@@ -337,6 +337,73 @@ namespace NetworkDesigner.Tuning
                     () => Designer.SetbackHandleActiveColor,
                     v => { Designer.SetbackHandleActiveColor = v; Designer.RefreshEditOverlays(); });
 
+                // -------- Intersection editing — lateral offset handles --------
+                TuningRegistry.RegisterFloat(
+                    "designer.lateralHandleDiameter", "Intersection editing", "Lateral handle diameter (m)",
+                    () => Designer.LateralOffsetHandleDiameter,
+                    v => { Designer.LateralOffsetHandleDiameter = v; Designer.RefreshEditOverlays(); },
+                    0.25f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "designer.lateralHandleRingThickness", "Intersection editing", "Lateral handle ring thickness (m)",
+                    () => Designer.LateralOffsetHandleRingThickness,
+                    v => { Designer.LateralOffsetHandleRingThickness = v; Designer.RefreshEditOverlays(); },
+                    0.05f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "designer.lateralHandleHeight", "Intersection editing", "Lateral handle height (m)",
+                    () => Designer.LateralOffsetHandleHeight,
+                    v => { Designer.LateralOffsetHandleHeight = v; Designer.RefreshEditOverlays(); },
+                    0f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "designer.lateralHandleInwardOffset", "Intersection editing", "Lateral handle inward offset (m)",
+                    () => Designer.LateralOffsetHandleInwardOffset,
+                    v => { Designer.LateralOffsetHandleInwardOffset = v; Designer.RefreshEditOverlays(); },
+                    0f, 20f);
+                TuningRegistry.RegisterColor(
+                    "designer.lateralHandleColor", "Intersection editing", "Lateral handle color",
+                    () => Designer.LateralOffsetHandleColor,
+                    v => { Designer.LateralOffsetHandleColor = v; Designer.RefreshEditOverlays(); });
+
+                // -------- Intersection editing — bezier control handles --------
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierHandleDiameter", "Intersection editing", "Bezier handle diameter (m)",
+                    () => Designer.BezierHandleDiameter,
+                    v => { Designer.BezierHandleDiameter = v; Designer.RefreshEditOverlays(); },
+                    0.25f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierHandleRingThickness", "Intersection editing", "Bezier handle ring thickness (m)",
+                    () => Designer.BezierHandleRingThickness,
+                    v => { Designer.BezierHandleRingThickness = v; Designer.RefreshEditOverlays(); },
+                    0.05f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierHandleHeight", "Intersection editing", "Bezier handle height (m)",
+                    () => Designer.BezierHandleHeight,
+                    v => { Designer.BezierHandleHeight = v; Designer.RefreshEditOverlays(); },
+                    0f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierPhantomTangent", "Intersection editing", "Bezier phantom tangent (0-1)",
+                    () => Designer.BezierPhantomTangent,
+                    v => { Designer.BezierPhantomTangent = v; Designer.RefreshEditOverlays(); },
+                    0.05f, 0.95f);
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierStemDashLength", "Intersection editing", "Bezier stem dash length (m)",
+                    () => Designer.BezierStemDashLength,
+                    v => { Designer.BezierStemDashLength = v; Designer.RefreshEditOverlays(); },
+                    0.05f, 2f);
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierStemGapLength", "Intersection editing", "Bezier stem dash gap (m)",
+                    () => Designer.BezierStemGapLength,
+                    v => { Designer.BezierStemGapLength = v; Designer.RefreshEditOverlays(); },
+                    0.05f, 2f);
+                TuningRegistry.RegisterFloat(
+                    "designer.bezierStemWidth", "Intersection editing", "Bezier stem line width (m)",
+                    () => Designer.BezierStemWidth,
+                    v => { Designer.BezierStemWidth = v; Designer.RefreshEditOverlays(); },
+                    0f, 1f);
+                TuningRegistry.RegisterColor(
+                    "designer.bezierHandleColor", "Intersection editing", "Bezier handle color",
+                    () => Designer.BezierHandleColor,
+                    v => { Designer.BezierHandleColor = v; Designer.RefreshEditOverlays(); });
+
                 // -------- Intersection editing — lane endpoint markers --------
                 TuningRegistry.RegisterFloat(
                     "designer.laneMarkerDiameter", "Intersection editing", "Lane marker diameter (m)",

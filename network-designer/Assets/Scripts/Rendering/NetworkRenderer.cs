@@ -887,15 +887,14 @@ namespace NetworkDesigner.Rendering
                 Vertex vb = FindVertex(road.EndB);
                 if (va != null && vb != null)
                 {
-                    // Apply LateralOffset at each endpoint so the bezier
-                    // start/end track the same shifted positions the
-                    // resolver used for setback math and intersection
-                    // geometry. Controls stay in world space — that
-                    // changes the bezier's tangent at the endpoints
-                    // (acceptable side-effect for now).
+                    // Apply LateralOffset at each endpoint AND shift the
+                    // bezier controls by the same perpendicular vector
+                    // so the curve's tangent at the shifted endpoint
+                    // matches the un-shifted tangent direction — no
+                    // kink at the endpoint. See EffectiveControl.
                     Vector2 p0 = GeometryResolver.EffectiveEndpoint(road, RoadEnd.A, va, vb);
-                    Vector2 c1 = road.Curve.ControlA;
-                    Vector2 c2 = road.Curve.ControlB;
+                    Vector2 c1 = GeometryResolver.EffectiveControl(road, RoadEnd.A, va, vb);
+                    Vector2 c2 = GeometryResolver.EffectiveControl(road, RoadEnd.B, vb, va);
                     Vector2 p3 = GeometryResolver.EffectiveEndpoint(road, RoadEnd.B, vb, va);
 
                     float tStart = GeometryResolver.ArcLengthToT(p0, c1, c2, p3, setbackA);

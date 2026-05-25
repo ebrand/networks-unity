@@ -193,6 +193,8 @@ namespace NetworkDesigner.Designer
         [Header("Ghost puck (Create-mode placement preview)")]
         [Tooltip("Opacity of the translucent puck shown at the snapped cursor in Create mode. 0 hides it completely.")]
         [Range(0f, 1f)] public float GhostPuckAlpha = 0.35f;
+        [Tooltip("Ghost puck tint when strong-snapped to an existing road edge — visual cue that the next click will split that road.")]
+        public Color GhostPuckEdgeSnapColor = new Color(1f, 0.9f, 0.2f, 1f);
 
         [Header("Range circle (Create-mode visual ruler)")]
         [Tooltip("Show a dashed circle around the cursor in Create mode. Purely visual — doesn't drive any logic.")]
@@ -206,6 +208,10 @@ namespace NetworkDesigner.Designer
         public Color RangeCircleColor = new Color(0.95f, 0.85f, 0.2f, 1f);
         [Tooltip("Opacity (alpha, 0–1) of the range circle. Overrides the color picker's alpha so you can tune it from a single slider.")]
         [Range(0f, 1f)] public float RangeCircleOpacity = 0.55f;
+
+        [Header("Curve splitting")]
+        [Tooltip("De Casteljau flatness threshold (meters) used when intersecting a new straight road with an existing curved road. Smaller = more accurate split point but more recursion. 0.1m is typical for road-scale work.")]
+        public float CurveSplitFlatnessThreshold = 0.1f;
 
         [Header("Snap guides")]
         [Tooltip("Maximum distance (m) from the cursor to a guide line for the guide to win the snap. When in range, the guide overrides the grid snap.")]
@@ -237,6 +243,8 @@ namespace NetworkDesigner.Designer
                  "the edge is split at the projected point and the new vertex becomes the " +
                  "split point. 0 = disabled (clicks always go to the cursor position).")]
         public float EdgeClickTolerance = 0.5f;
+        [Tooltip("Strong-snap radius (m) from the RAW cursor to an existing road edge in Create mode. When the cursor is within this distance of a road, the ghost puck (and resulting click) jumps to the road's projection — overriding grid + guide snap. Typically set larger than EdgeClickTolerance so the snap is easy to grab even with grid snap on. 0 = disabled.")]
+        public float RoadEdgeSnapTolerance = 2.0f;
         [Tooltip("When deleting a vertex with exactly 2 incident edges, merge them into a " +
                  "single edge if the angle between them is within this many degrees of " +
                  "straight (180°). 0 = disabled (always destroy vertex + edges).")]
@@ -295,6 +303,25 @@ namespace NetworkDesigner.Designer
         // direction → writes NetworkRoad.LateralOffsetA/B.
         readonly Dictionary<string, GameObject> _lateralOffsetHandles = new Dictionary<string, GameObject>();
         LateralOffsetHandle _draggedLateralHandle;
+        // Bezier control handles for the selected road's curve. A
+        // single road can be "selected for curve edit" at a time;
+        // mutually exclusive with _selectedVertex.
+        NetworkRoad _selectedRoad;
+        readonly Dictionary<string, GameObject> _bezierHandles = new Dictionary<string, GameObject>();
+        BezierControlHandle _draggedBezier;
+        bool _draggedBezierMaterialized;
+        [Header("Bezier control handle (curve editing)")]
+        public float BezierHandleDiameter = 1.6f;
+        public float BezierHandleRingThickness = 0.28f;
+        public float BezierHandleHeight = 1.6f;
+        public Color BezierHandleColor = new Color(1f, 0.45f, 0.85f, 0.95f);
+        [Tooltip("Where to place the phantom control point on a straight road. 0.33 → 1/3 of the way along the chord from this end.")]
+        [Range(0.05f, 0.95f)] public float BezierPhantomTangent = 0.33f;
+        [Tooltip("Dashed stem from each road endpoint to its bezier control handle. 0 = no stem.")]
+        public float BezierStemWidth = 0.1f;
+        public float BezierStemDashLength = 0.4f;
+        public float BezierStemGapLength = 0.3f;
+
         [Header("Lateral-offset handle (perpendicular endpoint shift)")]
         public float LateralOffsetHandleDiameter = 1.4f;
         public float LateralOffsetHandleRingThickness = 0.25f;
@@ -719,12 +746,12 @@ namespace NetworkDesigner.Designer
                 return;
             }
 
-            // While editing a specific vertex, suppress the road/
-            // intersection hover overlay — the user is focused on the
-            // selected vertex's per-vertex overlays (setback handles,
-            // lane endpoint markers) and stray asphalt highlights from
-            // moving the cursor around the scene are pure noise.
-            if (_selectedVertex != null)
+            // While editing a specific vertex OR road, suppress the
+            // road/intersection hover overlay — the user is focused on
+            // per-object overlays (setback handles, lane endpoint
+            // markers, bezier handles) and stray asphalt highlights
+            // from moving the cursor around the scene are pure noise.
+            if (_selectedVertex != null || _selectedRoad != null)
             {
                 ClearHoverHighlight();
                 return;
@@ -895,6 +922,7 @@ namespace NetworkDesigner.Designer
             EndDrag();
             EndHandleDrag();
             SetSelectedVertex(null);
+            SetSelectedRoad(null);
             ClearHoverHighlight();
             CurrentMode = m;
             // Default vertex view per mode: pucks ON in Create (so the
@@ -1375,10 +1403,25 @@ namespace NetworkDesigner.Designer
 
         void HandleEditInput()
         {
-            // Esc: unarm a click-to-edit-in-progress first, otherwise deselect.
+            // Esc priority:
+            //   1. Unarm a click-to-edit-in-progress.
+            //   2. If a road is selected for curve edit: REVERT its
+            //      Curve to null (back to straight) AND deselect.
+            //      Use clicking elsewhere if you want to deselect WITHOUT
+            //      reverting.
+            //   3. Deselect any selected vertex.
             if (Input.GetKeyDown(KeyCode.Escape))
             {
                 if (_armedLaneEndpoint != null) UnarmLaneEndpoint();
+                else if (_selectedRoad != null)
+                {
+                    _selectedRoad.Curve = null;
+                    NetworkRoad was = _selectedRoad;
+                    SetSelectedRoad(null);
+                    MarkNetworkDirty();
+                    Rebuild();
+                    Debug.Log($"[NetworkDesigner] Reverted road '{was.Id}' to straight via Esc.");
+                }
                 else SetSelectedVertex(null);
             }
 
@@ -1426,6 +1469,14 @@ namespace NetworkDesigner.Designer
                 }
                 else
                 {
+                    BezierControlHandle hitBez = PickBezierHandle();
+                    if (hitBez != null)
+                    {
+                        _draggedBezier = hitBez;
+                        _draggedBezierMaterialized = false;
+                    }
+                    else
+                    {
                     LateralOffsetHandle hitLat = PickLateralOffsetHandle();
                     if (hitLat != null)
                     {
@@ -1473,24 +1524,40 @@ namespace NetworkDesigner.Designer
                             }
                             else
                             {
-                                // Click on empty ground: if a lane is armed,
-                                // unarm (so the user can dismiss the click-
-                                // to-edit gesture without losing the vertex
-                                // selection). Otherwise no-op — Esc is the
-                                // explicit deselect path. This prevents an
-                                // accidental ground click from blowing away
-                                // the entire edit context.
-                                if (_armedLaneEndpoint != null) UnarmLaneEndpoint();
+                                // Road body click → select for curve
+                                // edit (bezier control handles appear).
+                                NetworkRoad hitRoad = PickRoad();
+                                if (hitRoad != null)
+                                {
+                                    SetSelectedRoad(hitRoad);
+                                }
+                                else
+                                {
+                                    // Click on empty ground: if a lane is armed,
+                                    // unarm (so the user can dismiss the click-
+                                    // to-edit gesture without losing the vertex
+                                    // selection). Also deselect any road.
+                                    // Otherwise no-op — Esc is the explicit
+                                    // deselect path. This prevents an accidental
+                                    // ground click from blowing away the entire
+                                    // edit context.
+                                    if (_armedLaneEndpoint != null) UnarmLaneEndpoint();
+                                    else if (_selectedRoad != null) SetSelectedRoad(null);
+                                }
                             }
                         }
+                    }
                     }
                     }
                 }
             }
 
-            // Drag a handle: project cursor onto the road's outward bearing
-            // and write the projected distance as the setback override.
-            if (_draggedLateralHandle != null && Input.GetMouseButton(0))
+            // Drag a handle: bezier > lateral > setback > vertex.
+            if (_draggedBezier != null && Input.GetMouseButton(0))
+            {
+                UpdateBezierDrag();
+            }
+            else if (_draggedLateralHandle != null && Input.GetMouseButton(0))
             {
                 UpdateLateralOffsetDrag();
             }
@@ -1518,6 +1585,7 @@ namespace NetworkDesigner.Designer
             {
                 EndHandleDrag();
                 EndLateralOffsetDrag();
+                EndBezierDrag();
                 EndDrag();
             }
 
@@ -2610,6 +2678,9 @@ namespace NetworkDesigner.Designer
         void SetSelectedVertex(Vertex v)
         {
             if (_selectedVertex == v) return;
+            // Selecting a vertex clears any selected road — single
+            // edit focus at a time.
+            if (v != null && _selectedRoad != null) SetSelectedRoad(null);
             Vertex previouslySelected = _selectedVertex;
             _selectedVertex = v;
             DestroySetbackHandles();
@@ -2852,7 +2923,11 @@ namespace NetworkDesigner.Designer
         void UpdateLateralOffsetDrag()
         {
             if (_draggedLateralHandle == null || _draggedLateralHandle.Road == null) return;
-            Vector2? ground = PickGround();
+            // PickGroundRaw (not PickGround) — handle drags should NOT
+            // snap to grid. The lateral offset is a continuous
+            // perpendicular distance; quantizing it makes fine tuning
+            // impossible at the typical grid spacing.
+            Vector2? ground = PickGroundRaw();
             if (!ground.HasValue) return;
             // Project the cursor (relative to the unshifted vertex) onto
             // the perpendicular axis to get the signed offset. Positive
@@ -2870,6 +2945,229 @@ namespace NetworkDesigner.Designer
         void EndLateralOffsetDrag()
         {
             _draggedLateralHandle = null;
+        }
+
+        // ---- Road selection (curve editing) ----
+
+        // Select a road for bezier-curve editing. Mutually exclusive
+        // with vertex selection — picking a road clears any selected
+        // vertex's per-vertex overlays; picking a vertex / pressing
+        // Esc clears the selected road.
+        void SetSelectedRoad(NetworkRoad road)
+        {
+            if (_selectedRoad == road) return;
+            // Clear any vertex selection so the user has a single edit
+            // focus at a time.
+            if (road != null && _selectedVertex != null) SetSelectedVertex(null);
+            _selectedRoad = road;
+            DestroyBezierHandles();
+            if (road != null) SpawnBezierHandles(road);
+        }
+
+        void SpawnBezierHandles(NetworkRoad road)
+        {
+            if (road == null) return;
+            Vertex va = FindVertexById(road.EndA);
+            Vertex vb = FindVertexById(road.EndB);
+            if (va == null || vb == null) return;
+            SpawnOrUpdateBezierHandle(road, RoadEnd.A, va, vb);
+            SpawnOrUpdateBezierHandle(road, RoadEnd.B, va, vb);
+        }
+
+        void RefreshBezierHandlePositions()
+        {
+            if (_selectedRoad == null || _bezierHandles.Count == 0) return;
+            Vertex va = FindVertexById(_selectedRoad.EndA);
+            Vertex vb = FindVertexById(_selectedRoad.EndB);
+            if (va == null || vb == null) return;
+            SpawnOrUpdateBezierHandle(_selectedRoad, RoadEnd.A, va, vb);
+            SpawnOrUpdateBezierHandle(_selectedRoad, RoadEnd.B, va, vb);
+        }
+
+        void SpawnOrUpdateBezierHandle(NetworkRoad road, RoadEnd end, Vertex va, Vertex vb)
+        {
+            string key = HandleKey(road.Id, end);
+
+            // Where the handle visually lives. For curved roads: at
+            // the stored control point. For straight roads: at a
+            // phantom position on the chord (1/3 from this end), so
+            // the user has a clickable target to bend the road.
+            Vector2 handlePos;
+            if (road.Curve != null)
+            {
+                handlePos = end == RoadEnd.A ? road.Curve.ControlA : road.Curve.ControlB;
+            }
+            else
+            {
+                Vector2 a = va.Position;
+                Vector2 b = vb.Position;
+                float t = Mathf.Clamp(BezierPhantomTangent, 0.05f, 0.95f);
+                handlePos = end == RoadEnd.A
+                    ? Vector2.Lerp(a, b, t)
+                    : Vector2.Lerp(b, a, t);
+            }
+
+            if (!_bezierHandles.TryGetValue(key, out GameObject go) || go == null)
+            {
+                go = new GameObject($"BezierHandle_{road.Id}_{end}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                go.AddComponent<MeshFilter>();
+                MeshRenderer mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = GetEditorOverlayMaterial();
+                go.AddComponent<SphereCollider>();
+                BezierControlHandle nbh = go.AddComponent<BezierControlHandle>();
+                nbh.Road = road;
+                nbh.End = end;
+                _bezierHandles[key] = go;
+            }
+
+            go.transform.position = new Vector3(handlePos.x, BezierHandleHeight, handlePos.y);
+
+            float outerR = Mathf.Max(0.1f, BezierHandleDiameter * 0.5f);
+            float innerR = Mathf.Max(0.05f, outerR - Mathf.Max(0.05f, BezierHandleRingThickness));
+            MeshFilter mf = go.GetComponent<MeshFilter>();
+            Mesh ringMesh = mf.sharedMesh;
+            if (ringMesh == null)
+            {
+                ringMesh = new Mesh { name = $"BezierRing_{key}" };
+                mf.sharedMesh = ringMesh;
+            }
+            ringMesh.Clear();
+            _scratchVerts.Clear();
+            _scratchTris.Clear();
+            _scratchColors.Clear();
+            EditorGeometry.AppendRing(_scratchVerts, _scratchTris, _scratchColors,
+                Vector2.zero, outerR, innerR, 28, 0f, BezierHandleColor);
+            ringMesh.SetVertices(_scratchVerts);
+            ringMesh.SetTriangles(_scratchTris, 0);
+            ringMesh.SetColors(_scratchColors);
+            ringMesh.RecalculateBounds();
+
+            SphereCollider sc = go.GetComponent<SphereCollider>();
+            sc.center = Vector3.zero;
+            sc.radius = outerR;
+
+            // Dashed stem from the road's effective endpoint (where the
+            // centerline actually meets the vertex) to the handle (the
+            // control point). Visual cue that the handle is tied to this
+            // road's curve, not floating loose. Built in LOCAL coords
+            // so the handle's transform handles world placement.
+            Transform stemTf = go.transform.Find("Stem");
+            GameObject stem;
+            MeshFilter stemMf;
+            if (stemTf == null)
+            {
+                stem = new GameObject("Stem");
+                stem.transform.SetParent(go.transform, worldPositionStays: false);
+                stem.transform.localPosition = Vector3.zero;
+                stemMf = stem.AddComponent<MeshFilter>();
+                MeshRenderer stemMr = stem.AddComponent<MeshRenderer>();
+                stemMr.sharedMaterial = GetEditorOverlayMaterial();
+            }
+            else
+            {
+                stem = stemTf.gameObject;
+                stemMf = stem.GetComponent<MeshFilter>();
+            }
+            Vector2 endpointWorld = GeometryResolver.EffectiveEndpoint(
+                road, end, end == RoadEnd.A ? va : vb, end == RoadEnd.A ? vb : va);
+            Vector2 endpointLocal = endpointWorld - handlePos;
+            Mesh stemMesh = stemMf.sharedMesh;
+            if (stemMesh == null)
+            {
+                stemMesh = new Mesh { name = $"BezierStem_{key}" };
+                stemMf.sharedMesh = stemMesh;
+            }
+            stemMesh.Clear();
+            _scratchVerts.Clear(); _scratchTris.Clear(); _scratchColors.Clear();
+            if (BezierStemWidth > 0f)
+            {
+                EditorGeometry.AppendDashedLine(_scratchVerts, _scratchTris, _scratchColors,
+                    endpointLocal, Vector2.zero,
+                    BezierStemWidth, BezierStemDashLength, BezierStemGapLength,
+                    0f, BezierHandleColor);
+            }
+            stemMesh.SetVertices(_scratchVerts);
+            stemMesh.SetTriangles(_scratchTris, 0);
+            stemMesh.SetColors(_scratchColors);
+            stemMesh.RecalculateBounds();
+        }
+
+        void DestroyBezierHandles()
+        {
+            foreach (KeyValuePair<string, GameObject> kvp in _bezierHandles)
+            {
+                if (kvp.Value == null) continue;
+                if (Application.isPlaying) Destroy(kvp.Value);
+                else DestroyImmediate(kvp.Value);
+            }
+            _bezierHandles.Clear();
+            _draggedBezier = null;
+            _draggedBezierMaterialized = false;
+        }
+
+        BezierControlHandle PickBezierHandle()
+        {
+            if (PickCamera == null) return null;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            float bestDist = float.MaxValue;
+            BezierControlHandle best = null;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                BezierControlHandle h = hits[i].collider.GetComponentInParent<BezierControlHandle>();
+                if (h == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = h;
+                }
+            }
+            return best;
+        }
+
+        void UpdateBezierDrag()
+        {
+            if (_draggedBezier == null || _draggedBezier.Road == null) return;
+            // PickGroundRaw — bezier controls should be smoothly
+            // adjustable; grid-snapping a control point produces
+            // visible jumps in the curve geometry.
+            Vector2? ground = PickGroundRaw();
+            if (!ground.HasValue) return;
+
+            NetworkRoad r = _draggedBezier.Road;
+            // Materialize the curve on first drag tick if the road is
+            // still straight — uses the chord-phantom positions for
+            // BOTH controls, then the actual cursor position overwrites
+            // the dragged-end's control below. Phantoms on the chord
+            // render identically to a straight road (cubic of colinear
+            // controls is colinear), so this is a no-op visually until
+            // the user actually pulls the handle off-chord.
+            if (r.Curve == null)
+            {
+                Vertex va = FindVertexById(r.EndA);
+                Vertex vb = FindVertexById(r.EndB);
+                if (va == null || vb == null) return;
+                float t = Mathf.Clamp(BezierPhantomTangent, 0.05f, 0.95f);
+                r.Curve = new RoadCurve
+                {
+                    ControlA = Vector2.Lerp(va.Position, vb.Position, t),
+                    ControlB = Vector2.Lerp(vb.Position, va.Position, t),
+                };
+                _draggedBezierMaterialized = true;
+            }
+
+            if (_draggedBezier.End == RoadEnd.A) r.Curve.ControlA = ground.Value;
+            else r.Curve.ControlB = ground.Value;
+
+            MarkNetworkDirty();
+            Rebuild();
+        }
+
+        void EndBezierDrag()
+        {
+            _draggedBezier = null;
+            _draggedBezierMaterialized = false;
         }
 
         // ---- Lane-endpoint markers (click-to-edit overrides) ----
@@ -4010,52 +4308,86 @@ namespace NetworkDesigner.Designer
         // will catch that path separately.
         Vertex CreateOrSplitAtPos(Vector2 pos)
         {
-            if (EdgeClickTolerance > 0f)
+            if (EdgeClickTolerance > 0f
+                && TryFindClosestRoadProjection(pos, EdgeClickTolerance,
+                    out NetworkRoad closestRoad, out Vector2 closestProj, out float tOnCurve))
             {
-                NetworkRoad closestRoad = null;
-                Vector2 closestProj = Vector2.zero;
-                float closestDist = float.MaxValue;
-                foreach (NetworkRoad r in _network.Roads)
+                // Don't create a near-duplicate if the projection
+                // happens to land on/near an existing vertex.
+                float reuseTol = Mathf.Max(VertexOnEdgeTolerance, 0.05f);
+                foreach (Vertex existing in _network.Vertices)
                 {
-                    // Phase A scope: only straight roads participate in
-                    // click-to-split. Curve-vs-click projection is Phase B.
-                    if (r.Curve != null) continue;
-                    Vertex va = FindVertexById(r.EndA);
-                    Vertex vb = FindVertexById(r.EndB);
-                    if (va == null || vb == null) continue;
-                    float t = ProjectOntoSegment(va.Position, vb.Position, pos, out Vector2 proj);
-                    if (t <= 0.05f || t >= 0.95f) continue;
-                    float d = Vector2.Distance(pos, proj);
-                    if (d < closestDist && d <= EdgeClickTolerance)
-                    {
-                        closestDist = d;
-                        closestRoad = r;
-                        closestProj = proj;
-                    }
+                    if (Vector2.Distance(existing.Position, closestProj) <= reuseTol)
+                        return existing;
                 }
-
-                if (closestRoad != null)
-                {
-                    // Don't create a near-duplicate if the projection
-                    // happens to land on/near an existing vertex.
-                    float reuseTol = Mathf.Max(VertexOnEdgeTolerance, 0.05f);
-                    foreach (Vertex existing in _network.Vertices)
-                    {
-                        if (Vector2.Distance(existing.Position, closestProj) <= reuseTol)
-                        {
-                            return existing;
-                        }
-                    }
-
-                    Vertex split = CreateAndPlaceVertex(closestProj);
-                    SplitRoad(closestRoad, split);
-                    Debug.Log($"[NetworkDesigner] Click on edge {closestRoad.Id} " +
-                              $"→ inserted vertex {split.Id} at " +
-                              $"({closestProj.x:F2}, {closestProj.y:F2})");
-                    return split;
-                }
+                Vertex split = CreateAndPlaceVertex(closestProj);
+                // For curved roads pass the bezier-t so SplitRoad can
+                // De Casteljau-split the curve at the exact projection
+                // point. For straights tOnCurve is unused.
+                SplitRoad(closestRoad, split,
+                    closestRoad.Curve != null ? (float?)tOnCurve : null);
+                Debug.Log($"[NetworkDesigner] Click on edge {closestRoad.Id} " +
+                          $"({(closestRoad.Curve != null ? "curved" : "straight")}) " +
+                          $"→ inserted vertex {split.Id} at " +
+                          $"({closestProj.x:F2}, {closestProj.y:F2})");
+                return split;
             }
             return CreateAndPlaceVertex(pos);
+        }
+
+        /// <summary>
+        /// Find the closest existing road edge to `pos`, within
+        /// `tolerance` meters. Handles both straight and curved roads:
+        /// straights use perpendicular projection on the chord, curves
+        /// use numerical bezier point-projection. Returns false if no
+        /// road's interior (5%..95% along its parameter) is within
+        /// tolerance — endpoint-near hits are excluded so the vertex
+        /// picker can handle them separately. `tOnCurve` is the
+        /// bezier-t parameter for curved roads (0..1); ignore it for
+        /// straight roads.
+        /// </summary>
+        bool TryFindClosestRoadProjection(Vector2 pos, float tolerance,
+            out NetworkRoad road, out Vector2 proj, out float tOnCurve)
+        {
+            road = null;
+            proj = Vector2.zero;
+            tOnCurve = 0f;
+            float bestDist = tolerance;
+            foreach (NetworkRoad r in _network.Roads)
+            {
+                Vertex va = FindVertexById(r.EndA);
+                Vertex vb = FindVertexById(r.EndB);
+                if (va == null || vb == null) continue;
+                if (r.Curve == null)
+                {
+                    float t = ProjectOntoSegment(va.Position, vb.Position, pos, out Vector2 p);
+                    if (t <= 0.05f || t >= 0.95f) continue;
+                    float d = Vector2.Distance(pos, p);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        road = r;
+                        proj = p;
+                        tOnCurve = 0f;
+                    }
+                }
+                else
+                {
+                    GeometryResolver.ClosestPointOnCubic(
+                        va.Position, r.Curve.ControlA, r.Curve.ControlB, vb.Position, pos,
+                        out float t, out Vector2 p, out float dSq);
+                    if (t <= 0.05f || t >= 0.95f) continue;
+                    float d = Mathf.Sqrt(dSq);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        road = r;
+                        proj = p;
+                        tOnCurve = t;
+                    }
+                }
+            }
+            return road != null;
         }
 
         // Project p onto the segment a→b. Returns the un-clamped parameter
@@ -4078,34 +4410,61 @@ namespace NetworkDesigner.Designer
 
             List<Crossing> crossings = new List<Crossing>();
 
-            // 1a) Crossings with existing edges (segment vs segment).
-            //     Snapshot because we'll mutate _network.Roads when we split.
+            // 1a) Crossings with existing edges. Straight roads:
+            //     segment-vs-segment. Curved roads: De Casteljau
+            //     subdivision until each sub-curve is flat enough to
+            //     treat as a chord (CurveSplitFlatnessThreshold), then
+            //     segment-segment on each sub-chord. TOld for curved
+            //     roads is the bezier t parameter (0..1) — passed to
+            //     SplitRoad so it can De Casteljau-split the curve at
+            //     the intersection point.
             List<NetworkRoad> existing = new List<NetworkRoad>(_network.Roads);
+            List<(float t, float s, Vector2 point)> curveHitsScratch =
+                new List<(float, float, Vector2)>();
             foreach (NetworkRoad other in existing)
             {
-                // Phase A scope: skip curved roads in segment-segment
-                // crossing detection. Curve-vs-segment intersection is
-                // Phase B; using the chord here would split at the wrong
-                // point.
-                if (other.Curve != null) continue;
                 Vertex oa = FindVertexById(other.EndA);
                 Vertex ob = FindVertexById(other.EndB);
                 if (oa == null || ob == null) continue;
                 // Skip edges that already share an endpoint with the new
                 // edge — they meet at a vertex, not a true crossing.
                 if (oa == a || oa == b || ob == a || ob == b) continue;
-                if (TrySegmentIntersection(a.Position, b.Position,
-                                            oa.Position, ob.Position,
-                                            out float tNew, out float tOld, out Vector2 hit))
+
+                if (other.Curve == null)
                 {
-                    crossings.Add(new Crossing
+                    if (TrySegmentIntersection(a.Position, b.Position,
+                                                oa.Position, ob.Position,
+                                                out float tNew, out float tOld, out Vector2 hit))
                     {
-                        TNew = tNew,
-                        TOld = tOld,
-                        Point = hit,
-                        OldRoad = other,
-                        ExistingVertex = null,
-                    });
+                        crossings.Add(new Crossing
+                        {
+                            TNew = tNew,
+                            TOld = tOld,
+                            Point = hit,
+                            OldRoad = other,
+                            ExistingVertex = null,
+                        });
+                    }
+                }
+                else
+                {
+                    curveHitsScratch.Clear();
+                    GeometryResolver.IntersectCubicSegment(
+                        oa.Position, other.Curve.ControlA, other.Curve.ControlB, ob.Position,
+                        a.Position, b.Position,
+                        CurveSplitFlatnessThreshold,
+                        curveHitsScratch);
+                    foreach ((float tOld, float tNew, Vector2 hit) in curveHitsScratch)
+                    {
+                        crossings.Add(new Crossing
+                        {
+                            TNew = tNew,
+                            TOld = tOld,
+                            Point = hit,
+                            OldRoad = other,
+                            ExistingVertex = null,
+                        });
+                    }
                 }
             }
 
@@ -4145,6 +4504,13 @@ namespace NetworkDesigner.Designer
 
             // 3) Build the chain. At each crossing either reuse an
             //    existing vertex or create a new one and split the old road.
+            //    Limitation: a new road that crosses the SAME curved
+            //    road at multiple points (S-curve / loop crossings)
+            //    only splits at the first hit. Subsequent crossings
+            //    on the same curved road are skipped here — splitting
+            //    a road that's already been replaced doesn't work, and
+            //    multi-t curve subdivision isn't implemented yet.
+            HashSet<string> alreadySplitRoadIds = new HashSet<string>();
             List<Vertex> chain = new List<Vertex>();
             chain.Add(a);
             foreach (Crossing c in crossings)
@@ -4156,8 +4522,17 @@ namespace NetworkDesigner.Designer
                 }
                 else
                 {
+                    if (c.OldRoad != null && alreadySplitRoadIds.Contains(c.OldRoad.Id))
+                    {
+                        Debug.LogWarning($"[NetworkDesigner] Skipping additional crossing on already-split curved road '{c.OldRoad.Id}' — multi-t splitting not yet supported.");
+                        continue;
+                    }
                     split = CreateAndPlaceVertex(c.Point);
-                    SplitRoad(c.OldRoad, split);
+                    // For curved roads, pass the bezier-t parameter so
+                    // SplitRoad can De Casteljau-split the curve at the
+                    // correct point. Straight roads ignore it.
+                    SplitRoad(c.OldRoad, split, c.TOld);
+                    if (c.OldRoad != null) alreadySplitRoadIds.Add(c.OldRoad.Id);
                 }
                 // Defend against duplicate consecutive entries (e.g.
                 // a crossing point that coincided with an existing
@@ -4231,7 +4606,7 @@ namespace NetworkDesigner.Designer
         // copying the original profile to both new pieces. The lane-
         // connectivity overrides on the split vertex are left empty so the
         // resolver's default through-connection kicks in for now.
-        void SplitRoad(NetworkRoad old, Vertex split)
+        void SplitRoad(NetworkRoad old, Vertex split, float? tOnOldCurve = null)
         {
             // Don't bother if the split happens to coincide with one of the
             // existing endpoints (numerical edge case).
@@ -4259,10 +4634,41 @@ namespace NetworkDesigner.Designer
                 Classification = old.Classification,
                 Profile = old.Profile,
             };
+
+            // Curved roads: De Casteljau-split the bezier at t.
+            // Left sub-curve becomes the left road's Curve; right sub-
+            // curve becomes the right road's Curve. Per-end setback
+            // overrides on the OUTER ends (old's EndA / EndB) carry
+            // through; the new split-vertex side gets none (auto-
+            // computed by the resolver).
+            if (old.Curve != null && tOnOldCurve.HasValue)
+            {
+                float t = Mathf.Clamp01(tOnOldCurve.Value);
+                GeometryResolver.SplitCubic(
+                    oa.Position, old.Curve.ControlA, old.Curve.ControlB, ob.Position, t,
+                    out _, out Vector2 lc1, out Vector2 lc2, out _,
+                    out _, out Vector2 rc1, out Vector2 rc2, out _);
+                left.Curve = new RoadCurve { ControlA = lc1, ControlB = lc2 };
+                right.Curve = new RoadCurve { ControlA = rc1, ControlB = rc2 };
+                // Outer setbacks survive on their respective halves;
+                // inner (split-vertex side) is left null for auto-resolve.
+                left.SetbackA = old.SetbackA;
+                right.SetbackB = old.SetbackB;
+                // Lateral offsets at the outer ends survive too.
+                left.LateralOffsetA = old.LateralOffsetA;
+                right.LateralOffsetB = old.LateralOffsetB;
+                // Stop/Yield controls on the outer ends carry through.
+                left.ControlA = old.ControlA;
+                right.ControlB = old.ControlB;
+            }
+
             _network.Roads.Add(left);
             _network.Roads.Add(right);
             MarkNetworkDirty();
-            Debug.Log($"[NetworkDesigner] Split road {old.Id} at vertex {split.Id} " +
+            string kind = (old.Curve != null && tOnOldCurve.HasValue)
+                ? $"curved (t={tOnOldCurve.Value:F3})"
+                : "straight";
+            Debug.Log($"[NetworkDesigner] Split {kind} road {old.Id} at vertex {split.Id} " +
                       $"→ {left.Id} + {right.Id}");
         }
 
@@ -4344,6 +4750,7 @@ namespace NetworkDesigner.Designer
             // geometry of the selected vertex.
             RefreshSetbackHandlePositions();
             RefreshLateralOffsetHandlePositions();
+            RefreshBezierHandlePositions();
             // Lane-endpoint markers depend on lane count + profile, so a
             // full respawn is simpler than position-only updates here.
             // If we were mid-armed, respawn in filtered (armed) state
@@ -4549,7 +4956,27 @@ namespace NetworkDesigner.Designer
             float t = (GroundY - ray.origin.y) / ray.direction.y;
             if (t < 0f) return null;
             Vector3 hit = ray.origin + ray.direction * t;
-            return ApplyGuidesOrGrid(new Vector2(hit.x, hit.z));
+            Vector2 raw = new Vector2(hit.x, hit.z);
+
+            // ROAD-EDGE SNAP (strong, overrides grid + guides). Tested
+            // against the RAW cursor so it wins even when grid snap
+            // would otherwise pull the cursor away from the road. Gated
+            // to Create mode + tools that go through CreateOrSplitAtPos
+            // (the same set that gets the ghost-puck snap visual), and
+            // to a separate, typically-larger tolerance
+            // (RoadEdgeSnapTolerance) so the user can tune it
+            // independently of the click-to-split tolerance.
+            if (CurrentMode == DesignerMode.Create
+                && (CurrentTool == BuildTool.Straight
+                    || CurrentTool == BuildTool.Fillet
+                    || CurrentTool == BuildTool.SCurve)
+                && RoadEdgeSnapTolerance > 0f
+                && TryFindClosestRoadProjection(raw, RoadEdgeSnapTolerance,
+                    out NetworkRoad _, out Vector2 proj, out float _))
+            {
+                return proj;
+            }
+            return ApplyGuidesOrGrid(raw);
         }
 
         // Snap pipeline: collect guide rays for the current state, find the
@@ -5180,19 +5607,36 @@ namespace NetworkDesigner.Designer
                 return;
             }
 
+            // PickGround already applies the strong road-edge snap
+            // upstream (for Straight / Fillet / SCurve tools), so the
+            // puck's position is already the projection. Detect whether
+            // we're sitting on a road so the tint can pop to the snap
+            // color — easier than threading a "did-snap?" bool out of
+            // PickGround.
+            Vector2 ghostPos = ground.Value;
+            bool snapped =
+                (CurrentTool == BuildTool.Straight
+                 || CurrentTool == BuildTool.Fillet
+                 || CurrentTool == BuildTool.SCurve)
+                && RoadEdgeSnapTolerance > 0f
+                && TryFindClosestRoadProjection(ghostPos, RoadEdgeSnapTolerance,
+                    out NetworkRoad _, out Vector2 _, out float _);
+
             if (_ghostPuckGo == null) CreateGhostPuck();
 
             _ghostPuckGo.SetActive(true);
             _ghostPuckGo.transform.position =
-                new Vector3(ground.Value.x, MarkerHeight, ground.Value.y);
+                new Vector3(ghostPos.x, MarkerHeight, ghostPos.y);
             _ghostPuckGo.transform.localScale =
                 new Vector3(MarkerDiameter, MarkerThickness * 0.5f, MarkerDiameter);
 
             // Keep the ghost material's tint synced to MarkerColor + current
             // alpha so changing either via tuning takes effect immediately.
+            // When snapped to a road edge, use the snap tint so the user
+            // sees the strong-snap visually.
             if (_ghostPuckMaterial != null)
             {
-                Color c = MarkerColor;
+                Color c = snapped ? GhostPuckEdgeSnapColor : MarkerColor;
                 c.a = GhostPuckAlpha;
                 _ghostPuckMaterial.color = c;
             }

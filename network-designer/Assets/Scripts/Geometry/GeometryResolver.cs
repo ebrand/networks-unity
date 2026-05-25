@@ -459,6 +459,8 @@ namespace NetworkDesigner.Geometry
             public float SetbackOverride;
             public Vector2 OtherVertexPos; // position of the road's far endpoint (used by curved approaches) — already lateral-offset-shifted
             public Vector2 SelfShiftedPos; // this end's effective centerline endpoint after LateralOffset
+            public Vector2 ShiftedControlA; // road.Curve.ControlA shifted by EndA's lateral offset (zeros for straight roads)
+            public Vector2 ShiftedControlB; // road.Curve.ControlB shifted by EndB's lateral offset
         }
 
         // -----------------------------------------------------------------
@@ -509,6 +511,16 @@ namespace NetworkDesigner.Geometry
                 Vector2 shiftedSelfPos = EffectiveEndpoint(road, end, vertex, other);
                 Vector2 shiftedOtherPos = EffectiveEndpoint(road, otherEnd, other, vertex);
 
+                // Lateral-offset-shifted bezier controls. EffectiveControl
+                // shifts the control by the same perpendicular vector as
+                // the endpoint, so curved roads with offsets don't kink
+                // at the endpoint. For straight roads (Curve == null)
+                // these are zero and unused.
+                Vertex vertexAtAObj = end == RoadEnd.A ? vertex : other;
+                Vertex vertexAtBObj = end == RoadEnd.A ? other : vertex;
+                Vector2 shiftedControlA = EffectiveControl(road, RoadEnd.A, vertexAtAObj, vertexAtBObj);
+                Vector2 shiftedControlB = EffectiveControl(road, RoadEnd.B, vertexAtBObj, vertexAtAObj);
+
                 list.Add(new ApproachData
                 {
                     Road = road,
@@ -520,6 +532,8 @@ namespace NetworkDesigner.Geometry
                     SetbackOverride = overrideVal,
                     OtherVertexPos = shiftedOtherPos,
                     SelfShiftedPos = shiftedSelfPos,
+                    ShiftedControlA = shiftedControlA,
+                    ShiftedControlB = shiftedControlB,
                 });
             }
             return list;
@@ -618,19 +632,24 @@ namespace NetworkDesigner.Geometry
             if (d.Road.Curve != null && d.Setback > Eps)
             {
                 Vector2 p0 = vertexPos;
+                // Lateral-offset-shifted controls so the curve's tangent
+                // at the (shifted) endpoint matches the un-shifted
+                // tangent direction. Without shifting controls in
+                // lock-step with the endpoint, an offset road's curve
+                // kinks at the endpoint instead of continuing smoothly.
                 Vector2 c1, c2;
                 if (d.End == RoadEnd.A)
                 {
-                    c1 = d.Road.Curve.ControlA;
-                    c2 = d.Road.Curve.ControlB;
+                    c1 = d.ShiftedControlA;
+                    c2 = d.ShiftedControlB;
                 }
                 else
                 {
                     // Reverse the curve so t=0 is at THIS vertex (the
                     // approach's vertex) regardless of which end of the
                     // road we are.
-                    c1 = d.Road.Curve.ControlB;
-                    c2 = d.Road.Curve.ControlA;
+                    c1 = d.ShiftedControlB;
+                    c2 = d.ShiftedControlA;
                 }
                 Vector2 p3 = d.OtherVertexPos;
                 float t = ArcLengthToT(p0, c1, c2, p3, d.Setback);
@@ -925,6 +944,151 @@ namespace NetworkDesigner.Geometry
                  + (3f * t * t) * (p3 - c2);
         }
 
+        /// <summary>
+        /// Find intersections between a cubic bezier and a line segment.
+        /// Uses recursive De Casteljau subdivision with bounding-box
+        /// culling; subdivides until each sub-curve is flat (control
+        /// points within `flatnessThreshold` of the chord), then treats
+        /// it as a line and does segment-segment intersection. Each
+        /// result is (t on the original curve, s on the segment, world
+        /// position of the hit). Order of results is by subdivision
+        /// walk order, not by t — sort if you need ascending t.
+        /// </summary>
+        public static void IntersectCubicSegment(
+            Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3,
+            Vector2 segA, Vector2 segB,
+            float flatnessThreshold,
+            List<(float t, float s, Vector2 point)> results,
+            int maxDepth = 20)
+        {
+            IntersectCubicSegmentRec(p0, c1, c2, p3, segA, segB,
+                flatnessThreshold, 0f, 1f, maxDepth, results);
+        }
+
+        static void IntersectCubicSegmentRec(
+            Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3,
+            Vector2 segA, Vector2 segB,
+            float flatnessThreshold,
+            float tStart, float tEnd, int depth,
+            List<(float t, float s, Vector2 point)> results)
+        {
+            // Bounding-box cull: if curve's AABB doesn't overlap the
+            // segment's AABB, no intersection possible in this sub-range.
+            Vector2 minB = Vector2.Min(Vector2.Min(p0, c1), Vector2.Min(c2, p3));
+            Vector2 maxB = Vector2.Max(Vector2.Max(p0, c1), Vector2.Max(c2, p3));
+            Vector2 minS = Vector2.Min(segA, segB);
+            Vector2 maxS = Vector2.Max(segA, segB);
+            if (maxB.x < minS.x || maxS.x < minB.x) return;
+            if (maxB.y < minS.y || maxS.y < minB.y) return;
+
+            // Flatness: distance from each control point to the chord
+            // p0→p3. If both are within threshold (or we've recursed
+            // too deep), approximate the sub-curve as the chord.
+            float dC1 = PerpendicularDistance(c1, p0, p3);
+            float dC2 = PerpendicularDistance(c2, p0, p3);
+            if (depth <= 0 || (dC1 < flatnessThreshold && dC2 < flatnessThreshold))
+            {
+                if (TrySegSegIntersect(p0, p3, segA, segB,
+                        out float tLocal, out float s, out Vector2 hit))
+                {
+                    float tGlobal = tStart + tLocal * (tEnd - tStart);
+                    results.Add((tGlobal, s, hit));
+                }
+                return;
+            }
+
+            // De Casteljau split at t=0.5 → two halves; recurse.
+            SplitCubic(p0, c1, c2, p3, 0.5f,
+                out Vector2 lp0, out Vector2 lc1, out Vector2 lc2, out Vector2 lp3,
+                out Vector2 rp0, out Vector2 rc1, out Vector2 rc2, out Vector2 rp3);
+            float tMid = (tStart + tEnd) * 0.5f;
+            IntersectCubicSegmentRec(lp0, lc1, lc2, lp3, segA, segB,
+                flatnessThreshold, tStart, tMid, depth - 1, results);
+            IntersectCubicSegmentRec(rp0, rc1, rc2, rp3, segA, segB,
+                flatnessThreshold, tMid, tEnd, depth - 1, results);
+        }
+
+        // Perpendicular distance from point P to line through A and B.
+        static float PerpendicularDistance(Vector2 p, Vector2 a, Vector2 b)
+        {
+            Vector2 ab = b - a;
+            float len2 = ab.sqrMagnitude;
+            if (len2 < 1e-9f) return Vector2.Distance(p, a);
+            // 2D cross product magnitude / |ab| = perpendicular distance.
+            float cross = ab.x * (p.y - a.y) - ab.y * (p.x - a.x);
+            return Mathf.Abs(cross) / Mathf.Sqrt(len2);
+        }
+
+        // Segment-segment intersection. Returns true and (tA, tB, hit)
+        // for an interior crossing; endpoint-touches return false so
+        // shared-vertex meetings don't fire as crossings. Mirrors the
+        // designer's TrySegmentIntersection but lives here so the
+        // curve-segment finder can be self-contained.
+        static bool TrySegSegIntersect(Vector2 a0, Vector2 a1,
+            Vector2 b0, Vector2 b1,
+            out float tA, out float tB, out Vector2 point)
+        {
+            tA = 0f; tB = 0f; point = Vector2.zero;
+            Vector2 r = a1 - a0;
+            Vector2 s = b1 - b0;
+            float denom = r.x * s.y - r.y * s.x;
+            if (Mathf.Abs(denom) < 1e-9f) return false;
+            Vector2 diff = b0 - a0;
+            tA = (diff.x * s.y - diff.y * s.x) / denom;
+            tB = (diff.x * r.y - diff.y * r.x) / denom;
+            const float eps = 1e-4f;
+            if (tA <= eps || tA >= 1f - eps) return false;
+            if (tB <= eps || tB >= 1f - eps) return false;
+            point = a0 + r * tA;
+            return true;
+        }
+
+        /// <summary>
+        /// Numerical closest-point projection onto a cubic bezier. Two
+        /// passes: (1) sample N points along the curve, find the closest;
+        /// (2) refine with a few binary searches around the best sample.
+        /// For road-scale work (curves up to ~200m, target accuracy
+        /// sub-meter), N=64 + 6 refinement steps is plenty fast and
+        /// accurate. Returns the bezier t parameter, the closest point
+        /// on the curve, and the squared distance to the target.
+        /// </summary>
+        public static void ClosestPointOnCubic(
+            Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, Vector2 target,
+            out float tBest, out Vector2 pointBest, out float distSqBest,
+            int samples = 64, int refineSteps = 6)
+        {
+            tBest = 0f;
+            pointBest = p0;
+            distSqBest = (p0 - target).sqrMagnitude;
+            float step = 1f / samples;
+            for (int i = 1; i <= samples; i++)
+            {
+                float t = i * step;
+                Vector2 q = SampleCubic(p0, c1, c2, p3, t);
+                float d2 = (q - target).sqrMagnitude;
+                if (d2 < distSqBest)
+                {
+                    distSqBest = d2;
+                    tBest = t;
+                    pointBest = q;
+                }
+            }
+            // Binary refinement around tBest.
+            float halfStep = step;
+            for (int i = 0; i < refineSteps; i++)
+            {
+                halfStep *= 0.5f;
+                float tL = Mathf.Max(0f, tBest - halfStep);
+                float tR = Mathf.Min(1f, tBest + halfStep);
+                Vector2 qL = SampleCubic(p0, c1, c2, p3, tL);
+                Vector2 qR = SampleCubic(p0, c1, c2, p3, tR);
+                float dL2 = (qL - target).sqrMagnitude;
+                float dR2 = (qR - target).sqrMagnitude;
+                if (dL2 < distSqBest) { distSqBest = dL2; tBest = tL; pointBest = qL; }
+                if (dR2 < distSqBest) { distSqBest = dR2; tBest = tR; pointBest = qR; }
+            }
+        }
+
         /// <summary>De Casteljau split: cubic at <paramref name="t"/> → left [0..t] + right [t..1], each as 4 control points.</summary>
         public static void SplitCubic(
             Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, float t,
@@ -1000,6 +1164,29 @@ namespace NetworkDesigner.Geometry
             // perpRight in (x, z) = CW 90° rotation of dir.
             Vector2 perpRight = new Vector2(dir.y, -dir.x);
             return thisVertex.Position + perpRight * offset;
+        }
+
+        /// <summary>
+        /// Effective bezier control point at a vertex, accounting for
+        /// the road's per-end LateralOffset. The control is shifted by
+        /// the SAME perpendicular vector as the endpoint — that keeps
+        /// the tangent direction at the shifted endpoint identical to
+        /// the original (control - endpoint vector is unchanged), so
+        /// curved roads with lateral offsets don't kink at the endpoint.
+        /// Returns Vector2.zero if the road has no curve. For straight
+        /// roads this isn't called (no controls to shift).
+        /// </summary>
+        public static Vector2 EffectiveControl(NetworkRoad road, RoadEnd end,
+            Vertex thisVertex, Vertex otherVertex)
+        {
+            if (road == null || road.Curve == null || thisVertex == null) return Vector2.zero;
+            Vector2 control = end == RoadEnd.A ? road.Curve.ControlA : road.Curve.ControlB;
+            float offset = end == RoadEnd.A ? road.LateralOffsetA : road.LateralOffsetB;
+            if (Mathf.Abs(offset) < 1e-6f) return control;
+            Vector2 dir = OutwardDirection(road, end, thisVertex, otherVertex);
+            if (dir.sqrMagnitude < 1e-8f) return control;
+            Vector2 perpRight = new Vector2(dir.y, -dir.x);
+            return control + perpRight * offset;
         }
 
         public static Vector2 OutwardDirection(NetworkRoad road, RoadEnd end,
