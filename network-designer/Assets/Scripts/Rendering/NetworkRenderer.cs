@@ -17,7 +17,18 @@ namespace NetworkDesigner.Rendering
     {
         [Header("Source")]
         [Tooltip("Network to render. Assigned from external code (e.g. NetworkMeshTest).")]
-        public Network Network;
+        // [System.NonSerialized] is load-bearing. Unity's UIElements
+        // Inspector data-binding walks every [Serializable] field of a
+        // public reference and AUTO-INSTANTIATES null class fields into
+        // default instances when SerializedObject.UpdateIfRequiredOrScript
+        // touches them. With this field plain-public, selecting this
+        // GameObject in the Inspector silently stamps `new RoadCurve()`
+        // (zero controls) onto every NetworkRoad whose Curve was null —
+        // turning straight roads into wild curves through the origin.
+        // [NonSerialized] hides the field from Unity's serializer (which
+        // is what we want here — the Network is wired up programmatically
+        // by NetworkDesigner.Rebuild(), not edited in the Inspector).
+        [System.NonSerialized] public Network Network;
 
         [Header("Materials (shared across all children when set)")]
         public Material AsphaltMaterial;
@@ -84,6 +95,8 @@ namespace NetworkDesigner.Rendering
         readonly Dictionary<string, GameObject> _laneFlowPool = new Dictionary<string, GameObject>();
         readonly Dictionary<string, GameObject> _approachMarkingsPool = new Dictionary<string, GameObject>();
         readonly Dictionary<string, GameObject> _signsPool = new Dictionary<string, GameObject>();
+        readonly Dictionary<string, GameObject> _laneMarkingsPool = new Dictionary<string, GameObject>();
+        readonly Dictionary<string, GameObject> _deadEndCapPool = new Dictionary<string, GameObject>();
 
         readonly HashSet<string> _liveVerticesScratch = new HashSet<string>();
         readonly HashSet<string> _liveRoadsScratch = new HashSet<string>();
@@ -91,6 +104,23 @@ namespace NetworkDesigner.Rendering
         readonly HashSet<string> _liveLaneFlowScratch = new HashSet<string>();
         readonly HashSet<string> _liveApproachMarkingsScratch = new HashSet<string>();
         readonly HashSet<string> _liveSignsScratch = new HashSet<string>();
+        readonly HashSet<string> _liveLaneMarkingsScratch = new HashSet<string>();
+        readonly HashSet<string> _liveDeadEndCapScratch = new HashSet<string>();
+
+        [Header("Dead-end caps")]
+        public bool ShowDeadEndCaps = true;
+        [Range(8, 64)] public int DeadEndCapSegments = 24;
+
+        [Header("Lane markings (painted intersection guides)")]
+        public bool ShowLaneMarkings = true;
+        public Color LaneMarkingWhite = Color.white;
+        public Color LaneMarkingYellow = new Color(1f, 0.85f, 0.2f, 1f);
+        [Range(0f, 1f)] public float LaneMarkingAlpha = 1f;
+        public float LaneMarkingWidth = 0.18f;
+        public float LaneMarkingHeight = 0.013f;
+        public float LaneMarkingDashLength = 0.7f;
+        public float LaneMarkingDashGap = 0.6f;
+        [Range(8, 64)] public int LaneMarkingBezierSamples = 24;
 
         [Header("Traffic signs")]
         public bool ShowSigns = true;
@@ -100,6 +130,12 @@ namespace NetworkDesigner.Rendering
         public float SignShoulderClearance = 1.5f;
         public float SignAlongOffset = 0.5f;
         public float SignHeight = 0.03f;
+        [Tooltip("Optional 3D prefab for Stop signs (e.g. CS - Signs Free Sign_Stop). When assigned, instantiated instead of the flat top-down quad. Pivot is expected at ground level.")]
+        public GameObject StopSignPrefab;
+        [Tooltip("Optional 3D prefab for Yield signs.")]
+        public GameObject YieldSignPrefab;
+        [Tooltip("Optional sign-post prefab (e.g. CS - Signs Free SignPost_1) — instantiated as a child of each sign so the panel has a real pole holding it up. Same pivot conventions as the sign prefab.")]
+        public GameObject SignPostPrefab;
 
         [Header("Pavement markings")]
         [Tooltip("Master toggle for per-approach Control paint. Each inbound approach paints based on its Control field (Stop→stop line, Yield→sharks teeth, None→nothing).")]
@@ -174,6 +210,8 @@ namespace NetworkDesigner.Rendering
                 ClearPool(_laneFlowPool);
                 ClearPool(_approachMarkingsPool);
                 ClearPool(_signsPool);
+                ClearPool(_laneMarkingsPool);
+                ClearPool(_deadEndCapPool);
                 return;
             }
 
@@ -183,6 +221,8 @@ namespace NetworkDesigner.Rendering
             _liveLaneFlowScratch.Clear();
             _liveApproachMarkingsScratch.Clear();
             _liveSignsScratch.Clear();
+            _liveLaneMarkingsScratch.Clear();
+            _liveDeadEndCapScratch.Clear();
 
             if (SimpleRender)
             {
@@ -194,6 +234,8 @@ namespace NetworkDesigner.Rendering
                 ClearPool(_laneFlowPool);
                 ClearPool(_approachMarkingsPool);
                 ClearPool(_signsPool);
+                ClearPool(_laneMarkingsPool);
+                ClearPool(_deadEndCapPool);
 
                 foreach (NetworkRoad road in Network.Roads)
                 {
@@ -241,6 +283,22 @@ namespace NetworkDesigner.Rendering
                     SpawnOrUpdateSigns(v, vg);
                     _liveSignsScratch.Add(v.Id);
                 }
+
+                if (ShowLaneMarkings && v.LaneMarkings != null && v.LaneMarkings.Count > 0)
+                {
+                    SpawnOrUpdateLaneMarkings(v, vg);
+                    _liveLaneMarkingsScratch.Add(v.Id);
+                }
+
+                // Dead-end vertices (exactly 1 incident approach) get a
+                // semicircular cap past the road end so the asphalt
+                // visually terminates rather than ending in a flat
+                // perpendicular cut.
+                if (ShowDeadEndCaps && vg.Approaches != null && vg.Approaches.Count == 1)
+                {
+                    SpawnOrUpdateDeadEndCap(v, vg.Approaches[0]);
+                    _liveDeadEndCapScratch.Add(v.Id);
+                }
             }
 
             // One RoadRenderer per road, with endpoints at the setback midpoints.
@@ -277,6 +335,78 @@ namespace NetworkDesigner.Rendering
             DestroyOrphans(_laneFlowPool, _liveLaneFlowScratch);
             DestroyOrphans(_approachMarkingsPool, _liveApproachMarkingsScratch);
             DestroyOrphans(_signsPool, _liveSignsScratch);
+            DestroyOrphans(_laneMarkingsPool, _liveLaneMarkingsScratch);
+            DestroyOrphans(_deadEndCapPool, _liveDeadEndCapScratch);
+        }
+
+        void SpawnOrUpdateDeadEndCap(Vertex v, VertexApproach approach)
+        {
+            if (!_deadEndCapPool.TryGetValue(v.Id, out GameObject go) || go == null)
+            {
+                go = new GameObject($"DeadEndCap_{v.Id}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                // Sit at MeshLift Y like the road body so they composite
+                // continuously with the road's asphalt + shoulder.
+                go.transform.position = new Vector3(0f, MeshLift, 0f);
+                go.AddComponent<DeadEndCapRenderer>();
+                _deadEndCapPool[v.Id] = go;
+            }
+            DeadEndCapRenderer dr = go.GetComponent<DeadEndCapRenderer>();
+            dr.Approach = approach;
+            dr.AsphaltMaterial = AsphaltMaterial;
+            dr.ShoulderMaterial = ShoulderMaterial;
+            dr.AsphaltColor = AsphaltColor;
+            dr.ShoulderColor = ShoulderColor;
+            dr.Segments = DeadEndCapSegments;
+            dr.UvTileSize = UvTileSize;
+            dr.Rebuild();
+        }
+
+        void SpawnOrUpdateLaneMarkings(Vertex v, VertexGeometry vg)
+        {
+            if (!_laneMarkingsPool.TryGetValue(v.Id, out GameObject go) || go == null)
+            {
+                go = new GameObject($"LaneMarkings_{v.Id}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                go.transform.position = Vector3.zero;
+                go.AddComponent<LaneMarkingsRenderer>();
+                _laneMarkingsPool[v.Id] = go;
+            }
+            LaneMarkingsRenderer lmr = go.GetComponent<LaneMarkingsRenderer>();
+            lmr.Geometry = vg;
+            lmr.Markings = v.LaneMarkings;
+            lmr.WhiteColor = LaneMarkingWhite;
+            lmr.YellowColor = LaneMarkingYellow;
+            lmr.Alpha = LaneMarkingAlpha;
+            lmr.Width = LaneMarkingWidth;
+            lmr.Height = LaneMarkingHeight;
+            lmr.DashLength = LaneMarkingDashLength;
+            lmr.DashGap = LaneMarkingDashGap;
+            lmr.BezierSamples = LaneMarkingBezierSamples;
+            lmr.Rebuild();
+        }
+
+        /// <summary>
+        /// Push lane-marking style fields to every spawned LaneMarkingsRenderer
+        /// + Rebuild them. Used by tuning when a style field changes.
+        /// </summary>
+        public void RefreshLaneMarkings()
+        {
+            foreach (KeyValuePair<string, GameObject> kv in _laneMarkingsPool)
+            {
+                if (kv.Value == null) continue;
+                LaneMarkingsRenderer lmr = kv.Value.GetComponent<LaneMarkingsRenderer>();
+                if (lmr == null) continue;
+                lmr.WhiteColor = LaneMarkingWhite;
+                lmr.YellowColor = LaneMarkingYellow;
+                lmr.Alpha = LaneMarkingAlpha;
+                lmr.Width = LaneMarkingWidth;
+                lmr.Height = LaneMarkingHeight;
+                lmr.DashLength = LaneMarkingDashLength;
+                lmr.DashGap = LaneMarkingDashGap;
+                lmr.BezierSamples = LaneMarkingBezierSamples;
+                lmr.Rebuild();
+            }
         }
 
         void SpawnOrUpdateSigns(Vertex v, VertexGeometry vg)
@@ -297,6 +427,9 @@ namespace NetworkDesigner.Rendering
             sr.SignShoulderClearance = SignShoulderClearance;
             sr.SignAlongOffset = SignAlongOffset;
             sr.Height = SignHeight;
+            sr.StopPrefab = StopSignPrefab;
+            sr.YieldPrefab = YieldSignPrefab;
+            sr.PostPrefab = SignPostPrefab;
             sr.Rebuild();
         }
 
@@ -317,6 +450,9 @@ namespace NetworkDesigner.Rendering
                 sr.SignShoulderClearance = SignShoulderClearance;
                 sr.SignAlongOffset = SignAlongOffset;
                 sr.Height = SignHeight;
+                sr.StopPrefab = StopSignPrefab;
+                sr.YieldPrefab = YieldSignPrefab;
+                sr.PostPrefab = SignPostPrefab;
                 sr.Rebuild();
             }
         }
@@ -469,6 +605,17 @@ namespace NetworkDesigner.Rendering
                 return lfr != null;
             }
             lfr = null;
+            return false;
+        }
+
+        public bool TryGetApproachMarkingsRenderer(string vertexId, out ApproachMarkingsRenderer amr)
+        {
+            if (_approachMarkingsPool.TryGetValue(vertexId, out GameObject go) && go != null)
+            {
+                amr = go.GetComponent<ApproachMarkingsRenderer>();
+                return amr != null;
+            }
+            amr = null;
             return false;
         }
 

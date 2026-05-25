@@ -264,6 +264,61 @@ namespace NetworkDesigner.Designer
         }
 
         /// <summary>
+        /// Append a flat painted "stripe" that follows a cubic bezier
+        /// from p0 to p3 (controls p1, p2). When <paramref name="gapLen"/>
+        /// is zero, the stripe is solid (one quad per sampled segment).
+        /// Otherwise dashed (alternating dashes of length dashLen with
+        /// gapLen gaps along arc length). Width measured perpendicular
+        /// to the curve. Returns the vertex range so callers can
+        /// rewrite alpha in place.
+        /// </summary>
+        public static void AppendBezierStripe(
+            List<Vector3> verts, List<int> tris, List<Color32> colors,
+            Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3,
+            float width, float dashLen, float gapLen, float y, Color color,
+            int sampleCount,
+            out int firstVertexIndex, out int vertexCount)
+        {
+            firstVertexIndex = verts.Count;
+            if (sampleCount < 8) sampleCount = 8;
+            Color32 c = (Color32)color;
+
+            Vector2[] pts = new Vector2[sampleCount + 1];
+            for (int i = 0; i <= sampleCount; i++)
+            {
+                float t = i / (float)sampleCount;
+                pts[i] = GeometryResolver.SampleCubic(p0, p1, p2, p3, t);
+            }
+            float[] cum = new float[sampleCount + 1];
+            for (int i = 1; i <= sampleCount; i++)
+            {
+                cum[i] = cum[i - 1] + Vector2.Distance(pts[i - 1], pts[i]);
+            }
+            float totalLen = cum[sampleCount];
+            float halfW = width * 0.5f;
+
+            if (gapLen <= 0f)
+            {
+                // Solid: one ribbon spanning [0, totalLen].
+                AppendPolylineDashRibbon(verts, tris, colors, pts, cum, 0f, totalLen, halfW, y, c);
+            }
+            else
+            {
+                float step = dashLen + gapLen;
+                float pos = 0f;
+                while (pos < totalLen - 1e-4f)
+                {
+                    float d0 = pos;
+                    float d1 = Mathf.Min(pos + dashLen, totalLen);
+                    AppendPolylineDashRibbon(verts, tris, colors, pts, cum, d0, d1, halfW, y, c);
+                    pos += step;
+                }
+            }
+
+            vertexCount = verts.Count - firstVertexIndex;
+        }
+
+        /// <summary>
         /// Append a stop line: thin rectangle spanning leftEdge → rightEdge
         /// (the setback line endpoints), extruded by lineWidth along
         /// outward (so it sits flat along the setback and has a small

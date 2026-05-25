@@ -16,7 +16,11 @@ namespace NetworkDesigner.Designer
 {
     public class SetbackHandle : MonoBehaviour
     {
-        public NetworkRoad Road;
+        // [NonSerialized]: prevent Unity's Inspector data-binding from
+        // walking the Road's graph and auto-instantiating null
+        // [Serializable] sub-objects (notably RoadCurve). See
+        // NetworkRenderer.Network for the full explanation.
+        [System.NonSerialized] public NetworkRoad Road;
         public RoadEnd End;
 
         /// <summary>True setback midpoint on the road body — the anchor end of the dashed stem.</summary>

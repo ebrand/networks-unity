@@ -66,6 +66,73 @@ namespace NetworkDesigner.Model
         Yield,
     }
 
+    /// <summary>
+    /// Color of a painted lane marking inside the intersection.
+    /// Auto = derived from the From lane's deterministic hash color
+    /// (matches the lane's marker color), so shift-created markings
+    /// "belong" visually to their originating lane.
+    /// </summary>
+    public enum LaneMarkingColor
+    {
+        White,
+        Yellow,
+        Auto,
+    }
+
+    /// <summary>Stroke style of a painted lane marking.</summary>
+    public enum LaneMarkingStyle
+    {
+        Solid,
+        Dashed,
+    }
+
+    /// <summary>
+    /// Named node on a lane, listed CW starting from the bottom-left
+    /// corner of the lane rectangle (inner-A → ML midpoint → outer-A
+    /// → outer-B → MR midpoint → inner-B). Lane FLOW arrows always
+    /// use A↔B (the midpoint nodes); lane MARKINGS can use any pair.
+    ///
+    /// At a given vertex, only the 3 nodes on the near-side end of
+    /// each incident lane are physically present:
+    ///   - At a road's A-end vertex: Origin, A, Primary are at the setback.
+    ///   - At a road's B-end vertex: Secondary, B, Tertiary are at the setback.
+    /// The 3 nodes at the FAR end of the lane sit at the other vertex.
+    /// </summary>
+    public enum LaneNode
+    {
+        Origin,    // inner-side A-end corner
+        A,         // centerline A-end midpoint (lane endpoint at A)
+        Primary,   // outer-side A-end corner
+        Secondary, // outer-side B-end corner
+        B,         // centerline B-end midpoint (lane endpoint at B)
+        Tertiary,  // inner-side B-end corner
+    }
+
+    /// <summary>
+    /// A painted "guide line" inside an intersection — a cubic bezier
+    /// from one lane endpoint to another, with two interior control
+    /// points the user can drag. Drawn as solid or dashed paint in
+    /// white or yellow. Lives on Vertex.LaneMarkings so deleting the
+    /// vertex cleans them up.
+    /// </summary>
+    [Serializable]
+    public class LaneMarking
+    {
+        public string Id;
+        public LaneRef From;
+        /// <summary>Which of the 6 named nodes on From's lane this marking starts at.</summary>
+        public LaneNode FromNode = LaneNode.A;
+        public LaneRef To;
+        /// <summary>Which of the 6 named nodes on To's lane this marking ends at.</summary>
+        public LaneNode ToNode = LaneNode.B;
+        /// <summary>Bezier control 1 (near From). World XZ.</summary>
+        public Vector2 Primary;
+        /// <summary>Bezier control 2 (near To). World XZ.</summary>
+        public Vector2 Secondary;
+        public LaneMarkingColor Color = LaneMarkingColor.White;
+        public LaneMarkingStyle Style = LaneMarkingStyle.Dashed;
+    }
+
     // -----------------------------------------------------------------
     // Lane references and connectivity
     // -----------------------------------------------------------------
@@ -130,6 +197,13 @@ namespace NetworkDesigner.Model
         /// Storing only overrides keeps saved networks small.
         /// </summary>
         public List<LaneConnection> ConnectivityOverrides = new List<LaneConnection>();
+
+        /// <summary>
+        /// Painted guide lines inside this intersection (e.g. dashed
+        /// turn-channel paint connecting two lane endpoints). Each is
+        /// a cubic bezier with editable interior controls.
+        /// </summary>
+        public List<LaneMarking> LaneMarkings = new List<LaneMarking>();
     }
 
     // -----------------------------------------------------------------

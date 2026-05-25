@@ -200,8 +200,17 @@ namespace NetworkDesigner.Geometry
                 effective.RemoveAll(c => LaneRefEquals(c.From, of));
             }
 
-            // Append every override (they're all authoritative now).
-            effective.AddRange(overrides);
+            // Append authoritative override entries. SENTINEL entries
+            // (To == null or empty RoadId) exist solely to trigger the
+            // per-from-lane REPLACE behavior above and are NOT emitted
+            // as real connections — used by NetworkDesigner to fully
+            // suppress all connections from a given from-lane.
+            foreach (LaneConnection o in overrides)
+            {
+                if (o == null) continue;
+                if (o.To == null || string.IsNullOrEmpty(o.To.RoadId)) continue;
+                effective.Add(o);
+            }
         }
 
         static bool LaneRefEquals(LaneRef a, LaneRef b)
@@ -748,6 +757,70 @@ namespace NetworkDesigner.Geometry
 
         /// <summary>Right perpendicular (90° CW). PerpRight((1,0)) = (0,-1).</summary>
         static Vector2 PerpRight(Vector2 v) => new Vector2(v.y, -v.x);
+
+        /// <summary>
+        /// World XZ position of a named LaneNode on a specific lane at
+        /// a specific approach. Returns null when the node isn't
+        /// physically present at this vertex (e.g. asking for Tertiary
+        /// at an end-A vertex returns null, because Tertiary lives at
+        /// the road's B end).
+        ///
+        /// Layout (per the model docs):
+        ///   End-A vertex → Origin / A / Primary are at the setback.
+        ///   End-B vertex → Secondary / B / Tertiary are at the setback.
+        /// Origin + Tertiary sit on the INNER side (toward centerline);
+        /// Primary + Secondary on the OUTER side (toward shoulder).
+        /// </summary>
+        public static Vector2? ResolveLaneNode(VertexApproach a, Direction dir, int laneIndex, LaneNode node)
+        {
+            if (a == null) return null;
+            List<Vector2> centers = dir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
+            List<float> widths = dir == Direction.AB ? a.LaneWidthsAB : a.LaneWidthsBA;
+            if (centers == null || widths == null) return null;
+            if (laneIndex < 0 || laneIndex >= centers.Count) return null;
+            if (laneIndex >= widths.Count) return null;
+
+            // Validate this node lives on the end-of-road at this vertex.
+            bool aEnd = a.End == RoadEnd.A;
+            bool nodeAtA = node == LaneNode.Origin || node == LaneNode.A || node == LaneNode.Primary;
+            bool nodeAtB = node == LaneNode.Secondary || node == LaneNode.B || node == LaneNode.Tertiary;
+            if (aEnd && !nodeAtA) return null;
+            if (!aEnd && !nodeAtB) return null;
+
+            Vector2 center = centers[laneIndex];
+            // Midpoint nodes (A / B) are just the lane centerline endpoint.
+            if (node == LaneNode.A || node == LaneNode.B) return center;
+
+            // Corner nodes need the cross-direction along the setback
+            // line and the "inner" side (toward the road centerline =
+            // toward the midpoint of the setback line).
+            Vector2 crossDir = a.OuterRight - a.OuterLeft;
+            float crossLen = crossDir.magnitude;
+            if (crossLen < 1e-4f) return center;
+            crossDir /= crossLen;
+            Vector2 setbackMidpoint = (a.OuterLeft + a.OuterRight) * 0.5f;
+            float toMidpointProj = Vector2.Dot(setbackMidpoint - center, crossDir);
+            Vector2 innerDir = toMidpointProj >= 0f ? crossDir : -crossDir;
+
+            float half = widths[laneIndex] * 0.5f;
+            bool isInner = node == LaneNode.Origin || node == LaneNode.Tertiary;
+            return center + (isInner ? +half : -half) * innerDir;
+        }
+
+        /// <summary>
+        /// Convenience: resolve a (LaneRef, LaneNode) against the
+        /// approach in <paramref name="vg"/> matching the lane's RoadId.
+        /// </summary>
+        public static Vector2? ResolveLaneNode(VertexGeometry vg, LaneRef lr, LaneNode node)
+        {
+            if (vg == null || lr == null) return null;
+            foreach (VertexApproach a in vg.Approaches)
+            {
+                if (a.RoadId == lr.RoadId)
+                    return ResolveLaneNode(a, lr.Direction, lr.Index, node);
+            }
+            return null;
+        }
 
         static float ShoulderPlusLanesWidth(List<Lane> lanes, float shoulderWidth)
         {

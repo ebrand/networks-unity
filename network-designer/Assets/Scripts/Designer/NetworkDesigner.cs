@@ -158,6 +158,10 @@ namespace NetworkDesigner.Designer
         public float LaneMarkerDiameter = 2.5f;
         [Tooltip("Stroke width of the ring (meters).")]
         public float LaneMarkerRingThickness = 0.5f;
+        [Tooltip("Outer diameter of the smaller lane-corner markers (Origin/Primary/Secondary/Tertiary). Smaller than midpoint markers so they don't dominate.")]
+        public float LaneCornerMarkerDiameter = 1.4f;
+        [Tooltip("Stroke width of corner-marker rings.")]
+        public float LaneCornerMarkerRingThickness = 0.28f;
         [Tooltip("World Y of the marker center. Sits above the setback handles so lane markers don't get visually occluded.")]
         public float LaneMarkerHeight = 1.4f;
         [Tooltip("Default alpha for unselected/unhovered markers and arrows. 0.25 = ambient dimmed visibility.")]
@@ -285,6 +289,12 @@ namespace NetworkDesigner.Designer
         // Hovered lane marker (Edit mode, vertex selected). Drives the
         // per-frame alpha lift on the marker + its flow arrows.
         LaneEndpointMarker _hoverLaneEndpoint;
+        // Modal "intersection lane marking" mode — toggled by holding
+        // Shift in Edit mode. While on, the midpoint A/B markers are
+        // hidden and the smaller Origin/Primary/Secondary/Tertiary
+        // corner markers are shown for marking authoring. Released
+        // shift reverts to the regular connectivity-edit overlay.
+        bool _markingShiftMode;
 
         // Hover (works in both modes; shown as a third marker state).
         Vertex _hoverVertex;
@@ -569,6 +579,7 @@ namespace NetworkDesigner.Designer
             // visual feedback for what they're about to click.
             UpdateHover();
             UpdateLaneHover();
+            UpdateMarkingShiftMode();
 
             if (CurrentMode == DesignerMode.Create) HandleCreateInput();
             else HandleEditInput();
@@ -647,11 +658,12 @@ namespace NetworkDesigner.Designer
             // Pop the new hovered marker to full alpha.
             if (newHover != null)
             {
-                Color c = newHover == _armedLaneEndpoint
-                    ? LaneMarkerArmedColor
-                    : (newHover.IsInbound
-                        ? EditorGeometry.HashToColor(LaneEndpointKey(newHover.Lane))
-                        : LaneOutboundMarkerColor);
+                bool isCorner = newHover.Node != LaneNode.A && newHover.Node != LaneNode.B;
+                Color c;
+                if (newHover == _armedLaneEndpoint) c = LaneMarkerArmedColor;
+                else if (newHover.IsInbound && isCorner) c = GetLaneCornerLineColor(newHover.Lane, newHover.Node);
+                else if (newHover.IsInbound) c = EditorGeometry.HashToColor(LaneFlowKey(newHover.Lane));
+                else c = LaneOutboundMarkerColor;
                 c.a = LaneOverlayFullAlpha;
                 RefreshLaneMarkerColor(newHover, c);
             }
@@ -1172,7 +1184,7 @@ namespace NetworkDesigner.Designer
             }
 
             // Begin drag on left-button down.
-            // Priority: sign > lane endpoint > setback handle > vertex > ground.
+            // Priority: sign > lane endpoint > marking > setback handle > vertex > ground.
             if (Input.GetMouseButtonDown(0) && !MouseOverPalette())
             {
                 SignClickTarget hitSign = PickSignClickTarget();
@@ -1181,10 +1193,20 @@ namespace NetworkDesigner.Designer
                     HandleSignClick(hitSign);
                     return;
                 }
-                LaneEndpointMarker hitLane = PickLaneEndpointMarker();
+                // While armed, prefer OUTBOUND hits — same affordance
+                // logic as the right-click delete path (see picker
+                // docstring). Without this, clicking near the boundary
+                // between two markers (e.g. the other corner of the
+                // armed lane vs an outbound on a neighboring lane) is
+                // a coin flip and the user has to retry.
+                LaneEndpointMarker hitLane = PickLaneEndpointMarker(preferOutbound: _armedLaneEndpoint != null);
                 if (hitLane != null)
                 {
                     HandleLaneEndpointClick(hitLane);
+                }
+                else if (PickMarkingClickTarget() is MarkingClickTarget hitMark && hitMark != null)
+                {
+                    CycleMarkingStyle(hitMark);
                 }
                 else
                 {
@@ -1249,13 +1271,32 @@ namespace NetworkDesigner.Designer
                 EndDrag();
             }
 
-            // Right-click: unarm a lane-edit in progress first; else clear
-            // a setback override when over a handle; else delete (vertex/road).
+            // Right-click priority. NOTE: deleting a flow arrow or
+            // lane marking requires arming an inbound marker first,
+            // then right-clicking the matching outbound marker. There
+            // is no "right-click directly on the line" delete shortcut
+            // — that gesture is reserved so a stray right-click can't
+            // wipe paint by accident.
+            //   1. Armed + clicked OUTBOUND marker → remove matching
+            //      connection (regular) or marking (shift). Stays armed
+            //      for repeated removals.
+            //   2. Armed + anything else → unarm (no delete).
+            //   3. Not armed + setback handle → clear override.
+            //   4. Not armed + anything else → vertex/road delete.
             if (Input.GetMouseButtonDown(1) && !MouseOverPalette())
             {
                 if (_armedLaneEndpoint != null)
                 {
-                    UnarmLaneEndpoint();
+                    LaneEndpointMarker hitOut = PickLaneEndpointMarker(preferOutbound: true);
+                    if (hitOut != null && !hitOut.IsInbound
+                        && hitOut.VertexId == _selectedVertex?.Id)
+                    {
+                        HandleLaneEndpointRightClick(hitOut);
+                    }
+                    else
+                    {
+                        UnarmLaneEndpoint();
+                    }
                 }
                 else
                 {
@@ -1268,6 +1309,100 @@ namespace NetworkDesigner.Designer
                     {
                         HandleRightClickDelete();
                     }
+                }
+            }
+        }
+
+        // Right-click on an OUTBOUND lane marker while armed: removes
+        // the corresponding connection/marking from the armed inbound.
+        // In regular mode, removes a ConnectivityOverride. In shift
+        // mode, removes a LaneMarking with matching nodes. Stays
+        // armed so the user can remove multiple in sequence.
+        void HandleLaneEndpointRightClick(LaneEndpointMarker m)
+        {
+            if (_selectedVertex == null || _armedLaneEndpoint == null) return;
+            if (m.IsInbound) return;
+            if (_markingShiftMode)
+            {
+                RemoveLaneMarking(_armedLaneEndpoint.Lane, _armedLaneEndpoint.Node, m.Lane, m.Node);
+            }
+            else
+            {
+                RemoveConnectionOverride(_armedLaneEndpoint.Lane, m.Lane);
+            }
+            MarkNetworkDirty();
+            Rebuild();
+        }
+
+        // Remove the (fromLane → toLane) connection from the selected
+        // vertex's EFFECTIVE connectivity. Works whether the connection
+        // came from a user-authored override or from the resolver's
+        // default rules.
+        //
+        // Strategy: read the effective list (after defaults+overrides
+        // merge), drop the target, and write the surviving connections
+        // from this from-lane back as explicit overrides — the
+        // resolver's per-from-lane REPLACE semantics then suppresses
+        // the default contribution. If the surviving list is empty
+        // (target was the only connection from this from-lane), write
+        // a SENTINEL override (To.RoadId == "") that exists solely to
+        // trigger the REPLACE check without emitting a real connection.
+        void RemoveConnectionOverride(LaneRef fromLane, LaneRef toLane)
+        {
+            if (_selectedVertex == null) return;
+            VertexGeometry vg = GeometryResolver.ResolveVertex(_network, _selectedVertex);
+            if (vg == null || vg.Connectivity == null) return;
+
+            List<LaneConnection> keep = new List<LaneConnection>();
+            bool foundTarget = false;
+            foreach (LaneConnection c in vg.Connectivity)
+            {
+                if (c == null || c.From == null || c.To == null) continue;
+                if (!LaneRefMatches(c.From, fromLane)) continue;
+                if (LaneRefMatches(c.To, toLane)) { foundTarget = true; continue; }
+                keep.Add(c);
+            }
+            if (!foundTarget) return; // nothing to remove
+
+            if (_selectedVertex.ConnectivityOverrides == null)
+                _selectedVertex.ConnectivityOverrides = new List<LaneConnection>();
+            // Wipe any existing overrides for this from-lane; we're about
+            // to write the authoritative list (or a sentinel).
+            _selectedVertex.ConnectivityOverrides.RemoveAll(
+                c => c != null && LaneRefMatches(c.From, fromLane));
+
+            foreach (LaneConnection c in keep)
+            {
+                _selectedVertex.ConnectivityOverrides.Add(new LaneConnection
+                {
+                    From = new LaneRef { RoadId = c.From.RoadId, Direction = c.From.Direction, Index = c.From.Index },
+                    To = new LaneRef { RoadId = c.To.RoadId, Direction = c.To.Direction, Index = c.To.Index },
+                });
+            }
+            if (keep.Count == 0)
+            {
+                _selectedVertex.ConnectivityOverrides.Add(new LaneConnection
+                {
+                    From = new LaneRef { RoadId = fromLane.RoadId, Direction = fromLane.Direction, Index = fromLane.Index },
+                    To = new LaneRef { RoadId = "", Direction = Direction.AB, Index = -1 },
+                });
+            }
+        }
+
+        // Remove the FIRST LaneMarking matching (fromLane+fromNode →
+        // toLane+toNode) on the selected vertex. No-op if none.
+        void RemoveLaneMarking(LaneRef fromLane, LaneNode fromNode, LaneRef toLane, LaneNode toNode)
+        {
+            if (_selectedVertex == null || _selectedVertex.LaneMarkings == null) return;
+            List<LaneMarking> list = _selectedVertex.LaneMarkings;
+            for (int i = 0; i < list.Count; i++)
+            {
+                LaneMarking lm = list[i];
+                if (LaneRefMatches(lm.From, fromLane) && lm.FromNode == fromNode
+                    && LaneRefMatches(lm.To, toLane) && lm.ToNode == toNode)
+                {
+                    list.RemoveAt(i);
+                    return;
                 }
             }
         }
@@ -1310,16 +1445,122 @@ namespace NetworkDesigner.Designer
             // Outbound clicked.
             if (_armedLaneEndpoint == null)
             {
-                Debug.Log("[NetworkDesigner] Lane edit: click an INBOUND endpoint first (blue), then click an OUTBOUND endpoint (orange) to author a connection.");
+                Debug.Log("[NetworkDesigner] Lane edit: click an INBOUND endpoint first, then click an OUTBOUND endpoint. (Hold Shift to enter intersection-marking mode and connect lane corner nodes instead.)");
                 return;
             }
 
-            ToggleConnectionOverride(_armedLaneEndpoint.Lane, m.Lane);
+            if (_markingShiftMode)
+            {
+                CreateLaneMarking(_armedLaneEndpoint.Lane, _armedLaneEndpoint.Node, m.Lane, m.Node);
+            }
+            else
+            {
+                AddConnectionOverride(_armedLaneEndpoint.Lane, m.Lane);
+            }
             // Keep the from-lane armed so the user can author multiple
-            // connections from the same inbound without re-clicking.
-            // (Right-click / Esc to finish.)
+            // markings / connections without re-clicking.
             MarkNetworkDirty();
             Rebuild();
+        }
+
+        // Create a new painted lane marking from (from.fromNode → to.toNode)
+        // on the selected vertex. Bezier control points are auto-placed
+        // along the inbound/outbound flow tangents (same heuristic as
+        // the flow arrows), so the curve enters/exits each lane
+        // smoothly. Color defaults to Auto (hash-derived from the From
+        // lane, matching the lane's marker color), style to Dashed.
+        void CreateLaneMarking(LaneRef from, LaneNode fromNode, LaneRef to, LaneNode toNode)
+        {
+            if (_selectedVertex == null) return;
+            VertexGeometry vg = GeometryResolver.ResolveVertex(_network, _selectedVertex);
+            if (vg == null) return;
+
+            Vector2? fromPos = GeometryResolver.ResolveLaneNode(vg, from, fromNode);
+            Vector2? toPos = GeometryResolver.ResolveLaneNode(vg, to, toNode);
+            if (!fromPos.HasValue || !toPos.HasValue) return;
+
+            Vector2 inboundFlow = -FindApproachOuterEdgeDir(vg, from.RoadId);
+            Vector2 outboundFlow = FindApproachOuterEdgeDir(vg, to.RoadId);
+            float chord = Vector2.Distance(fromPos.Value, toPos.Value);
+            float ctrlLen = chord * 0.45f;
+            Vector2 primary = fromPos.Value + inboundFlow * ctrlLen;
+            Vector2 secondary = toPos.Value - outboundFlow * ctrlLen;
+
+            if (_selectedVertex.LaneMarkings == null)
+                _selectedVertex.LaneMarkings = new List<LaneMarking>();
+            _selectedVertex.LaneMarkings.Add(new LaneMarking
+            {
+                Id = $"lm-{System.Guid.NewGuid().ToString("N").Substring(0, 8)}",
+                From = new LaneRef { RoadId = from.RoadId, Direction = from.Direction, Index = from.Index },
+                FromNode = fromNode,
+                To = new LaneRef { RoadId = to.RoadId, Direction = to.Direction, Index = to.Index },
+                ToNode = toNode,
+                Primary = primary,
+                Secondary = secondary,
+                Color = LaneMarkingColor.Auto,
+                Style = LaneMarkingStyle.Dashed,
+            });
+
+            // Diagnostic: log the inputs that drive the Auto color
+            // decision in LaneMarkingsRenderer so we can tell why a
+            // marking came out yellow vs white.
+            bool innerSide = fromNode == LaneNode.Origin || fromNode == LaneNode.Tertiary;
+            bool innermostLane = from.Index == 0;
+            string expectedColor = (innerSide && innermostLane) ? "YELLOW" : "WHITE";
+            Debug.Log($"[NetworkDesigner] CreateLaneMarking: From=(road={from.RoadId}, dir={from.Direction}, idx={from.Index}, node={fromNode})  " +
+                      $"To=(road={to.RoadId}, dir={to.Direction}, idx={to.Index}, node={toNode})  " +
+                      $"→ innerSide={innerSide}, innermostLane={innermostLane}, expected={expectedColor}");
+        }
+
+        void CycleMarkingStyle(MarkingClickTarget t)
+        {
+            Vertex v = FindVertexById(t.VertexId);
+            if (v == null || v.LaneMarkings == null) return;
+            LaneMarking m = v.LaneMarkings.Find(x => x.Id == t.MarkingId);
+            if (m == null) return;
+            // Cycle: White-Solid → White-Dashed → Yellow-Solid → Yellow-Dashed → …
+            if (m.Color == LaneMarkingColor.White && m.Style == LaneMarkingStyle.Solid)
+            {
+                m.Style = LaneMarkingStyle.Dashed;
+            }
+            else if (m.Color == LaneMarkingColor.White && m.Style == LaneMarkingStyle.Dashed)
+            {
+                m.Color = LaneMarkingColor.Yellow;
+                m.Style = LaneMarkingStyle.Solid;
+            }
+            else if (m.Color == LaneMarkingColor.Yellow && m.Style == LaneMarkingStyle.Solid)
+            {
+                m.Style = LaneMarkingStyle.Dashed;
+            }
+            else
+            {
+                m.Color = LaneMarkingColor.White;
+                m.Style = LaneMarkingStyle.Solid;
+            }
+            MarkNetworkDirty();
+            Rebuild();
+        }
+
+        void DeleteMarking(MarkingClickTarget t)
+        {
+            Vertex v = FindVertexById(t.VertexId);
+            if (v == null || v.LaneMarkings == null) return;
+            int removed = v.LaneMarkings.RemoveAll(x => x.Id == t.MarkingId);
+            if (removed > 0)
+            {
+                MarkNetworkDirty();
+                Rebuild();
+            }
+        }
+
+        static Vector2 FindApproachOuterEdgeDir(VertexGeometry vg, string roadId)
+        {
+            foreach (VertexApproach a in vg.Approaches)
+            {
+                if (a.RoadId == roadId && a.OuterEdgeDir.sqrMagnitude > 1e-6f)
+                    return a.OuterEdgeDir.normalized;
+            }
+            return Vector2.right;
         }
 
         void ArmLaneEndpoint(LaneEndpointMarker m)
@@ -1329,10 +1570,11 @@ namespace NetworkDesigner.Designer
             // Respawn lane markers in armed state: hide other inbounds,
             // show reachable outbound click targets.
             LaneRef armed = m.Lane;
+            LaneNode armedNode = m.Node;
             DestroyLaneEndpointMarkers();
             _armedLaneEndpoint = null; // cleared by destroy; reassign
             SpawnLaneEndpointMarkersFiltered(_selectedVertex, armed);
-            if (_laneEndpointMarkers.TryGetValue(LaneEndpointKey(armed), out GameObject ago) && ago != null)
+            if (_laneEndpointMarkers.TryGetValue(LaneEndpointKey(armed, armedNode), out GameObject ago) && ago != null)
             {
                 _armedLaneEndpoint = ago.GetComponent<LaneEndpointMarker>();
                 if (_armedLaneEndpoint != null)
@@ -1353,38 +1595,48 @@ namespace NetworkDesigner.Designer
             PushLaneFlowState();
         }
 
-        // Toggle a (from → to) entry in _selectedVertex.ConnectivityOverrides.
-        // Add if missing, remove if present. The override is added with
-        // REPLACE semantics at the resolver level — see
-        // GeometryResolver.ApplyConnectivityOverrides.
-        void ToggleConnectionOverride(LaneRef fromLane, LaneRef toLane)
+        // Add a (from → to) connection to the selected vertex's
+        // EFFECTIVE connectivity. Symmetric to RemoveConnectionOverride:
+        // synthesizes a full override list for the from-lane so the
+        // resolver's per-from-lane REPLACE semantics doesn't silently
+        // drop other default-generated connections from the same
+        // from-lane. Idempotent — if the connection already exists in
+        // the effective list, this is a no-op.
+        void AddConnectionOverride(LaneRef fromLane, LaneRef toLane)
         {
-            List<LaneConnection> list = _selectedVertex.ConnectivityOverrides;
-            if (list == null)
+            if (_selectedVertex == null) return;
+            VertexGeometry vg = GeometryResolver.ResolveVertex(_network, _selectedVertex);
+            if (vg == null || vg.Connectivity == null) return;
+
+            List<LaneConnection> keep = new List<LaneConnection>();
+            bool alreadyExists = false;
+            foreach (LaneConnection c in vg.Connectivity)
             {
-                list = new List<LaneConnection>();
-                _selectedVertex.ConnectivityOverrides = list;
+                if (c == null || c.From == null || c.To == null) continue;
+                if (!LaneRefMatches(c.From, fromLane)) continue;
+                if (LaneRefMatches(c.To, toLane)) alreadyExists = true;
+                keep.Add(c);
             }
-            int existing = -1;
-            for (int i = 0; i < list.Count; i++)
+            if (alreadyExists) return; // nothing to add
+
+            keep.Add(new LaneConnection
             {
-                LaneConnection c = list[i];
-                if (LaneRefMatches(c.From, fromLane) && LaneRefMatches(c.To, toLane))
+                From = new LaneRef { RoadId = fromLane.RoadId, Direction = fromLane.Direction, Index = fromLane.Index },
+                To = new LaneRef { RoadId = toLane.RoadId, Direction = toLane.Direction, Index = toLane.Index },
+            });
+
+            if (_selectedVertex.ConnectivityOverrides == null)
+                _selectedVertex.ConnectivityOverrides = new List<LaneConnection>();
+            // Wipe any existing overrides for this from-lane; we're
+            // about to write the authoritative list.
+            _selectedVertex.ConnectivityOverrides.RemoveAll(
+                c => c != null && LaneRefMatches(c.From, fromLane));
+            foreach (LaneConnection c in keep)
+            {
+                _selectedVertex.ConnectivityOverrides.Add(new LaneConnection
                 {
-                    existing = i;
-                    break;
-                }
-            }
-            if (existing >= 0)
-            {
-                list.RemoveAt(existing);
-            }
-            else
-            {
-                list.Add(new LaneConnection
-                {
-                    From = new LaneRef { RoadId = fromLane.RoadId, Direction = fromLane.Direction, Index = fromLane.Index },
-                    To   = new LaneRef { RoadId = toLane.RoadId,   Direction = toLane.Direction,   Index = toLane.Index },
+                    From = new LaneRef { RoadId = c.From.RoadId, Direction = c.From.Direction, Index = c.From.Index },
+                    To = new LaneRef { RoadId = c.To.RoadId, Direction = c.To.Direction, Index = c.To.Index },
                 });
             }
         }
@@ -1905,6 +2157,26 @@ namespace NetworkDesigner.Designer
             return null;
         }
 
+        MarkingClickTarget PickMarkingClickTarget()
+        {
+            if (PickCamera == null) return null;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            float bestDist = float.MaxValue;
+            MarkingClickTarget best = null;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                MarkingClickTarget t = hits[i].collider.GetComponentInParent<MarkingClickTarget>();
+                if (t == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = t;
+                }
+            }
+            return best;
+        }
+
         SignClickTarget PickSignClickTarget()
         {
             if (PickCamera == null) return null;
@@ -1927,6 +2199,19 @@ namespace NetworkDesigner.Designer
 
         LaneEndpointMarker PickLaneEndpointMarker()
         {
+            return PickLaneEndpointMarker(preferOutbound: false);
+        }
+
+        // When `preferOutbound` is true, any hit outbound marker beats
+        // any hit inbound marker (even if the inbound is closer along
+        // the ray). Used in the armed-state context where the user's
+        // next click is unambiguously aimed at an outbound — without
+        // this preference, the other corner of the same armed lane
+        // (which is also inbound, often closer to the cursor than the
+        // intended outbound on a neighboring lane) wins the picker
+        // and silently unarms instead of delete/create.
+        LaneEndpointMarker PickLaneEndpointMarker(bool preferOutbound)
+        {
             if (PickCamera == null) return null;
             Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
             // RaycastAll so the picker can find a lane marker even when
@@ -1934,33 +2219,67 @@ namespace NetworkDesigner.Designer
             // is in front along the same ray. Picks the closest hit
             // that actually has a LaneEndpointMarker component.
             RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
-            float bestDist = float.MaxValue;
-            LaneEndpointMarker best = null;
+            float bestOutDist = float.MaxValue;
+            float bestInDist = float.MaxValue;
+            LaneEndpointMarker bestOut = null;
+            LaneEndpointMarker bestIn = null;
             for (int i = 0; i < hits.Length; i++)
             {
                 LaneEndpointMarker m = hits[i].collider.GetComponentInParent<LaneEndpointMarker>();
                 if (m == null) continue;
-                if (hits[i].distance < bestDist)
+                if (m.IsInbound)
                 {
-                    bestDist = hits[i].distance;
-                    best = m;
+                    if (hits[i].distance < bestInDist)
+                    {
+                        bestInDist = hits[i].distance;
+                        bestIn = m;
+                    }
+                }
+                else
+                {
+                    if (hits[i].distance < bestOutDist)
+                    {
+                        bestOutDist = hits[i].distance;
+                        bestOut = m;
+                    }
                 }
             }
-            return best;
+            if (preferOutbound && bestOut != null) return bestOut;
+            // Fall back to the closest overall.
+            if (bestOut == null) return bestIn;
+            if (bestIn == null) return bestOut;
+            return bestOutDist <= bestInDist ? bestOut : bestIn;
         }
 
         void SetSelectedVertex(Vertex v)
         {
             if (_selectedVertex == v) return;
+            Vertex previouslySelected = _selectedVertex;
             _selectedVertex = v;
             DestroySetbackHandles();
             DestroyLaneEndpointMarkers();
+            // Restore the previously-selected vertex's marker now that
+            // it's no longer the edit focus.
+            if (previouslySelected != null)
+                SetVertexMarkerVisible(previouslySelected.Id, true);
             if (v != null)
             {
                 SpawnSetbackHandles(v);
                 SpawnLaneEndpointMarkers(v);
+                // Hide the selected vertex's marker puck so it doesn't
+                // occlude the per-vertex edit overlays (setback handles
+                // sit on top of it; lane endpoint rings sit at the lane
+                // endings which can be very close to the puck on tight
+                // intersections). Restored on Esc / re-select.
+                SetVertexMarkerVisible(v.Id, false);
             }
             PushLaneFlowState();
+        }
+
+        void SetVertexMarkerVisible(string vertexId, bool visible)
+        {
+            if (_vertexMarkers.TryGetValue(vertexId, out GameObject go) && go != null)
+                go.SetActive(visible);
         }
 
         void SpawnSetbackHandles(Vertex v)
@@ -2033,10 +2352,72 @@ namespace NetworkDesigner.Designer
         // at EndB: opposite). Spawned positions come straight from the
         // resolver's LaneEndsAB/LaneEndsBA so they sit on the same
         // setback line the lane-flow overlay uses.
+        // Per-frame: detect Shift state in Edit mode. On transition,
+        // respawn lane markers so the right subset (midpoints in
+        // regular mode, corners in marking mode) is visible. Also
+        // pushes a suppression flag onto the selected vertex's
+        // ApproachMarkingsRenderer so stop lines / sharks teeth / lane
+        // arrows hide while the user is authoring markings.
+        void UpdateMarkingShiftMode()
+        {
+            if (CurrentMode != DesignerMode.Edit || _selectedVertex == null)
+            {
+                if (_markingShiftMode)
+                {
+                    _markingShiftMode = false;
+                    PushPaintedControlsSuppression(null, false);
+                }
+                return;
+            }
+            bool now = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+            if (now == _markingShiftMode) return;
+            _markingShiftMode = now;
+            // Releasing shift cancels any armed corner; arming through
+            // shift mode → flow mode would orphan a corner-Node armed
+            // reference that doesn't exist in regular mode.
+            _armedLaneEndpoint = null;
+            _hoverLaneEndpoint = null;
+            DestroyLaneEndpointMarkers();
+            SpawnLaneEndpointMarkers(_selectedVertex);
+            PushPaintedControlsSuppression(_selectedVertex.Id, _markingShiftMode);
+            PushLaneFlowState();
+        }
+
+        // Tell the per-vertex ApproachMarkingsRenderer whether to
+        // suppress its stop-line / sharks-teeth / lane-arrow paint.
+        // When vertexId is null, clears the flag everywhere.
+        void PushPaintedControlsSuppression(string vertexId, bool suppress)
+        {
+            if (_renderer == null) return;
+            if (vertexId != null)
+            {
+                if (_renderer.TryGetApproachMarkingsRenderer(vertexId, out ApproachMarkingsRenderer amr))
+                {
+                    amr.SuppressForMarkingMode = suppress;
+                    amr.Rebuild();
+                }
+                return;
+            }
+            // Clear-all path — used when leaving the selection.
+            foreach (Vertex v in _network.Vertices)
+            {
+                if (_renderer.TryGetApproachMarkingsRenderer(v.Id, out ApproachMarkingsRenderer amr))
+                {
+                    if (amr.SuppressForMarkingMode)
+                    {
+                        amr.SuppressForMarkingMode = false;
+                        amr.Rebuild();
+                    }
+                }
+            }
+        }
+
         // Default spawn — used when no inbound is armed. Shows only
-        // INBOUND markers at the selected vertex. Outbound markers are
-        // spawned via SpawnLaneEndpointMarkersFiltered when the user
-        // arms an inbound, narrowing the click targets.
+        // INBOUND markers at the selected vertex. In regular Edit mode,
+        // emits the centerline midpoint markers (A or B) used for
+        // connectivity-override editing. In shift-marking mode, emits
+        // the smaller Origin/Primary/Secondary/Tertiary corner markers
+        // used for intersection lane-marking creation.
         void SpawnLaneEndpointMarkers(Vertex v)
         {
             if (_network == null) return;
@@ -2049,11 +2430,49 @@ namespace NetworkDesigner.Designer
                 NetworkRoad road = FindRoadById(a.RoadId);
                 if (road == null) continue;
 
-                // Inbound = traffic flowing TOWARD this vertex.
-                // At EndA's vertex: BA is inbound. At EndB's: AB is inbound.
                 Direction inboundDir = a.End == RoadEnd.A ? Direction.BA : Direction.AB;
                 List<Vector2> inboundLanes = inboundDir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
-                SpawnLaneRingMarkers(v, road, inboundDir, inboundLanes, isInbound: true);
+                if (inboundLanes == null) continue;
+
+                bool aEnd = a.End == RoadEnd.A;
+                LaneNode midNode = aEnd ? LaneNode.A : LaneNode.B;
+                LaneNode innerCorner = aEnd ? LaneNode.Origin : LaneNode.Tertiary;
+                LaneNode outerCorner = aEnd ? LaneNode.Primary : LaneNode.Secondary;
+
+                for (int i = 0; i < inboundLanes.Count; i++)
+                {
+                    LaneRef lr = new LaneRef { RoadId = road.Id, Direction = inboundDir, Index = i };
+                    if (_markingShiftMode)
+                    {
+                        // Marking mode: spawn corner markers, but DEDUPE
+                        // shared-boundary corners between adjacent lanes
+                        // (lane N's outer corner is geometrically identical
+                        // to lane N+1's inner corner). The rule: always
+                        // spawn the inner corner; only spawn the outer
+                        // corner on the LAST lane (where no next-index
+                        // lane exists to share with). Without this dedupe,
+                        // two markers stack at every interior lane
+                        // boundary, picker results are nondeterministic,
+                        // and delete-by-exact-lane-ref fails because the
+                        // first click stored ref A but the second click
+                        // matched ref B.
+                        Vector2? inner = GeometryResolver.ResolveLaneNode(a, inboundDir, i, innerCorner);
+                        if (inner.HasValue)
+                            SpawnLaneRingMarker(v, road, lr, innerCorner, inner.Value, isInbound: true, isCorner: true);
+                        bool isLastLane = (i == inboundLanes.Count - 1);
+                        if (isLastLane)
+                        {
+                            Vector2? outer = GeometryResolver.ResolveLaneNode(a, inboundDir, i, outerCorner);
+                            if (outer.HasValue)
+                                SpawnLaneRingMarker(v, road, lr, outerCorner, outer.Value, isInbound: true, isCorner: true);
+                        }
+                    }
+                    else
+                    {
+                        // Regular mode: emit only the midpoint marker.
+                        SpawnLaneRingMarker(v, road, lr, midNode, inboundLanes[i], isInbound: true, isCorner: false);
+                    }
+                }
             }
         }
 
@@ -2077,74 +2496,108 @@ namespace NetworkDesigner.Designer
                 Direction inboundDir = a.End == RoadEnd.A ? Direction.BA : Direction.AB;
                 Direction outboundDir = a.End == RoadEnd.A ? Direction.AB : Direction.BA;
 
+                bool aEnd = a.End == RoadEnd.A;
+                LaneNode midNode = aEnd ? LaneNode.A : LaneNode.B;
+                LaneNode innerCorner = aEnd ? LaneNode.Origin : LaneNode.Tertiary;
+                LaneNode outerCorner = aEnd ? LaneNode.Primary : LaneNode.Secondary;
+
                 if (isArmedRoad)
                 {
-                    // Keep ONLY the armed inbound marker on this road.
-                    // (Outbound markers on the armed road are not valid
-                    // click targets — the resolver doesn't allow U-turn
-                    // defaults; an override could but we hide them for
-                    // visual clarity.)
+                    // Keep ONLY the armed lane's relevant nodes visible.
                     if (armedLane.Direction == inboundDir)
                     {
                         List<Vector2> inboundLanes = inboundDir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
                         if (armedLane.Index >= 0 && armedLane.Index < inboundLanes.Count)
                         {
-                            SpawnLaneRingMarker(v, road, armedLane.Direction, armedLane.Index,
-                                inboundLanes[armedLane.Index], isInbound: true);
+                            LaneRef lr = new LaneRef { RoadId = road.Id, Direction = armedLane.Direction, Index = armedLane.Index };
+                            if (_markingShiftMode)
+                            {
+                                // Marking mode: keep both corner markers
+                                // for the armed lane (user might re-arm).
+                                Vector2? innerPos = GeometryResolver.ResolveLaneNode(a, armedLane.Direction, armedLane.Index, innerCorner);
+                                if (innerPos.HasValue) SpawnLaneRingMarker(v, road, lr, innerCorner, innerPos.Value, isInbound: true, isCorner: true);
+                                Vector2? outerPos = GeometryResolver.ResolveLaneNode(a, armedLane.Direction, armedLane.Index, outerCorner);
+                                if (outerPos.HasValue) SpawnLaneRingMarker(v, road, lr, outerCorner, outerPos.Value, isInbound: true, isCorner: true);
+                            }
+                            else
+                            {
+                                SpawnLaneRingMarker(v, road, lr, midNode, inboundLanes[armedLane.Index], isInbound: true, isCorner: false);
+                            }
                         }
                     }
                 }
                 else
                 {
-                    // Other roads: show their OUTBOUND markers as click targets.
+                    // Other roads: show their OUTBOUND nodes as click targets.
                     List<Vector2> outboundLanes = outboundDir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
-                    SpawnLaneRingMarkers(v, road, outboundDir, outboundLanes, isInbound: false);
+                    if (outboundLanes == null) continue;
+                    for (int i = 0; i < outboundLanes.Count; i++)
+                    {
+                        LaneRef lr = new LaneRef { RoadId = road.Id, Direction = outboundDir, Index = i };
+                        if (_markingShiftMode)
+                        {
+                            // See SpawnLaneEndpointMarkers for the dedupe
+                            // rationale: shared lane boundaries get one
+                            // marker, not two stacked at the same XZ.
+                            Vector2? innerPos = GeometryResolver.ResolveLaneNode(a, outboundDir, i, innerCorner);
+                            if (innerPos.HasValue) SpawnLaneRingMarker(v, road, lr, innerCorner, innerPos.Value, isInbound: false, isCorner: true);
+                            bool isLastLane = (i == outboundLanes.Count - 1);
+                            if (isLastLane)
+                            {
+                                Vector2? outerPos = GeometryResolver.ResolveLaneNode(a, outboundDir, i, outerCorner);
+                                if (outerPos.HasValue) SpawnLaneRingMarker(v, road, lr, outerCorner, outerPos.Value, isInbound: false, isCorner: true);
+                            }
+                        }
+                        else
+                        {
+                            SpawnLaneRingMarker(v, road, lr, midNode, outboundLanes[i], isInbound: false, isCorner: false);
+                        }
+                    }
                 }
             }
         }
 
-        void SpawnLaneRingMarkers(Vertex v, NetworkRoad road, Direction dir,
-            List<Vector2> ends, bool isInbound)
+        void SpawnLaneRingMarker(Vertex v, NetworkRoad road, LaneRef lr, LaneNode node,
+            Vector2 pos, bool isInbound, bool isCorner)
         {
-            if (ends == null) return;
-            for (int i = 0; i < ends.Count; i++)
-            {
-                SpawnLaneRingMarker(v, road, dir, i, ends[i], isInbound);
-            }
-        }
+            string markerKey = LaneEndpointKey(lr, node);
 
-        void SpawnLaneRingMarker(Vertex v, NetworkRoad road, Direction dir, int index,
-            Vector2 pos, bool isInbound)
-        {
-            string laneKey = LaneEndpointKey(new LaneRef { RoadId = road.Id, Direction = dir, Index = index });
-
-            GameObject go = new GameObject($"LaneEndpoint_{road.Id}_{dir}_{index}");
+            GameObject go = new GameObject($"LaneEndpoint_{road.Id}_{lr.Direction}_{lr.Index}_{node}");
             go.transform.SetParent(transform, worldPositionStays: false);
             go.transform.position = new Vector3(pos.x, LaneMarkerHeight, pos.y);
             go.AddComponent<MeshFilter>();
             MeshRenderer mr = go.AddComponent<MeshRenderer>();
             mr.sharedMaterial = GetEditorOverlayMaterial();
+            float diameter = isCorner ? LaneCornerMarkerDiameter : LaneMarkerDiameter;
+            float thickness = isCorner ? LaneCornerMarkerRingThickness : LaneMarkerRingThickness;
             SphereCollider sc = go.AddComponent<SphereCollider>();
-            sc.radius = LaneMarkerDiameter * 0.5f;
+            sc.radius = diameter * 0.5f;
 
             LaneEndpointMarker m = go.AddComponent<LaneEndpointMarker>();
             m.VertexId = v.Id;
-            m.Lane = new LaneRef { RoadId = road.Id, Direction = dir, Index = index };
+            m.Lane = lr;
+            m.Node = node;
             m.IsInbound = isInbound;
             m.WorldXZ = pos;
 
-            // Base color: inbound → hash from lane key (per-lane distinct).
-            // Outbound → uniform neutral (they're click targets, not
-            // identity-carrying objects).
-            Color baseColor = isInbound
-                ? EditorGeometry.HashToColor(laneKey)
-                : LaneOutboundMarkerColor;
-            // Apply dim alpha by default; hover/arm logic mutates later.
+            // Base color depends on marker kind:
+            //   Corner markers (used by lane markings) follow real
+            //     paint conventions: yellow if the lane is innermost
+            //     (adjacent to the road centerline), white otherwise
+            //     (adjacent to a same-direction lane divider).
+            //   Midpoint markers (used by lane flow / connectivity) use
+            //     a deterministic per-lane hash hue so different
+            //     inbound lanes are visually distinct.
+            //   Outbound markers always use the neutral target color.
+            Color baseColor;
+            if (!isInbound) baseColor = LaneOutboundMarkerColor;
+            else if (isCorner) baseColor = GetLaneCornerLineColor(lr, node);
+            else baseColor = EditorGeometry.HashToColor(LaneFlowKey(lr));
             baseColor.a = LaneOverlayDimAlpha;
 
-            float outerR = Mathf.Max(0.1f, LaneMarkerDiameter * 0.5f);
-            float innerR = Mathf.Max(0.05f, outerR - Mathf.Max(0.05f, LaneMarkerRingThickness));
-            Mesh ringMesh = new Mesh { name = $"LaneRing_{laneKey}" };
+            float outerR = Mathf.Max(0.1f, diameter * 0.5f);
+            float innerR = Mathf.Max(0.05f, outerR - Mathf.Max(0.05f, thickness));
+            Mesh ringMesh = new Mesh { name = $"LaneRing_{markerKey}" };
             _scratchVerts.Clear(); _scratchTris.Clear(); _scratchColors.Clear();
             EditorGeometry.AppendRing(_scratchVerts, _scratchTris, _scratchColors,
                 Vector2.zero, outerR, innerR, 32, 0f, baseColor);
@@ -2154,10 +2607,19 @@ namespace NetworkDesigner.Designer
             ringMesh.RecalculateBounds();
             go.GetComponent<MeshFilter>().sharedMesh = ringMesh;
 
-            _laneEndpointMarkers[laneKey] = go;
+            _laneEndpointMarkers[markerKey] = go;
         }
 
-        static string LaneEndpointKey(LaneRef lr)
+        // Marker pool key — different markers (midpoint vs each corner)
+        // on the same lane need distinct keys. Includes the LaneNode.
+        static string LaneEndpointKey(LaneRef lr, LaneNode node)
+        {
+            return $"{lr.RoadId}|{(int)lr.Direction}|{lr.Index}|{(int)node}";
+        }
+
+        // Lane-level key for the LaneFlowRenderer (filters arrows by
+        // lane, not by specific node — flow arrows always go A↔B).
+        static string LaneFlowKey(LaneRef lr)
         {
             return $"{lr.RoadId}|{(int)lr.Direction}|{lr.Index}";
         }
@@ -2190,11 +2652,31 @@ namespace NetworkDesigner.Designer
         // should show right now. Inbound = hashed color; outbound =
         // neutral; armed marker = armed color. Alpha is the dim
         // baseline; hover/arm callers override alpha as needed.
+        // Color of the real-road paint stripe THIS CORNER sits on:
+        //   - Inner-side corners (Origin / Tertiary) of the innermost
+        //     lane (Index == 0) lie on the road centerline → YELLOW.
+        //   - Every other corner lies on a same-direction lane divider
+        //     or the outer fog line → WHITE.
+        // The outer-side corners (Primary / Secondary) of the innermost
+        // lane are NOT yellow — they border the next lane out, which
+        // is a white divider. Lane index alone isn't enough; node
+        // identity matters too.
+        static Color GetLaneCornerLineColor(LaneRef lr, LaneNode node)
+        {
+            bool innerSide = node == LaneNode.Origin || node == LaneNode.Tertiary;
+            bool innermostLane = lr.Index == 0;
+            return innerSide && innermostLane
+                ? new Color(1f, 0.85f, 0.2f, 1f)
+                : new Color(0.95f, 0.95f, 0.95f, 1f);
+        }
+
         Color GetLaneMarkerAmbientColor(LaneEndpointMarker m)
         {
-            string key = LaneEndpointKey(m.Lane);
+            string key = LaneFlowKey(m.Lane);
+            bool isCorner = m.Node != LaneNode.A && m.Node != LaneNode.B;
             Color c;
             if (m == _armedLaneEndpoint) c = LaneMarkerArmedColor;
+            else if (m.IsInbound && isCorner) c = GetLaneCornerLineColor(m.Lane, m.Node);
             else if (m.IsInbound) c = EditorGeometry.HashToColor(key);
             else c = LaneOutboundMarkerColor;
             c.a = LaneOverlayDimAlpha;
@@ -3306,11 +3788,12 @@ namespace NetworkDesigner.Designer
             if (_selectedVertex != null && CurrentMode == DesignerMode.Edit)
             {
                 LaneRef priorArmed = _armedLaneEndpoint?.Lane;
+                LaneNode priorArmedNode = _armedLaneEndpoint != null ? _armedLaneEndpoint.Node : LaneNode.A;
                 DestroyLaneEndpointMarkers();
                 if (priorArmed != null)
                 {
                     SpawnLaneEndpointMarkersFiltered(_selectedVertex, priorArmed);
-                    if (_laneEndpointMarkers.TryGetValue(LaneEndpointKey(priorArmed), out GameObject ago) && ago != null)
+                    if (_laneEndpointMarkers.TryGetValue(LaneEndpointKey(priorArmed, priorArmedNode), out GameObject ago) && ago != null)
                     {
                         _armedLaneEndpoint = ago.GetComponent<LaneEndpointMarker>();
                         if (_armedLaneEndpoint != null)
@@ -3364,10 +3847,14 @@ namespace NetworkDesigner.Designer
             }
 
             if (!_renderer.TryGetLaneFlowRenderer(_selectedVertex.Id, out LaneFlowRenderer selfLfr)) return;
-            string newArmed = _armedLaneEndpoint != null ? LaneEndpointKey(_armedLaneEndpoint.Lane) : null;
-            string newHover = _hoverLaneEndpoint != null ? LaneEndpointKey(_hoverLaneEndpoint.Lane) : null;
-            bool filterChanged = !selfLfr.HasSelection || selfLfr.ArmedFromLaneKey != newArmed;
-            selfLfr.HasSelection = true;
+            string newArmed = _armedLaneEndpoint != null ? LaneFlowKey(_armedLaneEndpoint.Lane) : null;
+            string newHover = _hoverLaneEndpoint != null ? LaneFlowKey(_hoverLaneEndpoint.Lane) : null;
+            // Hide all flow arrows while in shift-marking mode — they
+            // visually compete with the painted markings the user is
+            // authoring. They return as soon as Shift is released.
+            bool wantSelection = !_markingShiftMode;
+            bool filterChanged = selfLfr.HasSelection != wantSelection || selfLfr.ArmedFromLaneKey != newArmed;
+            selfLfr.HasSelection = wantSelection;
             selfLfr.ArmedFromLaneKey = newArmed;
             selfLfr.HoveredLaneKey = newHover;
             if (filterChanged)
@@ -4087,6 +4574,10 @@ namespace NetworkDesigner.Designer
                 SpawnVertexMarker(v);
                 RefreshMarker(v);
             }
+            // Re-apply the hide-while-selected state after the rebuild,
+            // since freshly-spawned markers default to active.
+            if (_selectedVertex != null)
+                SetVertexMarkerVisible(_selectedVertex.Id, false);
         }
 
         // Standard shader so the marker puck shades + casts shadows.

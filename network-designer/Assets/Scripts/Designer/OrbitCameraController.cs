@@ -2,11 +2,16 @@
 //
 // Mouse bindings are chosen so that left-click and right-click stay
 // FREE for designer interactions (placing vertices, deleting things).
-// All camera control is on middle mouse and the scroll wheel.
+// All mouse-driven camera control is on middle mouse and the scroll
+// wheel; keyboard pan is on WASD.
 //
 //   - Middle-mouse drag         : orbit around Target
 //   - Shift + middle-mouse drag : pan Target (and the camera with it)
 //   - Mouse scroll              : zoom in/out (clamped to Min/MaxDistance)
+//   - W / S                     : pan Target forward / backward along
+//                                 the camera's ground-plane heading
+//   - A / D                     : pan Target left / right along the
+//                                 camera's ground-plane right vector
 //
 // Target is stored as a Vector3 (not a Transform) so panning can move
 // the focus point freely through empty space. Pitch is clamped above
@@ -48,6 +53,13 @@ namespace NetworkDesigner.Designer
         [Tooltip("Each scroll tick changes Distance by this fraction of " +
                  "the current Distance.")]
         public float ZoomSensitivity = 5f;
+        [Tooltip("WASD pan speed, in (meters per second) per (meter of Distance). " +
+                 "Scales with Distance so panning feels the same regardless of " +
+                 "zoom level — e.g. 1.5 means holding W moves Target forward by " +
+                 "75 m/s at Distance=50.")]
+        public float KeyboardPanSensitivity = 1.5f;
+        [Tooltip("Multiplier applied to keyboard pan speed while Shift is held.")]
+        public float KeyboardPanShiftMultiplier = 3f;
 
         // External predicate that, when set and returning true, causes
         // HandleInput to ignore the scroll wheel this frame. Used by
@@ -106,6 +118,41 @@ namespace NetworkDesigner.Designer
                 Distance -= scroll * ZoomSensitivity * Distance;
                 Distance = Mathf.Clamp(Distance, MinDistance, MaxDistance);
             }
+
+            HandleKeyboardPan();
+        }
+
+        // WASD pan in camera-relative ground-plane coordinates. W/S
+        // moves Target along the camera's heading projected onto the
+        // XZ plane (so straight-down camera also gets sensible
+        // forward); A/D moves perpendicular. Scaled by Distance for
+        // zoom-independent feel, and by Time.deltaTime so speed is
+        // framerate-independent.
+        void HandleKeyboardPan()
+        {
+            // Skip if an IMGUI text field has keyboard focus — typing
+            // in a field would otherwise scroll the camera.
+            if (GUIUtility.keyboardControl != 0) return;
+
+            float kbX = 0f, kbZ = 0f;
+            if (Input.GetKey(KeyCode.W)) kbZ += 1f;
+            if (Input.GetKey(KeyCode.S)) kbZ -= 1f;
+            if (Input.GetKey(KeyCode.A)) kbX -= 1f;
+            if (Input.GetKey(KeyCode.D)) kbX += 1f;
+            if (kbX == 0f && kbZ == 0f) return;
+
+            Vector3 fwd = transform.forward; fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward; // looking straight down
+            fwd.Normalize();
+            Vector3 right = transform.right; right.y = 0f;
+            if (right.sqrMagnitude < 1e-6f) right = Vector3.right;
+            right.Normalize();
+
+            float speed = KeyboardPanSensitivity * Distance;
+            bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+            if (shift) speed *= KeyboardPanShiftMultiplier;
+
+            Target += (right * kbX + fwd * kbZ) * (speed * Time.deltaTime);
         }
 
         void ApplyTransform()

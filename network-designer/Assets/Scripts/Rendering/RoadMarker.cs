@@ -9,6 +9,10 @@ namespace NetworkDesigner.Rendering
 {
     public class RoadMarker : MonoBehaviour
     {
-        public NetworkRoad Road;
+        // [NonSerialized]: prevent Unity's Inspector data-binding from
+        // walking the Road's graph and auto-instantiating null
+        // [Serializable] sub-objects (notably RoadCurve). See
+        // NetworkRenderer.Network for the full explanation.
+        [System.NonSerialized] public NetworkRoad Road;
     }
 }

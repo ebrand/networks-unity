@@ -610,6 +610,61 @@ namespace NetworkDesigner.Tuning
                     () => Renderer.SignHeight,
                     v => { Renderer.SignHeight = v; Renderer.RefreshSigns(); },
                     0f, 0.5f);
+
+                // -------- Lane markings (intersection painted guides) --------
+                TuningRegistry.RegisterBool(
+                    "renderer.showLaneMarkings", "Intersection lane markings", "Show painted lane markings",
+                    () => Renderer.ShowLaneMarkings,
+                    v => { Renderer.ShowLaneMarkings = v; Renderer.Rebuild(); });
+                TuningRegistry.RegisterColor(
+                    "renderer.laneMarkingWhite", "Intersection lane markings", "White color",
+                    () => Renderer.LaneMarkingWhite,
+                    v => { Renderer.LaneMarkingWhite = v; Renderer.RefreshLaneMarkings(); });
+                TuningRegistry.RegisterColor(
+                    "renderer.laneMarkingYellow", "Intersection lane markings", "Yellow color",
+                    () => Renderer.LaneMarkingYellow,
+                    v => { Renderer.LaneMarkingYellow = v; Renderer.RefreshLaneMarkings(); });
+                TuningRegistry.RegisterFloat(
+                    "renderer.laneMarkingAlpha", "Intersection lane markings", "Marking alpha (master)",
+                    () => Renderer.LaneMarkingAlpha,
+                    v => { Renderer.LaneMarkingAlpha = v; Renderer.RefreshLaneMarkings(); },
+                    0f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.laneMarkingWidth", "Intersection lane markings", "Stripe width (m)",
+                    () => Renderer.LaneMarkingWidth,
+                    v => { Renderer.LaneMarkingWidth = v; Renderer.RefreshLaneMarkings(); },
+                    0.03f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.laneMarkingHeight", "Intersection lane markings", "Stripe height above asphalt (m)",
+                    () => Renderer.LaneMarkingHeight,
+                    v => { Renderer.LaneMarkingHeight = v; Renderer.RefreshLaneMarkings(); },
+                    0f, 0.1f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.laneMarkingDashLength", "Intersection lane markings", "Dash length (m)",
+                    () => Renderer.LaneMarkingDashLength,
+                    v => { Renderer.LaneMarkingDashLength = v; Renderer.RefreshLaneMarkings(); },
+                    0.1f, 15f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.laneMarkingDashGap", "Intersection lane markings", "Dash gap (m)",
+                    () => Renderer.LaneMarkingDashGap,
+                    v => { Renderer.LaneMarkingDashGap = v; Renderer.RefreshLaneMarkings(); },
+                    0.05f, 20f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.laneMarkingBezierSamples", "Intersection lane markings", "Bezier samples",
+                    () => Renderer.LaneMarkingBezierSamples,
+                    v => { Renderer.LaneMarkingBezierSamples = Mathf.Clamp(Mathf.RoundToInt(v), 8, 64); Renderer.RefreshLaneMarkings(); },
+                    8f, 64f, 1f);
+
+                // -------- Dead-end caps --------
+                TuningRegistry.RegisterBool(
+                    "renderer.showDeadEndCaps", "Dead-end caps", "Show dead-end caps",
+                    () => Renderer.ShowDeadEndCaps,
+                    v => { Renderer.ShowDeadEndCaps = v; Renderer.Rebuild(); });
+                TuningRegistry.RegisterFloat(
+                    "renderer.deadEndCapSegments", "Dead-end caps", "Cap tessellation segments",
+                    () => Renderer.DeadEndCapSegments,
+                    v => { Renderer.DeadEndCapSegments = Mathf.Clamp(Mathf.RoundToInt(v), 8, 64); Renderer.Rebuild(); },
+                    8f, 64f, 1f);
             }
 
             if (Ambiance != null)
@@ -730,6 +785,16 @@ namespace NetworkDesigner.Tuning
                     () => Orbit.Yaw,
                     v => Orbit.Yaw = v,
                     -360f, 360f);
+                TuningRegistry.RegisterFloat(
+                    "orbit.keyboardPanSensitivity", "Camera", "WASD pan speed (× distance/s)",
+                    () => Orbit.KeyboardPanSensitivity,
+                    v => Orbit.KeyboardPanSensitivity = v,
+                    0f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "orbit.keyboardPanShiftMultiplier", "Camera", "WASD shift-boost multiplier",
+                    () => Orbit.KeyboardPanShiftMultiplier,
+                    v => Orbit.KeyboardPanShiftMultiplier = v,
+                    1f, 10f);
             }
         }
 

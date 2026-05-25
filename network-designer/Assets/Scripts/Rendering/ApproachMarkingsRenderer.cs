@@ -31,6 +31,13 @@ namespace NetworkDesigner.Rendering
         [Tooltip("Master toggle for per-approach control paint. When on, each inbound approach paints a stop line (Control=Stop), sharks teeth (Control=Yield), or nothing (Control=None).")]
         public bool ShowPaintedControls = true;
         public bool ShowLaneArrows = true;
+        /// <summary>
+        /// Per-vertex suppression — set by NetworkDesigner while the
+        /// user holds Shift for intersection-marking authoring. Hides
+        /// stop lines + sharks teeth + lane arrows at this vertex
+        /// without disturbing the global ShowPaintedControls toggle.
+        /// </summary>
+        public bool SuppressForMarkingMode = false;
 
         [Header("Style")]
         public Color MarkingColor = new Color(0.95f, 0.95f, 0.95f, 1f);
@@ -134,7 +141,7 @@ namespace NetworkDesigner.Rendering
                 ComputeInboundSpan(a, inboundLanes, inboundWidths,
                     out Vector2 inboundLeft, out Vector2 inboundRight);
 
-                if (ShowPaintedControls)
+                if (ShowPaintedControls && !SuppressForMarkingMode)
                 {
                     // Per-approach paint driven by Control:
                     //   Stop  → stop line
@@ -156,7 +163,7 @@ namespace NetworkDesigner.Rendering
                         PadUVs(_uvs[0], _verts[0].Count);
                     }
                 }
-                if (ShowLaneArrows && Geometry.Connectivity != null)
+                if (ShowLaneArrows && !SuppressForMarkingMode && Geometry.Connectivity != null)
                 {
                     EmitLaneArrows(a, outward, inboundDir, inboundLanes);
                 }

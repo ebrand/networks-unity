@@ -19,6 +19,14 @@ namespace NetworkDesigner.Designer
         public string VertexId;
         /// <summary>The lane reference (road id + direction + index).</summary>
         public LaneRef Lane;
+        /// <summary>
+        /// Which of the 6 named nodes on the lane this marker
+        /// represents. A and B are the centerline midpoint markers
+        /// (used by lane FLOW arrows and connectivity overrides);
+        /// Origin/Primary/Secondary/Tertiary are the lane corners
+        /// (used by lane MARKINGS for finer placement).
+        /// </summary>
+        public LaneNode Node = LaneNode.A;
         /// <summary>True if traffic on this lane flows TOWARD the vertex (the click-to-edit "from" side).</summary>
         public bool IsInbound;
         /// <summary>World XZ position of the endpoint (cached so click logic doesn't re-query transform).</summary>

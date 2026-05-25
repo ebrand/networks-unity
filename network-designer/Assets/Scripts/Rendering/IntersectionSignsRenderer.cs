@@ -31,6 +31,13 @@ namespace NetworkDesigner.Rendering
         public float SignShoulderClearance = 1.5f;
         public float SignAlongOffset = 0.5f;
 
+        [Header("3D prefabs (optional)")]
+        [Tooltip("When assigned, instantiate this instead of the flat textured quad for Control=Stop. Pivot at ground.")]
+        public GameObject StopPrefab;
+        public GameObject YieldPrefab;
+        [Tooltip("Optional sign-post prefab — instantiated as a child of each 3D sign so the panel has a real pole holding it up.")]
+        public GameObject PostPrefab;
+
         Material[] _matByControl;       // index by (int)StopYieldControl: 0=None, 1=Stop, 2=Yield
         Texture2D[] _texByControl;
         bool _resourcesLoaded;
@@ -71,8 +78,68 @@ namespace NetworkDesigner.Rendering
 
                 Vector2 imageUp = -outward;
                 int ctrlIdx = (int)a.Control;
-                SpawnSignGameObject(a.RoadId, a.End, signCenter, imageUp, SignSize, Height, effective, ctrlIdx);
+
+                // Prefer a 3D prefab when one is assigned for this
+                // control type. Falls back to the flat textured quad
+                // otherwise (matches existing behavior, and used for
+                // Control=None since there's no 3D "none" prefab).
+                GameObject prefab = null;
+                if (a.Control == StopYieldControl.Stop) prefab = StopPrefab;
+                else if (a.Control == StopYieldControl.Yield) prefab = YieldPrefab;
+
+                if (prefab != null)
+                {
+                    SpawnSignPrefab(a.RoadId, a.End, signCenter, outward, prefab);
+                }
+                else
+                {
+                    SpawnSignGameObject(a.RoadId, a.End, signCenter, imageUp, SignSize, Height, effective, ctrlIdx);
+                }
             }
+        }
+
+        // Instantiate a 3D sign prefab. Pivot at ground (Y=0); rotation
+        // makes the sign panel face the approaching driver. The CS -
+        // Signs Free prefab's "front" is along -Z, so we LookRotation
+        // along +outward (away from the driver) — that puts the
+        // prefab's +Z away from the driver and its -Z (the face) toward
+        // them. If your prefab's front is +Z instead, swap to -outward.
+        // Adds SignClickTarget for the click-to-cycle gesture; nests
+        // the optional post prefab as a child so they move together.
+        void SpawnSignPrefab(string roadId, RoadEnd end, Vector2 center, Vector2 outward, GameObject prefab)
+        {
+            GameObject go = Instantiate(prefab, transform);
+            go.name = $"Sign3D_{roadId}_{end}";
+            go.transform.position = new Vector3(center.x, 0f, center.y);
+            Vector3 facing = new Vector3(outward.x, 0f, outward.y);
+            if (facing.sqrMagnitude > 1e-6f)
+                go.transform.rotation = Quaternion.LookRotation(facing, Vector3.up);
+
+            // Optional sign post — instantiated as a CHILD so it
+            // inherits the sign's position + rotation automatically.
+            // CRITICAL: do NOT overwrite the post's local position /
+            // rotation. The CS - Signs Free post prefab has a built-in
+            // -90° X rotation on its ROOT transform that lifts the
+            // Z-up mesh into a vertical (world +Y) pole, plus a
+            // local Y offset (≈1.4m) that centers the pole at sign-
+            // panel height. Resetting localRotation = identity lays
+            // the pole horizontally; resetting localPosition drops it
+            // to ground. We just keep the prefab's authored transform
+            // and let the sign parent's Y-axis rotation spin the post
+            // (which is fine — a pole is rotationally symmetric).
+            if (PostPrefab != null)
+            {
+                Instantiate(PostPrefab, go.transform);
+            }
+
+            // The prefab usually carries its own MeshCollider on the
+            // sign panel — that's enough for SignClickTarget picking.
+            SignClickTarget tag = go.GetComponent<SignClickTarget>();
+            if (tag == null) tag = go.AddComponent<SignClickTarget>();
+            tag.RoadId = roadId;
+            tag.End = end;
+
+            _spawned.Add(go);
         }
 
         void SpawnSignGameObject(string roadId, RoadEnd end, Vector2 center, Vector2 imageUp,
