@@ -242,7 +242,9 @@ namespace NetworkDesigner.Rendering
                     Vertex a = FindVertex(road.EndA);
                     Vertex b = FindVertex(road.EndB);
                     if (a == null || b == null) continue;
-                    SpawnOrUpdateRoadLine(road, a.Position, b.Position);
+                    Vector2 lineEndA = GeometryResolver.EffectiveEndpoint(road, RoadEnd.A, a, b);
+                    Vector2 lineEndB = GeometryResolver.EffectiveEndpoint(road, RoadEnd.B, b, a);
+                    SpawnOrUpdateRoadLine(road, lineEndA, lineEndB);
                     _liveRoadsScratch.Add(road.Id);
                 }
                 DestroyOrphans(_roadLinePool, _liveRoadsScratch);
@@ -838,8 +840,11 @@ namespace NetworkDesigner.Rendering
                 // the parent (Designer) lives.
                 go.transform.position = new Vector3(0f, MeshLift, 0f);
                 go.AddComponent<IntersectionRenderer>();
+                go.AddComponent<IntersectionMarker>();
                 _intersectionPool[v.Id] = go;
             }
+            IntersectionMarker im = go.GetComponent<IntersectionMarker>();
+            if (im != null) im.Vertex = v;
             IntersectionRenderer ir = go.GetComponent<IntersectionRenderer>();
             ir.Geometry = vg;
             ir.VertexCenter = v.Position;
@@ -882,10 +887,16 @@ namespace NetworkDesigner.Rendering
                 Vertex vb = FindVertex(road.EndB);
                 if (va != null && vb != null)
                 {
-                    Vector2 p0 = va.Position;
+                    // Apply LateralOffset at each endpoint so the bezier
+                    // start/end track the same shifted positions the
+                    // resolver used for setback math and intersection
+                    // geometry. Controls stay in world space — that
+                    // changes the bezier's tangent at the endpoints
+                    // (acceptable side-effect for now).
+                    Vector2 p0 = GeometryResolver.EffectiveEndpoint(road, RoadEnd.A, va, vb);
                     Vector2 c1 = road.Curve.ControlA;
                     Vector2 c2 = road.Curve.ControlB;
-                    Vector2 p3 = vb.Position;
+                    Vector2 p3 = GeometryResolver.EffectiveEndpoint(road, RoadEnd.B, vb, va);
 
                     float tStart = GeometryResolver.ArcLengthToT(p0, c1, c2, p3, setbackA);
                     // For end B we parameterize from vb backward. Walk the

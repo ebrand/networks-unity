@@ -69,7 +69,13 @@ namespace NetworkDesigner.Geometry
             // and outer-edge corners materialized in world space).
             foreach (ApproachData d in data)
             {
-                result.Approaches.Add(BuildApproach(d, vertex.Position, network.DriveSide));
+                // Pass the lateral-offset-shifted endpoint as the
+                // "vertex position" for this approach. With offset=0
+                // this is just vertex.Position (no behavior change);
+                // with non-zero offset the approach's centerline,
+                // setback midpoint, lane endpoints, and outer corners
+                // all shift perpendicular to the road's direction.
+                result.Approaches.Add(BuildApproach(d, d.SelfShiftedPos, network.DriveSide));
             }
 
             // Build outline. Order CW: for each approach i, emit its
@@ -451,7 +457,8 @@ namespace NetworkDesigner.Geometry
             public float Setback;         // resolved
             public bool HasSetbackOverride;
             public float SetbackOverride;
-            public Vector2 OtherVertexPos; // position of the road's far endpoint (used by curved approaches)
+            public Vector2 OtherVertexPos; // position of the road's far endpoint (used by curved approaches) — already lateral-offset-shifted
+            public Vector2 SelfShiftedPos; // this end's effective centerline endpoint after LateralOffset
         }
 
         // -----------------------------------------------------------------
@@ -491,6 +498,17 @@ namespace NetworkDesigner.Geometry
                 // correct direction at the vertex instead of the chord.
                 Vector2 dir = OutwardDirection(road, end, vertex, other);
                 if (dir.sqrMagnitude < Eps * Eps) continue;
+
+                // Lateral-offset shifted endpoints. Both ends' offsets
+                // are applied so curved-road bezier sampling and chord
+                // direction match what the renderer will draw. perpRight
+                // is taken from the UN-SHIFTED direction (one-shot —
+                // no recursive recompute), which is the convention the
+                // drag handle uses to interpret the offset.
+                RoadEnd otherEnd = end == RoadEnd.A ? RoadEnd.B : RoadEnd.A;
+                Vector2 shiftedSelfPos = EffectiveEndpoint(road, end, vertex, other);
+                Vector2 shiftedOtherPos = EffectiveEndpoint(road, otherEnd, other, vertex);
+
                 list.Add(new ApproachData
                 {
                     Road = road,
@@ -500,7 +518,8 @@ namespace NetworkDesigner.Geometry
                     RoadWidth = road.Profile.TotalWidth,
                     HasSetbackOverride = hasOverride,
                     SetbackOverride = overrideVal,
-                    OtherVertexPos = other.Position,
+                    OtherVertexPos = shiftedOtherPos,
+                    SelfShiftedPos = shiftedSelfPos,
                 });
             }
             return list;
@@ -960,6 +979,29 @@ namespace NetworkDesigner.Geometry
         /// with the endpoint). Callers should treat zero as "skip this
         /// approach".
         /// </summary>
+        /// <summary>
+        /// Effective centerline endpoint at a vertex, accounting for the
+        /// road's per-end LateralOffset (perpendicular shift to the road's
+        /// outward direction at that end). When offsets are 0 this is
+        /// just vertex.Position. Used by the resolver (intersection
+        /// math), the renderer (curved-road bezier sampling), and the
+        /// lateral-offset drag handle UI — keep them in sync by going
+        /// through this helper instead of recomputing the shift in
+        /// each call site.
+        /// </summary>
+        public static Vector2 EffectiveEndpoint(NetworkRoad road, RoadEnd end,
+            Vertex thisVertex, Vertex otherVertex)
+        {
+            if (thisVertex == null) return Vector2.zero;
+            float offset = end == RoadEnd.A ? road.LateralOffsetA : road.LateralOffsetB;
+            if (Mathf.Abs(offset) < 1e-6f) return thisVertex.Position;
+            Vector2 dir = OutwardDirection(road, end, thisVertex, otherVertex);
+            if (dir.sqrMagnitude < 1e-8f) return thisVertex.Position;
+            // perpRight in (x, z) = CW 90° rotation of dir.
+            Vector2 perpRight = new Vector2(dir.y, -dir.x);
+            return thisVertex.Position + perpRight * offset;
+        }
+
         public static Vector2 OutwardDirection(NetworkRoad road, RoadEnd end,
             Vertex thisVertex, Vertex otherVertex)
         {

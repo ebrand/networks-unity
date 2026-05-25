@@ -259,6 +259,23 @@ namespace NetworkDesigner.Model
         /// Edit mode doesn't apply to roads with a curve yet.
         /// </summary>
         public RoadCurve Curve;
+
+        /// <summary>
+        /// Per-end lateral offset (meters, perpendicular to the road's
+        /// direction at that end). Shifts where the road's centerline
+        /// effectively meets the vertex without moving the vertex
+        /// itself. Sign convention: positive = perpendicular-RIGHT of
+        /// the road's A→B direction at that end (CW 90° rotation of
+        /// the outward bearing).
+        ///
+        /// Use case: at a Y-fork where two approaches diverge from a
+        /// shared vertex going nearly parallel, lateral offsets let
+        /// each approach be pushed apart at the vertex so there's
+        /// visible grass between them — without splitting the vertex
+        /// or duplicating connectivity. Default 0 = no shift.
+        /// </summary>
+        public float LateralOffsetA;
+        public float LateralOffsetB;
     }
 
     /// <summary>

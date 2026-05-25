@@ -10,6 +10,37 @@ import {
   Tooltip,
 } from "@mantine/core";
 import type { SavedConfig } from "../storage/configs";
+import type { Road } from "../model/types";
+
+// Compact cross-section formula for the list view. Walks across the
+// road from the AB shoulder to the BA shoulder:
+//   |ab-shoulder|ab-lane-widths (outermost→innermost)|m|ba-lane-widths (innermost→outermost)|ba-shoulder|
+// One-way roads (one side empty) collapse to a single lane group with
+// no `m` segment.
+function formatCrossSection(road: Road): string {
+  const fmt = (n: number) => {
+    // Up to 1 decimal, trim trailing zeros / dots ("4" not "4.0").
+    const s = n.toFixed(1);
+    return s.endsWith(".0") ? s.slice(0, -2) : s;
+  };
+  const sA = fmt(road.shoulderAB.width);
+  const sB = fmt(road.shoulderBA.width);
+  const ab = road.ab.lanes;
+  const ba = road.ba.lanes;
+  const abPart = ab.length > 0
+    ? [...ab].reverse().map((l) => fmt(l.width)).join(",")
+    : "";
+  const baPart = ba.length > 0
+    ? ba.map((l) => fmt(l.width)).join(",")
+    : "";
+  // Both directions present → include the median marker between them.
+  if (abPart && baPart) return `|${sA}|${abPart}|m|${baPart}|${sB}|`;
+  // One-way: single lane group between the two shoulders, no median.
+  if (abPart) return `|${sA}|${abPart}|${sB}|`;
+  if (baPart) return `|${sA}|${baPart}|${sB}|`;
+  // Degenerate: no lanes at all.
+  return `|${sA}||${sB}|`;
+}
 
 interface Props {
   configs: SavedConfig[];
@@ -120,7 +151,7 @@ export function ConfigsPanel({
                       truncate
                       fw={isActive ? 600 : 400}
                     >
-                      {c.name || "Untitled road"}
+                      {(c.name || "Untitled road") + " - " + formatCrossSection(c.road)}
                     </Text>
                     {c.category && c.category.trim().length > 0 && (
                       <Text size="xs" c="dimmed" truncate>

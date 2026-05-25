@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "exportedAt": "2026-05-25T00:53:41.395Z",
-  "activeId": "cfg-mpilnsad-iobij8",
+  "exportedAt": "2026-05-25T18:17:55.781Z",
+  "activeId": "cfg-mpiw0b7g-aogfqy",
   "configs": [
     {
       "id": "cfg-mpivlf8b-rrs7rq",
@@ -119,14 +119,14 @@
           "lanes": []
         },
         "shoulderAB": {
-          "width": 1
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 1
+          "width": 1.5
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779643433016
+      "updatedAt": 1779732771456
     },
     {
       "id": "cfg-mpivfuao-r0osky",
@@ -515,7 +515,7 @@
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779648778032
+      "updatedAt": 1779724786998
     }
   ]
 }

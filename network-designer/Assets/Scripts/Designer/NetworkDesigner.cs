@@ -269,12 +269,40 @@ namespace NetworkDesigner.Designer
         // Edit-mode state
         Vertex _draggedVertex;
 
+        // Edit-mode hover highlight: a single GameObject (lazy-spawned)
+        // whose mesh + transform are set to mirror the currently hovered
+        // road body or intersection asphalt. Disabled when nothing is
+        // hovered. Yellow translucent unlit material via the
+        // NetworkDesigner/EditorHighlight shader.
+        GameObject _hoverHighlightGo;
+        Material _hoverHighlightMat;
+        NetworkRoad _hoverRoad;
+        Vertex _hoverIntersectionVertex;
+        [Header("Edit-mode hover highlight")]
+        public Color HoverHighlightColor = new Color(1f, 0.9f, 0f, 0.25f);
+        [Tooltip("Y offset applied to the hover-highlight mesh so it sits just above the road/intersection asphalt without z-fighting.")]
+        public float HoverHighlightLift = 0.02f;
+
         // Edit-mode vertex selection + setback handles
         Vertex _selectedVertex;
         SetbackHandle _draggedHandle;
         // Spawned handle GameObjects keyed by "<roadId>:<end>" so we can
         // update positions in place when a Rebuild fires.
         readonly Dictionary<string, GameObject> _setbackHandles = new Dictionary<string, GameObject>();
+
+        // Lateral-offset drag handles — one per (road, end) at the
+        // selected vertex. Drag perpendicular to the road's outward
+        // direction → writes NetworkRoad.LateralOffsetA/B.
+        readonly Dictionary<string, GameObject> _lateralOffsetHandles = new Dictionary<string, GameObject>();
+        LateralOffsetHandle _draggedLateralHandle;
+        [Header("Lateral-offset handle (perpendicular endpoint shift)")]
+        public float LateralOffsetHandleDiameter = 1.4f;
+        public float LateralOffsetHandleRingThickness = 0.25f;
+        public float LateralOffsetHandleHeight = 1.5f;
+        public Color LateralOffsetHandleColor = new Color(0.45f, 0.85f, 1f, 0.95f);
+        public Color LateralOffsetHandleActiveColor = new Color(0.2f, 0.7f, 1f, 1f);
+        [Tooltip("How far INTO the road body (along its outward direction at this end) the lateral-offset handle is drawn, so neighboring approaches' handles don't pile up at the vertex. Drag math is unchanged — only the displayed position shifts.")]
+        public float LateralOffsetHandleInwardOffset = 4f;
         // Shared unlit/vertex-color/transparent material used for every
         // edit-mode overlay primitive (setback rings + stems, lane
         // marker rings, lane-flow arrows). One material = good batching.
@@ -579,6 +607,7 @@ namespace NetworkDesigner.Designer
             // visual feedback for what they're about to click.
             UpdateHover();
             UpdateLaneHover();
+            UpdateRoadIntersectionHover();
             UpdateMarkingShiftMode();
 
             if (CurrentMode == DesignerMode.Create) HandleCreateInput();
@@ -619,7 +648,12 @@ namespace NetworkDesigner.Designer
         // clobber them.
         void UpdateHover()
         {
-            Vertex newHover = PickVertex();
+            // While editing a specific vertex, suppress hover-recoloring
+            // of OTHER vertex markers so the user isn't visually pulled
+            // off the vertex they're working on.
+            Vertex newHover = (CurrentMode == DesignerMode.Edit && _selectedVertex != null)
+                ? null
+                : PickVertex();
             if (newHover == _hoverVertex) return;
             Vertex old = _hoverVertex;
             _hoverVertex = newHover;
@@ -670,6 +704,165 @@ namespace NetworkDesigner.Designer
             PushLaneFlowState();
         }
 
+        // Edit-mode only: when the cursor is over a road body or
+        // intersection asphalt, mirror that mesh into a yellow
+        // translucent overlay GameObject (`_hoverHighlightGo`) so the
+        // user sees what their next click would target. Only one
+        // highlight is shown at a time (vertex marker hover > road >
+        // intersection in pick priority). Vertex-marker hover already
+        // has its own marker recolor — we don't double-highlight.
+        void UpdateRoadIntersectionHover()
+        {
+            if (CurrentMode != DesignerMode.Edit || PickCamera == null)
+            {
+                ClearHoverHighlight();
+                return;
+            }
+
+            // While editing a specific vertex, suppress the road/
+            // intersection hover overlay — the user is focused on the
+            // selected vertex's per-vertex overlays (setback handles,
+            // lane endpoint markers) and stray asphalt highlights from
+            // moving the cursor around the scene are pure noise.
+            if (_selectedVertex != null)
+            {
+                ClearHoverHighlight();
+                return;
+            }
+
+            // If a vertex marker is being hovered, the marker hover
+            // recolor already conveys the selection — skip the asphalt
+            // overlay so we don't stack two indicators.
+            if (_hoverVertex != null)
+            {
+                ClearHoverHighlight();
+                return;
+            }
+
+            // RaycastAll so we can pick the road body / intersection
+            // asphalt even when an overlay collider (lane marker, sign,
+            // setback handle) sits along the same ray. Prefer
+            // road/intersection hits with the smallest distance.
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            NetworkRoad hitRoad = null;
+            Vertex hitVertex = null;
+            GameObject hitGo = null;
+            float bestDist = float.MaxValue;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                RaycastHit h = hits[i];
+                RoadMarker rm = h.collider.GetComponentInParent<RoadMarker>();
+                if (rm != null && rm.Road != null)
+                {
+                    if (h.distance < bestDist)
+                    {
+                        bestDist = h.distance;
+                        hitRoad = rm.Road;
+                        hitVertex = null;
+                        hitGo = h.collider.gameObject;
+                    }
+                    continue;
+                }
+                IntersectionMarker im = h.collider.GetComponentInParent<IntersectionMarker>();
+                if (im != null && im.Vertex != null)
+                {
+                    if (h.distance < bestDist)
+                    {
+                        bestDist = h.distance;
+                        hitRoad = null;
+                        hitVertex = im.Vertex;
+                        hitGo = h.collider.gameObject;
+                    }
+                }
+            }
+
+            if (hitRoad == null && hitVertex == null)
+            {
+                ClearHoverHighlight();
+                return;
+            }
+
+            // Same target as last frame → keep the highlight as-is
+            // (don't rebind the mesh every frame; that thrashes the
+            // collider/renderer state for no visual benefit).
+            if (hitRoad != null && hitRoad == _hoverRoad) return;
+            if (hitVertex != null && hitVertex == _hoverIntersectionVertex) return;
+
+            _hoverRoad = hitRoad;
+            _hoverIntersectionVertex = hitVertex;
+            ShowHoverHighlight(hitGo);
+        }
+
+        void ClearHoverHighlight()
+        {
+            _hoverRoad = null;
+            _hoverIntersectionVertex = null;
+            if (_hoverHighlightGo != null) _hoverHighlightGo.SetActive(false);
+        }
+
+        void ShowHoverHighlight(GameObject sourceGo)
+        {
+            if (sourceGo == null) { ClearHoverHighlight(); return; }
+            MeshFilter srcMf = sourceGo.GetComponent<MeshFilter>();
+            if (srcMf == null || srcMf.sharedMesh == null) { ClearHoverHighlight(); return; }
+
+            EnsureHoverHighlightGo();
+            _hoverHighlightGo.SetActive(true);
+
+            MeshFilter mf = _hoverHighlightGo.GetComponent<MeshFilter>();
+            mf.sharedMesh = srcMf.sharedMesh;
+
+            // Match source transform; lift slightly so the overlay
+            // draws cleanly above the underlying asphalt and any other
+            // overlays at the same Y (e.g. lane markings render-queue).
+            Transform st = sourceGo.transform;
+            Transform ht = _hoverHighlightGo.transform;
+            ht.position = st.position + new Vector3(0f, HoverHighlightLift, 0f);
+            ht.rotation = st.rotation;
+            ht.localScale = st.lossyScale;
+
+            // Materials array: one entry per submesh, but ONLY index 0
+            // (the asphalt submesh in both RoadRenderer + IntersectionRenderer)
+            // gets a non-null material. Higher submeshes (lane markings,
+            // shoulder strips, arrows, etc.) are left unrendered so the
+            // highlight only paints the asphalt body shape.
+            int subCount = srcMf.sharedMesh.subMeshCount;
+            Material[] mats = new Material[subCount];
+            mats[0] = GetHoverHighlightMaterial();
+            // (mats[1..subCount-1] stay null → submeshes skipped)
+            MeshRenderer mr = _hoverHighlightGo.GetComponent<MeshRenderer>();
+            mr.sharedMaterials = mats;
+        }
+
+        void EnsureHoverHighlightGo()
+        {
+            if (_hoverHighlightGo != null) return;
+            _hoverHighlightGo = new GameObject("EditHoverHighlight");
+            _hoverHighlightGo.transform.SetParent(transform, worldPositionStays: false);
+            _hoverHighlightGo.AddComponent<MeshFilter>();
+            MeshRenderer mr = _hoverHighlightGo.AddComponent<MeshRenderer>();
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            _hoverHighlightGo.SetActive(false);
+        }
+
+        Material GetHoverHighlightMaterial()
+        {
+            if (_hoverHighlightMat == null)
+            {
+                Shader sh = Shader.Find("NetworkDesigner/EditorHighlight");
+                if (sh == null)
+                {
+                    Debug.LogWarning("[NetworkDesigner] EditorHighlight shader missing — hover highlight will use Sprites/Default fallback.");
+                    sh = Shader.Find("Sprites/Default");
+                }
+                _hoverHighlightMat = new Material(sh) { name = "EditHoverHighlightMat" };
+            }
+            _hoverHighlightMat.color = HoverHighlightColor;
+            return _hoverHighlightMat;
+        }
+
         // Recompute a vertex marker's material from its current state.
         // Priority: anchor / dragged (active) > hover > default.
         void RefreshMarker(Vertex v)
@@ -702,7 +895,13 @@ namespace NetworkDesigner.Designer
             EndDrag();
             EndHandleDrag();
             SetSelectedVertex(null);
+            ClearHoverHighlight();
             CurrentMode = m;
+            // Default vertex view per mode: pucks ON in Create (so the
+            // user can see what they're connecting), OFF in Edit (so
+            // they don't occlude the hover highlight + per-vertex
+            // edit overlays). User can still toggle with V at any time.
+            SetVertexMarkersVisible(m == DesignerMode.Create);
             Debug.Log($"[NetworkDesigner] Mode → {CurrentMode}");
         }
 
@@ -1184,9 +1383,20 @@ namespace NetworkDesigner.Designer
             }
 
             // Begin drag on left-button down.
-            // Priority: sign > lane endpoint > marking > setback handle > vertex > ground.
+            // Priority: Alt+road → reverse direction. Otherwise:
+            // sign > lane endpoint > marking > setback handle > vertex > ground.
             if (Input.GetMouseButtonDown(0) && !MouseOverPalette())
             {
+                bool altHeld = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+                if (altHeld)
+                {
+                    NetworkRoad hitR = PickRoad();
+                    if (hitR != null)
+                    {
+                        ReverseRoadDirection(hitR);
+                        return;
+                    }
+                }
                 SignClickTarget hitSign = PickSignClickTarget();
                 if (hitSign != null)
                 {
@@ -1204,12 +1414,28 @@ namespace NetworkDesigner.Designer
                 {
                     HandleLaneEndpointClick(hitLane);
                 }
-                else if (PickMarkingClickTarget() is MarkingClickTarget hitMark && hitMark != null)
+                else if (_selectedVertex != null
+                         && PickMarkingClickTarget() is MarkingClickTarget hitMark
+                         && hitMark != null)
                 {
+                    // Only allow marking-style cycling while a vertex
+                    // is in edit mode — otherwise a click anywhere near
+                    // a painted marking on a non-edited intersection
+                    // mutates state the user wasn't focused on.
                     CycleMarkingStyle(hitMark);
                 }
                 else
                 {
+                    LateralOffsetHandle hitLat = PickLateralOffsetHandle();
+                    if (hitLat != null)
+                    {
+                        _draggedLateralHandle = hitLat;
+                        // No active-color refresh for now — could mirror
+                        // setback handle's RefreshHandleMaterial pattern
+                        // if the visual distinction becomes important.
+                    }
+                    else
+                    {
                     SetbackHandle hitHandle = PickSetbackHandle();
                     if (hitHandle != null)
                     {
@@ -1224,28 +1450,51 @@ namespace NetworkDesigner.Designer
                         Vertex hit = PickVertex();
                         if (hit != null)
                         {
+                            // Puck click is drag-only — does NOT enter
+                            // vertex edit mode. Entering edit mode is
+                            // reserved for clicking the intersection
+                            // asphalt (see below). This keeps the two
+                            // gestures distinct: "I want to move this
+                            // vertex" vs "I want to edit this vertex".
                             _draggedVertex = hit;
-                            SetSelectedVertex(hit);
                             RefreshMarker(hit);
                         }
                         else
                         {
-                            // Click on empty ground: if a lane is armed,
-                            // unarm (so the user can dismiss the click-
-                            // to-edit gesture without losing the vertex
-                            // selection). Otherwise no-op — Esc is the
-                            // explicit deselect path. This prevents an
-                            // accidental ground click from blowing away
-                            // the entire edit context.
-                            if (_armedLaneEndpoint != null) UnarmLaneEndpoint();
+                            // No puck hit. If the click landed on an
+                            // intersection asphalt, select that vertex
+                            // (no drag — pucks are likely hidden in
+                            // Edit mode anyway). Same target the user
+                            // saw highlighted via the hover overlay.
+                            Vertex hitInt = PickIntersectionVertex();
+                            if (hitInt != null)
+                            {
+                                SetSelectedVertex(hitInt);
+                            }
+                            else
+                            {
+                                // Click on empty ground: if a lane is armed,
+                                // unarm (so the user can dismiss the click-
+                                // to-edit gesture without losing the vertex
+                                // selection). Otherwise no-op — Esc is the
+                                // explicit deselect path. This prevents an
+                                // accidental ground click from blowing away
+                                // the entire edit context.
+                                if (_armedLaneEndpoint != null) UnarmLaneEndpoint();
+                            }
                         }
+                    }
                     }
                 }
             }
 
             // Drag a handle: project cursor onto the road's outward bearing
             // and write the projected distance as the setback override.
-            if (_draggedHandle != null && Input.GetMouseButton(0))
+            if (_draggedLateralHandle != null && Input.GetMouseButton(0))
+            {
+                UpdateLateralOffsetDrag();
+            }
+            else if (_draggedHandle != null && Input.GetMouseButton(0))
             {
                 UpdateHandleDrag();
             }
@@ -1268,6 +1517,7 @@ namespace NetworkDesigner.Designer
             if (Input.GetMouseButtonUp(0))
             {
                 EndHandleDrag();
+                EndLateralOffsetDrag();
                 EndDrag();
             }
 
@@ -2142,6 +2392,112 @@ namespace NetworkDesigner.Designer
             }
         }
 
+        // Pick the intersection asphalt under the cursor, skipping any
+        // non-intersection colliders along the same ray. Returns the
+        // Vertex backing the closest intersection mesh hit, or null.
+        Vertex PickIntersectionVertex()
+        {
+            if (PickCamera == null) return null;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            float bestDist = float.MaxValue;
+            Vertex best = null;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                IntersectionMarker im = hits[i].collider.GetComponentInParent<IntersectionMarker>();
+                if (im == null || im.Vertex == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = im.Vertex;
+                }
+            }
+            return best;
+        }
+
+        // Pick the road body under the cursor, skipping any non-road
+        // colliders along the same ray (vertex marker, lane endpoint,
+        // setback handle, etc.). Returns the closest road hit, or null.
+        NetworkRoad PickRoad()
+        {
+            if (PickCamera == null) return null;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            float bestDist = float.MaxValue;
+            NetworkRoad best = null;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                RoadMarker rm = hits[i].collider.GetComponentInParent<RoadMarker>();
+                if (rm == null || rm.Road == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = rm.Road;
+                }
+            }
+            return best;
+        }
+
+        // Reverse a road's traffic direction by swapping its AB / BA
+        // lane lists and shoulders. Geometry (EndA/EndB, Setbacks,
+        // Curve controls, StopYieldControl) stays attached to the same
+        // physical ends — only which DIRECTION the lanes carry traffic
+        // flips. Side effect: any ConnectivityOverrides / LaneMarkings
+        // on either endpoint that reference this road become invalid
+        // (their stored Direction labels no longer match the lanes)
+        // and are dropped. Clearing is safer than remapping because
+        // AB and BA may have different lane counts (and the FROM/TO
+        // semantics of overrides depend on which direction is in/out
+        // at the vertex). Users re-author intersection editing as
+        // needed after a reverse.
+        void ReverseRoadDirection(NetworkRoad road)
+        {
+            if (road == null || road.Profile == null) return;
+
+            // Swap lane sides + shoulders in the profile.
+            var savedAB = road.Profile.AB;
+            road.Profile.AB = road.Profile.BA;
+            road.Profile.BA = savedAB;
+            var savedShoulderAB = road.Profile.ShoulderAB;
+            road.Profile.ShoulderAB = road.Profile.ShoulderBA;
+            road.Profile.ShoulderBA = savedShoulderAB;
+
+            // Drop now-orphaned per-vertex lane connectivity that
+            // pointed at the old direction labels.
+            int droppedOverrides = 0;
+            int droppedMarkings = 0;
+            foreach (Vertex v in _network.Vertices)
+            {
+                if (v.Id != road.EndA && v.Id != road.EndB) continue;
+                if (v.ConnectivityOverrides != null)
+                {
+                    int before = v.ConnectivityOverrides.Count;
+                    v.ConnectivityOverrides.RemoveAll(c =>
+                        (c.From != null && c.From.RoadId == road.Id) ||
+                        (c.To   != null && c.To.RoadId   == road.Id));
+                    droppedOverrides += before - v.ConnectivityOverrides.Count;
+                }
+                if (v.LaneMarkings != null)
+                {
+                    int before = v.LaneMarkings.Count;
+                    v.LaneMarkings.RemoveAll(m =>
+                        (m.From != null && m.From.RoadId == road.Id) ||
+                        (m.To   != null && m.To.RoadId   == road.Id));
+                    droppedMarkings += before - v.LaneMarkings.Count;
+                }
+            }
+
+            Debug.Log($"[NetworkDesigner] Reversed road '{road.Id}' direction. " +
+                      $"Dropped {droppedOverrides} connectivity overrides + " +
+                      $"{droppedMarkings} lane markings on its endpoints.");
+
+            MarkNetworkDirty();
+            Rebuild();
+            // Force re-evaluation of hover next frame — the cached
+            // road reference is still valid, but the mesh changed.
+            _hoverRoad = null;
+        }
+
         // -----------------------------------------------------------------
         // Setback handle editing (Edit mode)
         // -----------------------------------------------------------------
@@ -2257,14 +2613,19 @@ namespace NetworkDesigner.Designer
             Vertex previouslySelected = _selectedVertex;
             _selectedVertex = v;
             DestroySetbackHandles();
+            DestroyLateralOffsetHandles();
             DestroyLaneEndpointMarkers();
             // Restore the previously-selected vertex's marker now that
-            // it's no longer the edit focus.
-            if (previouslySelected != null)
+            // it's no longer the edit focus — but only if the global
+            // vertex-view toggle is currently ON. Otherwise leave it
+            // hidden so it doesn't pop out as the lone visible puck
+            // while every other vertex stays hidden.
+            if (previouslySelected != null && ShowVertexMarkers)
                 SetVertexMarkerVisible(previouslySelected.Id, true);
             if (v != null)
             {
                 SpawnSetbackHandles(v);
+                SpawnLateralOffsetHandles(v);
                 SpawnLaneEndpointMarkers(v);
                 // Hide the selected vertex's marker puck so it doesn't
                 // occlude the per-vertex edit overlays (setback handles
@@ -2292,7 +2653,7 @@ namespace NetworkDesigner.Designer
             {
                 NetworkRoad road = FindRoadById(a.RoadId);
                 if (road == null) continue;
-                SpawnOrUpdateSetbackHandle(road, a);
+                SpawnOrUpdateSetbackHandle(road, a, vg);
             }
         }
 
@@ -2313,7 +2674,7 @@ namespace NetworkDesigner.Designer
                 stillValid.Add(key);
                 NetworkRoad road = FindRoadById(a.RoadId);
                 if (road == null) continue;
-                SpawnOrUpdateSetbackHandle(road, a);
+                SpawnOrUpdateSetbackHandle(road, a, vg);
             }
             // Remove any handle that no longer corresponds to a live approach.
             List<string> stale = new List<string>();
@@ -2342,6 +2703,173 @@ namespace NetworkDesigner.Designer
             }
             _setbackHandles.Clear();
             _draggedHandle = null;
+        }
+
+        // ---- Lateral-offset handles ----
+
+        void SpawnLateralOffsetHandles(Vertex v)
+        {
+            if (_network == null || v == null) return;
+            VertexGeometry vg = GeometryResolver.ResolveVertex(_network, v);
+            if (vg == null || vg.Approaches == null) return;
+            foreach (VertexApproach a in vg.Approaches)
+            {
+                NetworkRoad road = FindRoadById(a.RoadId);
+                if (road == null) continue;
+                SpawnOrUpdateLateralOffsetHandle(road, a, v);
+            }
+        }
+
+        void RefreshLateralOffsetHandlePositions()
+        {
+            if (_selectedVertex == null || _lateralOffsetHandles.Count == 0) return;
+            if (_network == null) return;
+            VertexGeometry vg = GeometryResolver.ResolveVertex(_network, _selectedVertex);
+            if (vg == null || vg.Approaches == null) return;
+            HashSet<string> stillValid = new HashSet<string>();
+            foreach (VertexApproach a in vg.Approaches)
+            {
+                string key = HandleKey(a.RoadId, a.End);
+                stillValid.Add(key);
+                NetworkRoad road = FindRoadById(a.RoadId);
+                if (road == null) continue;
+                SpawnOrUpdateLateralOffsetHandle(road, a, _selectedVertex);
+            }
+            List<string> stale = new List<string>();
+            foreach (string key in _lateralOffsetHandles.Keys)
+                if (!stillValid.Contains(key)) stale.Add(key);
+            foreach (string key in stale)
+            {
+                GameObject go = _lateralOffsetHandles[key];
+                if (go != null)
+                {
+                    if (Application.isPlaying) Destroy(go); else DestroyImmediate(go);
+                }
+                _lateralOffsetHandles.Remove(key);
+            }
+        }
+
+        void SpawnOrUpdateLateralOffsetHandle(NetworkRoad road, VertexApproach a, Vertex thisVertex)
+        {
+            string key = HandleKey(road.Id, a.End);
+
+            // Effective centerline endpoint (after current LateralOffset).
+            // Displayed position is pushed INTO the road body by
+            // LateralOffsetHandleInwardOffset so neighboring approaches'
+            // handles don't pile up on each other at the vertex. The
+            // drag math (in UpdateLateralOffsetDrag) projects the cursor
+            // onto the perpendicular axis rooted at the un-shifted
+            // VertexXZ — independent of the displayed depth — so the
+            // computed offset value isn't affected by this inward shift.
+            string otherId = a.End == RoadEnd.A ? road.EndB : road.EndA;
+            Vertex other = FindVertexById(otherId);
+            Vector2 centerlineEnd = GeometryResolver.EffectiveEndpoint(road, a.End, thisVertex, other);
+
+            Vector2 outward = a.OuterEdgeDir.sqrMagnitude > 1e-6f
+                ? a.OuterEdgeDir.normalized
+                : Vector2.right;
+            Vector2 perpRight = new Vector2(outward.y, -outward.x);
+
+            Vector2 handlePos = centerlineEnd + outward * LateralOffsetHandleInwardOffset;
+
+            if (!_lateralOffsetHandles.TryGetValue(key, out GameObject go) || go == null)
+            {
+                go = new GameObject($"LateralOffsetHandle_{road.Id}_{a.End}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                go.AddComponent<MeshFilter>();
+                MeshRenderer mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = GetEditorOverlayMaterial();
+                go.AddComponent<SphereCollider>();
+                LateralOffsetHandle nlh = go.AddComponent<LateralOffsetHandle>();
+                nlh.Road = road;
+                nlh.End = a.End;
+                _lateralOffsetHandles[key] = go;
+            }
+
+            LateralOffsetHandle lh = go.GetComponent<LateralOffsetHandle>();
+            lh.VertexXZ = thisVertex.Position;
+            lh.PerpRightXZ = perpRight;
+
+            go.transform.position = new Vector3(handlePos.x, LateralOffsetHandleHeight, handlePos.y);
+
+            float outerR = Mathf.Max(0.1f, LateralOffsetHandleDiameter * 0.5f);
+            float innerR = Mathf.Max(0.05f, outerR - Mathf.Max(0.05f, LateralOffsetHandleRingThickness));
+            MeshFilter mf = go.GetComponent<MeshFilter>();
+            Mesh ringMesh = mf.sharedMesh;
+            if (ringMesh == null)
+            {
+                ringMesh = new Mesh { name = $"LateralOffsetRing_{key}" };
+                mf.sharedMesh = ringMesh;
+            }
+            ringMesh.Clear();
+            _scratchVerts.Clear();
+            _scratchTris.Clear();
+            _scratchColors.Clear();
+            EditorGeometry.AppendRing(_scratchVerts, _scratchTris, _scratchColors,
+                Vector2.zero, outerR, innerR, 28, 0f, LateralOffsetHandleColor);
+            ringMesh.SetVertices(_scratchVerts);
+            ringMesh.SetTriangles(_scratchTris, 0);
+            ringMesh.SetColors(_scratchColors);
+            ringMesh.RecalculateBounds();
+
+            SphereCollider sc = go.GetComponent<SphereCollider>();
+            sc.center = Vector3.zero;
+            sc.radius = outerR;
+        }
+
+        void DestroyLateralOffsetHandles()
+        {
+            foreach (KeyValuePair<string, GameObject> kvp in _lateralOffsetHandles)
+            {
+                if (kvp.Value == null) continue;
+                if (Application.isPlaying) Destroy(kvp.Value);
+                else DestroyImmediate(kvp.Value);
+            }
+            _lateralOffsetHandles.Clear();
+            _draggedLateralHandle = null;
+        }
+
+        LateralOffsetHandle PickLateralOffsetHandle()
+        {
+            if (PickCamera == null) return null;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            float bestDist = float.MaxValue;
+            LateralOffsetHandle best = null;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                LateralOffsetHandle h = hits[i].collider.GetComponentInParent<LateralOffsetHandle>();
+                if (h == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = h;
+                }
+            }
+            return best;
+        }
+
+        void UpdateLateralOffsetDrag()
+        {
+            if (_draggedLateralHandle == null || _draggedLateralHandle.Road == null) return;
+            Vector2? ground = PickGround();
+            if (!ground.HasValue) return;
+            // Project the cursor (relative to the unshifted vertex) onto
+            // the perpendicular axis to get the signed offset. Positive
+            // = perp-right of the road's A→B direction at this end.
+            Vector2 rel = ground.Value - _draggedLateralHandle.VertexXZ;
+            float signed = Vector2.Dot(rel, _draggedLateralHandle.PerpRightXZ);
+            if (_draggedLateralHandle.End == RoadEnd.A)
+                _draggedLateralHandle.Road.LateralOffsetA = signed;
+            else
+                _draggedLateralHandle.Road.LateralOffsetB = signed;
+            MarkNetworkDirty();
+            Rebuild();
+        }
+
+        void EndLateralOffsetDrag()
+        {
+            _draggedLateralHandle = null;
         }
 
         // ---- Lane-endpoint markers (click-to-edit overrides) ----
@@ -2439,33 +2967,17 @@ namespace NetworkDesigner.Designer
                 LaneNode innerCorner = aEnd ? LaneNode.Origin : LaneNode.Tertiary;
                 LaneNode outerCorner = aEnd ? LaneNode.Primary : LaneNode.Secondary;
 
+                // Position-based dedupe scratch — see TrySpawnDedupedCorner.
+                // Lives per (road, direction) since adjacent roads' corners
+                // can legitimately land near each other and shouldn't merge.
+                _spawnedCornerPositions.Clear();
                 for (int i = 0; i < inboundLanes.Count; i++)
                 {
                     LaneRef lr = new LaneRef { RoadId = road.Id, Direction = inboundDir, Index = i };
                     if (_markingShiftMode)
                     {
-                        // Marking mode: spawn corner markers, but DEDUPE
-                        // shared-boundary corners between adjacent lanes
-                        // (lane N's outer corner is geometrically identical
-                        // to lane N+1's inner corner). The rule: always
-                        // spawn the inner corner; only spawn the outer
-                        // corner on the LAST lane (where no next-index
-                        // lane exists to share with). Without this dedupe,
-                        // two markers stack at every interior lane
-                        // boundary, picker results are nondeterministic,
-                        // and delete-by-exact-lane-ref fails because the
-                        // first click stored ref A but the second click
-                        // matched ref B.
-                        Vector2? inner = GeometryResolver.ResolveLaneNode(a, inboundDir, i, innerCorner);
-                        if (inner.HasValue)
-                            SpawnLaneRingMarker(v, road, lr, innerCorner, inner.Value, isInbound: true, isCorner: true);
-                        bool isLastLane = (i == inboundLanes.Count - 1);
-                        if (isLastLane)
-                        {
-                            Vector2? outer = GeometryResolver.ResolveLaneNode(a, inboundDir, i, outerCorner);
-                            if (outer.HasValue)
-                                SpawnLaneRingMarker(v, road, lr, outerCorner, outer.Value, isInbound: true, isCorner: true);
-                        }
+                        TrySpawnDedupedCorner(v, road, lr, a, inboundDir, i, innerCorner, isInbound: true);
+                        TrySpawnDedupedCorner(v, road, lr, a, inboundDir, i, outerCorner, isInbound: true);
                     }
                     else
                     {
@@ -2531,22 +3043,14 @@ namespace NetworkDesigner.Designer
                     // Other roads: show their OUTBOUND nodes as click targets.
                     List<Vector2> outboundLanes = outboundDir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
                     if (outboundLanes == null) continue;
+                    _spawnedCornerPositions.Clear();
                     for (int i = 0; i < outboundLanes.Count; i++)
                     {
                         LaneRef lr = new LaneRef { RoadId = road.Id, Direction = outboundDir, Index = i };
                         if (_markingShiftMode)
                         {
-                            // See SpawnLaneEndpointMarkers for the dedupe
-                            // rationale: shared lane boundaries get one
-                            // marker, not two stacked at the same XZ.
-                            Vector2? innerPos = GeometryResolver.ResolveLaneNode(a, outboundDir, i, innerCorner);
-                            if (innerPos.HasValue) SpawnLaneRingMarker(v, road, lr, innerCorner, innerPos.Value, isInbound: false, isCorner: true);
-                            bool isLastLane = (i == outboundLanes.Count - 1);
-                            if (isLastLane)
-                            {
-                                Vector2? outerPos = GeometryResolver.ResolveLaneNode(a, outboundDir, i, outerCorner);
-                                if (outerPos.HasValue) SpawnLaneRingMarker(v, road, lr, outerCorner, outerPos.Value, isInbound: false, isCorner: true);
-                            }
+                            TrySpawnDedupedCorner(v, road, lr, a, outboundDir, i, innerCorner, isInbound: false);
+                            TrySpawnDedupedCorner(v, road, lr, a, outboundDir, i, outerCorner, isInbound: false);
                         }
                         else
                         {
@@ -2555,6 +3059,42 @@ namespace NetworkDesigner.Designer
                     }
                 }
             }
+        }
+
+        // Scratch list of corner positions already spawned for the
+        // current (road, direction) pass — used by TrySpawnDedupedCorner
+        // to skip a duplicate corner that lands within an epsilon of an
+        // earlier one. Re-cleared at the start of every per-approach
+        // spawn loop in SpawnLaneEndpointMarkers / Filtered.
+        readonly List<Vector2> _spawnedCornerPositions = new List<Vector2>();
+        const float CornerDedupeEpsilonSq = 0.04f; // 0.2m radius
+
+        // Resolve the corner position, then spawn a marker UNLESS one
+        // is already present within CornerDedupeEpsilonSq at the same
+        // XZ. This handles both:
+        //   (a) Standard two-way roads: lane N's outer corner == lane
+        //       N+1's inner corner (always shared at lane boundaries).
+        //   (b) One-way roads with no median: lanes on opposite sides
+        //       of the asphalt midpoint have their "inner" sides BOTH
+        //       facing the midpoint, so two lane-0/lane-1 INNER
+        //       corners land at the same midpoint position — while
+        //       the OUTER corners on each side are unique.
+        // Earlier "always spawn inner, only outer on last lane" rule
+        // got (a) right but broke (b) — left the asphalt edges with
+        // no markers. Position-dedup handles both cases uniformly.
+        // First spawn wins; subsequent lanes lose their dup'd corner.
+        void TrySpawnDedupedCorner(Vertex v, NetworkRoad road, LaneRef lr,
+            VertexApproach a, Direction dir, int laneIndex, LaneNode node, bool isInbound)
+        {
+            Vector2? p = GeometryResolver.ResolveLaneNode(a, dir, laneIndex, node);
+            if (!p.HasValue) return;
+            Vector2 pos = p.Value;
+            for (int i = 0; i < _spawnedCornerPositions.Count; i++)
+            {
+                if ((_spawnedCornerPositions[i] - pos).sqrMagnitude < CornerDedupeEpsilonSq) return;
+            }
+            _spawnedCornerPositions.Add(pos);
+            SpawnLaneRingMarker(v, road, lr, node, pos, isInbound: isInbound, isCorner: true);
         }
 
         void SpawnLaneRingMarker(Vertex v, NetworkRoad road, LaneRef lr, LaneNode node,
@@ -2723,7 +3263,7 @@ namespace NetworkDesigner.Designer
         // Spawn or update the ring+stem visual for a single setback
         // handle at the given approach. Idempotent — safe to call from
         // both initial spawn and per-frame refresh during drag.
-        void SpawnOrUpdateSetbackHandle(NetworkRoad road, VertexApproach a)
+        void SpawnOrUpdateSetbackHandle(NetworkRoad road, VertexApproach a, VertexGeometry vg)
         {
             string key = HandleKey(road.Id, a.End);
 
@@ -2736,17 +3276,37 @@ namespace NetworkDesigner.Designer
                 : Vector2.right;
 
             // Handle sits PERPENDICULAR to the road direction — off in
-            // the grass to one side — so it doesn't compete with the
-            // lane endpoint rings (which line up along the road's
-            // setback line). PerpRight = CW 90° of outward; in the
-            // (x,z) ground plane this places the handle on the road's
-            // right shoulder side when facing outward.
+            // the grass to one side. To always pick the side that's
+            // "outside the intersection", look at where the OTHER
+            // approaches at this vertex sit relative to this approach:
+            // sum each neighbor's outward bearing projected onto the
+            // perpendicular axis, and place the handle on the OPPOSITE
+            // side from that sum (so it's on the side with the most
+            // empty grass, away from neighboring asphalt). With no
+            // neighbors (isolated dead-end), defaults to perpRight.
             Vector2 perpRight = new Vector2(outward.y, -outward.x);
+            float neighborProjection = 0f;
+            if (vg != null && vg.Approaches != null)
+            {
+                for (int i = 0; i < vg.Approaches.Count; i++)
+                {
+                    VertexApproach other = vg.Approaches[i];
+                    if (other == a) continue;
+                    Vector2 oDir = other.OuterEdgeDir;
+                    if (oDir.sqrMagnitude < 1e-6f) continue;
+                    oDir = oDir.normalized;
+                    neighborProjection += Vector2.Dot(oDir, perpRight);
+                }
+            }
+            // > 0: most neighbors are on the perpRight side → put handle on perpLeft.
+            // < 0: most on the perpLeft side → put handle on perpRight.
+            // == 0 (no neighbors / perfectly balanced): fall back to perpRight.
+            Vector2 outsideDir = neighborProjection > 0f ? -perpRight : perpRight;
             float halfWidth = road.Profile.TotalWidth * 0.5f;
             float offset = halfWidth + Mathf.Max(
                 SetbackHandleOffsetMin,
                 road.Profile.TotalWidth * SetbackHandleOffsetWidthMultiplier);
-            Vector2 handlePos = anchor + perpRight * offset;
+            Vector2 handlePos = anchor + outsideDir * offset;
 
             if (!_setbackHandles.TryGetValue(key, out GameObject go) || go == null)
             {
@@ -2839,8 +3399,10 @@ namespace NetworkDesigner.Designer
         {
             if (_selectedVertex == null) return;
             DestroySetbackHandles();
+            DestroyLateralOffsetHandles();
             DestroyLaneEndpointMarkers();
             SpawnSetbackHandles(_selectedVertex);
+            SpawnLateralOffsetHandles(_selectedVertex);
             SpawnLaneEndpointMarkers(_selectedVertex);
         }
 
@@ -3781,6 +4343,7 @@ namespace NetworkDesigner.Designer
             // Keep edit-mode setback handles synced to the post-resolve
             // geometry of the selected vertex.
             RefreshSetbackHandlePositions();
+            RefreshLateralOffsetHandlePositions();
             // Lane-endpoint markers depend on lane count + profile, so a
             // full respawn is simpler than position-only updates here.
             // If we were mid-armed, respawn in filtered (armed) state
@@ -4523,6 +5086,12 @@ namespace NetworkDesigner.Designer
             {
                 if (kv.Value != null) kv.Value.SetActive(visible);
             }
+            // Re-honor the "hide selected vertex while editing" rule
+            // (otherwise toggling vertex view back ON would un-hide
+            // the currently-selected vertex's puck and let it occlude
+            // the per-vertex edit overlays).
+            if (visible && _selectedVertex != null)
+                SetVertexMarkerVisible(_selectedVertex.Id, false);
         }
 
         Material GetMarkerMaterial()

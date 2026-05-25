@@ -9,6 +9,12 @@ namespace NetworkDesigner.Designer
 {
     public class VertexMarker : MonoBehaviour
     {
-        public Vertex Vertex;
+        // [NonSerialized]: prevent Unity's Inspector data-binding from
+        // walking the Vertex's graph and auto-instantiating null
+        // [Serializable] sub-objects (the bug that turned straight
+        // roads into wild curves). See NetworkRenderer.Network for
+        // the full explanation. Vertex is set programmatically by
+        // NetworkDesigner.SpawnVertexMarker, never in the Inspector.
+        [System.NonSerialized] public Vertex Vertex;
     }
 }

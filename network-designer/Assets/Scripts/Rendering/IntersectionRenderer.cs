@@ -267,6 +267,15 @@ namespace NetworkDesigner.Rendering
                     ShoulderMaterial != null ? ShoulderMaterial : CreateLitMatte(ShoulderColor, "ShoulderMat"),
                 };
             }
+
+            // MeshCollider so the intersection asphalt can be raycast-
+            // picked by the designer (used by the Edit-mode hover
+            // overlay). Reassigning sharedMesh forces the collider's
+            // mesh to re-bake against the just-rebuilt geometry.
+            MeshCollider mc = GetComponent<MeshCollider>();
+            if (mc == null) mc = gameObject.AddComponent<MeshCollider>();
+            mc.sharedMesh = null;
+            mc.sharedMesh = mesh;
         }
 
         // Standard shader with matte settings — gives the surface real
