@@ -41,6 +41,10 @@ network-designer/*.app
 network-designer/*.unitypackage
 network-designer/crashlytics-build.properties
 
+# Runtime-generated state (regenerated every Play session — noisy diffs)
+network-designer/NetworkAutosave.json
+network-designer/TuningOverrides.json
+
 # Common stray .meta files for ignored dirs (Unity emits these)
 network-designer/[Ll]ibrary.meta
 network-designer/[Tt]emp.meta
