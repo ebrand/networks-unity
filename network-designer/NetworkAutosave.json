@@ -258,63 +258,6 @@
       "ConnectivityOverrides": []
     },
     {
-      "Id": "v-6a41a932",
-      "Position": {
-        "x": -140.0,
-        "y": 230.0
-      },
-      "ConnectivityOverrides": [
-        {
-          "From": {
-            "RoadId": "r-1064cd30",
-            "Direction": 0,
-            "Index": 0
-          },
-          "To": {
-            "RoadId": "r-0840b8fe",
-            "Direction": 1,
-            "Index": 0
-          }
-        },
-        {
-          "From": {
-            "RoadId": "r-1064cd30",
-            "Direction": 0,
-            "Index": 1
-          },
-          "To": {
-            "RoadId": "r-0840b8fe",
-            "Direction": 1,
-            "Index": 1
-          }
-        },
-        {
-          "From": {
-            "RoadId": "r-f47b9fd4",
-            "Direction": 1,
-            "Index": 0
-          },
-          "To": {
-            "RoadId": "r-1064cd30",
-            "Direction": 1,
-            "Index": 0
-          }
-        },
-        {
-          "From": {
-            "RoadId": "r-f47b9fd4",
-            "Direction": 1,
-            "Index": 0
-          },
-          "To": {
-            "RoadId": "r-0840b8fe",
-            "Direction": 1,
-            "Index": 0
-          }
-        }
-      ]
-    },
-    {
       "Id": "v-ceac271c",
       "Position": {
         "x": -140.0,
@@ -380,22 +323,50 @@
             "Direction": 0,
             "Index": 1
           }
+        },
+        {
+          "From": {
+            "RoadId": "r-ff6dc637",
+            "Direction": 0,
+            "Index": 0
+          },
+          "To": {
+            "RoadId": "r-0074002c",
+            "Direction": 1,
+            "Index": 0
+          }
+        },
+        {
+          "From": {
+            "RoadId": "r-0074002c",
+            "Direction": 0,
+            "Index": 2
+          },
+          "To": {
+            "RoadId": "r-ff6dc637",
+            "Direction": 1,
+            "Index": 1
+          }
+        },
+        {
+          "From": {
+            "RoadId": "r-0074002c",
+            "Direction": 0,
+            "Index": 1
+          },
+          "To": {
+            "RoadId": "r-ff6dc637",
+            "Direction": 1,
+            "Index": 0
+          }
         }
       ]
     },
     {
-      "Id": "v-b93a78fc",
+      "Id": "v-bda17135",
       "Position": {
-        "x": -250.0,
-        "y": 230.0
-      },
-      "ConnectivityOverrides": []
-    },
-    {
-      "Id": "v-d5dff1ce",
-      "Position": {
-        "x": -50.0,
-        "y": 230.0
+        "x": -140.0,
+        "y": 360.0
       },
       "ConnectivityOverrides": []
     }
@@ -1212,9 +1183,9 @@
       "ControlB": 0
     },
     {
-      "Id": "r-1064cd30",
-      "EndA": "v-ceac271c",
-      "EndB": "v-6a41a932",
+      "Id": "r-ff6dc637",
+      "EndA": "v-bda17135",
+      "EndB": "v-ceac271c",
       "Classification": 1,
       "Profile": {
         "Id": "road-1",
@@ -1247,101 +1218,10 @@
           ]
         },
         "ShoulderAB": {
-          "Width": 2.0
+          "Width": 1.5
         },
         "ShoulderBA": {
-          "Width": 2.0
-        }
-      },
-      "SetbackA": 16.1661224,
-      "ControlA": 0,
-      "ControlB": 1
-    },
-    {
-      "Id": "r-0840b8fe",
-      "EndA": "v-b93a78fc",
-      "EndB": "v-6a41a932",
-      "Classification": 1,
-      "Profile": {
-        "Id": "road-1",
-        "ab": {
-          "Lanes": [
-            {
-              "Id": "ab-0",
-              "Width": 4.0
-            },
-            {
-              "Id": "ab-1",
-              "Width": 4.0
-            },
-            {
-              "Id": "lane-1002",
-              "Width": 4.0
-            }
-          ]
-        },
-        "ba": {
-          "Lanes": [
-            {
-              "Id": "ba-0",
-              "Width": 4.0
-            },
-            {
-              "Id": "ba-1",
-              "Width": 4.0
-            }
-          ]
-        },
-        "ShoulderAB": {
-          "Width": 2.0
-        },
-        "ShoulderBA": {
-          "Width": 2.0
-        }
-      },
-      "ControlA": 0,
-      "ControlB": 0
-    },
-    {
-      "Id": "r-f47b9fd4",
-      "EndA": "v-6a41a932",
-      "EndB": "v-d5dff1ce",
-      "Classification": 1,
-      "Profile": {
-        "Id": "road-1",
-        "ab": {
-          "Lanes": [
-            {
-              "Id": "ab-0",
-              "Width": 4.0
-            },
-            {
-              "Id": "ab-1",
-              "Width": 4.0
-            },
-            {
-              "Id": "lane-1002",
-              "Width": 4.0
-            }
-          ]
-        },
-        "ba": {
-          "Lanes": [
-            {
-              "Id": "ba-0",
-              "Width": 4.0
-            },
-            {
-              "Id": "ba-1",
-              "Width": 4.0
-            }
-          ]
-        },
-        "ShoulderAB": {
-          "Width": 2.0
-        },
-        "ShoulderBA": {
-          "Width": 2.0
+          "Width": 1.5
         }
       },
       "ControlA": 0,

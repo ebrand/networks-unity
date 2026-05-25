@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "exportedAt": "2026-05-24T19:48:13.300Z",
-  "activeId": "cfg-mpk6sz6z-jtrqco",
+  "exportedAt": "2026-05-25T00:53:41.395Z",
+  "activeId": "cfg-mpilnsad-iobij8",
   "configs": [
     {
       "id": "cfg-mpivlf8b-rrs7rq",
@@ -155,14 +155,14 @@
           ]
         },
         "shoulderAB": {
-          "width": 2
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 2
+          "width": 1.5
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779651628641
+      "updatedAt": 1779670348209
     },
     {
       "id": "cfg-mphpcck0-xv9ht3",
@@ -191,17 +191,17 @@
           ]
         },
         "shoulderAB": {
-          "width": 2
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 2
+          "width": 1.5
         },
         "median": {
           "width": 2
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779648737633
+      "updatedAt": 1779670375377
     },
     {
       "id": "cfg-mphp46pv-wtfwzw",
@@ -234,14 +234,14 @@
           ]
         },
         "shoulderAB": {
-          "width": 2
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 2
+          "width": 1.5
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779643506930
+      "updatedAt": 1779670381886
     },
     {
       "id": "cfg-mphoqclk-53z30r",
@@ -274,17 +274,17 @@
           ]
         },
         "shoulderAB": {
-          "width": 2
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 2
+          "width": 1.5
         },
         "median": {
           "width": 2
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779648743597
+      "updatedAt": 1779670388936
     },
     {
       "id": "cfg-mpiloq66-y4bac5",
@@ -343,14 +343,14 @@
           "lanes": []
         },
         "shoulderAB": {
-          "width": 1
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 1
+          "width": 1.5
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779643528554
+      "updatedAt": 1779670399262
     },
     {
       "id": "cfg-mpivzaua-m1gigl",
@@ -387,14 +387,14 @@
           ]
         },
         "shoulderAB": {
-          "width": 2
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 2
+          "width": 1.5
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779643532585
+      "updatedAt": 1779670406260
     },
     {
       "id": "cfg-mpiw0b7g-aogfqy",
@@ -431,17 +431,17 @@
           ]
         },
         "shoulderAB": {
-          "width": 2
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 2
+          "width": 1.5
         },
         "median": {
           "width": 2
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779648768522
+      "updatedAt": 1779670413910
     },
     {
       "id": "cfg-mpk6sz6z-jtrqco",
@@ -476,7 +476,7 @@
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779652087613
+      "updatedAt": 1779663035035
     },
     {
       "id": "cfg-mpilnsad-iobij8",

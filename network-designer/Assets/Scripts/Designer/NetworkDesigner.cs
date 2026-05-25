@@ -3761,6 +3761,14 @@ namespace NetworkDesigner.Designer
         // onto the alpha texture for tinting + the per-color alpha.
         void UpdateGuideLineVisual()
         {
+            // Snap guides only make sense during placement (Create mode).
+            // Switching to Edit mode stops calling ApplyGuidesOrGrid, so
+            // _activeGuides would hold whatever the last Create-mode
+            // frame computed — leaving the dashed rays "stuck on" after
+            // a Tab into Edit. Clear them here so the per-frame draw
+            // loop disables every LineRenderer in Edit mode.
+            if (CurrentMode != DesignerMode.Create) _activeGuides.Clear();
+
             int activeCount = _activeGuides.Count;
 
             // Make sure the pool has at least `activeCount` LineRenderers.
