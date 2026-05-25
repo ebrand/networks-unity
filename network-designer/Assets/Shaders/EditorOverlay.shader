@@ -1,0 +1,60 @@
+// Minimal unlit, vertex-colored, alpha-blended shader for Edit-mode
+// UI overlays (setback handles, lane markers, lane-flow arrows,
+// dashed stems). All color + alpha comes from per-vertex Color32 in
+// the mesh, so hover/select state can be updated by mutating mesh
+// colors in place without rebuilding the mesh.
+//
+// Two-sided (Cull Off) so the overlays stay visible if the camera
+// happens to flip below ground; ZWrite Off so they don't occlude
+// each other when overlapping at similar Y values.
+
+Shader "NetworkDesigner/EditorOverlay"
+{
+    Properties { }
+    SubShader
+    {
+        Tags
+        {
+            "Queue" = "Transparent"
+            "RenderType" = "Transparent"
+            "IgnoreProjector" = "True"
+        }
+        Blend SrcAlpha OneMinusSrcAlpha
+        ZWrite Off
+        Cull Off
+        Lighting Off
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #include "UnityCG.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float4 color : COLOR;
+            };
+
+            struct v2f
+            {
+                float4 pos : SV_POSITION;
+                float4 color : COLOR;
+            };
+
+            v2f vert(appdata v)
+            {
+                v2f o;
+                o.pos = UnityObjectToClipPos(v.vertex);
+                o.color = v.color;
+                return o;
+            }
+
+            fixed4 frag(v2f i) : SV_Target
+            {
+                return i.color;
+            }
+            ENDCG
+        }
+    }
+}

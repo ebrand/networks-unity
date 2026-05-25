@@ -1,0 +1,521 @@
+{
+  "version": 1,
+  "exportedAt": "2026-05-24T19:48:13.300Z",
+  "activeId": "cfg-mpk6sz6z-jtrqco",
+  "configs": [
+    {
+      "id": "cfg-mpivlf8b-rrs7rq",
+      "name": "1x",
+      "category": "One-way",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779649717332
+    },
+    {
+      "id": "cfg-mphpapyk-36rett",
+      "name": "1x1",
+      "category": "Small",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779643493993
+    },
+    {
+      "id": "cfg-mphpaz1g-vxsakg",
+      "name": "1x1m",
+      "category": "Small",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "median": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779648700119
+    },
+    {
+      "id": "cfg-mpj1xbsv-t6sry3",
+      "name": "2x",
+      "category": "One-way",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 1
+        },
+        "shoulderBA": {
+          "width": 1
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779643433016
+    },
+    {
+      "id": "cfg-mpivfuao-r0osky",
+      "name": "2x1",
+      "category": "Medium",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2
+        },
+        "shoulderBA": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779651628641
+    },
+    {
+      "id": "cfg-mphpcck0-xv9ht3",
+      "name": "2x1m",
+      "category": "Medium",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2
+        },
+        "shoulderBA": {
+          "width": 2
+        },
+        "median": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779648737633
+    },
+    {
+      "id": "cfg-mphp46pv-wtfwzw",
+      "name": "2x2",
+      "category": "Medium",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2
+        },
+        "shoulderBA": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779643506930
+    },
+    {
+      "id": "cfg-mphoqclk-53z30r",
+      "name": "2x2m",
+      "category": "Medium",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2
+        },
+        "shoulderBA": {
+          "width": 2
+        },
+        "median": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779648743597
+    },
+    {
+      "id": "cfg-mpiloq66-y4bac5",
+      "name": "2xhwy",
+      "category": "Highway",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 5
+            },
+            {
+              "id": "ab-1",
+              "width": 5
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 3
+        },
+        "shoulderBA": {
+          "width": 3
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779648727248
+    },
+    {
+      "id": "cfg-mpj236vc-fxcync",
+      "name": "3x",
+      "category": "One-way",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            },
+            {
+              "id": "lane-1000",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 1
+        },
+        "shoulderBA": {
+          "width": 1
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779643528554
+    },
+    {
+      "id": "cfg-mpivzaua-m1gigl",
+      "name": "3x2",
+      "category": "Large",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            },
+            {
+              "id": "lane-1002",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2
+        },
+        "shoulderBA": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779643532585
+    },
+    {
+      "id": "cfg-mpiw0b7g-aogfqy",
+      "name": "3x2m",
+      "category": "Large",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            },
+            {
+              "id": "lane-1004",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2
+        },
+        "shoulderBA": {
+          "width": 2
+        },
+        "median": {
+          "width": 2
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779648768522
+    },
+    {
+      "id": "cfg-mpk6sz6z-jtrqco",
+      "name": "3xhwy",
+      "category": "Highway",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 5
+            },
+            {
+              "id": "ab-1",
+              "width": 5
+            },
+            {
+              "id": "lane-1000",
+              "width": 5
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 3
+        },
+        "shoulderBA": {
+          "width": 3
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779652087613
+    },
+    {
+      "id": "cfg-mpilnsad-iobij8",
+      "name": "4xhwy",
+      "category": "Highway",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 5
+            },
+            {
+              "id": "ab-1",
+              "width": 5
+            },
+            {
+              "id": "lane-1000",
+              "width": 5
+            },
+            {
+              "id": "lane-1001",
+              "width": 5
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 3
+        },
+        "shoulderBA": {
+          "width": 3
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1779648778032
+    }
+  ]
+}
