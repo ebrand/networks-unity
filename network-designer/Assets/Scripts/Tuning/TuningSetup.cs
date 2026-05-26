@@ -10,6 +10,7 @@
 // component's OnEnable) makes the surface obvious in one place.
 
 using UnityEngine;
+using NetworkDesigner.Agents;
 using NetworkDesigner.Designer;
 using NetworkDesigner.Geometry;
 using NetworkDesigner.Rendering;
@@ -26,6 +27,7 @@ namespace NetworkDesigner.Tuning
         public OrbitCameraController Orbit;
         public GroundGrid Grid;
         public GroundTiler GroundTiler;
+        public AgentSystem Agents;
 
         [Header("Persistence")]
         [Tooltip("If true, tuning panel changes are written to disk and re-applied across Play stop/start.")]
@@ -47,6 +49,7 @@ namespace NetworkDesigner.Tuning
             if (Orbit == null) Orbit = FindFirstObjectByType<OrbitCameraController>();
             if (Grid == null) Grid = FindFirstObjectByType<GroundGrid>();
             if (GroundTiler == null) GroundTiler = FindFirstObjectByType<GroundTiler>();
+            if (Agents == null) Agents = FindFirstObjectByType<AgentSystem>();
 
             TuningRegistry.Clear();
             RegisterAll();
@@ -862,6 +865,162 @@ namespace NetworkDesigner.Tuning
                     () => Orbit.KeyboardPanShiftMultiplier,
                     v => Orbit.KeyboardPanShiftMultiplier = v,
                     1f, 10f);
+            }
+
+            if (Agents != null)
+            {
+                // -------- Agents --------
+                TuningRegistry.RegisterFloat(
+                    "agents.defaultSpeed", "Agents", "Default speed (m/s)",
+                    () => Agents.DefaultSpeed,
+                    v =>
+                    {
+                        Agents.DefaultSpeed = v;
+                        // Push live to existing agents too — otherwise
+                        // a slider drag only affects FUTURE spawns,
+                        // which is confusing in a tuning panel.
+                        Agents.ApplyDefaultSpeedToAllAgents();
+                    },
+                    0f, 60f);
+                TuningRegistry.RegisterFloat(
+                    "agents.minSpawnGap", "Agents", "Min spawn gap (m)",
+                    () => Agents.MinSpawnGap,
+                    v => Agents.MinSpawnGap = v,
+                    0f, 30f);
+                TuningRegistry.RegisterFloat(
+                    "agents.maxSpawnPerFrame", "Agents", "Max spawn attempts / frame",
+                    () => Agents.MaxSpawnAttemptsPerFrame,
+                    v => Agents.MaxSpawnAttemptsPerFrame = Mathf.Max(1, Mathf.RoundToInt(v)),
+                    1f, 100f);
+                TuningRegistry.RegisterBool(
+                    "agents.paused", "Agents", "Paused",
+                    () => Agents.Paused,
+                    v => Agents.Paused = v);
+                TuningRegistry.RegisterFloat(
+                    "agents.diameter", "Agents", "Capsule diameter (m)",
+                    () => Agents.AgentDiameter,
+                    v => { Agents.AgentDiameter = v; Agents.RefreshAllAgentVisuals(); },
+                    0.2f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.height", "Agents", "Capsule height (m)",
+                    () => Agents.AgentHeight,
+                    v => { Agents.AgentHeight = v; Agents.RefreshAllAgentVisuals(); },
+                    0.2f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.yLift", "Agents", "Y-lift above ground (m)",
+                    () => Agents.AgentYLift,
+                    v => { Agents.AgentYLift = v; Agents.RefreshAllAgentVisuals(); },
+                    0f, 5f);
+                TuningRegistry.RegisterColor(
+                    "agents.color", "Agents", "Color",
+                    () => Agents.AgentColor,
+                    v => { Agents.AgentColor = v; Agents.RefreshAllAgentVisuals(); });
+                TuningRegistry.RegisterFloat(
+                    "agents.intersectionCtrlFraction", "Agents", "Intersection bezier ctrl (0-1)",
+                    () => Agents.IntersectionBezierControlFraction,
+                    v => Agents.IntersectionBezierControlFraction = v,
+                    0f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "agents.laneChangeDistance", "Agents", "Lane change distance (m)",
+                    () => Agents.LaneChangeDistanceMeters,
+                    v => Agents.LaneChangeDistanceMeters = v,
+                    1f, 200f);
+                TuningRegistry.RegisterBool(
+                    "agents.overtakingEnabled", "Agents", "Overtaking enabled",
+                    () => Agents.OvertakingEnabled,
+                    v => Agents.OvertakingEnabled = v);
+                TuningRegistry.RegisterFloat(
+                    "agents.overtakeSpeedRatio", "Agents", "Overtake speed ratio (0-1)",
+                    () => Agents.OvertakeSpeedRatio,
+                    v => Agents.OvertakeSpeedRatio = v,
+                    0f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "agents.overtakeMinRemaining", "Agents", "Overtake min remaining road (m)",
+                    () => Agents.OvertakeMinRemainingMeters,
+                    v => Agents.OvertakeMinRemainingMeters = v,
+                    1f, 200f);
+                TuningRegistry.RegisterFloat(
+                    "agents.overtakeClearAhead", "Agents", "Overtake clear-ahead (m)",
+                    () => Agents.OvertakeClearAhead,
+                    v => Agents.OvertakeClearAhead = v,
+                    1f, 100f);
+                TuningRegistry.RegisterFloat(
+                    "agents.followLookAhead", "Agents", "Follow look-ahead (m)",
+                    () => Agents.FollowLookAhead,
+                    v => Agents.FollowLookAhead = v,
+                    0f, 100f);
+                TuningRegistry.RegisterFloat(
+                    "agents.followMinDistance", "Agents", "Follow min distance (m)",
+                    () => Agents.FollowMinDistance,
+                    v => Agents.FollowMinDistance = v,
+                    0f, 30f);
+                TuningRegistry.RegisterFloat(
+                    "agents.followComfortDistance", "Agents", "Follow comfort distance (m)",
+                    () => Agents.FollowComfortDistance,
+                    v => Agents.FollowComfortDistance = v,
+                    0f, 60f);
+                TuningRegistry.RegisterFloat(
+                    "agents.followConeAngle", "Agents", "Follow cone half-angle (deg)",
+                    () => Agents.FollowConeAngleDeg,
+                    v => Agents.FollowConeAngleDeg = v,
+                    0f, 90f);
+                TuningRegistry.RegisterFloat(
+                    "agents.followAcceleration", "Agents", "Acceleration (m/s²)",
+                    () => Agents.FollowAcceleration,
+                    v => Agents.FollowAcceleration = v,
+                    0.5f, 30f);
+                TuningRegistry.RegisterFloat(
+                    "agents.followDeceleration", "Agents", "Deceleration (m/s²)",
+                    () => Agents.FollowDeceleration,
+                    v => Agents.FollowDeceleration = v,
+                    0.5f, 50f);
+                TuningRegistry.RegisterBool(
+                    "agents.intersectionRightOfWay", "Agents", "Intersection right-of-way",
+                    () => Agents.IntersectionRightOfWay,
+                    v => Agents.IntersectionRightOfWay = v);
+                TuningRegistry.RegisterFloat(
+                    "agents.intersectionBrakeMargin", "Agents", "Intersection brake margin (m)",
+                    () => Agents.IntersectionBrakeMargin,
+                    v => Agents.IntersectionBrakeMargin = v,
+                    0f, 20f);
+                TuningRegistry.RegisterFloat(
+                    "agents.intersectionConflictDistance", "Agents", "Intersection conflict distance (m)",
+                    () => Agents.IntersectionConflictDistance,
+                    v => Agents.IntersectionConflictDistance = v,
+                    0f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.intersectionStopDistance", "Agents", "Intersection stop distance (m)",
+                    () => Agents.IntersectionStopDistance,
+                    v => Agents.IntersectionStopDistance = v,
+                    0f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.intersectionCommitDistance", "Agents", "Intersection commit distance (m)",
+                    () => Agents.IntersectionCommitDistance,
+                    v => Agents.IntersectionCommitDistance = v,
+                    0f, 10f);
+                TuningRegistry.RegisterBool(
+                    "agents.obeyTrafficSigns", "Agents", "Obey traffic signs (stop/yield)",
+                    () => Agents.ObeyTrafficSigns,
+                    v => Agents.ObeyTrafficSigns = v);
+                TuningRegistry.RegisterFloat(
+                    "agents.stopWaitSeconds", "Agents", "Stop sign wait (seconds)",
+                    () => Agents.StopWaitSeconds,
+                    v => Agents.StopWaitSeconds = v,
+                    0f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.yieldApproachSpeed", "Agents", "Yield approach speed (m/s)",
+                    () => Agents.YieldApproachSpeed,
+                    v => Agents.YieldApproachSpeed = v,
+                    0f, 20f);
+
+                if (Designer != null)
+                {
+                    TuningRegistry.RegisterFloat(
+                        "agents.swarmBatchSize", "Agents", "Swarm batch size (G hotkey)",
+                        () => Designer.AgentSpawnBatchSize,
+                        v => Designer.AgentSpawnBatchSize = Mathf.Max(1, Mathf.RoundToInt(v)),
+                        1f, 1000f);
+                }
             }
         }
 

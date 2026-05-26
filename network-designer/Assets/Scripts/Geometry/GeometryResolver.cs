@@ -265,6 +265,17 @@ namespace NetworkDesigner.Geometry
             int n = apps.Count;
             if (n < 2) return;
 
+            // FULL DEFAULT CONNECTIVITY: every inbound connects to
+            // every other approach's outbound, index-matched. Covers
+            // straight + all turns (left, right, anything in between)
+            // without distinguishing them. The agent pathfinder
+            // (which uses this) gets full route freedom; user
+            // overrides REMOVE specific connections as needed.
+            //
+            // U-turn back on the SAME road is intentionally skipped —
+            // it's a rare movement and would create a "free turnaround"
+            // at every junction which doesn't match driving intuition.
+            // Add an explicit override if a specific U-turn is needed.
             for (int i = 0; i < n; i++)
             {
                 VertexApproach self = apps[i];
@@ -272,32 +283,10 @@ namespace NetworkDesigner.Geometry
                 List<Vector2> inboundLanes = inboundDir == Direction.AB ? self.LaneEndsAB : self.LaneEndsBA;
                 if (inboundLanes == null || inboundLanes.Count == 0) continue;
 
-                // ---- (1) Straight-through ----
-                int oppIdx = FindOppositeApproach(apps, i, StraightConnectionToleranceRad);
-                if (oppIdx >= 0)
+                for (int j = 0; j < n; j++)
                 {
-                    AddIndexMatchedConnections(self, apps[oppIdx], inboundDir, inboundLanes, outConnections);
-                }
-
-                // ---- (2) Curbside turn ----
-                // RHD: easy turn is RIGHT, which is the previous approach
-                // in the CW-sorted list (= one step CCW = (i-1+n)%n).
-                // LHD: easy turn is LEFT, which is the next-CW approach
-                // = (i+1)%n. The geometric reasoning is symmetric.
-                // Skipped for n<3 since at a 2-way joint the straight
-                // rule already exhausts the available connections.
-                if (n >= 3)
-                {
-                    int turnIdx = driveSide == DriveSide.Right
-                        ? (i - 1 + n) % n
-                        : (i + 1) % n;
-                    // Avoid duplicating the straight connection if it
-                    // happens to coincide (degenerate 3-way where the
-                    // straight target IS the curbside neighbor).
-                    if (turnIdx != oppIdx)
-                    {
-                        AddCurbsideTurnConnection(self, apps[turnIdx], inboundDir, inboundLanes, outConnections);
-                    }
+                    if (j == i) continue; // skip U-turn on same road
+                    AddIndexMatchedConnections(self, apps[j], inboundDir, inboundLanes, outConnections);
                 }
             }
         }
@@ -867,6 +856,42 @@ namespace NetworkDesigner.Geometry
             return w;
         }
 
+        /// <summary>
+        /// Signed perpendicular offset (in PerpRight(A→B) coordinates)
+        /// from the road's centerline to the center of the lane at
+        /// (direction, laneIndex). Mirrors the resolver's lane-positioning
+        /// math so an agent placed at `centerlinePos + PerpRight(tangent)
+        /// * thisOffset` sits exactly on the lane centerline.
+        ///
+        /// Positive return = perp-right of the A→B direction.
+        /// Drive-side flips the conventions; null road/profile returns 0.
+        /// </summary>
+        public static float LaneCenterOffsetSigned(
+            NetworkRoad road, Direction dir, int laneIndex, DriveSide driveSide)
+        {
+            if (road == null || road.Profile == null) return 0f;
+            int abSign = driveSide == DriveSide.Right ? 1 : -1;
+            int baSign = -abSign;
+            float medianHalf = road.Profile.Median != null
+                ? road.Profile.Median.Width * 0.5f : 0f;
+
+            // Same asphalt-midpoint recentering as the resolver — for
+            // asymmetric AB/BA lane counts this isn't zero.
+            float abOuter = abSign * (medianHalf
+                + ShoulderPlusLanesWidth(road.Profile.AB.Lanes, road.Profile.ShoulderAB.Width));
+            float baOuter = baSign * (medianHalf
+                + ShoulderPlusLanesWidth(road.Profile.BA.Lanes, road.Profile.ShoulderBA.Width));
+            float midpoint = (abOuter + baOuter) * 0.5f;
+
+            List<Lane> lanes = dir == Direction.AB ? road.Profile.AB.Lanes : road.Profile.BA.Lanes;
+            int sign = dir == Direction.AB ? abSign : baSign;
+            if (lanes == null || laneIndex < 0 || laneIndex >= lanes.Count) return 0f;
+
+            float cursor = sign * medianHalf;
+            for (int i = 0; i < laneIndex; i++) cursor += sign * lanes[i].Width;
+            return cursor + sign * lanes[laneIndex].Width * 0.5f - midpoint;
+        }
+
         static Vertex FindVertex(Network n, string id)
         {
             foreach (Vertex v in n.Vertices)
@@ -933,6 +958,26 @@ namespace NetworkDesigner.Geometry
                 prev = curr;
             }
             return 1f;
+        }
+
+        /// <summary>
+        /// Total arc length of a cubic bezier, approximated by sampling
+        /// N+1 points and summing chord segments. Accurate enough for
+        /// path weighting (typically within 0.5% of analytic for road-
+        /// scale curves with default sample count).
+        /// </summary>
+        public static float CubicArcLength(Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, int samples = 32)
+        {
+            float total = 0f;
+            Vector2 prev = p0;
+            for (int i = 1; i <= samples; i++)
+            {
+                float t = (float)i / samples;
+                Vector2 curr = SampleCubic(p0, c1, c2, p3, t);
+                total += Vector2.Distance(prev, curr);
+                prev = curr;
+            }
+            return total;
         }
 
         /// <summary>Unnormalized tangent of a cubic bezier at <paramref name="t"/>. B'(t) = 3(1-t)²(c1-p0) + 6(1-t)t(c2-c1) + 3t²(p3-c2).</summary>

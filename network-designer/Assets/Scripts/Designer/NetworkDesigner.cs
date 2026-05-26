@@ -26,6 +26,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using Newtonsoft.Json;
+using NetworkDesigner.Agents;
 using NetworkDesigner.Geometry;
 using NetworkDesigner.Import;
 using NetworkDesigner.Model;
@@ -39,7 +40,7 @@ namespace NetworkDesigner.Designer
     {
         // NOTE: enum order matters — Unity serializes the int value, so
         // keeping Create=0/Edit=1 preserves existing scene asset values.
-        public enum DesignerMode { Create, Edit }
+        public enum DesignerMode { Create, Edit, Run }
         public enum BuildTool { Straight, Fillet, SCurve, Roundabout, CulDeSac }
         enum BuildState { Idle, EdgeFromVertex }
         // Shared state machine for the 3-click curve tools (Fillet, SCurve).
@@ -65,6 +66,14 @@ namespace NetworkDesigner.Designer
         public KeyCode ToolHotkeyCulDeSac = KeyCode.Alpha5;
         [Tooltip("Toggles visibility of vertex markers (the small puck at each vertex).")]
         public KeyCode VertexViewToggleHotkey = KeyCode.V;
+        [Tooltip("Spawns a swarm of agents on random (start, end) vertex pairs. Count = AgentSpawnBatchSize.")]
+        public KeyCode AgentSpawnHotkey = KeyCode.G;
+        [Tooltip("Despawns ALL active agents.")]
+        public KeyCode AgentClearHotkey = KeyCode.H;
+        [Tooltip("Toggle the simulation Paused state (freezes agent ticking + spawn drain).")]
+        public KeyCode PauseHotkey = KeyCode.P;
+        [Tooltip("How many agents the G hotkey spawns in one batch.")]
+        public int AgentSpawnBatchSize = 100;
 
         [Header("Tool palette UI")]
         [Tooltip("Show the on-screen tool palette (IMGUI overlay).")]
@@ -260,6 +269,35 @@ namespace NetworkDesigner.Designer
         Network _network;
         public Network Network => _network;
 
+        // Agent system — auto-discovered on the same GameObject (or
+        // its children) at OnEnable.
+        AgentSystem _agentSystem;
+
+        // Selected agent (left-click in Edit mode) and the on-ground
+        // LineRenderer that visualizes its planned path.
+        Agent _selectedAgent;
+        GameObject _agentPathLineGo;
+        LineRenderer _agentPathLine;
+        Color _selectedAgentOriginalColor;
+        bool _selectedAgentColorCaptured;
+        [Header("Agent plan visualization")]
+        [Tooltip("Color tint applied to a selected agent's capsule so it stands out.")]
+        public Color SelectedAgentTint = new Color(1f, 0.95f, 0.2f, 1f);
+        [Tooltip("Color of the polyline overlay showing the selected agent's planned path.")]
+        public Color AgentPlanColor = new Color(1f, 0.95f, 0.2f, 0.85f);
+        [Tooltip("Width (m) of the agent plan polyline.")]
+        public float AgentPlanLineWidth = 0.4f;
+        [Tooltip("Y-lift (m) of the plan polyline above the road surface so it sits on top.")]
+        public float AgentPlanLineHeight = 0.1f;
+        [Tooltip("Samples per segment along the agent's plan. More = smoother curves.")]
+        public int AgentPlanSamplesPerSegment = 12;
+        [Tooltip("Color of the line from the selected agent to each FOLLOW blocker (another agent in its forward cone slowing it down).")]
+        public Color BlockerFollowColor = new Color(1f, 0.2f, 0.2f, 0.85f);
+        [Tooltip("Color of the line from the selected agent to each INTERSECTION blocker (another agent on a conflicting upcoming intersection bezier).")]
+        public Color BlockerIntersectionColor = new Color(1f, 0.6f, 0.1f, 0.85f);
+        [Tooltip("Width (m) of the blocker indicator lines.")]
+        public float BlockerLineWidth = 0.35f;
+
         // Autosave debounce. Set by MarkDirty; consumed by Update to time
         // the actual disk write so a slider drag or vertex drag doesn't
         // hammer the file system every frame.
@@ -420,6 +458,11 @@ namespace NetworkDesigner.Designer
         void OnEnable()
         {
             _renderer = GetComponent<NetworkRenderer>();
+            // Auto-discover an AgentSystem on the same GameObject (or
+            // its children). It's not required — agent features just
+            // no-op if missing.
+            _agentSystem = GetComponent<AgentSystem>();
+            if (_agentSystem == null) _agentSystem = GetComponentInChildren<AgentSystem>();
             if (PickCamera == null) PickCamera = Camera.main;
             if (Grid == null) Grid = FindFirstObjectByType<GroundGrid>();
 
@@ -619,6 +662,12 @@ namespace NetworkDesigner.Designer
             if (Input.GetKeyDown(RoundaboutHotkey)) TryRoundaboutHotkey();
             if (Input.GetKeyDown(VertexViewToggleHotkey)) SetVertexMarkersVisible(!ShowVertexMarkers);
 
+            // Agents: G spawns a swarm of AgentSpawnBatchSize agents
+            // on random (start, end) vertex pairs. H despawns all.
+            if (Input.GetKeyDown(AgentSpawnHotkey)) SpawnAgentSwarm();
+            if (Input.GetKeyDown(AgentClearHotkey)) ClearAllAgents();
+            if (Input.GetKeyDown(PauseHotkey)) TogglePause();
+
             // Direct tool select (Create mode only). Edit mode ignores
             // these so number keys stay free for future Edit-mode actions.
             if (CurrentMode == DesignerMode.Create)
@@ -638,7 +687,8 @@ namespace NetworkDesigner.Designer
             UpdateMarkingShiftMode();
 
             if (CurrentMode == DesignerMode.Create) HandleCreateInput();
-            else HandleEditInput();
+            else if (CurrentMode == DesignerMode.Edit) HandleEditInput();
+            else HandleRunInput();
 
             // Runs unconditionally so the ghost hides correctly the
             // frame the user toggles out of Create mode.
@@ -658,6 +708,14 @@ namespace NetworkDesigner.Designer
 
             // Create-mode dashed range circle.
             UpdateRangeCircle();
+
+            // Keep the selected agent's plan polyline in sync with its
+            // current segments (they can change on loop / rebuild).
+            UpdateAgentPlanLine();
+            // Per-frame blocker indicator lines — show what's slowing
+            // the selected agent down (useful during Pause to debug
+            // gridlock).
+            UpdateBlockerLines();
 
             // Debounced autosave flush.
             if (Autosave && _autosaveDirtySinceRealtime > 0f
@@ -908,7 +966,14 @@ namespace NetworkDesigner.Designer
 
         void ToggleMode()
         {
-            SetMode(CurrentMode == DesignerMode.Create ? DesignerMode.Edit : DesignerMode.Create);
+            // Cycle: Create → Edit → Run → Create.
+            DesignerMode next = CurrentMode switch
+            {
+                DesignerMode.Create => DesignerMode.Edit,
+                DesignerMode.Edit => DesignerMode.Run,
+                _ => DesignerMode.Create,
+            };
+            SetMode(next);
         }
 
         // Idempotent mode setter. Cancels any in-progress operation when
@@ -923,6 +988,7 @@ namespace NetworkDesigner.Designer
             EndHandleDrag();
             SetSelectedVertex(null);
             SetSelectedRoad(null);
+            SetSelectedAgent(null);
             ClearHoverHighlight();
             CurrentMode = m;
             // Default vertex view per mode: pucks ON in Create (so the
@@ -1349,7 +1415,8 @@ namespace NetworkDesigner.Designer
                 Curve = new RoadCurve { ControlA = controlA, ControlB = controlB },
             };
             _network.Roads.Add(road);
-            MarkNetworkDirty();
+            // New road — no existing agent's plan references it yet.
+            MarkDirtyNoAgentRebuild();
             Debug.Log($"[NetworkDesigner] Fillet road {road.Id}: " +
                       $"A({start.Id}) → B({end.Id}) via corner ({corner.x:F2}, {corner.y:F2}); " +
                       $"controlA=({controlA.x:F2},{controlA.y:F2}) " +
@@ -1378,7 +1445,8 @@ namespace NetworkDesigner.Designer
                 Curve = new RoadCurve { ControlA = controlA, ControlB = controlB },
             };
             _network.Roads.Add(road);
-            MarkNetworkDirty();
+            // New road — no existing agent's plan references it yet.
+            MarkDirtyNoAgentRebuild();
             Debug.Log($"[NetworkDesigner] S-curve road {road.Id}: " +
                       $"A({start.Id}) → B({end.Id}) via control ({control.x:F2}, {control.y:F2}); " +
                       $"controlA=({controlA.x:F2},{controlA.y:F2}) " +
@@ -1413,12 +1481,13 @@ namespace NetworkDesigner.Designer
             if (Input.GetKeyDown(KeyCode.Escape))
             {
                 if (_armedLaneEndpoint != null) UnarmLaneEndpoint();
+                else if (_selectedAgent != null) SetSelectedAgent(null);
                 else if (_selectedRoad != null)
                 {
                     _selectedRoad.Curve = null;
                     NetworkRoad was = _selectedRoad;
                     SetSelectedRoad(null);
-                    MarkNetworkDirty();
+                    MarkRoadDirty(was.Id);
                     Rebuild();
                     Debug.Log($"[NetworkDesigner] Reverted road '{was.Id}' to straight via Esc.");
                 }
@@ -1430,6 +1499,16 @@ namespace NetworkDesigner.Designer
             // sign > lane endpoint > marking > setback handle > vertex > ground.
             if (Input.GetMouseButtonDown(0) && !MouseOverPalette())
             {
+                // Agent click → select for plan visualization. Highest
+                // priority since the agent's capsule sits above the
+                // road surface and is the most-foreground clickable.
+                AgentClickTarget agentTag = PickAgent();
+                if (agentTag != null && agentTag.Agent != null)
+                {
+                    SetSelectedAgent(agentTag.Agent);
+                    return;
+                }
+
                 bool altHeld = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 if (altHeld)
                 {
@@ -1576,7 +1655,7 @@ namespace NetworkDesigner.Designer
                     {
                         marker.transform.position = new Vector3(ground.Value.x, MarkerHeight, ground.Value.y);
                     }
-                    MarkNetworkDirty();
+                    MarkVertexDirty(_draggedVertex.Id);
                     Rebuild();
                 }
             }
@@ -1648,7 +1727,13 @@ namespace NetworkDesigner.Designer
             {
                 RemoveConnectionOverride(_armedLaneEndpoint.Lane, m.Lane);
             }
-            MarkNetworkDirty();
+            // Connection mutations (add OR remove) don't invalidate
+            // agents — agents continue with their current plans and
+            // pick up the change naturally at their next loop. Avoids
+            // the visual "swarm teleports to edited intersection" when
+            // every agent through V rebuilds at once. New spawns
+            // (next G press) use fresh connectivity immediately.
+            MarkDirtyNoAgentRebuild();
             Rebuild();
         }
 
@@ -1736,7 +1821,8 @@ namespace NetworkDesigner.Designer
             StopYieldControl next = NextControl(cur);
             if (t.End == RoadEnd.A) r.ControlA = next;
             else r.ControlB = next;
-            MarkNetworkDirty();
+            // Agents don't yet honor stop/yield signs — no rebuild needed.
+            MarkDirtyNoAgentRebuild();
             Rebuild();
         }
 
@@ -1770,14 +1856,23 @@ namespace NetworkDesigner.Designer
             if (_markingShiftMode)
             {
                 CreateLaneMarking(_armedLaneEndpoint.Lane, _armedLaneEndpoint.Node, m.Lane, m.Node);
+                // Markings are visual only.
+                MarkDirtyNoAgentRebuild();
             }
             else
             {
                 AddConnectionOverride(_armedLaneEndpoint.Lane, m.Lane);
+                // ADDITIVE change — existing agents' current plans are
+                // still valid (they don't need the new connection).
+                // Skipping the agent rebuild here prevents the "swarm
+                // teleports to the edited intersection" visual that
+                // happens when MarkVertexDirty invalidates everything
+                // passing through V at once. New spawns (next G press)
+                // will see and use the new connection.
+                MarkDirtyNoAgentRebuild();
             }
             // Keep the from-lane armed so the user can author multiple
             // markings / connections without re-clicking.
-            MarkNetworkDirty();
             Rebuild();
         }
 
@@ -1855,7 +1950,8 @@ namespace NetworkDesigner.Designer
                 m.Color = LaneMarkingColor.White;
                 m.Style = LaneMarkingStyle.Solid;
             }
-            MarkNetworkDirty();
+            // Marking style cycle is purely cosmetic.
+            MarkDirtyNoAgentRebuild();
             Rebuild();
         }
 
@@ -1866,7 +1962,8 @@ namespace NetworkDesigner.Designer
             int removed = v.LaneMarkings.RemoveAll(x => x.Id == t.MarkingId);
             if (removed > 0)
             {
-                MarkNetworkDirty();
+                // Visual only.
+                MarkDirtyNoAgentRebuild();
                 Rebuild();
             }
         }
@@ -2439,25 +2536,70 @@ namespace NetworkDesigner.Designer
         void HandleRightClickDelete()
         {
             if (PickCamera == null) return;
+            // Try agent first — they sit ABOVE the road and have their
+            // own trigger collider; raycast may hit an agent before
+            // (or instead of) the road/vertex below it. Use a
+            // dedicated RaycastAll scan to be sure we find one even
+            // when other colliders are in the way.
+            AgentClickTarget agentTag = PickAgent();
+            if (agentTag != null && agentTag.Agent != null && _agentSystem != null)
+            {
+                _agentSystem.DespawnAgent(agentTag.Agent);
+                return;
+            }
+
+            // RaycastAll + filter so agent trigger colliders (which
+            // may sit between the camera and the road/vertex below)
+            // don't shadow the real target. Vertex first (sits above
+            // road surface), then road.
             Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
-            if (!Physics.Raycast(ray, out RaycastHit hit, 10000f)) return;
-
-            // Vertex marker wins over road if both are stacked (markers
-            // sit slightly above the road surface, so they'd typically
-            // hit first anyway).
-            VertexMarker vm = hit.collider.GetComponentInParent<VertexMarker>();
-            if (vm != null && vm.Vertex != null)
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            VertexMarker vmBest = null;
+            float vmDist = float.MaxValue;
+            RoadMarker rmBest = null;
+            float rmDist = float.MaxValue;
+            for (int i = 0; i < hits.Length; i++)
             {
-                DeleteVertex(vm.Vertex);
-                return;
+                VertexMarker vm = hits[i].collider.GetComponentInParent<VertexMarker>();
+                if (vm != null && vm.Vertex != null && hits[i].distance < vmDist)
+                {
+                    vmDist = hits[i].distance;
+                    vmBest = vm;
+                    continue;
+                }
+                RoadMarker rm = hits[i].collider.GetComponentInParent<RoadMarker>();
+                if (rm != null && rm.Road != null && hits[i].distance < rmDist)
+                {
+                    rmDist = hits[i].distance;
+                    rmBest = rm;
+                }
             }
+            if (vmBest != null) { DeleteVertex(vmBest.Vertex); return; }
+            if (rmBest != null) { DeleteRoad(rmBest.Road); return; }
+        }
 
-            RoadMarker rm = hit.collider.GetComponentInParent<RoadMarker>();
-            if (rm != null && rm.Road != null)
+        // Pick the closest agent under the cursor. Returns its
+        // AgentClickTarget tag (with the Agent reference), or null
+        // if no agent is hit. Used by right-click despawn.
+        AgentClickTarget PickAgent()
+        {
+            if (PickCamera == null) return null;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f, ~0,
+                QueryTriggerInteraction.Collide);
+            float bestDist = float.MaxValue;
+            AgentClickTarget best = null;
+            for (int i = 0; i < hits.Length; i++)
             {
-                DeleteRoad(rm.Road);
-                return;
+                AgentClickTarget tag = hits[i].collider.GetComponentInParent<AgentClickTarget>();
+                if (tag == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = tag;
+                }
             }
+            return best;
         }
 
         // Pick the intersection asphalt under the cursor, skipping any
@@ -2559,7 +2701,7 @@ namespace NetworkDesigner.Designer
                       $"Dropped {droppedOverrides} connectivity overrides + " +
                       $"{droppedMarkings} lane markings on its endpoints.");
 
-            MarkNetworkDirty();
+            MarkRoadDirty(road.Id);
             Rebuild();
             // Force re-evaluation of hover next frame — the cached
             // road reference is still valid, but the mesh changed.
@@ -2938,7 +3080,7 @@ namespace NetworkDesigner.Designer
                 _draggedLateralHandle.Road.LateralOffsetA = signed;
             else
                 _draggedLateralHandle.Road.LateralOffsetB = signed;
-            MarkNetworkDirty();
+            MarkRoadDirty(_draggedLateralHandle.Road.Id);
             Rebuild();
         }
 
@@ -3160,7 +3302,7 @@ namespace NetworkDesigner.Designer
             if (_draggedBezier.End == RoadEnd.A) r.Curve.ControlA = ground.Value;
             else r.Curve.ControlB = ground.Value;
 
-            MarkNetworkDirty();
+            MarkRoadDirty(r.Id);
             Rebuild();
         }
 
@@ -3544,7 +3686,7 @@ namespace NetworkDesigner.Designer
             if (_draggedHandle.End == RoadEnd.A) r.SetbackA = t;
             else r.SetbackB = t;
 
-            MarkNetworkDirty();
+            MarkRoadDirty(r.Id);
             Rebuild();
         }
 
@@ -3553,7 +3695,7 @@ namespace NetworkDesigner.Designer
             if (r == null) return;
             if (end == RoadEnd.A) r.SetbackA = null;
             else r.SetbackB = null;
-            MarkNetworkDirty();
+            MarkRoadDirty(r.Id);
             Debug.Log($"[NetworkDesigner] Cleared setback override on road {r.Id} end {end}.");
             Rebuild();
         }
@@ -4213,8 +4355,10 @@ namespace NetworkDesigner.Designer
 
         void DeleteRoad(NetworkRoad road)
         {
-            _network.Roads.RemoveAll(r => r.Id == road.Id);
-            MarkNetworkDirty();
+            string roadId = road.Id;
+            _network.Roads.RemoveAll(r => r.Id == roadId);
+            // Agents using this road need to reroute.
+            MarkRoadDirty(roadId);
             Rebuild();
         }
 
@@ -4293,7 +4437,8 @@ namespace NetworkDesigner.Designer
             };
             _network.Vertices.Add(v);
             SpawnVertexMarker(v);
-            MarkNetworkDirty();
+            // New vertex — no existing agent's plan references it yet.
+            MarkDirtyNoAgentRebuild();
             return v;
         }
 
@@ -4595,7 +4740,8 @@ namespace NetworkDesigner.Designer
                 Profile = BuildDefaultProfile(),
             };
             _network.Roads.Add(road);
-            MarkNetworkDirty();
+            // New road — no existing agent's plan references it yet.
+            MarkDirtyNoAgentRebuild();
             Debug.Log($"[NetworkDesigner] Road {road.Id}: " +
                       $"A({a.Id}) @ ({a.Position.x:F2}, {a.Position.y:F2}) → " +
                       $"B({b.Id}) @ ({b.Position.x:F2}, {b.Position.y:F2}), " +
@@ -4664,7 +4810,10 @@ namespace NetworkDesigner.Designer
 
             _network.Roads.Add(left);
             _network.Roads.Add(right);
-            MarkNetworkDirty();
+            // Agents that were on the old road need to reroute since
+            // it no longer exists. The split vertex is brand-new and
+            // not on any existing plan, so vertex-scope is wrong.
+            MarkRoadDirty(old.Id);
             string kind = (old.Curve != null && tOnOldCurve.HasValue)
                 ? $"curved (t={tOnOldCurve.Value:F3})"
                 : "straight";
@@ -4746,6 +4895,9 @@ namespace NetworkDesigner.Designer
             if (_renderer == null) _renderer = GetComponent<NetworkRenderer>();
             _renderer.Network = _network;
             _renderer.Rebuild();
+            // Push the latest Network into the agent system too so
+            // pathfinding + per-frame ticking see current geometry.
+            if (_agentSystem != null) _agentSystem.Network = _network;
             // Keep edit-mode setback handles synced to the post-resolve
             // geometry of the selected vertex.
             RefreshSetbackHandlePositions();
@@ -4847,7 +4999,59 @@ namespace NetworkDesigner.Designer
         // a vertex position, or a road profile/setback override. Doesn't
         // touch disk — just resets the debounce so Update flushes after a
         // brief idle period.
+        // The four entry points below all mark the network as needing
+        // an autosave; they differ only in which agents they invalidate
+        // for path rebuild. Pick the narrowest scope that covers the
+        // mutation so unaffected agents keep their plans.
+        //
+        //   MarkNetworkDirty()              — invalidate ALL agents.
+        //                                     Use only for topology-
+        //                                     wide changes.
+        //   MarkRoadDirty(roadId)           — invalidate agents whose
+        //                                     remaining path uses this
+        //                                     road.
+        //   MarkVertexDirty(vertexId)       — invalidate agents whose
+        //                                     remaining path traverses
+        //                                     this vertex.
+        //   MarkDirtyNoAgentRebuild()       — autosave only, no agent
+        //                                     invalidation (purely
+        //                                     cosmetic edits).
         void MarkNetworkDirty()
+        {
+            _autosaveDirtySinceRealtime = Time.realtimeSinceStartup;
+            if (_agentSystem != null) _agentSystem.InvalidateAllAgents();
+        }
+
+        void MarkRoadDirty(string roadId)
+        {
+            _autosaveDirtySinceRealtime = Time.realtimeSinceStartup;
+            if (_agentSystem != null) _agentSystem.InvalidateAgentsForRoad(roadId);
+        }
+
+        void MarkVertexDirty(string vertexId)
+        {
+            _autosaveDirtySinceRealtime = Time.realtimeSinceStartup;
+            if (_agentSystem == null) return;
+            // Vertex mutation affects:
+            //   - agents passing through this vertex (lane connectivity,
+            //     setback/intersection geometry).
+            //   - agents on any road incident to this vertex (the road's
+            //     endpoint geometry shifts when the vertex moves).
+            // Catch both — InvalidateAgentsForVertex covers the first;
+            // an InvalidateAgentsForRoad sweep per incident road covers
+            // the second.
+            _agentSystem.InvalidateAgentsForVertex(vertexId);
+            if (_network != null && !string.IsNullOrEmpty(vertexId))
+            {
+                foreach (NetworkRoad r in _network.Roads)
+                {
+                    if (r.EndA == vertexId || r.EndB == vertexId)
+                        _agentSystem.InvalidateAgentsForRoad(r.Id);
+                }
+            }
+        }
+
+        void MarkDirtyNoAgentRebuild()
         {
             _autosaveDirtySinceRealtime = Time.realtimeSinceStartup;
         }
@@ -5208,6 +5412,238 @@ namespace NetworkDesigner.Designer
                     });
                 }
             }
+        }
+
+        // ---- Agent swarm ----
+
+        void EnsureAgentSystem()
+        {
+            if (_agentSystem != null) return;
+            _agentSystem = GetComponent<AgentSystem>();
+            if (_agentSystem == null) _agentSystem = GetComponentInChildren<AgentSystem>();
+        }
+
+        void SpawnAgentSwarm()
+        {
+            EnsureAgentSystem();
+            if (_agentSystem == null)
+            {
+                Debug.LogWarning("[NetworkDesigner] Agent spawn refused: no AgentSystem on this GameObject. " +
+                                 "Add an AgentSystem component alongside NetworkDesigner.");
+                return;
+            }
+            if (_agentSystem.Network == null) _agentSystem.Network = _network;
+            _agentSystem.SpawnRandomAgents(AgentSpawnBatchSize);
+        }
+
+        void ClearAllAgents()
+        {
+            if (_agentSystem == null) return;
+            int n = _agentSystem.Agents.Count;
+            if (n == 0) return;
+            // Clear selection too — the selected agent is about to vanish.
+            SetSelectedAgent(null);
+            _agentSystem.DespawnAll();
+            Debug.Log($"[NetworkDesigner] Despawned {n} agent(s).");
+        }
+
+        void TogglePause()
+        {
+            EnsureAgentSystem();
+            if (_agentSystem == null) return;
+            _agentSystem.Paused = !_agentSystem.Paused;
+            Debug.Log($"[NetworkDesigner] Simulation {(_agentSystem.Paused ? "PAUSED" : "RESUMED")}.");
+        }
+
+        // Run mode input handler. Network editing is locked — only
+        // agent interactions are honored. Esc deselects.
+        void HandleRunInput()
+        {
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                if (_selectedAgent != null) SetSelectedAgent(null);
+            }
+            if (!Input.GetMouseButtonDown(0) && !Input.GetMouseButtonDown(1)) return;
+            if (MouseOverPalette()) return;
+
+            if (Input.GetMouseButtonDown(0))
+            {
+                AgentClickTarget agentTag = PickAgent();
+                if (agentTag != null && agentTag.Agent != null)
+                {
+                    SetSelectedAgent(agentTag.Agent);
+                }
+            }
+            else if (Input.GetMouseButtonDown(1))
+            {
+                AgentClickTarget agentTag = PickAgent();
+                if (agentTag != null && agentTag.Agent != null && _agentSystem != null)
+                {
+                    _agentSystem.DespawnAgent(agentTag.Agent);
+                }
+            }
+        }
+
+        // ---- Agent selection + plan visualization ----
+
+        void SetSelectedAgent(Agent a)
+        {
+            if (_selectedAgent == a) return;
+            // Restore the previously-selected agent's color.
+            if (_selectedAgent != null && _selectedAgent.Visual != null && _selectedAgentColorCaptured)
+            {
+                MeshRenderer pmr = _selectedAgent.Visual.GetComponent<MeshRenderer>();
+                if (pmr != null && pmr.sharedMaterial != null)
+                    pmr.sharedMaterial.color = _selectedAgentOriginalColor;
+            }
+            _selectedAgent = a;
+            _selectedAgentColorCaptured = false;
+            if (a != null && a.Visual != null)
+            {
+                MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+                if (mr != null && mr.sharedMaterial != null)
+                {
+                    _selectedAgentOriginalColor = mr.sharedMaterial.color;
+                    _selectedAgentColorCaptured = true;
+                    mr.sharedMaterial.color = SelectedAgentTint;
+                }
+                Debug.Log($"[NetworkDesigner] Selected agent '{a.Id}' " +
+                          $"(start='{a.StartVertexId}', end='{a.EndVertexId}', " +
+                          $"{a.Segments?.Count ?? 0} segments).");
+            }
+            else if (_agentPathLineGo != null)
+            {
+                _agentPathLineGo.SetActive(false);
+            }
+        }
+
+        // Called every frame from Update. Builds / updates the polyline
+        // following the selected agent's segments. Handles the case
+        // where the selected agent was despawned (e.g., right-click
+        // delete or auto-despawn on broken route).
+        void UpdateAgentPlanLine()
+        {
+            if (_selectedAgent == null)
+            {
+                if (_agentPathLineGo != null) _agentPathLineGo.SetActive(false);
+                return;
+            }
+            // Agent may have been despawned externally.
+            if (_agentSystem == null || _selectedAgent.Visual == null
+                || _selectedAgent.Segments == null || _selectedAgent.Segments.Count == 0)
+            {
+                SetSelectedAgent(null);
+                return;
+            }
+
+            EnsureAgentPathLine();
+            _agentPathLineGo.SetActive(true);
+
+            // Sample each segment from t=0..1 at AgentPlanSamplesPerSegment
+            // points, concatenate into a polyline. Skip the very first
+            // point of each subsequent segment to avoid a doubled vertex
+            // at segment boundaries.
+            int samplesPerSeg = Mathf.Max(2, AgentPlanSamplesPerSegment);
+            var segs = _selectedAgent.Segments;
+            int totalPoints = segs.Count * samplesPerSeg;
+            if (_planLinePoints == null || _planLinePoints.Length != totalPoints)
+                _planLinePoints = new Vector3[totalPoints];
+            int idx = 0;
+            for (int s = 0; s < segs.Count; s++)
+            {
+                AgentSegment seg = segs[s];
+                for (int i = 0; i < samplesPerSeg; i++)
+                {
+                    float t = i / (float)(samplesPerSeg - 1);
+                    seg.Sample(t, out Vector2 pos, out _);
+                    _planLinePoints[idx++] = new Vector3(pos.x, AgentPlanLineHeight, pos.y);
+                }
+            }
+            _agentPathLine.positionCount = idx;
+            _agentPathLine.SetPositions(_planLinePoints);
+            _agentPathLine.startWidth = AgentPlanLineWidth;
+            _agentPathLine.endWidth = AgentPlanLineWidth;
+            if (_agentPathLine.material != null)
+                _agentPathLine.material.color = AgentPlanColor;
+        }
+
+        void EnsureAgentPathLine()
+        {
+            if (_agentPathLineGo != null) return;
+            _agentPathLineGo = new GameObject("AgentPlanLine");
+            _agentPathLineGo.transform.SetParent(transform, worldPositionStays: false);
+            _agentPathLine = _agentPathLineGo.AddComponent<LineRenderer>();
+            _agentPathLine.useWorldSpace = true;
+            _agentPathLine.startWidth = AgentPlanLineWidth;
+            _agentPathLine.endWidth = AgentPlanLineWidth;
+            _agentPathLine.material = new Material(Shader.Find("Sprites/Default"))
+            {
+                name = "AgentPlanLineMat",
+                color = AgentPlanColor,
+            };
+            _agentPathLine.numCapVertices = 2;
+            _agentPathLine.numCornerVertices = 2;
+        }
+
+        // Reusable buffer to avoid per-frame allocation.
+        Vector3[] _planLinePoints;
+
+        // Pool of LineRenderer GameObjects for the per-frame blocker
+        // visualization. Active ones connect the selected agent to
+        // each of its current blockers; inactive ones stay around
+        // for reuse so we don't allocate/free every frame.
+        readonly List<LineRenderer> _blockerLines = new List<LineRenderer>();
+        readonly List<Agent> _scratchFollowBlockers = new List<Agent>();
+        readonly List<Agent> _scratchIntersectionBlockers = new List<Agent>();
+
+        void UpdateBlockerLines()
+        {
+            // No selection → hide all.
+            if (_selectedAgent == null || _selectedAgent.Visual == null || _agentSystem == null)
+            {
+                for (int i = 0; i < _blockerLines.Count; i++)
+                    if (_blockerLines[i] != null) _blockerLines[i].gameObject.SetActive(false);
+                return;
+            }
+
+            _agentSystem.ComputeBlockers(_selectedAgent, _scratchFollowBlockers, _scratchIntersectionBlockers);
+            int total = _scratchFollowBlockers.Count + _scratchIntersectionBlockers.Count;
+
+            // Grow pool as needed.
+            while (_blockerLines.Count < total)
+            {
+                var go = new GameObject("AgentBlockerLine");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                var lr = go.AddComponent<LineRenderer>();
+                lr.useWorldSpace = true;
+                lr.positionCount = 2;
+                lr.material = new Material(Shader.Find("Sprites/Default")) { name = "BlockerLineMat" };
+                _blockerLines.Add(lr);
+            }
+
+            Vector3 fromPos = _selectedAgent.Visual.transform.position;
+            int idx = 0;
+            for (int i = 0; i < _scratchFollowBlockers.Count; i++, idx++)
+                ConfigureBlockerLine(_blockerLines[idx], fromPos, _scratchFollowBlockers[i], BlockerFollowColor);
+            for (int i = 0; i < _scratchIntersectionBlockers.Count; i++, idx++)
+                ConfigureBlockerLine(_blockerLines[idx], fromPos, _scratchIntersectionBlockers[i], BlockerIntersectionColor);
+            // Deactivate the rest.
+            for (; idx < _blockerLines.Count; idx++)
+                if (_blockerLines[idx] != null) _blockerLines[idx].gameObject.SetActive(false);
+        }
+
+        void ConfigureBlockerLine(LineRenderer lr, Vector3 fromPos, Agent to, Color color)
+        {
+            if (lr == null || to == null || to.Visual == null) return;
+            lr.gameObject.SetActive(true);
+            Vector3 toPos = to.Visual.transform.position;
+            // Lift slightly above the road so the line is visible.
+            Vector3 lift = new Vector3(0f, AgentPlanLineHeight + 0.05f, 0f);
+            lr.SetPosition(0, fromPos + lift);
+            lr.SetPosition(1, toPos + lift);
+            lr.startWidth = BlockerLineWidth;
+            lr.endWidth = BlockerLineWidth;
+            if (lr.material != null) lr.material.color = color;
         }
 
         // Project cursor onto a half-ray starting at `origin` going in
