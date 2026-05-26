@@ -24,13 +24,19 @@ namespace NetworkDesigner.Agents
 
         public int SegmentIndex;     // current entry in Segments
         public float T;              // 0..1 along current segment
-        // Two-speed model so following behavior can throttle the agent
-        // without losing its preferred cruising speed.
-        //   TargetSpeed — the agent's preferred speed (m/s). Set at
-        //     spawn from AgentSystem.DefaultSpeed.
-        //   Speed       — the agent's CURRENT speed (m/s). Adjusted
-        //     each frame toward a "desired" speed based on the gap to
-        //     the agent ahead. Capped at TargetSpeed.
+        // Three-speed model.
+        //   NaturalSpeed — the agent's preferred cruise speed (m/s).
+        //     Sampled at spawn from a bell curve around
+        //     AgentSystem.DefaultSpeed (stdev = SpeedVariationStdDev).
+        //     Constant for the life of the agent.
+        //   TargetSpeed  — NaturalSpeed capped by the current road's
+        //     posted SpeedLimit. Recomputed each frame in
+        //     UpdateFollowingSpeeds. Equal to NaturalSpeed when on an
+        //     intersection segment or a road without a posted limit.
+        //   Speed        — the CURRENT speed (m/s). Adjusted each frame
+        //     toward a "desired" speed via following / intersection /
+        //     sign logic. Capped at TargetSpeed.
+        public float NaturalSpeed = 12f;
         public float TargetSpeed = 12f;
         public float Speed = 12f;
         public bool Loop = true;

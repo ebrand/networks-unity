@@ -132,6 +132,7 @@ GameObject:
   - component: {fileID: 715120601}
   - component: {fileID: 715120605}
   - component: {fileID: 715120604}
+  - component: {fileID: 715120606}
   m_Layer: 0
   m_Name: Designer
   m_TagString: Untagged
@@ -159,6 +160,12 @@ MonoBehaviour:
   ToolHotkeyFillet: 50
   ToolHotkeySCurve: 51
   ToolHotkeyRoundabout: 52
+  ToolHotkeyCulDeSac: 53
+  VertexViewToggleHotkey: 118
+  AgentSpawnHotkey: 103
+  AgentClearHotkey: 104
+  PauseHotkey: 112
+  AgentSpawnBatchSize: 100
   ShowToolPalette: 1
   ToolPaletteOrigin: {x: 10, y: 10}
   ToolPaletteWidth: 200
@@ -169,33 +176,54 @@ MonoBehaviour:
   RoundaboutRadius: 12
   RoundaboutLanes: 2
   RoundaboutHotkey: 114
+  CulDeSacWidthMultiplier: 2
+  CulDeSacLanes: 1
   Autosave: 1
   AutosavePath: 
   AutosaveDebounceSeconds: 1
   PickCamera: {fileID: 0}
   GroundY: 0
   SnapToGrid: 1
+  AngleSnapEnabled: 1
   MajorSnapRange: 1.5
   Grid: {fileID: 0}
   SetbackHandleDiameter: 1.5
+  SetbackRingThickness: 0.35
   SetbackHandleHeight: 0.4
+  SetbackHandleOffsetMin: 3
+  SetbackHandleOffsetWidthMultiplier: 0.4
+  SetbackStemDashLength: 0.4
+  SetbackStemGapLength: 0.3
+  SetbackStemWidth: 0.1
   SetbackHandleColor: {r: 1, g: 0.55, b: 0.15, a: 1}
   SetbackHandleActiveColor: {r: 1, g: 0.85, b: 0.2, a: 1}
+  LaneMarkerDiameter: 2.5
+  LaneMarkerRingThickness: 0.5
+  LaneCornerMarkerDiameter: 1.4
+  LaneCornerMarkerRingThickness: 0.28
+  LaneMarkerHeight: 1.4
+  LaneOverlayDimAlpha: 0.25
+  LaneOverlayFullAlpha: 1
+  LaneOutboundMarkerColor: {r: 0.85, g: 0.85, b: 0.85, a: 1}
+  LaneMarkerArmedColor: {r: 1, g: 1, b: 0.3, a: 1}
   MarkerDiameter: 2
   MarkerThickness: 0.15
   MarkerHeight: 0.5
   MarkerColor: {r: 0.2, g: 0.6, b: 1, a: 1}
   MarkerHoverColor: {r: 0.55, g: 0.85, b: 1, a: 1}
   MarkerActiveColor: {r: 1, g: 0.85, b: 0.2, a: 1}
+  ShowVertexMarkers: 1
   PreviewLineWidth: 0.5
   PreviewLineColor: {r: 0.5, g: 0.85, b: 1, a: 0.8}
   GhostPuckAlpha: 0.35
+  GhostPuckEdgeSnapColor: {r: 1, g: 0.9, b: 0.2, a: 1}
   RangeCircleEnabled: 1
   RangeCircleRadius: 10
   RangeCircleWidth: 0.06
   RangeCircleDashPeriod: 0.6
   RangeCircleColor: {r: 0.95, g: 0.85, b: 0.2, a: 0.55}
   RangeCircleOpacity: 0.55
+  CurveSplitFlatnessThreshold: 0.1
   GuideSnapDistance: 0.5
   GuideLineWidth: 0.05
   GuideDashPeriod: 0.6
@@ -206,11 +234,43 @@ MonoBehaviour:
   PerpendicularGuideRange: 100
   VertexOnEdgeTolerance: 0.25
   EdgeClickTolerance: 0.5
+  RoadEdgeSnapTolerance: 2
   CollinearMergeAngleDeg: 8
   DefaultAbLanes: 1
   DefaultBaLanes: 1
   DefaultLaneWidth: 4
   DefaultShoulderWidth: 1
+  SelectedAgentTint: {r: 1, g: 0.95, b: 0.2, a: 1}
+  AgentPlanColor: {r: 1, g: 0.95, b: 0.2, a: 0.85}
+  AgentPlanLineWidth: 0.4
+  AgentPlanLineHeight: 0.1
+  AgentPlanSamplesPerSegment: 12
+  BlockerFollowColor: {r: 1, g: 0.2, b: 0.2, a: 0.85}
+  BlockerIntersectionColor: {r: 1, g: 0.6, b: 0.1, a: 0.85}
+  BlockerLineWidth: 0.35
+  BlockerFollowTint: {r: 1, g: 0.25, b: 0.25, a: 1}
+  BlockerIntersectionTint: {r: 1, g: 0.55, b: 0.1, a: 1}
+  DetectionConeColor: {r: 0.3, g: 0.7, b: 1, a: 0.16}
+  DetectionConeLift: 0.04
+  DetectionConeSegments: 24
+  DetectionConeShowComfortRing: 1
+  DetectionConeComfortColor: {r: 0.3, g: 0.7, b: 1, a: 0.28}
+  HoverHighlightColor: {r: 1, g: 0.9, b: 0, a: 0.25}
+  HoverHighlightLift: 0.02
+  BezierHandleDiameter: 1.6
+  BezierHandleRingThickness: 0.28
+  BezierHandleHeight: 1.6
+  BezierHandleColor: {r: 1, g: 0.45, b: 0.85, a: 0.95}
+  BezierPhantomTangent: 0.33
+  BezierStemWidth: 0.1
+  BezierStemDashLength: 0.4
+  BezierStemGapLength: 0.3
+  LateralOffsetHandleDiameter: 1.4
+  LateralOffsetHandleRingThickness: 0.25
+  LateralOffsetHandleHeight: 1.5
+  LateralOffsetHandleColor: {r: 0.45, g: 0.85, b: 1, a: 0.95}
+  LateralOffsetHandleActiveColor: {r: 0.2, g: 0.7, b: 1, a: 1}
+  LateralOffsetHandleInwardOffset: 4
 --- !u!114 &715120602
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -223,10 +283,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 68eab0eda13a94a6e9f06ea20252e79a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NetworkDesigner.Rendering.NetworkRenderer
-  Network:
-    DriveSide: 0
-    Vertices: []
-    Roads: []
   AsphaltMaterial: {fileID: 2100000, guid: 4eb4982c44d4641918001074262f2e5f, type: 2}
   ShoulderMaterial: {fileID: 0}
   MedianMaterial: {fileID: 0}
@@ -256,6 +312,58 @@ MonoBehaviour:
   RoadLineColor: {r: 0.85, g: 0.85, b: 0.95, a: 1}
   RoadLineWidth: 0.4
   BezierSamplesPerSegment: 16
+  ShowDeadEndCaps: 1
+  DeadEndCapSegments: 24
+  ShowLaneMarkings: 1
+  LaneMarkingWhite: {r: 1, g: 1, b: 1, a: 1}
+  LaneMarkingYellow: {r: 1, g: 0.85, b: 0.2, a: 1}
+  LaneMarkingAlpha: 1
+  LaneMarkingWidth: 0.18
+  LaneMarkingHeight: 0.013
+  LaneMarkingDashLength: 0.7
+  LaneMarkingDashGap: 0.6
+  LaneMarkingBezierSamples: 24
+  ShowSigns: 1
+  SignTint: {r: 1, g: 1, b: 1, a: 1}
+  SignAlpha: 1
+  SignSize: 2.5
+  SignShoulderClearance: 1.5
+  SignAlongOffset: 0.5
+  SignHeight: 0.03
+  StopSignPrefab: {fileID: 303154237037538169, guid: 7f58021dc7e4f9742bb58e20c1bbbcda, type: 3}
+  YieldSignPrefab: {fileID: 2957576626556104725, guid: ad8bf61253b5ddf4ab5bd2a4312b5c0d, type: 3}
+  SignPostPrefab: {fileID: 1374523276229974, guid: ce971711b1127b94d858994998d95b94, type: 3}
+  ShowPaintedControls: 1
+  ShowLaneArrows: 1
+  PavementMarkingColor: {r: 0.95, g: 0.95, b: 0.95, a: 1}
+  PavementMarkingAlpha: 1
+  PavementMarkingHeight: 0.012
+  StopLineWidth: 0.6
+  StopLineInsetFromSetback: 0.2
+  YieldTriangleBase: 0.6
+  YieldTriangleHeight: 0.9
+  YieldTriangleSpacing: 0.4
+  YieldInsetFromSetback: 0.2
+  LaneArrowSize: 3.5
+  LaneArrowOffset: 4
+  LaneArrowLength: 3
+  LaneArrowShaftWidth: 0.4
+  LaneArrowHeadLength: 0.9
+  LaneArrowHeadWidth: 1.3
+  LaneArrowStackSpacing: 4
+  StraightTurnThresholdDeg: 30
+  ShowLaneFlow: 1
+  LaneFlowHeight: 0.02
+  LaneFlowDimAlpha: 0.25
+  LaneFlowFullAlpha: 1
+  LaneFlowShaftWidth: 0.8
+  LaneFlowDashLength: 1.2
+  LaneFlowDashGap: 0.9
+  LaneFlowHeadLength: 2.5
+  LaneFlowHeadWidth: 2.5
+  LaneFlowBezierSamples: 24
+  LaneFlowBezierControlFraction: 0.45
+  CulDeSacFillSegments: 48
 --- !u!4 &715120603
 Transform:
   m_ObjectHideFlags: 0
@@ -289,6 +397,7 @@ MonoBehaviour:
   Orbit: {fileID: 0}
   Grid: {fileID: 0}
   GroundTiler: {fileID: 0}
+  Agents: {fileID: 0}
   PersistChanges: 1
   PersistencePath: 
   PersistDebounceSeconds: 0.5
@@ -306,6 +415,47 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::NetworkDesigner.Tuning.TuningServer
   Port: 8787
   LogTraffic: 0
+--- !u!114 &715120606
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 715120600}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f4171244623894c398ace13ddfbf313e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::NetworkDesigner.Agents.AgentSystem
+  Paused: 0
+  DefaultSpeed: 12
+  SpeedVariationStdDev: 0
+  MinSpawnGap: 6
+  MaxSpawnAttemptsPerFrame: 20
+  AgentDiameter: 1.6
+  AgentHeight: 1.8
+  AgentYLift: 0.9
+  AgentColor: {r: 0.3, g: 0.85, b: 0.4, a: 1}
+  IntersectionBezierControlFraction: 0.45
+  LaneChangeDistanceMeters: 30
+  OvertakingEnabled: 1
+  OvertakeSpeedRatio: 0.7
+  OvertakeMinRemainingMeters: 20
+  OvertakeClearAhead: 15
+  FollowLookAhead: 25
+  FollowMinDistance: 4
+  FollowComfortDistance: 15
+  FollowConeAngleDeg: 60
+  FollowAcceleration: 6
+  FollowDeceleration: 12
+  IntersectionRightOfWay: 1
+  IntersectionConflictDistance: 3
+  IntersectionBrakeMargin: 4
+  IntersectionStopDistance: 1.5
+  IntersectionCommitDistance: 1.5
+  ObeyTrafficSigns: 1
+  StopWaitSeconds: 1
+  YieldApproachSpeed: 4
 --- !u!1 &849874332
 GameObject:
   m_ObjectHideFlags: 0
@@ -604,6 +754,8 @@ MonoBehaviour:
   RotateSensitivity: 5
   PanSensitivity: 0.05
   ZoomSensitivity: 5
+  KeyboardPanSensitivity: 1.5
+  KeyboardPanShiftMultiplier: 3
 --- !u!1 &1769303990
 GameObject:
   m_ObjectHideFlags: 0

@@ -297,6 +297,20 @@ namespace NetworkDesigner.Designer
         public Color BlockerIntersectionColor = new Color(1f, 0.6f, 0.1f, 0.85f);
         [Tooltip("Width (m) of the blocker indicator lines.")]
         public float BlockerLineWidth = 0.35f;
+        [Tooltip("Tint applied to a FOLLOW blocker's capsule (the closest agent in the cone causing slowdown). Original color is restored when it's no longer blocking.")]
+        public Color BlockerFollowTint = new Color(1f, 0.25f, 0.25f, 1f);
+        [Tooltip("Tint applied to an INTERSECTION blocker's capsule (an agent on a conflicting upcoming bezier). Takes priority over the FOLLOW tint if the same agent qualifies as both.")]
+        public Color BlockerIntersectionTint = new Color(1f, 0.55f, 0.1f, 1f);
+        [Tooltip("Fill color for the selected agent's forward detection cone (the region where it looks for follow blockers).")]
+        public Color DetectionConeColor = new Color(0.3f, 0.7f, 1f, 0.16f);
+        [Tooltip("Y-lift (m) of the detection cone fan above the road so it sits on top.")]
+        public float DetectionConeLift = 0.04f;
+        [Tooltip("Angular segments used to tesselate the cone fan. More = smoother edge.")]
+        [Range(4, 64)] public int DetectionConeSegments = 24;
+        [Tooltip("Draw a separate inner fan at FollowComfortDistance (= start-slowing range). Outer fan is at FollowLookAhead (= consider-range).")]
+        public bool DetectionConeShowComfortRing = true;
+        [Tooltip("Fill color for the inner FollowComfortDistance fan. Should be more saturated than DetectionConeColor.")]
+        public Color DetectionConeComfortColor = new Color(0.3f, 0.7f, 1f, 0.28f);
 
         // Autosave debounce. Set by MarkDirty; consumed by Update to time
         // the actual disk write so a slider drag or vertex drag doesn't
@@ -714,8 +728,10 @@ namespace NetworkDesigner.Designer
             UpdateAgentPlanLine();
             // Per-frame blocker indicator lines — show what's slowing
             // the selected agent down (useful during Pause to debug
-            // gridlock).
+            // gridlock). Also tints the blocker capsules in place.
             UpdateBlockerLines();
+            // Forward detection cone fan for the selected agent.
+            UpdateDetectionCone();
 
             // Debounced autosave flush.
             if (Autosave && _autosaveDirtySinceRealtime > 0f
@@ -2237,6 +2253,9 @@ namespace NetworkDesigner.Designer
             DrawSelectedVertexSection();
 
             GUILayout.Space(8);
+            DrawSelectedRoadSection();
+
+            GUILayout.Space(8);
             DrawConfigsSection();
 
             GUILayout.EndScrollView();
@@ -2334,6 +2353,92 @@ namespace NetworkDesigner.Designer
             {
                 GUILayout.Label("(no incident roads)", _paletteSubtle);
             }
+        }
+
+        // Read/write inspector for the road selected for curve edit.
+        // Mirrors DrawSelectedVertexSection's style. Currently exposes:
+        //   - id, width, chord length
+        //   - speed limit (text field; empty = no limit)
+        // Adding more per-road fields here is straightforward — they
+        // don't need to be in the React tuning app since they're
+        // per-instance, not global.
+        void DrawSelectedRoadSection()
+        {
+            if (CurrentMode != DesignerMode.Edit) return;
+            if (_selectedRoad == null) return;
+
+            GUILayout.Label("ROAD", _paletteHeader);
+            GUILayout.Label($"id: {_selectedRoad.Id}", _paletteSubtle);
+
+            Vertex vA = FindVertexById(_selectedRoad.EndA);
+            Vertex vB = FindVertexById(_selectedRoad.EndB);
+            float chordLen = (vA != null && vB != null)
+                ? Vector2.Distance(vA.Position, vB.Position)
+                : 0f;
+            GUILayout.Label($"w={_selectedRoad.Profile.TotalWidth:F1}m  chord={chordLen:F1}m", _paletteSubtle);
+
+            // Speed limit text field. Empty / non-numeric → null (no limit).
+            // Buffer keeps the text the user is typing across frames; flushed
+            // on Enter or focus loss via the equality check below.
+            string current = _selectedRoad.SpeedLimit.HasValue
+                ? _selectedRoad.SpeedLimit.Value.ToString("0.##")
+                : "";
+            if (_speedLimitEditingId != _selectedRoad.Id)
+            {
+                _speedLimitEditingId = _selectedRoad.Id;
+                _speedLimitEditBuf = current;
+            }
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("speed limit (m/s)", _paletteSubtle, GUILayout.Width(120));
+            string typed = GUILayout.TextField(_speedLimitEditBuf, GUILayout.Width(60));
+            if (typed != _speedLimitEditBuf) _speedLimitEditBuf = typed;
+            if (GUILayout.Button("set", _paletteButton, GUILayout.Width(40)))
+            {
+                ApplySpeedLimitEdit();
+            }
+            if (GUILayout.Button("clear", _paletteButton, GUILayout.Width(48)))
+            {
+                _selectedRoad.SpeedLimit = null;
+                _speedLimitEditBuf = "";
+                MarkDirtyNoAgentRebuild();
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(
+                _selectedRoad.SpeedLimit.HasValue
+                    ? $"  posted: {_selectedRoad.SpeedLimit.Value:F1} m/s"
+                    : "  posted: (none — agents cruise at NaturalSpeed)",
+                _paletteSubtle);
+        }
+
+        // Text buffer + which road we're currently editing — lets the
+        // user type freely without each keystroke writing to the model.
+        string _speedLimitEditingId = "";
+        string _speedLimitEditBuf = "";
+
+        void ApplySpeedLimitEdit()
+        {
+            if (_selectedRoad == null) return;
+            string s = _speedLimitEditBuf == null ? "" : _speedLimitEditBuf.Trim();
+            if (s.Length == 0)
+            {
+                _selectedRoad.SpeedLimit = null;
+            }
+            else if (float.TryParse(s, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float v) && v > 0f)
+            {
+                _selectedRoad.SpeedLimit = v;
+            }
+            else
+            {
+                Debug.LogWarning($"[NetworkDesigner] Invalid speed limit '{s}' — expected a positive number or empty.");
+                _speedLimitEditBuf = _selectedRoad.SpeedLimit.HasValue
+                    ? _selectedRoad.SpeedLimit.Value.ToString("0.##")
+                    : "";
+                return;
+            }
+            // No agent rebuild — the speed cap is read live from the
+            // road each frame in UpdateFollowingSpeeds.
+            MarkDirtyNoAgentRebuild();
         }
 
         static bool ApproachHasInboundLanes(VertexApproach app, RoadEnd end)
@@ -2716,11 +2821,25 @@ namespace NetworkDesigner.Designer
         {
             if (PickCamera == null) return null;
             Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
-            if (Physics.Raycast(ray, out RaycastHit hit, 10000f))
+            // RaycastAll + filter, matching every other picker. Single-hit
+            // Physics.Raycast silently misses when ANY collider (ground,
+            // road body, neighboring handle) sits between the camera and
+            // the setback handle's SphereCollider — that's how the bottom
+            // handle at certain vertices became un-clickable.
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            float bestDist = float.MaxValue;
+            SetbackHandle best = null;
+            for (int i = 0; i < hits.Length; i++)
             {
-                return hit.collider.GetComponentInParent<SetbackHandle>();
+                SetbackHandle sh = hits[i].collider.GetComponentInParent<SetbackHandle>();
+                if (sh == null) continue;
+                if (hits[i].distance < bestDist)
+                {
+                    bestDist = hits[i].distance;
+                    best = sh;
+                }
             }
-            return null;
+            return best;
         }
 
         MarkingClickTarget PickMarkingClickTarget()
@@ -5496,6 +5615,9 @@ namespace NetworkDesigner.Designer
                 if (pmr != null && pmr.sharedMaterial != null)
                     pmr.sharedMaterial.color = _selectedAgentOriginalColor;
             }
+            // Restore any blocker tints from the previous selection so
+            // they don't carry into the new (or empty) selection's frame.
+            RestoreAllBlockerTints();
             _selectedAgent = a;
             _selectedAgentColorCaptured = false;
             if (a != null && a.Visual != null)
@@ -5596,11 +5718,36 @@ namespace NetworkDesigner.Designer
         readonly List<Agent> _scratchFollowBlockers = new List<Agent>();
         readonly List<Agent> _scratchIntersectionBlockers = new List<Agent>();
 
+        // Tracks blockers currently tinted away from their natural color
+        // so we can restore them when they're no longer blocking or the
+        // selection changes. Key = agent, value = original material
+        // color captured before the first tint.
+        readonly Dictionary<Agent, Color> _tintedBlockerOriginals = new Dictionary<Agent, Color>();
+        readonly HashSet<Agent> _currentlyTintedBlockers = new HashSet<Agent>();
+        readonly List<Agent> _scratchTintsToClear = new List<Agent>();
+
+        // Forward detection cone fan. Single GameObject + mesh, rebuilt
+        // each frame in world coordinates while an agent is selected.
+        // Two sub-meshes: outer fan (FollowLookAhead, low alpha) + inner
+        // fan (FollowComfortDistance, higher alpha). The inner ring is
+        // the actual "starts slowing me" range; outer is what's
+        // considered at all.
+        GameObject _agentDetectionConeGo;
+        MeshFilter _agentDetectionConeMfOuter;
+        MeshFilter _agentDetectionConeMfInner;
+        Mesh _agentDetectionConeMeshOuter;
+        Mesh _agentDetectionConeMeshInner;
+        Vector3[] _coneVertsOuter;
+        int[] _coneTrisOuter;
+        Vector3[] _coneVertsInner;
+        int[] _coneTrisInner;
+
         void UpdateBlockerLines()
         {
-            // No selection → hide all.
+            // No selection → hide lines, restore all tinted blockers.
             if (_selectedAgent == null || _selectedAgent.Visual == null || _agentSystem == null)
             {
+                RestoreAllBlockerTints();
                 for (int i = 0; i < _blockerLines.Count; i++)
                     if (_blockerLines[i] != null) _blockerLines[i].gameObject.SetActive(false);
                 return;
@@ -5630,6 +5777,62 @@ namespace NetworkDesigner.Designer
             // Deactivate the rest.
             for (; idx < _blockerLines.Count; idx++)
                 if (_blockerLines[idx] != null) _blockerLines[idx].gameObject.SetActive(false);
+
+            // Tint blocker capsules. Intersection blockers tinted last
+            // so they win priority if an agent qualifies as both.
+            _currentlyTintedBlockers.Clear();
+            for (int i = 0; i < _scratchFollowBlockers.Count; i++)
+                TintBlocker(_scratchFollowBlockers[i], BlockerFollowTint);
+            for (int i = 0; i < _scratchIntersectionBlockers.Count; i++)
+                TintBlocker(_scratchIntersectionBlockers[i], BlockerIntersectionTint);
+
+            // Restore color on any agent tinted last frame but not this
+            // frame (no longer blocking).
+            _scratchTintsToClear.Clear();
+            foreach (var kv in _tintedBlockerOriginals)
+                if (!_currentlyTintedBlockers.Contains(kv.Key)) _scratchTintsToClear.Add(kv.Key);
+            for (int i = 0; i < _scratchTintsToClear.Count; i++)
+            {
+                Agent a = _scratchTintsToClear[i];
+                if (a != null && a.Visual != null)
+                {
+                    MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+                    if (mr != null && mr.sharedMaterial != null)
+                        mr.sharedMaterial.color = _tintedBlockerOriginals[a];
+                }
+                _tintedBlockerOriginals.Remove(a);
+            }
+        }
+
+        // Apply a tint to a blocker capsule. Captures the original color
+        // on first tint so we can restore it later. Skips the selected
+        // agent (which already has its own tint applied by SetSelectedAgent).
+        void TintBlocker(Agent a, Color tint)
+        {
+            if (a == null || a.Visual == null || a == _selectedAgent) return;
+            MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+            if (mr == null || mr.sharedMaterial == null) return;
+            _currentlyTintedBlockers.Add(a);
+            if (!_tintedBlockerOriginals.ContainsKey(a))
+                _tintedBlockerOriginals[a] = mr.sharedMaterial.color;
+            mr.sharedMaterial.color = tint;
+        }
+
+        // Restore every currently-tinted blocker to its original color.
+        // Called when the selection clears, when the agent system is
+        // unavailable, or before processing a new selection.
+        void RestoreAllBlockerTints()
+        {
+            foreach (var kv in _tintedBlockerOriginals)
+            {
+                Agent a = kv.Key;
+                if (a == null || a.Visual == null) continue;
+                MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+                if (mr != null && mr.sharedMaterial != null)
+                    mr.sharedMaterial.color = kv.Value;
+            }
+            _tintedBlockerOriginals.Clear();
+            _currentlyTintedBlockers.Clear();
         }
 
         void ConfigureBlockerLine(LineRenderer lr, Vector3 fromPos, Agent to, Color color)
@@ -5644,6 +5847,152 @@ namespace NetworkDesigner.Designer
             lr.startWidth = BlockerLineWidth;
             lr.endWidth = BlockerLineWidth;
             if (lr.material != null) lr.material.color = color;
+        }
+
+        // Forward detection cone visualization for the selected agent.
+        // Two fans on the ground: outer at FollowLookAhead (the "consider"
+        // range — agents farther than this are ignored), inner at
+        // FollowComfortDistance (the "start slowing" range — closest
+        // agent inside drives followDesired). Both span ±FollowConeAngleDeg
+        // about the agent's heading.
+        void UpdateDetectionCone()
+        {
+            if (_selectedAgent == null || _selectedAgent.Visual == null || _agentSystem == null)
+            {
+                if (_agentDetectionConeGo != null) _agentDetectionConeGo.SetActive(false);
+                return;
+            }
+            EnsureDetectionCone();
+            _agentDetectionConeGo.SetActive(true);
+
+            float outerR = Mathf.Max(0.1f, _agentSystem.FollowLookAhead);
+            float innerR = Mathf.Clamp(_agentSystem.FollowComfortDistance, 0.1f, outerR);
+            float halfAngle = Mathf.Clamp(_agentSystem.FollowConeAngleDeg, 0.5f, 89.999f);
+            Vector3 pos = _selectedAgent.Visual.transform.position;
+            Vector3 fwd = _selectedAgent.Visual.transform.forward;
+            // Flatten to XZ in case the visual ever picks up a Y tilt.
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+            fwd.Normalize();
+
+            BuildConeFan(_agentDetectionConeMeshOuter, ref _coneVertsOuter, ref _coneTrisOuter,
+                pos, fwd, outerR, halfAngle, DetectionConeLift);
+            if (DetectionConeShowComfortRing && innerR > 0.1f)
+            {
+                BuildConeFan(_agentDetectionConeMeshInner, ref _coneVertsInner, ref _coneTrisInner,
+                    pos, fwd, innerR, halfAngle, DetectionConeLift + 0.01f);
+                if (_agentDetectionConeMfInner != null) _agentDetectionConeMfInner.gameObject.SetActive(true);
+            }
+            else
+            {
+                if (_agentDetectionConeMfInner != null) _agentDetectionConeMfInner.gameObject.SetActive(false);
+            }
+
+            UpdateConeMaterialColors();
+        }
+
+        void BuildConeFan(Mesh mesh, ref Vector3[] verts, ref int[] tris,
+            Vector3 origin, Vector3 fwd, float radius, float halfAngleDeg, float lift)
+        {
+            int segs = Mathf.Max(4, DetectionConeSegments);
+            int vCount = segs + 2;       // center + (segs+1) arc points
+            int tCount = segs * 3;
+            if (verts == null || verts.Length != vCount) verts = new Vector3[vCount];
+            if (tris == null || tris.Length != tCount) tris = new int[tCount];
+
+            Vector3 center = origin + new Vector3(0f, lift, 0f);
+            verts[0] = center;
+            for (int i = 0; i <= segs; i++)
+            {
+                float t = i / (float)segs;
+                float angle = Mathf.Lerp(-halfAngleDeg, halfAngleDeg, t) * Mathf.Deg2Rad;
+                float cs = Mathf.Cos(angle);
+                float sn = Mathf.Sin(angle);
+                // Rotate fwd around Y (XZ-plane). Note: standard right-hand
+                // rotation about +Y in left-handed Unity coords:
+                //   x' =  x*cos + z*sin
+                //   z' = -x*sin + z*cos
+                Vector3 dir = new Vector3(
+                    fwd.x * cs + fwd.z * sn,
+                    0f,
+                    -fwd.x * sn + fwd.z * cs);
+                verts[i + 1] = center + dir * radius;
+            }
+            for (int i = 0; i < segs; i++)
+            {
+                tris[i * 3]     = 0;
+                tris[i * 3 + 1] = i + 1;
+                tris[i * 3 + 2] = i + 2;
+            }
+            mesh.Clear();
+            mesh.vertices = verts;
+            mesh.triangles = tris;
+            mesh.RecalculateBounds();
+            // Color carried via material (single uniform fill); per-vertex
+            // colors aren't needed since the unlit transparent shader uses
+            // material.color.
+        }
+
+        void EnsureDetectionCone()
+        {
+            if (_agentDetectionConeGo != null) return;
+            _agentDetectionConeGo = new GameObject("AgentDetectionCone");
+            // Keep this GameObject at world identity. We could parent it
+            // under `transform` for hierarchy tidiness, but mesh vertices
+            // are interpreted in the GameObject's LOCAL space — any
+            // non-identity parent transform would offset the cone from
+            // the agent. Leaving it as a root object guarantees local =
+            // world and the world-space vertices below render where
+            // we expect.
+            _agentDetectionConeGo.transform.position = Vector3.zero;
+            _agentDetectionConeGo.transform.rotation = Quaternion.identity;
+            _agentDetectionConeGo.transform.localScale = Vector3.one;
+
+            // Outer fan child.
+            var outerGo = new GameObject("OuterFan");
+            outerGo.transform.SetParent(_agentDetectionConeGo.transform, worldPositionStays: false);
+            _agentDetectionConeMfOuter = outerGo.AddComponent<MeshFilter>();
+            _agentDetectionConeMeshOuter = new Mesh { name = "AgentDetectionConeOuter" };
+            _agentDetectionConeMfOuter.sharedMesh = _agentDetectionConeMeshOuter;
+            var outerMr = outerGo.AddComponent<MeshRenderer>();
+            outerMr.sharedMaterial = new Material(Shader.Find("Sprites/Default"))
+            {
+                name = "DetectionConeOuterMat",
+                color = DetectionConeColor,
+            };
+            outerMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            outerMr.receiveShadows = false;
+
+            // Inner fan child.
+            var innerGo = new GameObject("InnerFan");
+            innerGo.transform.SetParent(_agentDetectionConeGo.transform, worldPositionStays: false);
+            _agentDetectionConeMfInner = innerGo.AddComponent<MeshFilter>();
+            _agentDetectionConeMeshInner = new Mesh { name = "AgentDetectionConeInner" };
+            _agentDetectionConeMfInner.sharedMesh = _agentDetectionConeMeshInner;
+            var innerMr = innerGo.AddComponent<MeshRenderer>();
+            innerMr.sharedMaterial = new Material(Shader.Find("Sprites/Default"))
+            {
+                name = "DetectionConeInnerMat",
+                color = DetectionConeComfortColor,
+            };
+            innerMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            innerMr.receiveShadows = false;
+        }
+
+        void UpdateConeMaterialColors()
+        {
+            if (_agentDetectionConeMfOuter != null)
+            {
+                var mr = _agentDetectionConeMfOuter.GetComponent<MeshRenderer>();
+                if (mr != null && mr.sharedMaterial != null)
+                    mr.sharedMaterial.color = DetectionConeColor;
+            }
+            if (_agentDetectionConeMfInner != null)
+            {
+                var mr = _agentDetectionConeMfInner.GetComponent<MeshRenderer>();
+                if (mr != null && mr.sharedMaterial != null)
+                    mr.sharedMaterial.color = DetectionConeComfortColor;
+            }
         }
 
         // Project cursor onto a half-ray starting at `origin` going in

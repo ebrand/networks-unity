@@ -38,6 +38,8 @@ namespace NetworkDesigner.Agents
         [Header("Defaults")]
         [Tooltip("Default forward speed (m/s) for newly spawned agents.")]
         public float DefaultSpeed = 12f;
+        [Tooltip("Per-agent speed variation as standard deviation (m/s) of a bell curve around DefaultSpeed. 0 = every agent gets exactly DefaultSpeed. Try 2–4 for natural-looking traffic with some agents passing others.")]
+        public float SpeedVariationStdDev = 0f;
         [Tooltip("Minimum distance (m) between a new agent's spawn position and any existing agent. Prevents stacked spawns where two agents start in the same lane on the same road and travel forever together.")]
         public float MinSpawnGap = 6f;
         [Tooltip("Maximum spawn attempts per frame from the pending queue. Larger = faster ramp-up; smaller = smoother visual entry. Most attempts succeed early then taper as dead-ends fill.")]
@@ -166,14 +168,20 @@ namespace NetworkDesigner.Agents
                 }
             }
 
+            // Sample this agent's natural cruise speed. With stdev > 0,
+            // a bell curve around DefaultSpeed; clamped to a positive
+            // floor so we never end up with stationary "agents".
+            float naturalSpeed = SampleGaussian(DefaultSpeed, SpeedVariationStdDev);
+            naturalSpeed = Mathf.Max(0.5f, naturalSpeed);
             Agent a = new Agent
             {
                 Id = $"a-{System.Guid.NewGuid().ToString("N").Substring(0, 8)}",
                 Segments = segments,
                 SegmentIndex = 0,
                 T = 0f,
-                TargetSpeed = DefaultSpeed,
-                Speed = DefaultSpeed,
+                NaturalSpeed = naturalSpeed,
+                TargetSpeed = naturalSpeed,
+                Speed = naturalSpeed,
                 Loop = true,
                 StartVertexId = startVertexId,
                 EndVertexId = endVertexId,
@@ -264,18 +272,25 @@ namespace NetworkDesigner.Agents
             if (intersectionBlockers != null) intersectionBlockers.Clear();
             if (a == null || a.Visual == null) return;
 
-            // Follow blockers: same heuristic as the speed pre-pass.
+            // Follow blockers: mirror the speed pre-pass's adaptive
+            // look-ahead so the viz matches what's actually slowing
+            // the agent. The speed loop uses
+            //   lookAhead = max(FollowLookAhead, minDist + v²/(2·decel))
+            // and we report any agent inside that range in cone.
             Vector3 myPos = a.Visual.transform.position;
             Vector3 myFwd = a.Visual.transform.forward;
             float minCos = Mathf.Cos(Mathf.Clamp(FollowConeAngleDeg, 0f, 89.999f) * Mathf.Deg2Rad);
-            float comfortSq = FollowComfortDistance * FollowComfortDistance;
+            float decel = Mathf.Max(FollowDeceleration, 0.1f);
+            float kinematicLook = FollowMinDistance + (a.Speed * a.Speed) / (2f * decel);
+            float lookAhead = Mathf.Max(FollowLookAhead, kinematicLook);
+            float lookSq = lookAhead * lookAhead;
             for (int i = 0; i < _agents.Count; i++)
             {
                 Agent o = _agents[i];
                 if (o == a || o.Visual == null) continue;
                 Vector3 toOther = o.Visual.transform.position - myPos;
                 float distSq = toOther.sqrMagnitude;
-                if (distSq > comfortSq || distSq < 1e-6f) continue;
+                if (distSq > lookSq || distSq < 1e-6f) continue;
                 float dist = Mathf.Sqrt(distSq);
                 float dot = Vector3.Dot(toOther / dist, myFwd);
                 if (dot < minCos) continue;
@@ -709,8 +724,11 @@ namespace NetworkDesigner.Agents
         void UpdateFollowingSpeeds(float dt)
         {
             float minCos = Mathf.Cos(Mathf.Clamp(FollowConeAngleDeg, 0f, 89.999f) * Mathf.Deg2Rad);
-            float lookSq = FollowLookAhead * FollowLookAhead;
-            float gapRange = Mathf.Max(FollowComfortDistance - FollowMinDistance, 1e-4f);
+            // Use the configured FollowLookAhead as a floor, but extend
+            // it per-agent based on current speed so an agent moving
+            // faster than the static range can see leaders far enough
+            // out to brake in time. Brake distance = v²/(2·decel).
+            float decel = Mathf.Max(FollowDeceleration, 0.1f);
 
             // Overtaking pass — runs before speed update so a successful
             // overtake might immediately let the agent break out of
@@ -745,6 +763,19 @@ namespace NetworkDesigner.Agents
                 }
             }
 
+            // Build a roadId → SpeedLimit dictionary once per frame so
+            // the inner loop's per-agent TargetSpeed update is O(1).
+            _roadSpeedLimitScratch.Clear();
+            if (Network != null && Network.Roads != null)
+            {
+                for (int r = 0; r < Network.Roads.Count; r++)
+                {
+                    NetworkRoad nr = Network.Roads[r];
+                    if (nr != null && nr.SpeedLimit.HasValue)
+                        _roadSpeedLimitScratch[nr.Id] = nr.SpeedLimit.Value;
+                }
+            }
+
             for (int i = 0; i < _agents.Count; i++)
             {
                 Agent a = _agents[i];
@@ -752,8 +783,30 @@ namespace NetworkDesigner.Agents
                 Vector3 myPos = a.Visual.transform.position;
                 Vector3 myFwd = a.Visual.transform.forward;
 
+                // Effective TargetSpeed = NaturalSpeed capped by the
+                // posted SpeedLimit of the road the agent is currently
+                // on. Intersection segments and unlimited roads → no cap.
+                float effectiveTarget = a.NaturalSpeed;
+                if (a.Segments != null && a.SegmentIndex < a.Segments.Count
+                    && a.Segments[a.SegmentIndex] is AgentRoadSegment ars)
+                {
+                    if (_roadSpeedLimitScratch.TryGetValue(ars.RoadId, out float lim))
+                        effectiveTarget = Mathf.Min(effectiveTarget, lim);
+                }
+                a.TargetSpeed = effectiveTarget;
+
+                // Per-agent adaptive look-ahead. Take the larger of the
+                // configured FollowLookAhead and the kinematic brake
+                // distance at this agent's current speed — otherwise a
+                // fast agent might not see a stopped leader until it's
+                // too close to stop.
+                float kinematicLook = FollowMinDistance + (a.Speed * a.Speed) / (2f * decel);
+                float lookAhead = Mathf.Max(FollowLookAhead, kinematicLook);
+                float lookSq = lookAhead * lookAhead;
+
                 // (1) Following distance.
                 float closestGap = float.MaxValue;
+                float closestLeaderSpeed = 0f;
                 for (int j = 0; j < _agents.Count; j++)
                 {
                     if (i == j) continue;
@@ -765,15 +818,33 @@ namespace NetworkDesigner.Agents
                     float dist = Mathf.Sqrt(distSq);
                     float forwardDot = Vector3.Dot(toOther / dist, myFwd);
                     if (forwardDot < minCos) continue;
-                    if (dist < closestGap) closestGap = dist;
+                    if (dist < closestGap)
+                    {
+                        closestGap = dist;
+                        closestLeaderSpeed = o.Speed;
+                    }
                 }
+                // Kinematic follow speed using RELATIVE velocity:
+                //   v_max = sqrt(v_lead² + 2·decel·(gap − minDist))
+                // Meaning: at the leader's current speed, I can be at
+                // v_max and still match the leader's position+speed if
+                // they brake at the same decel I do. If the leader is
+                // already at my target speed, v_max naturally exceeds
+                // TargetSpeed → cruise. If the leader is stopped,
+                // collapses to the simple "can I stop in time?" form.
                 float followDesired;
-                if (closestGap == float.MaxValue || closestGap > FollowComfortDistance)
+                if (closestGap == float.MaxValue)
                     followDesired = a.TargetSpeed;
-                else if (closestGap < FollowMinDistance)
+                else if (closestGap <= FollowMinDistance)
                     followDesired = 0f;
                 else
-                    followDesired = a.TargetSpeed * (closestGap - FollowMinDistance) / gapRange;
+                {
+                    float availableBrake = closestGap - FollowMinDistance;
+                    float kinematicMaxSq = closestLeaderSpeed * closestLeaderSpeed
+                        + 2f * decel * availableBrake;
+                    float kinematicMax = Mathf.Sqrt(Mathf.Max(0f, kinematicMaxSq));
+                    followDesired = Mathf.Min(a.TargetSpeed, kinematicMax);
+                }
 
                 // (2) Intersection behavior: combines right-of-way
                 //     (FIFO) with traffic-sign rules (Stop/Yield).
@@ -924,6 +995,22 @@ namespace NetworkDesigner.Agents
         // intersection beziers currently traversed at each vertex.
         readonly Dictionary<string, List<AgentIntersectionSegment>> _vertexOccupancyBeziers
             = new Dictionary<string, List<AgentIntersectionSegment>>();
+
+        // Per-frame scratch: roadId → posted SpeedLimit (m/s). Only
+        // contains entries for roads with a non-null SpeedLimit.
+        // Rebuilt at the start of each UpdateFollowingSpeeds.
+        readonly Dictionary<string, float> _roadSpeedLimitScratch = new Dictionary<string, float>();
+
+        // Box-Muller Gaussian. Returns mean when stdDev <= 0.
+        static float SampleGaussian(float mean, float stdDev)
+        {
+            if (stdDev <= 0f) return mean;
+            float u1 = Mathf.Max(1e-6f, UnityEngine.Random.value);
+            float u2 = UnityEngine.Random.value;
+            float z = Mathf.Sqrt(-2f * Mathf.Log(u1))
+                * Mathf.Cos(2f * Mathf.PI * u2);
+            return mean + stdDev * z;
+        }
 
         // Sample-based bezier-vs-bezier conflict check. Two paths
         // "conflict" only if they actually CROSS (different headings
@@ -1340,9 +1427,18 @@ namespace NetworkDesigner.Agents
 
         public void ApplyDefaultSpeedToAllAgents()
         {
-            // Update TargetSpeed — the per-frame following pre-pass
-            // will move Speed toward this value naturally.
-            for (int i = 0; i < _agents.Count; i++) _agents[i].TargetSpeed = DefaultSpeed;
+            // Re-sample NaturalSpeed for each existing agent so the
+            // tuning slider's effect is visible immediately. With
+            // SpeedVariationStdDev == 0 every agent gets exactly the new
+            // DefaultSpeed; otherwise each agent gets a fresh draw.
+            // TargetSpeed itself is recomputed per frame from NaturalSpeed
+            // capped by the current road's SpeedLimit, so no need to set
+            // it directly here.
+            for (int i = 0; i < _agents.Count; i++)
+            {
+                float n = SampleGaussian(DefaultSpeed, SpeedVariationStdDev);
+                _agents[i].NaturalSpeed = Mathf.Max(0.5f, n);
+            }
         }
 
         public void RefreshAllAgentVisuals()

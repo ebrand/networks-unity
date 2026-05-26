@@ -883,6 +883,17 @@ namespace NetworkDesigner.Tuning
                     },
                     0f, 60f);
                 TuningRegistry.RegisterFloat(
+                    "agents.speedVariationStdDev", "Agents", "Speed variation σ (m/s)",
+                    () => Agents.SpeedVariationStdDev,
+                    v =>
+                    {
+                        Agents.SpeedVariationStdDev = v;
+                        // Re-sample NaturalSpeed for existing agents so
+                        // the change is visible immediately.
+                        Agents.ApplyDefaultSpeedToAllAgents();
+                    },
+                    0f, 15f);
+                TuningRegistry.RegisterFloat(
                     "agents.minSpawnGap", "Agents", "Min spawn gap (m)",
                     () => Agents.MinSpawnGap,
                     v => Agents.MinSpawnGap = v,
