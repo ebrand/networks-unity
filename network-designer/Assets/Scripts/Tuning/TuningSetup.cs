@@ -20,6 +20,9 @@ namespace NetworkDesigner.Tuning
     [DisallowMultipleComponent]
     public class TuningSetup : MonoBehaviour
     {
+        // km/h ↔ m/s. Physics runs in m/s; the tuning UI displays km/h.
+        const float KPH_PER_MPS = 3.6f;
+
         [Header("Scene refs (optional — auto-found if null)")]
         public NetworkDesigner.Designer.NetworkDesigner Designer;
         public NetworkRenderer Renderer;
@@ -80,11 +83,58 @@ namespace NetworkDesigner.Tuning
 
         void Update()
         {
+            // The orbit camera mutates Yaw / Pitch / Distance / Target
+            // directly (mouse drag, scroll, WASD pan) — those changes
+            // never flow through TrySet, so OnValueChanged never fires
+            // and the debounced save below stays asleep. Poll the
+            // values each frame and mark dirty on drift so the on-disk
+            // tuning file picks up camera moves automatically.
+            PollOrbitCameraForChanges();
+
             if (!PersistChanges) return;
             if (_dirtySinceRealtime < 0f) return;
             if (Time.realtimeSinceStartup - _dirtySinceRealtime < PersistDebounceSeconds) return;
             TuningRegistry.SaveToFile(ResolvePersistencePath());
             _dirtySinceRealtime = -1f;
+        }
+
+        // Previous-frame snapshot of orbit state. Compared each frame
+        // against current values to detect in-editor camera moves and
+        // mark TuningSetup dirty (so the camera position survives
+        // session restarts via TuningOverrides.json).
+        Vector3 _prevOrbitTarget;
+        float _prevOrbitYaw, _prevOrbitPitch, _prevOrbitDistance;
+        bool _prevOrbitInit;
+
+        void PollOrbitCameraForChanges()
+        {
+            if (Orbit == null) return;
+            if (!_prevOrbitInit)
+            {
+                _prevOrbitTarget = Orbit.Target;
+                _prevOrbitYaw = Orbit.Yaw;
+                _prevOrbitPitch = Orbit.Pitch;
+                _prevOrbitDistance = Orbit.DistanceTarget;
+                _prevOrbitInit = true;
+                return;
+            }
+            // Read DistanceTarget — the steady-state zoom — not the
+            // animating Distance, so smoothing doesn't mark dirty every
+            // frame. Threshold the other axes too so micro-noise
+            // doesn't trigger spurious saves.
+            const float EPS = 0.02f;
+            if ((Orbit.Target - _prevOrbitTarget).sqrMagnitude < EPS * EPS
+                && Mathf.Abs(Orbit.Yaw - _prevOrbitYaw) < EPS
+                && Mathf.Abs(Orbit.Pitch - _prevOrbitPitch) < EPS
+                && Mathf.Abs(Orbit.DistanceTarget - _prevOrbitDistance) < EPS) return;
+            _prevOrbitTarget = Orbit.Target;
+            _prevOrbitYaw = Orbit.Yaw;
+            _prevOrbitPitch = Orbit.Pitch;
+            _prevOrbitDistance = Orbit.DistanceTarget;
+            // Mark dirty (only if not already), letting the existing
+            // debounce window decide when to actually write to disk.
+            if (_dirtySinceRealtime < 0f)
+                _dirtySinceRealtime = Time.realtimeSinceStartup;
         }
 
         void OnTuningChanged()
@@ -467,6 +517,13 @@ namespace NetworkDesigner.Tuning
                     () => Renderer.RoadLineColor,
                     v => { Renderer.RoadLineColor = v; Renderer.Rebuild(); });
 
+                TuningRegistry.RegisterFloat(
+                    "renderer.turnLaneStripeInset", "Road lines",
+                    "Turn lane stripe inset (m)",
+                    () => Renderer.TurnLaneStripeInset,
+                    v => { Renderer.TurnLaneStripeInset = v; Renderer.Rebuild(); },
+                    0f, 2f);
+
                 TuningRegistry.RegisterBool(
                     "renderer.drawArrows", "One-way arrows", "Show direction arrows",
                     () => Renderer.DrawArrows,
@@ -832,8 +889,12 @@ namespace NetworkDesigner.Tuning
             {
                 TuningRegistry.RegisterFloat(
                     "orbit.distance", "Camera", "Distance",
-                    () => Orbit.Distance,
-                    v => Orbit.Distance = Mathf.Min(v, Orbit.MaxDistance),
+                    // Bind to the smoothed target, not the animating
+                    // Distance — per-frame ease would otherwise be read
+                    // back as a "change" by the poll, and writes from
+                    // the panel would fight the smoother.
+                    () => Orbit.DistanceTarget,
+                    v => Orbit.DistanceTarget = Mathf.Min(v, Orbit.MaxDistance),
                     1f, 5000f);
                 TuningRegistry.RegisterFloat(
                     "orbit.maxDistance", "Camera", "Max distance",
@@ -855,6 +916,11 @@ namespace NetworkDesigner.Tuning
                     () => Orbit.Yaw,
                     v => Orbit.Yaw = v,
                     -360f, 360f);
+                TuningRegistry.RegisterVector3(
+                    "orbit.target", "Camera", "Pivot target (world XYZ)",
+                    () => Orbit.Target,
+                    v => Orbit.Target = v,
+                    -10000f, 10000f);
                 TuningRegistry.RegisterFloat(
                     "orbit.keyboardPanSensitivity", "Camera", "WASD pan speed (× distance/s)",
                     () => Orbit.KeyboardPanSensitivity,
@@ -865,34 +931,49 @@ namespace NetworkDesigner.Tuning
                     () => Orbit.KeyboardPanShiftMultiplier,
                     v => Orbit.KeyboardPanShiftMultiplier = v,
                     1f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "orbit.zoomSensitivity", "Camera", "Zoom per wheel notch (× distance)",
+                    () => Orbit.ZoomSensitivity,
+                    v => Orbit.ZoomSensitivity = v,
+                    0f, 30f);
+                TuningRegistry.RegisterFloat(
+                    "orbit.zoomSmoothing", "Camera", "Zoom smoothing (1/s)",
+                    () => Orbit.ZoomSmoothing,
+                    v => Orbit.ZoomSmoothing = v,
+                    0f, 40f);
             }
 
             if (Agents != null)
             {
                 // -------- Agents --------
+                // Speeds are displayed and persisted in km/h. The
+                // physics simulation stays in m/s internally; getters
+                // multiply by KPH_PER_MPS on read, setters divide on
+                // write. Brake-distance + acceleration math (which
+                // assume m/s²) is unaffected.
                 TuningRegistry.RegisterFloat(
-                    "agents.defaultSpeed", "Agents", "Default speed (m/s)",
-                    () => Agents.DefaultSpeed,
+                    "agents.defaultSpeed", "Agents", "Default speed (km/h)",
+                    () => Agents.DefaultSpeed * KPH_PER_MPS,
                     v =>
                     {
-                        Agents.DefaultSpeed = v;
+                        Agents.DefaultSpeed = v / KPH_PER_MPS;
                         // Push live to existing agents too — otherwise
                         // a slider drag only affects FUTURE spawns,
                         // which is confusing in a tuning panel.
                         Agents.ApplyDefaultSpeedToAllAgents();
                     },
-                    0f, 60f);
+                    0f, 200f);
                 TuningRegistry.RegisterFloat(
-                    "agents.speedVariationStdDev", "Agents", "Speed variation σ (m/s)",
-                    () => Agents.SpeedVariationStdDev,
+                    "agents.speedVariationStdDev", "Agents", "Speed variation σ (km/h)",
+                    () => Agents.SpeedVariationStdDev * KPH_PER_MPS,
                     v =>
                     {
-                        Agents.SpeedVariationStdDev = v;
-                        // Re-sample NaturalSpeed for existing agents so
+                        Agents.SpeedVariationStdDev = v / KPH_PER_MPS;
+                        // Re-sample SpeedBias for existing agents so
                         // the change is visible immediately.
                         Agents.ApplyDefaultSpeedToAllAgents();
                     },
-                    0f, 15f);
+                    0f, 50f);
                 TuningRegistry.RegisterFloat(
                     "agents.minSpawnGap", "Agents", "Min spawn gap (m)",
                     () => Agents.MinSpawnGap,
@@ -922,6 +1003,21 @@ namespace NetworkDesigner.Tuning
                     () => Agents.AgentYLift,
                     v => { Agents.AgentYLift = v; Agents.RefreshAllAgentVisuals(); },
                     0f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "agents.vehicleScale", "Agents", "Vehicle prefab scale",
+                    () => Agents.AgentVehicleScale,
+                    v => { Agents.AgentVehicleScale = v; Agents.RefreshAllAgentVisuals(); },
+                    0.1f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.vehicleYLift", "Agents", "Vehicle Y-lift (m)",
+                    () => Agents.AgentVehicleYLift,
+                    v => Agents.AgentVehicleYLift = v,
+                    -2f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "agents.length", "Agents", "Agent hit-box length (m)",
+                    () => Agents.AgentLength,
+                    v => Agents.AgentLength = v,
+                    0f, 12f);
                 TuningRegistry.RegisterColor(
                     "agents.color", "Agents", "Color",
                     () => Agents.AgentColor,
@@ -956,6 +1052,34 @@ namespace NetworkDesigner.Tuning
                     v => Agents.OvertakeClearAhead = v,
                     1f, 100f);
                 TuningRegistry.RegisterFloat(
+                    "agents.overtakeClearBehind", "Agents", "Overtake clear-behind (m)",
+                    () => Agents.OvertakeClearBehind,
+                    v => Agents.OvertakeClearBehind = v,
+                    0f, 50f);
+                TuningRegistry.RegisterBool(
+                    "agents.overtakeAllowReroute", "Agents", "Overtake allow reroute",
+                    () => Agents.OvertakeAllowReroute,
+                    v => Agents.OvertakeAllowReroute = v);
+                TuningRegistry.RegisterFloat(
+                    "agents.laneChangeCooldownSeconds", "Agents", "Lane change cool-down (s)",
+                    () => Agents.LaneChangeCooldownSeconds,
+                    v => Agents.LaneChangeCooldownSeconds = v,
+                    0f, 15f);
+                TuningRegistry.RegisterBool(
+                    "agents.yieldRightEnabled", "Agents", "Yield-right enabled",
+                    () => Agents.YieldRightEnabled,
+                    v => Agents.YieldRightEnabled = v);
+                TuningRegistry.RegisterFloat(
+                    "agents.yieldRightSpeedDelta", "Agents", "Yield-right speed delta (km/h)",
+                    () => Agents.YieldRightSpeedDelta * KPH_PER_MPS,
+                    v => Agents.YieldRightSpeedDelta = v / KPH_PER_MPS,
+                    0f, 40f);
+                TuningRegistry.RegisterFloat(
+                    "agents.yieldRightLookBehind", "Agents", "Yield-right look-behind (m)",
+                    () => Agents.YieldRightLookBehind,
+                    v => Agents.YieldRightLookBehind = v,
+                    5f, 100f);
+                TuningRegistry.RegisterFloat(
                     "agents.followLookAhead", "Agents", "Follow look-ahead (m)",
                     () => Agents.FollowLookAhead,
                     v => Agents.FollowLookAhead = v,
@@ -985,6 +1109,47 @@ namespace NetworkDesigner.Tuning
                     () => Agents.FollowDeceleration,
                     v => Agents.FollowDeceleration = v,
                     0.5f, 50f);
+                // -------- Physics feel --------
+                TuningRegistry.RegisterFloat(
+                    "agents.maxJerk", "Agents", "Max jerk (m/s³)",
+                    () => Agents.MaxJerk,
+                    v => Agents.MaxJerk = v,
+                    0f, 40f);
+                TuningRegistry.RegisterFloat(
+                    "agents.maxLateralAccel", "Agents", "Max cornering lateral accel (m/s²)",
+                    () => Agents.MaxLateralAccel,
+                    v => Agents.MaxLateralAccel = v,
+                    0.5f, 20f);
+                TuningRegistry.RegisterFloat(
+                    "agents.corneringLookahead", "Agents", "Cornering lookahead (0-1)",
+                    () => Agents.CorneringLookaheadFraction,
+                    v => Agents.CorneringLookaheadFraction = v,
+                    0f, 1f);
+                TuningRegistry.RegisterFloat(
+                    "agents.rollPerLatAccel", "Agents", "Body roll per lat-accel (deg per m/s²)",
+                    () => Agents.RollPerLateralAccel,
+                    v => Agents.RollPerLateralAccel = v,
+                    0f, 10f);
+                TuningRegistry.RegisterFloat(
+                    "agents.maxRollDeg", "Agents", "Max body roll (deg)",
+                    () => Agents.MaxRollDeg,
+                    v => Agents.MaxRollDeg = v,
+                    0f, 30f);
+                TuningRegistry.RegisterFloat(
+                    "agents.pitchPerLongAccel", "Agents", "Body pitch per long-accel (deg per m/s²)",
+                    () => Agents.PitchPerLongAccel,
+                    v => Agents.PitchPerLongAccel = v,
+                    0f, 5f);
+                TuningRegistry.RegisterFloat(
+                    "agents.maxPitchDeg", "Agents", "Max body pitch (deg)",
+                    () => Agents.MaxPitchDeg,
+                    v => Agents.MaxPitchDeg = v,
+                    0f, 20f);
+                TuningRegistry.RegisterFloat(
+                    "agents.bodyEaseRate", "Agents", "Body roll/pitch ease rate (1/s)",
+                    () => Agents.BodyEaseRate,
+                    v => Agents.BodyEaseRate = v,
+                    0.5f, 30f);
                 TuningRegistry.RegisterBool(
                     "agents.intersectionRightOfWay", "Agents", "Intersection right-of-way",
                     () => Agents.IntersectionRightOfWay,
@@ -1019,10 +1184,10 @@ namespace NetworkDesigner.Tuning
                     v => Agents.StopWaitSeconds = v,
                     0f, 10f);
                 TuningRegistry.RegisterFloat(
-                    "agents.yieldApproachSpeed", "Agents", "Yield approach speed (m/s)",
-                    () => Agents.YieldApproachSpeed,
-                    v => Agents.YieldApproachSpeed = v,
-                    0f, 20f);
+                    "agents.yieldApproachSpeed", "Agents", "Yield approach speed (km/h)",
+                    () => Agents.YieldApproachSpeed * KPH_PER_MPS,
+                    v => Agents.YieldApproachSpeed = v / KPH_PER_MPS,
+                    0f, 80f);
 
                 if (Designer != null)
                 {

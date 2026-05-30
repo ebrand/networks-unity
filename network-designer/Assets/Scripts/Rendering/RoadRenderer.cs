@@ -92,6 +92,8 @@ namespace NetworkDesigner.Rendering
         public float DashLength = 3f;
         [Tooltip("Gap between white dashes (m). Typical highway = 9m.")]
         public float DashGap = 9f;
+        [Tooltip("Inset (m) between a turn lane's outer SOLID yellow line and the inner DASHED yellow line. Standard TWLTL paint puts these close together; ~0.3m reads well at typical zoom.")]
+        public float TurnLaneStripeInset = 0.3f;
         [Tooltip("Vertical lift above road surface to avoid Z-fighting (m).")]
         public float MarkingHeight = 0.01f;
         [Tooltip("How far short of each setback line (each end of the road body) the markings stop. " +
@@ -300,14 +302,42 @@ namespace NetworkDesigner.Rendering
 
             if (endAlong <= startAlong + 1e-4f) return;
 
-            // Yellow centerline (two-way no-median only).
+            // Yellow centerline / turn-lane edges (two-way, no median).
+            //   No median + no turn lane → single yellow line at center.
+            //   Turn lane → two yellow lines at the turn lane's edges.
+            //   Median → no yellow marking (median fills the gap).
             if (Profile.AB.Lanes.Count > 0 && Profile.BA.Lanes.Count > 0 && Profile.Median == null)
             {
-                // The AB/BA boundary was at offset 0 BEFORE the centering
-                // shift; after the shift it sits at -midpoint.
-                float yellowOffset = -midpoint;
-                AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
-                    forward, right, origin, yellowOffset, startAlong, endAlong, LineWidth);
+                if (Profile.TurnLane != null && Profile.TurnLane.Width > 0f)
+                {
+                    // Standard TWLTL paint: SOLID yellow on each outer
+                    // edge of the turn lane, plus a DASHED yellow line
+                    // just inside (toward the turn lane). Each side
+                    // gets two parallel yellow lines.
+                    float half = Profile.TurnLane.Width * 0.5f;
+                    float stripeInset = TurnLaneStripeInset;
+                    // Outer solid lines — at the turn lane's edges.
+                    AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
+                        forward, right, origin, -half - midpoint, startAlong, endAlong, LineWidth);
+                    AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
+                        forward, right, origin,  half - midpoint, startAlong, endAlong, LineWidth);
+                    // Inner dashed lines — offset by stripeInset toward
+                    // the turn lane's centerline (so the negative-side
+                    // dashed line is at -half + stripeInset, etc.).
+                    AppendDashedLine(verts, triByKind[(int)MaterialKind.Centerline],
+                        forward, right, origin, -half + stripeInset - midpoint, startAlong, endAlong,
+                        LineWidth, DashLength, DashGap);
+                    AppendDashedLine(verts, triByKind[(int)MaterialKind.Centerline],
+                        forward, right, origin,  half - stripeInset - midpoint, startAlong, endAlong,
+                        LineWidth, DashLength, DashGap);
+                }
+                else
+                {
+                    // Single centerline at the AB/BA boundary (offset 0
+                    // pre-shift = -midpoint post-shift).
+                    AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
+                        forward, right, origin, -midpoint, startAlong, endAlong, LineWidth);
+                }
             }
 
             // White dashed interior lane boundaries.
@@ -345,13 +375,35 @@ namespace NetworkDesigner.Rendering
 
             float step = Mathf.Max(0.05f, CurveLineSegmentLength);
 
-            // Yellow centerline (two-way no-median only).
+            // Yellow centerline / turn-lane edges (two-way, no median).
+            // Same logic as the straight path — see BuildStraightMarkings.
             if (Profile.AB.Lanes.Count > 0 && Profile.BA.Lanes.Count > 0 && Profile.Median == null)
             {
-                float yellowOffset = -midpoint;
-                EmitCurvedLine(tbl, y, yellowOffset, startAlong, endAlong, step,
-                    LineWidth, dashed: false,
-                    verts, triByKind[(int)MaterialKind.Centerline]);
+                if (Profile.TurnLane != null && Profile.TurnLane.Width > 0f)
+                {
+                    // TWLTL: solid yellow outer edges + dashed yellow
+                    // inside lines (mirroring the straight path).
+                    float half = Profile.TurnLane.Width * 0.5f;
+                    float stripeInset = TurnLaneStripeInset;
+                    EmitCurvedLine(tbl, y, -half - midpoint, startAlong, endAlong, step,
+                        LineWidth, dashed: false,
+                        verts, triByKind[(int)MaterialKind.Centerline]);
+                    EmitCurvedLine(tbl, y,  half - midpoint, startAlong, endAlong, step,
+                        LineWidth, dashed: false,
+                        verts, triByKind[(int)MaterialKind.Centerline]);
+                    EmitCurvedLine(tbl, y, -half + stripeInset - midpoint, startAlong, endAlong, step,
+                        LineWidth, dashed: true,
+                        verts, triByKind[(int)MaterialKind.Centerline]);
+                    EmitCurvedLine(tbl, y,  half - stripeInset - midpoint, startAlong, endAlong, step,
+                        LineWidth, dashed: true,
+                        verts, triByKind[(int)MaterialKind.Centerline]);
+                }
+                else
+                {
+                    EmitCurvedLine(tbl, y, -midpoint, startAlong, endAlong, step,
+                        LineWidth, dashed: false,
+                        verts, triByKind[(int)MaterialKind.Centerline]);
+                }
             }
 
             // White dashed interior lane boundaries.
@@ -499,9 +551,9 @@ namespace NetworkDesigner.Rendering
         {
             List<float> centers = new List<float>();
             int sign = SpatialOffsetSign(dir);
-            float medianHalf = Profile.Median != null ? Profile.Median.Width * 0.5f : 0f;
+            float centerHalf = Profile.CenterStripWidth * 0.5f;
             List<Lane> lanes = dir == Direction.AB ? Profile.AB.Lanes : Profile.BA.Lanes;
-            float cursor = sign * medianHalf;
+            float cursor = sign * centerHalf;
             foreach (Lane l in lanes)
             {
                 float center = cursor + sign * (l.Width * 0.5f) - midpoint;
@@ -619,12 +671,12 @@ namespace NetworkDesigner.Rendering
         void BuildStrips(out List<Strip> strips, out float midpoint)
         {
             strips = new List<Strip>();
-            float medianHalf = Profile.Median != null ? Profile.Median.Width * 0.5f : 0f;
+            float centerHalf = Profile.CenterStripWidth * 0.5f;
 
             int signAB = SpatialOffsetSign(Direction.AB);
             int signBA = SpatialOffsetSign(Direction.BA);
 
-            float cursorAB = signAB * medianHalf;
+            float cursorAB = signAB * centerHalf;
             foreach (Lane l in Profile.AB.Lanes)
             {
                 float next = cursorAB + signAB * l.Width;
@@ -634,7 +686,7 @@ namespace NetworkDesigner.Rendering
             float abOuter = cursorAB + signAB * Profile.ShoulderAB.Width;
             AddStrip(strips, cursorAB, abOuter, MaterialKind.Shoulder);
 
-            float cursorBA = signBA * medianHalf;
+            float cursorBA = signBA * centerHalf;
             foreach (Lane l in Profile.BA.Lanes)
             {
                 float next = cursorBA + signBA * l.Width;
@@ -644,9 +696,14 @@ namespace NetworkDesigner.Rendering
             float baOuter = cursorBA + signBA * Profile.ShoulderBA.Width;
             AddStrip(strips, cursorBA, baOuter, MaterialKind.Shoulder);
 
-            if (Profile.Median != null && !Profile.IsOneWay)
+            // Center strip. Median = grass (non-drivable). Turn lane =
+            // asphalt (drivable). Both only meaningful on two-way roads.
+            if (!Profile.IsOneWay && centerHalf > 0f)
             {
-                AddStrip(strips, -medianHalf, medianHalf, MaterialKind.Median);
+                MaterialKind kind = Profile.Median != null
+                    ? MaterialKind.Median
+                    : MaterialKind.Asphalt;
+                AddStrip(strips, -centerHalf, centerHalf, kind);
             }
 
             midpoint = (abOuter + baOuter) * 0.5f;
@@ -667,11 +724,11 @@ namespace NetworkDesigner.Rendering
         // centering shift already applied.
         IEnumerable<float> InteriorLaneOffsets(float midpoint)
         {
-            float medianHalf = Profile.Median != null ? Profile.Median.Width * 0.5f : 0f;
+            float centerHalf = Profile.CenterStripWidth * 0.5f;
             int signAB = SpatialOffsetSign(Direction.AB);
             int signBA = SpatialOffsetSign(Direction.BA);
 
-            float cursor = signAB * medianHalf;
+            float cursor = signAB * centerHalf;
             int abCount = Profile.AB.Lanes.Count;
             for (int i = 0; i < abCount; i++)
             {
@@ -679,7 +736,7 @@ namespace NetworkDesigner.Rendering
                 if (i < abCount - 1) yield return cursor - midpoint;
             }
 
-            cursor = signBA * medianHalf;
+            cursor = signBA * centerHalf;
             int baCount = Profile.BA.Lanes.Count;
             for (int i = 0; i < baCount; i++)
             {

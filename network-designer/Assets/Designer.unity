@@ -165,10 +165,11 @@ MonoBehaviour:
   AgentSpawnHotkey: 103
   AgentClearHotkey: 104
   PauseHotkey: 112
+  ChaseCamHotkey: 102
   AgentSpawnBatchSize: 100
   ShowToolPalette: 1
   ToolPaletteOrigin: {x: 10, y: 10}
-  ToolPaletteWidth: 200
+  ToolPaletteWidth: 320
   RoadConfigPath: road-config.json
   FilletLeverFraction: 0.55
   ShowMeasurementTooltip: 1
@@ -245,6 +246,9 @@ MonoBehaviour:
   AgentPlanLineWidth: 0.4
   AgentPlanLineHeight: 0.1
   AgentPlanSamplesPerSegment: 12
+  ChaseCamForwardOffset: 1.5
+  ChaseCamHeightOffset: 0.5
+  ChaseCamFieldOfView: 70
   BlockerFollowColor: {r: 1, g: 0.2, b: 0.2, a: 0.85}
   BlockerIntersectionColor: {r: 1, g: 0.6, b: 0.1, a: 0.85}
   BlockerLineWidth: 0.35
@@ -255,6 +259,8 @@ MonoBehaviour:
   DetectionConeSegments: 24
   DetectionConeShowComfortRing: 1
   DetectionConeComfortColor: {r: 0.3, g: 0.7, b: 1, a: 0.28}
+  DetectionConeShowRear: 1
+  DetectionConeRearColor: {r: 1, g: 0.75, b: 0.2, a: 0.22}
   HoverHighlightColor: {r: 1, g: 0.9, b: 0, a: 0.25}
   HoverHighlightLift: 0.02
   BezierHandleDiameter: 1.6
@@ -428,7 +434,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NetworkDesigner.Agents.AgentSystem
   Paused: 0
-  DefaultSpeed: 12
+  DefaultSpeed: 19.44
   SpeedVariationStdDev: 0
   MinSpawnGap: 6
   MaxSpawnAttemptsPerFrame: 20
@@ -436,14 +442,39 @@ MonoBehaviour:
   AgentHeight: 1.8
   AgentYLift: 0.9
   AgentColor: {r: 0.3, g: 0.85, b: 0.4, a: 1}
+  AgentVehiclePrefabs:
+  - {fileID: 3786326439804512758, guid: f4e73d783d681e04ca355f6c8a50af8e, type: 3}
+  - {fileID: 793685457875359081, guid: 9c92406c14c380849bca38280c133c64, type: 3}
+  - {fileID: 2922220883736789182, guid: 041e4e3100f07184cacfe35dce34f022, type: 3}
+  - {fileID: 1718881139866272103, guid: d84787863a48b884e8c303159510c801, type: 3}
+  - {fileID: 7199546247579947592, guid: 8c0f502c596c3c746a68e5631858c360, type: 3}
+  - {fileID: 3859950695711406603, guid: eb1d6cef4963f9948a2d46b477134dfb, type: 3}
+  - {fileID: 745966575250574594, guid: 789bb11bfacf90443892854edcbb02f4, type: 3}
+  AgentVehicleScale: 1.8
+  AgentVehicleYLift: 0
   IntersectionBezierControlFraction: 0.45
   LaneChangeDistanceMeters: 30
   OvertakingEnabled: 1
   OvertakeSpeedRatio: 0.7
   OvertakeMinRemainingMeters: 20
   OvertakeClearAhead: 15
+  OvertakeClearBehind: 6
+  OvertakeAllowReroute: 1
+  LaneChangeCooldownSeconds: 3
+  YieldRightEnabled: 1
+  YieldRightSpeedDelta: 2
+  YieldRightLookBehind: 25
+  MaxJerk: 8
+  MaxLateralAccel: 4
+  CorneringLookaheadFraction: 0.5
+  RollPerLateralAccel: 2.5
+  MaxRollDeg: 8
+  PitchPerLongAccel: 0.4
+  MaxPitchDeg: 5
+  BodyEaseRate: 8
   FollowLookAhead: 25
   FollowMinDistance: 4
+  AgentLength: 3.5
   FollowComfortDistance: 15
   FollowConeAngleDeg: 60
   FollowAcceleration: 6
@@ -754,6 +785,7 @@ MonoBehaviour:
   RotateSensitivity: 5
   PanSensitivity: 0.05
   ZoomSensitivity: 5
+  ZoomSmoothing: 10
   KeyboardPanSensitivity: 1.5
   KeyboardPanShiftMultiplier: 3
 --- !u!1 &1769303990

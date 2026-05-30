@@ -48,7 +48,10 @@ export function RoadConfigForm({
     onChange({
       ...road,
       [direction]: { lanes },
+      // Both median and turn lane are two-way-only; strip whichever is
+      // set when the road becomes one-way.
       median: becomesOneWay ? undefined : road.median,
+      turnLane: becomesOneWay ? undefined : road.turnLane,
     });
   }
 
@@ -68,13 +71,30 @@ export function RoadConfigForm({
     if (on && oneWay) return;
     onChange({
       ...road,
+      // Mutually exclusive with turnLane: turning median on clears turnLane.
       median: on ? { width: road.median?.width ?? 1 } : undefined,
+      turnLane: on ? undefined : road.turnLane,
     });
   }
 
   function setMedianWidth(width: number) {
     if (!road.median) return;
     onChange({ ...road, median: { width } });
+  }
+
+  function toggleTurnLane(on: boolean) {
+    if (on && oneWay) return;
+    onChange({
+      ...road,
+      // Mutually exclusive with median: turning turnLane on clears median.
+      turnLane: on ? { width: road.turnLane?.width ?? 6 } : undefined,
+      median: on ? undefined : road.median,
+    });
+  }
+
+  function setTurnLaneWidth(width: number) {
+    if (!road.turnLane) return;
+    onChange({ ...road, turnLane: { width } });
   }
 
   function setShoulderWidth(side: "AB" | "BA", width: number) {
@@ -174,20 +194,24 @@ export function RoadConfigForm({
       <Divider />
 
       <section>
-        <SectionTitle>Median</SectionTitle>
+        <SectionTitle>Center strip</SectionTitle>
         <Checkbox
           label="Has median"
           checked={!!road.median}
           disabled={oneWay}
           onChange={(e) => toggleMedian(e.currentTarget.checked)}
           description={
-            oneWay ? "Disabled on one-way roads" : undefined
+            oneWay
+              ? "Disabled on one-way roads"
+              : road.turnLane
+              ? "Enabling clears the turn lane (mutually exclusive)"
+              : undefined
           }
         />
         {road.median && (
           <NumberInput
             mt="sm"
-            label="Width"
+            label="Median width"
             min={0.1}
             step={0.1}
             decimalScale={2}
@@ -196,6 +220,35 @@ export function RoadConfigForm({
             value={road.median.width}
             onChange={(v) =>
               setMedianWidth(typeof v === "number" ? v : 0)
+            }
+          />
+        )}
+        <Checkbox
+          mt="sm"
+          label="Has turn lane (TWLTL)"
+          checked={!!road.turnLane}
+          disabled={oneWay}
+          onChange={(e) => toggleTurnLane(e.currentTarget.checked)}
+          description={
+            oneWay
+              ? "Disabled on one-way roads"
+              : road.median
+              ? "Enabling clears the median (mutually exclusive)"
+              : "Drivable center lane for left turns / curb cuts"
+          }
+        />
+        {road.turnLane && (
+          <NumberInput
+            mt="sm"
+            label="Turn lane width"
+            min={0.1}
+            step={0.1}
+            decimalScale={2}
+            fixedDecimalScale
+            suffix=" m"
+            value={road.turnLane.width}
+            onChange={(v) =>
+              setTurnLaneWidth(typeof v === "number" ? v : 0)
             }
           />
         )}

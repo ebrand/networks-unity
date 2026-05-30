@@ -36,8 +36,8 @@ namespace NetworkDesigner.Agents
         public bool Paused;
 
         [Header("Defaults")]
-        [Tooltip("Default forward speed (m/s) for newly spawned agents.")]
-        public float DefaultSpeed = 12f;
+        [Tooltip("Implicit speed limit (m/s) on roads with no posted SpeedLimit. Internally m/s; the tuning panel displays this as km/h. Default 19.44 m/s ≈ 70 km/h.")]
+        public float DefaultSpeed = 19.44f;
         [Tooltip("Per-agent speed variation as standard deviation (m/s) of a bell curve around DefaultSpeed. 0 = every agent gets exactly DefaultSpeed. Try 2–4 for natural-looking traffic with some agents passing others.")]
         public float SpeedVariationStdDev = 0f;
         [Tooltip("Minimum distance (m) between a new agent's spawn position and any existing agent. Prevents stacked spawns where two agents start in the same lane on the same road and travel forever together.")]
@@ -51,6 +51,12 @@ namespace NetworkDesigner.Agents
         [Tooltip("Y-lift (m) of the agent's center above ground so the capsule sits ON the road, not inside it.")]
         public float AgentYLift = 0.9f;
         public Color AgentColor = new Color(0.3f, 0.85f, 0.4f, 1f);
+        [Tooltip("Optional vehicle prefab pool. When non-empty, each new agent instantiates a random prefab from this list instead of the capsule fallback. Each prefab's body MeshRenderer becomes the tintable target; tires aren't tinted. Drag prefabs from Assets/Awb-Free Low Poly Vehicles/Prefabs/ here.")]
+        public GameObject[] AgentVehiclePrefabs;
+        [Tooltip("Uniform scale applied to instantiated vehicle prefabs. Prefab pack's natural scale is roughly 1.5m × 0.8m × 2.8m; ~1.44 reads as compact-car-sized in this sim. Ignored for capsule fallback.")]
+        public float AgentVehicleScale = 1.44f;
+        [Tooltip("World Y at which a vehicle prefab is placed (prefab pivot = its bottom, so 0 = on ground). Replaces AgentYLift when using vehicle prefabs.")]
+        public float AgentVehicleYLift = 0f;
 
         [Header("Intersection bezier")]
         [Tooltip("Bezier control-point length as a fraction of the chord between the inbound and outbound lane endpoints at a vertex. Matches the lane-flow arrow rendering when set to the same value.")]
@@ -69,12 +75,46 @@ namespace NetworkDesigner.Agents
         public float OvertakeMinRemainingMeters = 20f;
         [Tooltip("Distance (m) ahead in the candidate adjacent lane that must be clear of other agents.")]
         public float OvertakeClearAhead = 15f;
+        [Tooltip("Distance (m) BEHIND in the candidate adjacent lane that must be clear of other agents. Smaller than OvertakeClearAhead since the rear gap closes slower than the front. Set to 0 to ignore agents behind (legacy behavior, may cause merge-into-neighbor visual overlaps).")]
+        public float OvertakeClearBehind = 6f;
+        [Tooltip("If no adjacent lane permits the planned next turn, allow the overtake anyway: pick any lane with a valid outbound, lane-change to it, and re-plan the route at the next segment boundary. Trade: agent may take a longer path to its destination but won't get stuck indefinitely behind slow traffic in a turn-restricted lane.")]
+        public bool OvertakeAllowReroute = true;
+        [Tooltip("Seconds an agent waits after ANY lane change (overtake / yield-right / reroute) before another lane change is allowed. Prevents the overtake↔yield ping-pong that otherwise happens when an agent is faster than its lead but slower than someone behind it.")]
+        public float LaneChangeCooldownSeconds = 3f;
+        [Tooltip("Enable yield-right: a slower agent will lane-change RIGHT (in RHT countries — semantically 'into the slow lane') when a faster agent is approaching from behind in its current lane. Requires multi-lane road, valid connection at next vertex, and the destination lane to be clear ahead.")]
+        public bool YieldRightEnabled = true;
+        [Tooltip("How much faster (m/s) the rear agent must be than ME to trigger a yield. Smaller = more eager yields.")]
+        public float YieldRightSpeedDelta = 2f;
+        [Tooltip("How far behind (m) to look for an approaching faster agent. Same-lane + same-direction agents only.")]
+        public float YieldRightLookBehind = 25f;
+        [Tooltip("When set, TryYieldRight prints one log line per frame for this agent explaining why a yield did or didn't fire. NetworkDesigner sets this to the currently-selected agent.")]
+        [System.NonSerialized] public Agent DebugAgent;
+
+        [Header("Physics feel (on-rails kinematic polish)")]
+        [Tooltip("Maximum jerk (m/s³) — rate of change of acceleration. The speed controller ramps acceleration toward its target at this rate instead of snapping, giving S-curve speed profiles. 0 disables jerk-limiting (instant accel changes, old behavior). ~5-15 feels carlike.")]
+        public float MaxJerk = 8f;
+        [Tooltip("Maximum comfortable lateral acceleration (m/s²) in turns. Agents cap their speed entering curves so v²·curvature ≤ this. Lower = slow way down for corners; higher = barrel through. ~3-5 is a comfortable car corner.")]
+        public float MaxLateralAccel = 4f;
+        [Tooltip("How far ahead (fraction of the current+next segment) to scan for the tightest upcoming curvature when computing the cornering speed cap. Larger = brake earlier for corners.")]
+        [Range(0f, 1f)] public float CorneringLookaheadFraction = 0.5f;
+        [Tooltip("Degrees of body roll per unit of lateral acceleration (m/s²). Visual lean into turns. 0 disables roll.")]
+        public float RollPerLateralAccel = 2.5f;
+        [Tooltip("Maximum body roll (degrees), clamps RollPerLateralAccel output.")]
+        public float MaxRollDeg = 8f;
+        [Tooltip("Degrees of pitch per unit of longitudinal acceleration (m/s²). Negative accel (braking) pitches nose down; positive (accel) squats nose up. 0 disables pitch.")]
+        public float PitchPerLongAccel = 0.4f;
+        [Tooltip("Maximum body pitch (degrees), clamps PitchPerLongAccel output.")]
+        public float MaxPitchDeg = 5f;
+        [Tooltip("How fast the visual roll/pitch eases toward its target (1/sec). Higher = snappier body response, lower = floatier.")]
+        public float BodyEaseRate = 8f;
 
         [Header("Following (agent-to-agent awareness)")]
         [Tooltip("Maximum distance (m) to look ahead for another agent. Agents farther than this are ignored.")]
         public float FollowLookAhead = 25f;
-        [Tooltip("Closer than this (m) → agent comes to a full stop. The 'bumper distance'.")]
+        [Tooltip("Closer than this (m) → agent comes to a full stop. Measured BUMPER-to-bumper — the agent's AgentLength is added internally before center-to-center comparison. So 3 here + AgentLength=4 means cars stop with 3m of empty road between them.")]
         public float FollowMinDistance = 4f;
+        [Tooltip("Effective longitudinal length (m) of the agent's hit box. Added to FollowMinDistance + Overtake clearance distances so the gap conventions stay BUMPER-to-bumper rather than center-to-center. Match this to the visible car length — for vehicle prefabs at AgentVehicleScale=1.25 this is ~3.5m; capsules should set ~AgentDiameter.")]
+        public float AgentLength = 3.5f;
         [Tooltip("Farther than this (m) → agent cruises at TargetSpeed. Between MinDistance and ComfortDistance the speed scales linearly.")]
         public float FollowComfortDistance = 15f;
         [Tooltip("Cone half-angle (degrees) for 'is this other agent ahead of me?'. Wider catches agents on curving roads / lane changes; narrower ignores side traffic.")]
@@ -168,20 +208,29 @@ namespace NetworkDesigner.Agents
                 }
             }
 
-            // Sample this agent's natural cruise speed. With stdev > 0,
-            // a bell curve around DefaultSpeed; clamped to a positive
-            // floor so we never end up with stationary "agents".
-            float naturalSpeed = SampleGaussian(DefaultSpeed, SpeedVariationStdDev);
-            naturalSpeed = Mathf.Max(0.5f, naturalSpeed);
+            // Sample this agent's speed bias once. Applied relative to
+            // whatever speed (road SpeedLimit or DefaultSpeed) governs
+            // the road the agent is on at any given frame.
+            float bias = SampleGaussian(0f, SpeedVariationStdDev);
+            float initialBase = DefaultSpeed;
+            // Try to read the first road segment's posted limit so the
+            // initial Speed doesn't have to ramp from a wrong value.
+            if (segments != null && segments.Count > 0
+                && segments[0] is AgentRoadSegment firstRoad)
+            {
+                NetworkRoad nr = FindRoadById(firstRoad.RoadId);
+                if (nr != null && nr.SpeedLimit.HasValue) initialBase = nr.SpeedLimit.Value;
+            }
+            float initialTarget = Mathf.Max(0.5f, initialBase + bias);
             Agent a = new Agent
             {
                 Id = $"a-{System.Guid.NewGuid().ToString("N").Substring(0, 8)}",
                 Segments = segments,
                 SegmentIndex = 0,
                 T = 0f,
-                NaturalSpeed = naturalSpeed,
-                TargetSpeed = naturalSpeed,
-                Speed = naturalSpeed,
+                SpeedBias = bias,
+                TargetSpeed = initialTarget,
+                Speed = initialTarget,
                 Loop = true,
                 StartVertexId = startVertexId,
                 EndVertexId = endVertexId,
@@ -281,13 +330,43 @@ namespace NetworkDesigner.Agents
             Vector3 myFwd = a.Visual.transform.forward;
             float minCos = Mathf.Cos(Mathf.Clamp(FollowConeAngleDeg, 0f, 89.999f) * Mathf.Deg2Rad);
             float decel = Mathf.Max(FollowDeceleration, 0.1f);
-            float kinematicLook = FollowMinDistance + (a.Speed * a.Speed) / (2f * decel);
+            // Effective center-to-center threshold: bumper gap + hit-box length.
+            float effectiveMinDist = FollowMinDistance + AgentLength;
+            float kinematicLook = effectiveMinDist + (a.Speed * a.Speed) / (2f * decel);
             float lookAhead = Mathf.Max(FollowLookAhead, kinematicLook);
             float lookSq = lookAhead * lookAhead;
+            // Mirror the speed loop's lane-aware filter so the viz
+            // doesn't list adjacent-lane parallel cars that don't
+            // actually slow this agent.
+            AgentRoadSegment myRoadSeg = a.Segments != null && a.SegmentIndex < a.Segments.Count
+                ? a.Segments[a.SegmentIndex] as AgentRoadSegment : null;
+            NetworkRoad myRoadObj = myRoadSeg != null ? FindRoadById(myRoadSeg.RoadId) : null;
+            Direction myDir = (myRoadSeg != null && myRoadObj != null)
+                ? InferRoadSegmentDirection(myRoadObj, myRoadSeg)
+                : Direction.AB;
+            int myLane = myRoadSeg != null
+                ? (a.T < myRoadSeg.LaneChangeStartT
+                    ? myRoadSeg.SourceStartLaneIndex
+                    : myRoadSeg.SourceEndLaneIndex)
+                : -1;
             for (int i = 0; i < _agents.Count; i++)
             {
                 Agent o = _agents[i];
                 if (o == a || o.Visual == null) continue;
+                if (myRoadSeg != null
+                    && o.Segments != null && o.SegmentIndex < o.Segments.Count
+                    && o.Segments[o.SegmentIndex] is AgentRoadSegment otherRoadSeg
+                    && otherRoadSeg.RoadId == myRoadSeg.RoadId)
+                {
+                    Direction otherDir = InferRoadSegmentDirection(myRoadObj, otherRoadSeg);
+                    if (otherDir == myDir)
+                    {
+                        int otherLane = o.T < otherRoadSeg.LaneChangeStartT
+                            ? otherRoadSeg.SourceStartLaneIndex
+                            : otherRoadSeg.SourceEndLaneIndex;
+                        if (otherLane != myLane) continue;
+                    }
+                }
                 Vector3 toOther = o.Visual.transform.position - myPos;
                 float distSq = toOther.sqrMagnitude;
                 if (distSq > lookSq || distSq < 1e-6f) continue;
@@ -730,6 +809,14 @@ namespace NetworkDesigner.Agents
             // out to brake in time. Brake distance = v²/(2·decel).
             float decel = Mathf.Max(FollowDeceleration, 0.1f);
 
+            // Yield-right pass — runs before Overtaking so a slow agent
+            // moves right BEFORE the faster agent decides it needs to
+            // overtake around them. Result: less lane-change churn.
+            if (YieldRightEnabled)
+            {
+                for (int i = 0; i < _agents.Count; i++) TryYieldRight(_agents[i]);
+            }
+
             // Overtaking pass — runs before speed update so a successful
             // overtake might immediately let the agent break out of
             // the cone and stop slowing this same frame.
@@ -783,28 +870,50 @@ namespace NetworkDesigner.Agents
                 Vector3 myPos = a.Visual.transform.position;
                 Vector3 myFwd = a.Visual.transform.forward;
 
-                // Effective TargetSpeed = NaturalSpeed capped by the
-                // posted SpeedLimit of the road the agent is currently
-                // on. Intersection segments and unlimited roads → no cap.
-                float effectiveTarget = a.NaturalSpeed;
+                // Effective TargetSpeed: base + per-agent bias, where the
+                // base is the current road's SpeedLimit if posted, else
+                // DefaultSpeed. Intersection segments inherit the base
+                // from… whatever; we use DefaultSpeed as a fallback
+                // since intersections don't have their own limit.
+                // Clamped to a positive floor.
+                float baseSpeed = DefaultSpeed;
                 if (a.Segments != null && a.SegmentIndex < a.Segments.Count
-                    && a.Segments[a.SegmentIndex] is AgentRoadSegment ars)
+                    && a.Segments[a.SegmentIndex] is AgentRoadSegment ars
+                    && _roadSpeedLimitScratch.TryGetValue(ars.RoadId, out float lim))
                 {
-                    if (_roadSpeedLimitScratch.TryGetValue(ars.RoadId, out float lim))
-                        effectiveTarget = Mathf.Min(effectiveTarget, lim);
+                    baseSpeed = lim;
                 }
-                a.TargetSpeed = effectiveTarget;
+                a.TargetSpeed = Mathf.Max(0.5f, baseSpeed + a.SpeedBias);
 
                 // Per-agent adaptive look-ahead. Take the larger of the
                 // configured FollowLookAhead and the kinematic brake
                 // distance at this agent's current speed — otherwise a
                 // fast agent might not see a stopped leader until it's
                 // too close to stop.
-                float kinematicLook = FollowMinDistance + (a.Speed * a.Speed) / (2f * decel);
+                // effectiveMinDist treats the gap as bumper-to-bumper:
+                // FollowMinDistance + AgentLength = center-to-center cap.
+                float effectiveMinDist = FollowMinDistance + AgentLength;
+                float kinematicLook = effectiveMinDist + (a.Speed * a.Speed) / (2f * decel);
                 float lookAhead = Mathf.Max(FollowLookAhead, kinematicLook);
                 float lookSq = lookAhead * lookAhead;
 
                 // (1) Following distance.
+                // Pre-resolve my road/direction/lane for the lane-aware
+                // filter below. Only meaningful when I'm on a road
+                // segment; on intersection beziers, fall back to pure
+                // cone (cross-traffic + queue agents both relevant).
+                AgentRoadSegment myRoadSeg = a.Segments != null && a.SegmentIndex < a.Segments.Count
+                    ? a.Segments[a.SegmentIndex] as AgentRoadSegment : null;
+                NetworkRoad myRoadObj = myRoadSeg != null ? FindRoadById(myRoadSeg.RoadId) : null;
+                Direction myDir = (myRoadSeg != null && myRoadObj != null)
+                    ? InferRoadSegmentDirection(myRoadObj, myRoadSeg)
+                    : Direction.AB;
+                int myLane = myRoadSeg != null
+                    ? (a.T < myRoadSeg.LaneChangeStartT
+                        ? myRoadSeg.SourceStartLaneIndex
+                        : myRoadSeg.SourceEndLaneIndex)
+                    : -1;
+
                 float closestGap = float.MaxValue;
                 float closestLeaderSpeed = 0f;
                 for (int j = 0; j < _agents.Count; j++)
@@ -812,6 +921,30 @@ namespace NetworkDesigner.Agents
                     if (i == j) continue;
                     Agent o = _agents[j];
                     if (o.Visual == null) continue;
+
+                    // Lane-aware filter: when both of us are on a road
+                    // segment of the SAME road traveling the SAME
+                    // direction, only count this leader if they're in
+                    // MY lane. Adjacent-lane parallel traffic isn't
+                    // actually blocking me — without this filter, the
+                    // raw cone catches side-by-side cars and causes
+                    // phantom slowdowns that then get rear-ended by the
+                    // real follower in my own lane.
+                    if (myRoadSeg != null
+                        && o.Segments != null && o.SegmentIndex < o.Segments.Count
+                        && o.Segments[o.SegmentIndex] is AgentRoadSegment otherRoadSeg
+                        && otherRoadSeg.RoadId == myRoadSeg.RoadId)
+                    {
+                        Direction otherDir = InferRoadSegmentDirection(myRoadObj, otherRoadSeg);
+                        if (otherDir == myDir)
+                        {
+                            int otherLane = o.T < otherRoadSeg.LaneChangeStartT
+                                ? otherRoadSeg.SourceStartLaneIndex
+                                : otherRoadSeg.SourceEndLaneIndex;
+                            if (otherLane != myLane) continue;
+                        }
+                    }
+
                     Vector3 toOther = o.Visual.transform.position - myPos;
                     float distSq = toOther.sqrMagnitude;
                     if (distSq > lookSq || distSq < 1e-6f) continue;
@@ -835,11 +968,11 @@ namespace NetworkDesigner.Agents
                 float followDesired;
                 if (closestGap == float.MaxValue)
                     followDesired = a.TargetSpeed;
-                else if (closestGap <= FollowMinDistance)
+                else if (closestGap <= effectiveMinDist)
                     followDesired = 0f;
                 else
                 {
-                    float availableBrake = closestGap - FollowMinDistance;
+                    float availableBrake = closestGap - effectiveMinDist;
                     float kinematicMaxSq = closestLeaderSpeed * closestLeaderSpeed
                         + 2f * decel * availableBrake;
                     float kinematicMax = Mathf.Sqrt(Mathf.Max(0f, kinematicMaxSq));
@@ -985,9 +1118,88 @@ namespace NetworkDesigner.Agents
                 }
 
                 float desired = Mathf.Min(followDesired, intersectionDesired);
+
+                // (3) Cornering speed cap. Look at the tightest upcoming
+                //     curvature and cap speed so lateral accel (v²·κ)
+                //     stays within MaxLateralAccel. Makes agents brake
+                //     for turns instead of barrelling through.
+                float corneringCap = CorneringSpeedCap(a);
+                if (corneringCap < desired) desired = corneringCap;
+
+                // (4) Jerk-limited longitudinal update. Instead of
+                //     snapping acceleration to ±Follow(Acc/Dec)eleration,
+                //     ramp the acceleration toward its target at MaxJerk,
+                //     then integrate. Produces S-curve speed profiles.
+                ApplyJerkLimitedSpeed(a, desired, dt);
+            }
+        }
+
+        // Cap on speed (m/s) so the agent's lateral acceleration through
+        // the tightest curvature in the lookahead window stays within
+        // MaxLateralAccel. Scans the current segment from the agent's T
+        // forward into the next segment by CorneringLookaheadFraction.
+        float CorneringSpeedCap(Agent a)
+        {
+            if (MaxLateralAccel <= 0f) return float.MaxValue;
+            if (a.Segments == null || a.SegmentIndex >= a.Segments.Count) return float.MaxValue;
+
+            float maxKappa = 0f;
+            // Current segment: from current T to end.
+            AgentSegment cur = a.Segments[a.SegmentIndex];
+            const int SAMPLES = 5;
+            for (int i = 0; i <= SAMPLES; i++)
+            {
+                float t = Mathf.Lerp(a.T, 1f, i / (float)SAMPLES);
+                maxKappa = Mathf.Max(maxKappa, Mathf.Abs(cur.CurvatureAt(t)));
+            }
+            // Next segment: first CorneringLookaheadFraction of it (so we
+            // brake BEFORE entering a sharp turn — usually an intersection).
+            if (a.SegmentIndex + 1 < a.Segments.Count && CorneringLookaheadFraction > 0f)
+            {
+                AgentSegment nxt = a.Segments[a.SegmentIndex + 1];
+                for (int i = 0; i <= SAMPLES; i++)
+                {
+                    float t = Mathf.Lerp(0f, CorneringLookaheadFraction, i / (float)SAMPLES);
+                    maxKappa = Mathf.Max(maxKappa, Mathf.Abs(nxt.CurvatureAt(t)));
+                }
+            }
+            if (maxKappa < 1e-5f) return float.MaxValue; // effectively straight
+            // v² · κ ≤ a_lat_max  →  v ≤ sqrt(a_lat_max / κ)
+            return Mathf.Sqrt(MaxLateralAccel / maxKappa);
+        }
+
+        // Integrate speed toward `desired` with a jerk-limited (S-curve)
+        // acceleration profile. Falls back to the old snap-to-rate
+        // MoveTowards when MaxJerk <= 0.
+        void ApplyJerkLimitedSpeed(Agent a, float desired, float dt)
+        {
+            if (MaxJerk <= 0f)
+            {
                 float rate = desired > a.Speed ? FollowAcceleration : FollowDeceleration;
                 a.Speed = Mathf.MoveTowards(a.Speed, desired, rate * dt);
+                a.Accel = 0f;
+                return;
             }
+
+            float gap = desired - a.Speed;
+            // Target acceleration to close `gap` this frame, clamped to
+            // the configured accel (gap>0) / decel (gap<0) envelope.
+            float targetAccel = Mathf.Clamp(
+                gap / Mathf.Max(dt, 1e-4f),
+                -FollowDeceleration, FollowAcceleration);
+
+            // Jerk-limit: ramp current accel toward target.
+            a.Accel = Mathf.MoveTowards(a.Accel, targetAccel, MaxJerk * dt);
+
+            float newSpeed = a.Speed + a.Accel * dt;
+            // Anti-overshoot: if we crossed the desired speed this frame,
+            // clamp exactly and zero residual accel so we settle.
+            if ((gap > 0f && newSpeed > desired) || (gap < 0f && newSpeed < desired))
+            {
+                newSpeed = desired;
+                a.Accel = 0f;
+            }
+            a.Speed = Mathf.Max(0f, newSpeed);
         }
 
         // Scratch dictionary reused across frames. Built each pre-pass
@@ -1077,28 +1289,58 @@ namespace NetworkDesigner.Agents
         // lane choice flows cleanly through.
         void TryOvertake(Agent a)
         {
+            bool diag = (a == DebugAgent);
             if (a.Segments == null || a.SegmentIndex >= a.Segments.Count) return;
             var current = a.Segments[a.SegmentIndex] as AgentRoadSegment;
-            if (current == null) return;
-            // Already mid-change → don't double up.
-            if (current.SourceStartLaneIndex != current.SourceEndLaneIndex) return;
+            if (current == null)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] skip: not on a road segment (in intersection).");
+                return;
+            }
+            // Cool-down after a previous lane change. Prevents the
+            // overtake↔yield-right ping-pong on multi-lane roads.
+            float sinceLast = Time.realtimeSinceStartup - a.LastLaneChangeRealtime;
+            if (sinceLast < LaneChangeCooldownSeconds)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] skip: cool-down ({sinceLast:F1}s since last lane change, need {LaneChangeCooldownSeconds:F1}s).");
+                return;
+            }
+            // Note: pre-baked lane change (start != end) is NOT a blocker.
+            // ExecuteLaneChange snapshots the agent's current interpolated
+            // offset and starts a new merge from there, so overtake can
+            // override a pre-baked plan without visual jumps.
+            //
             // Are we actually being slowed?
-            if (a.Speed >= a.TargetSpeed * OvertakeSpeedRatio) return;
+            if (a.Speed >= a.TargetSpeed * OvertakeSpeedRatio)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] skip: not slowed enough (speed={a.Speed:F1} >= {a.TargetSpeed * OvertakeSpeedRatio:F1} = target*{OvertakeSpeedRatio:F2}).");
+                return;
+            }
             // Enough road left to maneuver?
             float remaining = (1f - a.T) * current.ArcLength;
-            if (remaining < OvertakeMinRemainingMeters) return;
+            if (remaining < OvertakeMinRemainingMeters)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] skip: only {remaining:F1}m road remaining (need {OvertakeMinRemainingMeters:F1}m).");
+                return;
+            }
 
             NetworkRoad road = FindRoadById(current.RoadId);
             if (road == null || road.Profile == null) return;
-            int currentLane = current.SourceEndLaneIndex;
-            // Need the (Direction) — recover from the lane offset's
-            // sign relative to the AB convention. Cleaner: we stored
-            // it implicitly via the offsets but didn't expose
-            // direction directly. Find direction by checking which
-            // direction has the current end-lane offset.
+            // Effective current lane = where the agent is VISUALLY. If a
+            // pre-baked merge hasn't started yet, we're in the start lane;
+            // once T crosses LaneChangeStartT we're committed toward the
+            // end lane. This keeps "adjacent lane" calculations grounded
+            // in the agent's actual position, not the eventual destination.
+            int currentLane = a.T < current.LaneChangeStartT
+                ? current.SourceStartLaneIndex
+                : current.SourceEndLaneIndex;
             Direction dir = InferRoadSegmentDirection(road, current);
             var lanes = dir == Direction.AB ? road.Profile.AB?.Lanes : road.Profile.BA?.Lanes;
-            if (lanes == null || lanes.Count <= 1) return;
+            if (lanes == null || lanes.Count <= 1)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] skip: single-lane road (lanes={lanes?.Count ?? 0}).");
+                return;
+            }
 
             // The upcoming intersection segment + the road after it.
             AgentIntersectionSegment upcomingIsx = a.SegmentIndex + 1 < a.Segments.Count
@@ -1111,9 +1353,10 @@ namespace NetworkDesigner.Agents
                 : Direction.AB;
 
             int[] candidates = { currentLane - 1, currentLane + 1 };
+            int diagNoConn = 0, diagBlocked = 0, diagOutOfRange = 0;
             foreach (int candIn in candidates)
             {
-                if (candIn < 0 || candIn >= lanes.Count) continue;
+                if (candIn < 0 || candIn >= lanes.Count) { diagOutOfRange++; continue; }
 
                 // Validate the candidate still permits the next turn.
                 LaneConnection conn = null;
@@ -1123,24 +1366,226 @@ namespace NetworkDesigner.Agents
                         upcomingIsx.ToVertexId,
                         road, dir, candIn,
                         nextRoadObj, nextDir);
-                    if (conn == null) continue;
+                    if (conn == null) { diagNoConn++; continue; }
                 }
 
                 // Adjacent lane occupied check.
-                if (!IsAdjacentLaneClearAhead(a, road, dir, candIn)) continue;
+                if (!IsAdjacentLaneClearAhead(a, road, dir, candIn)) { diagBlocked++; continue; }
 
                 // Commit the lane change.
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] OVERTAKE FIRES: {currentLane} → {candIn} (planned next turn preserved).");
                 ExecuteLaneChange(a, candIn, conn, road, dir, upcomingIsx, nextRoad);
                 return;
             }
+
+            if (diag) Debug.Log($"[OvertakeDiag {a.Id}] standard pass failed (currentLane={currentLane}). rejected: outOfRange={diagOutOfRange} noConnForNextTurn={diagNoConn} laneBlocked={diagBlocked}.");
+
+            // Reroute pass: standard pass failed because no adjacent
+            // lane carries the planned next turn. If allowed, lane-
+            // change to any adjacent lane that has SOME valid outbound
+            // at the next vertex, then flag for re-plan. Result: the
+            // agent escapes the slow queue by taking a different turn
+            // and picks a new route to its destination from there.
+            if (!OvertakeAllowReroute)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] reroute pass disabled (OvertakeAllowReroute=false).");
+                return;
+            }
+            if (upcomingIsx == null)
+            {
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] reroute skip: no upcoming intersection.");
+                return;
+            }
+            int diagRerouteNoConn = 0, diagRerouteBlocked = 0;
+            foreach (int candIn in candidates)
+            {
+                if (candIn < 0 || candIn >= lanes.Count) continue;
+                if (!IsAdjacentLaneClearAhead(a, road, dir, candIn)) { diagRerouteBlocked++; continue; }
+                LaneConnection anyConn = PickAnyOutboundFromLane(
+                    upcomingIsx.ToVertexId, road, dir, candIn);
+                if (anyConn == null) { diagRerouteNoConn++; continue; }
+                if (diag) Debug.Log($"[OvertakeDiag {a.Id}] REROUTE-OVERTAKE FIRES: {currentLane} → {candIn} (will re-plan at next vertex).");
+                ExecuteLaneChange(a, candIn, null, road, dir, null, null);
+                a.NeedsRebuild = true;
+                return;
+            }
+            if (diag) Debug.Log($"[OvertakeDiag {a.Id}] reroute pass failed. rejected: noOutboundFromLane={diagRerouteNoConn} laneBlocked={diagRerouteBlocked}.");
         }
 
-        bool IsAdjacentLaneClearAhead(Agent a, NetworkRoad road, Direction dir, int candidateLane)
+        // Returns any LaneConnection emanating from (inRoad, inDir, inLane)
+        // at the given vertex, regardless of outbound road. Used by the
+        // overtake-reroute path to find an "escape" turn for an agent
+        // whose planned next turn isn't reachable from the adjacent lane.
+        LaneConnection PickAnyOutboundFromLane(
+            string vertexId, NetworkRoad inRoad, Direction inDir, int inLane)
         {
+            Vertex v = FindVertex(vertexId);
+            if (v == null) return null;
+            VertexGeometry vg = ResolveCached(v);
+            if (vg == null || vg.Connectivity == null) return null;
+            List<LaneConnection> matches = null;
+            foreach (LaneConnection c in vg.Connectivity)
+            {
+                if (c == null || c.From == null || c.To == null) continue;
+                if (c.From.RoadId != inRoad.Id) continue;
+                if (c.From.Direction != inDir) continue;
+                if (c.From.Index != inLane) continue;
+                if (matches == null) matches = new List<LaneConnection>();
+                matches.Add(c);
+            }
+            if (matches == null || matches.Count == 0) return null;
+            return matches[UnityEngine.Random.Range(0, matches.Count)];
+        }
+
+        // Slow-agent courtesy: if a faster agent is approaching from
+        // behind in the same lane, lane-change RIGHT to let them pass.
+        // "Right" is drive-side aware:
+        //   - DriveSide.Right (US, Europe): lane index 0 is leftmost
+        //     (passing lane), N-1 is rightmost (slow lane) → step +1
+        //   - DriveSide.Left (UK, Australia): mirrored → step -1
+        // Preconditions are the same as TryOvertake — the destination
+        // lane must still permit the agent's next turn AND be clear
+        // ahead. The "fast agent behind" check is path-space (same
+        // road + same direction + same lane) so cross-traffic and
+        // adjacent-lane agents don't trigger spurious yields.
+        void TryYieldRight(Agent a)
+        {
+            bool diag = (a == DebugAgent);
+            if (a.Segments == null || a.SegmentIndex >= a.Segments.Count) return;
+            var current = a.Segments[a.SegmentIndex] as AgentRoadSegment;
+            if (current == null)
+            {
+                if (diag) Debug.Log($"[YieldDiag {a.Id}] skip: not on a road segment (in intersection).");
+                return;
+            }
+            // Cool-down after a previous lane change.
+            float sinceLast = Time.realtimeSinceStartup - a.LastLaneChangeRealtime;
+            if (sinceLast < LaneChangeCooldownSeconds)
+            {
+                if (diag) Debug.Log($"[YieldDiag {a.Id}] skip: cool-down ({sinceLast:F1}s since last lane change, need {LaneChangeCooldownSeconds:F1}s).");
+                return;
+            }
+            // Note: pre-baked lane change (start != end) is NOT a blocker.
+            // Yield-right overrides the pre-baked plan when a faster agent
+            // is behind — courtesy takes priority. ExecuteLaneChange
+            // snapshots the current interpolated offset so the merge
+            // continues smoothly from wherever the agent visually is.
+
+            NetworkRoad road = FindRoadById(current.RoadId);
+            if (road == null || road.Profile == null) return;
+            // Effective current lane = where the agent is VISUALLY (see
+            // TryOvertake for the same reasoning).
+            int currentLane = a.T < current.LaneChangeStartT
+                ? current.SourceStartLaneIndex
+                : current.SourceEndLaneIndex;
+            Direction dir = InferRoadSegmentDirection(road, current);
+            var lanes = dir == Direction.AB ? road.Profile.AB?.Lanes : road.Profile.BA?.Lanes;
+            if (lanes == null || lanes.Count <= 1)
+            {
+                if (diag) Debug.Log($"[YieldDiag {a.Id}] skip: single-lane road (lanes={lanes?.Count ?? 0}).");
+                return;
+            }
+
+            int rightStep = Network.DriveSide == DriveSide.Right ? +1 : -1;
+            int candIn = currentLane + rightStep;
+            if (candIn < 0 || candIn >= lanes.Count)
+            {
+                if (diag) Debug.Log($"[YieldDiag {a.Id}] skip: already in rightmost lane (currentLane={currentLane}, lanes={lanes.Count}).");
+                return;
+            }
+
+            // Find a faster agent immediately behind me in MY current lane.
+            if (a.Visual == null) return;
+            Vector3 myPos = a.Visual.transform.position;
+            Vector3 myFwd = a.Visual.transform.forward;
+            float lookBackSq = YieldRightLookBehind * YieldRightLookBehind;
+            bool fasterBehind = false;
+            int diagSlowerSpeed = 0, diagWrongRoad = 0, diagWrongLane = 0, diagWrongDir = 0, diagOutOfRange = 0, diagNotBehind = 0;
             for (int i = 0; i < _agents.Count; i++)
             {
                 Agent o = _agents[i];
-                if (o == a) continue;
+                if (o == a || o.Visual == null) continue;
+                // Compare TARGET speeds, not current. Once a faster agent
+                // catches up to me, follow-logic throttles their current
+                // Speed to match mine — so a Speed-vs-Speed check would
+                // silently fail in steady-state queues. TargetSpeed
+                // captures their PREFERRED cruise: if it's meaningfully
+                // higher than mine, they want to pass.
+                if (o.TargetSpeed < a.TargetSpeed + YieldRightSpeedDelta) { diagSlowerSpeed++; continue; }
+                if (o.Segments == null || o.SegmentIndex >= o.Segments.Count) continue;
+                var otherRoad = o.Segments[o.SegmentIndex] as AgentRoadSegment;
+                if (otherRoad == null) continue;
+                if (otherRoad.RoadId != road.Id) { diagWrongRoad++; continue; }
+                if (otherRoad.SourceEndLaneIndex != currentLane
+                    && otherRoad.SourceStartLaneIndex != currentLane) { diagWrongLane++; continue; }
+                Direction otherDir = InferRoadSegmentDirection(road, otherRoad);
+                if (otherDir != dir) { diagWrongDir++; continue; }
+                Vector3 toOther = o.Visual.transform.position - myPos;
+                float distSq = toOther.sqrMagnitude;
+                if (distSq > lookBackSq || distSq < 1e-6f) { diagOutOfRange++; continue; }
+                // Behind = forward dot is negative.
+                if (Vector3.Dot(toOther, myFwd) >= 0f) { diagNotBehind++; continue; }
+                fasterBehind = true;
+                break;
+            }
+            if (!fasterBehind)
+            {
+                if (diag) Debug.Log($"[YieldDiag {a.Id}] no faster agent behind (currentLane={currentLane}, target={a.TargetSpeed:F1}). rejected: slowerTarget={diagSlowerSpeed} wrongRoad={diagWrongRoad} wrongLane={diagWrongLane} wrongDir={diagWrongDir} outOfRange={diagOutOfRange} notBehind={diagNotBehind}.");
+                return;
+            }
+
+            // Same connectivity + clear-ahead checks as TryOvertake. If
+            // the right lane breaks the upcoming turn, don't yield.
+            AgentIntersectionSegment upcomingIsx = a.SegmentIndex + 1 < a.Segments.Count
+                ? a.Segments[a.SegmentIndex + 1] as AgentIntersectionSegment : null;
+            AgentRoadSegment nextRoad = a.SegmentIndex + 2 < a.Segments.Count
+                ? a.Segments[a.SegmentIndex + 2] as AgentRoadSegment : null;
+            NetworkRoad nextRoadObj = nextRoad != null ? FindRoadById(nextRoad.RoadId) : null;
+            Direction nextDir = nextRoadObj != null
+                ? InferRoadSegmentDirection(nextRoadObj, nextRoad)
+                : Direction.AB;
+
+            LaneConnection conn = null;
+            if (upcomingIsx != null && nextRoadObj != null)
+            {
+                conn = PickConnectionAtVertex(
+                    upcomingIsx.ToVertexId,
+                    road, dir, candIn,
+                    nextRoadObj, nextDir);
+                if (conn == null)
+                {
+                    if (diag) Debug.Log($"[YieldDiag {a.Id}] skip: right lane (cand={candIn}) has no valid connection to next turn at vertex '{upcomingIsx.ToVertexId}'.");
+                    return;
+                }
+            }
+
+            if (!IsAdjacentLaneClearAhead(a, road, dir, candIn))
+            {
+                if (diag) Debug.Log($"[YieldDiag {a.Id}] skip: right lane (cand={candIn}) not clear ahead within {OvertakeClearAhead}m.");
+                return;
+            }
+
+            if (diag) Debug.Log($"[YieldDiag {a.Id}] YIELD-RIGHT FIRES: {currentLane} → {candIn}.");
+            ExecuteLaneChange(a, candIn, conn, road, dir, upcomingIsx, nextRoad);
+        }
+
+        // Returns false if any agent currently in (or merging into) the
+        // candidate lane sits within OvertakeClearAhead meters AHEAD or
+        // OvertakeClearBehind meters BEHIND of MY bumper. Longitudinal-
+        // only — lateral separation is implicit in the lane filter.
+        // AgentLength is added so the clearances are bumper-to-bumper
+        // instead of center-to-center (same convention as FollowMinDistance).
+        bool IsAdjacentLaneClearAhead(Agent a, NetworkRoad road, Direction dir, int candidateLane)
+        {
+            if (a.Visual == null) return true;
+            Vector3 myPos = a.Visual.transform.position;
+            Vector3 myFwd = a.Visual.transform.forward;
+            float aheadCutoff = OvertakeClearAhead + AgentLength;
+            float behindCutoff = OvertakeClearBehind + AgentLength;
+            for (int i = 0; i < _agents.Count; i++)
+            {
+                Agent o = _agents[i];
+                if (o == a || o.Visual == null) continue;
                 if (o.Segments == null || o.SegmentIndex >= o.Segments.Count) continue;
                 var otherRoad = o.Segments[o.SegmentIndex] as AgentRoadSegment;
                 if (otherRoad == null) continue;
@@ -1149,13 +1594,16 @@ namespace NetworkDesigner.Agents
                     && otherRoad.SourceStartLaneIndex != candidateLane) continue;
                 Direction otherDir = InferRoadSegmentDirection(road, otherRoad);
                 if (otherDir != dir) continue;
-                // Same road + same direction + (will be) in the
-                // candidate lane. Are they within OvertakeClearAhead?
-                if (a.Visual == null || o.Visual == null) continue;
-                Vector3 toOther = o.Visual.transform.position - a.Visual.transform.position;
-                float forward = Vector3.Dot(toOther, a.Visual.transform.forward);
-                if (forward < 0f) continue; // behind us — they don't block our forward pass
-                if (toOther.magnitude < OvertakeClearAhead) return false;
+                Vector3 toOther = o.Visual.transform.position - myPos;
+                float forward = Vector3.Dot(toOther, myFwd);
+                if (forward >= 0f)
+                {
+                    if (forward < aheadCutoff) return false;
+                }
+                else
+                {
+                    if (-forward < behindCutoff) return false;
+                }
             }
             return true;
         }
@@ -1176,9 +1624,17 @@ namespace NetworkDesigner.Agents
             current.LaneOffsetTravelStart = currentOffset;
             current.LaneOffsetTravelEnd = newEndOffsetTravel;
             current.SourceEndLaneIndex = newEndLane;
-            // Start the change NOW from current T (so the ramp uses
-            // the remaining road for the merge).
+            // Start the change NOW and complete it within
+            // LaneChangeDistanceMeters of forward travel — otherwise
+            // the merge would drag across the entire remaining segment
+            // (passive-aggressive drift on long roads).
             current.LaneChangeStartT = a.T;
+            float dT = LaneChangeDistanceMeters
+                / Mathf.Max(current.ArcLength, 1e-4f);
+            current.LaneChangeEndT = Mathf.Min(1f, a.T + dT);
+            // Stamp cool-down so TryOvertake / TryYieldRight don't
+            // immediately re-trigger on the next frame.
+            a.LastLaneChangeRealtime = Time.realtimeSinceStartup;
 
             // Cascade: the intersection segment after this road was
             // built with the OLD endLane. Replace it with one keyed
@@ -1288,11 +1744,47 @@ namespace NetworkDesigner.Agents
         {
             AgentSegment seg = a.Segments[a.SegmentIndex];
             seg.Sample(a.T, out Vector2 pos, out Vector2 tangent);
-            a.Visual.transform.position = new Vector3(pos.x, AgentYLift, pos.y);
+            // Vehicle prefabs are ground-anchored at their pivot, so use
+            // AgentVehicleYLift. Capsules use the legacy AgentYLift
+            // (center-anchored).
+            float yLift = AgentYLift;
+            AgentClickTarget tag = a.Visual.GetComponent<AgentClickTarget>();
+            if (tag != null && tag.IsVehicle) yLift = AgentVehicleYLift;
+            a.Visual.transform.position = new Vector3(pos.x, yLift, pos.y);
             if (tangent.sqrMagnitude > 1e-6f)
             {
                 Vector3 fwd = new Vector3(tangent.x, 0f, tangent.y).normalized;
-                a.Visual.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
+                Quaternion heading = Quaternion.LookRotation(fwd, Vector3.up);
+
+                // Body roll + pitch from physics. Targets:
+                //   roll  = lateral accel (v²·κ, signed) → lean into turn
+                //   pitch = -longitudinal accel → nose dives on braking
+                // Eased toward targets so the body doesn't snap. dt is
+                // 0 on the immediate-spawn path; guard against that.
+                float dt = Time.deltaTime;
+                float kappa = seg.CurvatureAt(a.T);
+                float latAccel = a.Speed * a.Speed * kappa;      // signed
+                float rollTarget = Mathf.Clamp(
+                    -latAccel * RollPerLateralAccel, -MaxRollDeg, MaxRollDeg);
+                float pitchTarget = Mathf.Clamp(
+                    -a.Accel * PitchPerLongAccel, -MaxPitchDeg, MaxPitchDeg);
+                if (dt > 0f)
+                {
+                    float k = 1f - Mathf.Exp(-BodyEaseRate * dt); // frame-rate-independent ease
+                    a.VisualRollDeg = Mathf.Lerp(a.VisualRollDeg, rollTarget, k);
+                    a.VisualPitchDeg = Mathf.Lerp(a.VisualPitchDeg, pitchTarget, k);
+                }
+                else
+                {
+                    a.VisualRollDeg = rollTarget;
+                    a.VisualPitchDeg = pitchTarget;
+                }
+
+                // Roll about forward (Z), pitch about right (X), in the
+                // body's local frame after heading.
+                Quaternion bodyTilt = Quaternion.AngleAxis(a.VisualRollDeg, fwd)
+                    * Quaternion.AngleAxis(a.VisualPitchDeg, Vector3.Cross(Vector3.up, fwd));
+                a.Visual.transform.rotation = bodyTilt * heading;
             }
         }
 
@@ -1408,14 +1900,24 @@ namespace NetworkDesigner.Agents
             var newPath = AgentPathfinder.FindPath(Network, currentVertexId, targetVertex);
             if (newPath == null || newPath.Count == 0)
             {
+                // No route from where we are. For looping agents, fall
+                // back to a TELEPORT-LOOP: re-spawn the agent at its
+                // original StartVertex with the original A→B plan.
+                // Required for networks where the agent's planned loop
+                // can't be closed via the road graph — most commonly a
+                // one-way edge between two dead-ends. Visually the agent
+                // jumps from end back to start; preserves SpeedBias and
+                // identity (same Agent object).
+                if (a.Loop && TryTeleportLoop(a)) return true;
                 Debug.LogWarning($"[AgentSystem] Agent '{a.Id}' rebuild: no route from " +
-                                 $"'{currentVertexId}' to '{targetVertex}' after network change. Despawning.");
+                                 $"'{currentVertexId}' to '{targetVertex}'. Despawning.");
                 DespawnAgent(a);
                 return false;
             }
             List<AgentSegment> newSegs = BuildSegments(newPath, currentVertexId);
             if (newSegs == null || newSegs.Count == 0)
             {
+                if (a.Loop && TryTeleportLoop(a)) return true;
                 DespawnAgent(a);
                 return false;
             }
@@ -1425,19 +1927,101 @@ namespace NetworkDesigner.Agents
             return true;
         }
 
+        // Re-spawn a looping agent. Picks a fresh random (start, end)
+        // pair from the current dead-end set (so each lap can take a
+        // different route on multi-dead-end networks), re-samples
+        // SpeedBias (so the agent's personality varies between laps),
+        // and re-plans. Falls back to the agent's original endpoints
+        // if the fresh pick is unrouteable. Returns false if nothing
+        // is routeable (caller despawns).
+        bool TryTeleportLoop(Agent a)
+        {
+            if (a == null) return false;
+
+            // Try a fresh random dead-end pair.
+            var deadEnds = ComputeDeadEnds();
+            string newStart = a.StartVertexId;
+            string newEnd = a.EndVertexId;
+            if (deadEnds.Count >= 2)
+            {
+                for (int attempt = 0; attempt < 8; attempt++)
+                {
+                    int i = UnityEngine.Random.Range(0, deadEnds.Count);
+                    int j = UnityEngine.Random.Range(0, deadEnds.Count);
+                    if (i == j) continue;
+                    newStart = deadEnds[i].Id;
+                    newEnd = deadEnds[j].Id;
+                    break;
+                }
+            }
+
+            // Attempt fresh pair → fall back to original pair if unrouteable.
+            var path = AgentPathfinder.FindPath(Network, newStart, newEnd);
+            List<AgentSegment> segs = path != null && path.Count > 0
+                ? BuildSegments(path, newStart) : null;
+            if (segs == null || segs.Count == 0)
+            {
+                if (newStart != a.StartVertexId || newEnd != a.EndVertexId)
+                {
+                    newStart = a.StartVertexId;
+                    newEnd = a.EndVertexId;
+                    path = AgentPathfinder.FindPath(Network, newStart, newEnd);
+                    segs = path != null && path.Count > 0
+                        ? BuildSegments(path, newStart) : null;
+                }
+                if (segs == null || segs.Count == 0) return false;
+            }
+
+            a.StartVertexId = newStart;
+            a.EndVertexId = newEnd;
+            a.Segments = segs;
+            a.SegmentIndex = 0;
+            a.T = 0f;
+            a.NeedsRebuild = false;
+            // Clear any stop-sign state from the previous lap so the
+            // agent doesn't think it's still waiting at a sign.
+            a.StoppedAtVertexId = null;
+            a.StoppedAtRealtime = 0f;
+            // Re-sample personal speed bias — different lap, possibly
+            // different "mood" → some laps faster, some slower than
+            // the road's posted limit.
+            a.SpeedBias = SampleGaussian(0f, SpeedVariationStdDev);
+            a.Speed = Mathf.Max(0.5f, a.TargetSpeed);
+            if (a.Visual != null) PositionVisual(a);
+            return true;
+        }
+
+        // Snapshot the network's current dead-end vertices (degree-1).
+        // Used by TryTeleportLoop to pick a fresh random destination
+        // each lap.
+        List<Vertex> ComputeDeadEnds()
+        {
+            var result = new List<Vertex>();
+            if (Network == null || Network.Vertices == null || Network.Roads == null) return result;
+            var degree = new Dictionary<string, int>();
+            foreach (Vertex v in Network.Vertices) degree[v.Id] = 0;
+            foreach (NetworkRoad r in Network.Roads)
+            {
+                if (degree.ContainsKey(r.EndA)) degree[r.EndA]++;
+                if (degree.ContainsKey(r.EndB)) degree[r.EndB]++;
+            }
+            foreach (Vertex v in Network.Vertices)
+                if (degree.TryGetValue(v.Id, out int d) && d == 1) result.Add(v);
+            return result;
+        }
+
         public void ApplyDefaultSpeedToAllAgents()
         {
-            // Re-sample NaturalSpeed for each existing agent so the
-            // tuning slider's effect is visible immediately. With
-            // SpeedVariationStdDev == 0 every agent gets exactly the new
-            // DefaultSpeed; otherwise each agent gets a fresh draw.
-            // TargetSpeed itself is recomputed per frame from NaturalSpeed
-            // capped by the current road's SpeedLimit, so no need to set
-            // it directly here.
+            // Re-sample SpeedBias for each existing agent. The
+            // SpeedVariationStdDev slider needs this — otherwise its
+            // effect only shows on FUTURE spawns. DefaultSpeed itself
+            // is read live every frame in UpdateFollowingSpeeds, so a
+            // DefaultSpeed change propagates without any work here, but
+            // re-sampling on the same hook is cheap and keeps the
+            // tuning panel feeling immediate.
             for (int i = 0; i < _agents.Count; i++)
             {
-                float n = SampleGaussian(DefaultSpeed, SpeedVariationStdDev);
-                _agents[i].NaturalSpeed = Mathf.Max(0.5f, n);
+                _agents[i].SpeedBias = SampleGaussian(0f, SpeedVariationStdDev);
             }
         }
 
@@ -1447,6 +2031,19 @@ namespace NetworkDesigner.Agents
             {
                 GameObject v = _agents[i].Visual;
                 if (v == null) continue;
+                AgentClickTarget tag = v.GetComponent<AgentClickTarget>();
+                if (tag != null && tag.IsVehicle)
+                {
+                    // Vehicle prefab: only the uniform scale is
+                    // user-tunable here. AgentColor is intentionally
+                    // NOT applied — vehicles keep their native prefab
+                    // colors so the artist's intended look survives
+                    // (currently-selected / blocker tints are still
+                    // applied transiently by the designer).
+                    v.transform.localScale = Vector3.one * Mathf.Max(0.01f, AgentVehicleScale);
+                    continue;
+                }
+                // Capsule fallback: original behavior.
                 v.transform.localScale = new Vector3(AgentDiameter, AgentHeight * 0.5f, AgentDiameter);
                 MeshRenderer mr = v.GetComponent<MeshRenderer>();
                 if (mr != null && mr.sharedMaterial != null) mr.sharedMaterial.color = AgentColor;
@@ -1472,26 +2069,89 @@ namespace NetworkDesigner.Agents
 
         GameObject CreateVisual(Agent a)
         {
+            // Prefer a vehicle prefab when the pool is populated.
+            GameObject prefab = PickRandomVehiclePrefab();
+            if (prefab != null) return CreateVehicleVisual(a, prefab);
+
+            // Capsule fallback: original behavior preserved.
             GameObject go = GameObject.CreatePrimitive(PrimitiveType.Capsule);
             go.name = $"Agent_{a.Id}";
             go.transform.SetParent(transform, worldPositionStays: false);
             go.transform.localScale = new Vector3(AgentDiameter, AgentHeight * 0.5f, AgentDiameter);
-            // KEEP the capsule's default collider so right-click can
-            // pick the agent. Marked as trigger so it doesn't
-            // contribute to physics (agents don't collide with
-            // anything — Tier 1 following is speed-based, not
-            // physics-based).
             Collider col = go.GetComponent<Collider>();
             if (col != null) col.isTrigger = true;
             AgentClickTarget tag = go.AddComponent<AgentClickTarget>();
             tag.Agent = a;
+            tag.IsVehicle = false;
             MeshRenderer mr = go.GetComponent<MeshRenderer>();
             if (mr != null)
             {
                 Material mat = new Material(Shader.Find("Standard")) { color = AgentColor, name = "AgentMat" };
                 mr.sharedMaterial = mat;
             }
+            tag.BodyRenderer = mr;
             return go;
+        }
+
+        GameObject PickRandomVehiclePrefab()
+        {
+            if (AgentVehiclePrefabs == null || AgentVehiclePrefabs.Length == 0) return null;
+            // Up to 4 retries to skip null entries (empty array slots).
+            for (int i = 0; i < 4; i++)
+            {
+                int idx = UnityEngine.Random.Range(0, AgentVehiclePrefabs.Length);
+                GameObject p = AgentVehiclePrefabs[idx];
+                if (p != null) return p;
+            }
+            return null;
+        }
+
+        GameObject CreateVehicleVisual(Agent a, GameObject prefab)
+        {
+            GameObject root = Instantiate(prefab, transform);
+            root.name = $"Agent_{a.Id}";
+            root.transform.localScale = Vector3.one * Mathf.Max(0.01f, AgentVehicleScale);
+
+            // Find the body MeshRenderer (the largest non-tire mesh).
+            // Tires are named like "X Tire" in this pack — exclude any
+            // child whose name contains "Tire" so the body stays the
+            // tint target.
+            MeshRenderer body = null;
+            float bestSize = 0f;
+            foreach (MeshRenderer mr in root.GetComponentsInChildren<MeshRenderer>())
+            {
+                if (mr.gameObject.name.IndexOf("Tire", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                    continue;
+                Vector3 s = mr.bounds.size;
+                float vol = s.x * s.y * s.z;
+                if (vol > bestSize) { bestSize = vol; body = mr; }
+            }
+
+            // Clone the body material so per-agent tinting (selected /
+            // blocker) doesn't mutate the shared prefab asset and
+            // ripple to every other agent of the same model.
+            if (body != null && body.sharedMaterial != null)
+                body.sharedMaterial = new Material(body.sharedMaterial);
+
+            // Mark all colliders as triggers — kinematic sim, no
+            // physical collisions. They stay around for the picker.
+            foreach (Collider c in root.GetComponentsInChildren<Collider>())
+                c.isTrigger = true;
+            // If nothing has a collider, add one to the root so the
+            // agent is still pickable.
+            if (root.GetComponentsInChildren<Collider>().Length == 0)
+            {
+                BoxCollider bc = root.AddComponent<BoxCollider>();
+                bc.size = new Vector3(2f, 1f, 4f);
+                bc.center = new Vector3(0f, 0.5f, 0f);
+                bc.isTrigger = true;
+            }
+
+            AgentClickTarget tag = root.AddComponent<AgentClickTarget>();
+            tag.Agent = a;
+            tag.IsVehicle = true;
+            tag.BodyRenderer = body;
+            return root;
         }
 
         Vertex FindVertex(string id)

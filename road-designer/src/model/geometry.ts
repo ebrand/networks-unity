@@ -31,8 +31,10 @@ export interface RoadGeometry {
   // outermost. Index here matches `side.lanes[i]`.
   ab: LaneGeometry[];
   ba: LaneGeometry[];
-  // Median rectangle if present.
+  // Median rectangle if present (mutually exclusive with turnLane).
   median?: LaneGeometry;
+  // Turn-lane rectangle if present (mutually exclusive with median).
+  turnLane?: LaneGeometry;
   // Shoulder rectangles, one per side.
   shoulderAB: LaneGeometry;
   shoulderBA: LaneGeometry;
@@ -153,7 +155,15 @@ export function buildRoadGeometry(
   const bx = centerlineB.x;
   const cy = centerlineA.y;
 
-  const medianHalf = road.median ? road.median.width / 2 : 0;
+  // Center strip half — either a median or a turn lane (mutually
+  // exclusive). Both push the AB / BA sides outward by the same amount,
+  // so for lane positioning we collapse them into a single value.
+  const centerWidth = road.median
+    ? road.median.width
+    : road.turnLane
+    ? road.turnLane.width
+    : 0;
+  const medianHalf = centerWidth / 2;
 
   function buildSide(direction: Direction): {
     lanes: LaneGeometry[];
@@ -200,8 +210,11 @@ export function buildRoadGeometry(
   }
 
   let median: LaneGeometry | undefined;
+  let turnLane: LaneGeometry | undefined;
   if (road.median) {
     median = buildRect(ax, bx, cy - medianHalf, road.median.width, 1);
+  } else if (road.turnLane) {
+    turnLane = buildRect(ax, bx, cy - medianHalf, road.turnLane.width, 1);
   }
 
   const minY = Math.min(abSide.outerY, baSide.outerY);
@@ -213,6 +226,7 @@ export function buildRoadGeometry(
     ab: abSide.lanes,
     ba: baSide.lanes,
     median,
+    turnLane,
     shoulderAB: abSide.shoulder,
     shoulderBA: baSide.shoulder,
     outerYAB: abSide.outerY,

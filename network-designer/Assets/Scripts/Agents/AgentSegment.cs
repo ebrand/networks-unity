@@ -36,6 +36,13 @@ namespace NetworkDesigner.Agents
         // Returns world-XZ position + (unnormalized) tangent in the
         // direction of travel at parameter t ∈ [0, 1].
         public abstract void Sample(float t, out Vector2 pos, out Vector2 tangent);
+
+        // Signed curvature κ (1/radius) of the centerline at t. Positive
+        // and negative distinguish turn direction (for body roll). Road
+        // segments add their lane-offset perpendicular shift, but to
+        // first order the centerline curvature dominates, so we use the
+        // centerline bezier directly. Default 0 (straight).
+        public virtual float CurvatureAt(float t) => 0f;
     }
 
     public class AgentRoadSegment : AgentSegment
@@ -49,15 +56,20 @@ namespace NetworkDesigner.Agents
 
         // Lane offsets at the START and END of the segment. Equal
         // values = agent stays in one lane; different values = lane
-        // change happens within this segment, starting at
-        // LaneChangeStartT and finishing at t=1. Both are signed in
+        // change happens within this segment over the t-window
+        // [LaneChangeStartT, LaneChangeEndT]. Both are signed in
         // PerpRight-of-travel-direction coordinates.
         public float LaneOffsetTravelStart;
         public float LaneOffsetTravelEnd;
-        // t at which the lane-change interpolation begins. Computed
-        // in AgentSystem as 1 - (LaneChangeDistanceMeters / ArcLength),
-        // clamped to [0, 1]. If start == end, this value is ignored.
+        // t window in which the lane-change interpolation runs. For
+        // pre-baked changes the end is 1 (merge by segment boundary).
+        // For mid-segment overtakes / yield-rights the end is
+        // start + LaneChangeDistanceMeters/ArcLength so the merge
+        // completes in a fixed metric distance regardless of where on
+        // the road it began. If start == end of OFFSETS, both are
+        // ignored.
         public float LaneChangeStartT;
+        public float LaneChangeEndT = 1f;
 
         // Lane indices that built this segment (in the road's own
         // AB/BA convention). Stashed so the loop-closing intersection
@@ -102,11 +114,16 @@ namespace NetworkDesigner.Agents
         {
             if (Mathf.Approximately(LaneOffsetTravelStart, LaneOffsetTravelEnd))
                 return LaneOffsetTravelStart;
+            float endT = LaneChangeEndT > LaneChangeStartT ? LaneChangeEndT : 1f;
             if (t <= LaneChangeStartT) return LaneOffsetTravelStart;
-            float u = (t - LaneChangeStartT) / Mathf.Max(1f - LaneChangeStartT, 1e-4f);
+            if (t >= endT) return LaneOffsetTravelEnd;
+            float u = (t - LaneChangeStartT) / Mathf.Max(endT - LaneChangeStartT, 1e-4f);
             u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(u));
             return Mathf.Lerp(LaneOffsetTravelStart, LaneOffsetTravelEnd, u);
         }
+
+        public override float CurvatureAt(float t)
+            => GeometryResolver.CubicCurvature(P0, C1, C2, P3, Mathf.Clamp01(t));
     }
 
     public class AgentIntersectionSegment : AgentSegment
@@ -123,5 +140,8 @@ namespace NetworkDesigner.Agents
             Vector2 raw = GeometryResolver.CubicTangent(P0, C1, C2, P3, t);
             tangent = raw.sqrMagnitude < 1e-6f ? Vector2.right : raw.normalized;
         }
+
+        public override float CurvatureAt(float t)
+            => GeometryResolver.CubicCurvature(P0, C1, C2, P3, Mathf.Clamp01(t));
     }
 }

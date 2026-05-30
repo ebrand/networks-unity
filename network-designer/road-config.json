@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "exportedAt": "2026-05-25T18:17:55.781Z",
-  "activeId": "cfg-mpiw0b7g-aogfqy",
+  "exportedAt": "2026-05-30T19:24:13.603Z",
+  "activeId": "cfg-mpsq23ew-pfzani",
   "configs": [
     {
       "id": "cfg-mpivlf8b-rrs7rq",
@@ -98,6 +98,41 @@
       "updatedAt": 1779648700119
     },
     {
+      "id": "cfg-mpsq23ew-pfzani",
+      "name": "1x1turn",
+      "category": "Small",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "turnLane": {
+          "width": 6
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1780169050326
+    },
+    {
       "id": "cfg-mpj1xbsv-t6sry3",
       "name": "2x",
       "category": "One-way",
@@ -126,7 +161,7 @@
         }
       },
       "driveSide": "right",
-      "updatedAt": 1779732771456
+      "updatedAt": 1780167888086
     },
     {
       "id": "cfg-mpivfuao-r0osky",
@@ -287,6 +322,49 @@
       "updatedAt": 1779670388936
     },
     {
+      "id": "cfg-mpsq46d3-fa4dib",
+      "name": "2x2turn",
+      "category": "Medium",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "turnLane": {
+          "width": 6
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1780169043400
+    },
+    {
       "id": "cfg-mpiloq66-y4bac5",
       "name": "2xhwy",
       "category": "Highway",
@@ -442,6 +520,57 @@
       },
       "driveSide": "right",
       "updatedAt": 1779670413910
+    },
+    {
+      "id": "cfg-mpsq9okc-eqzkrk",
+      "name": "3x3turn",
+      "category": "Large",
+      "road": {
+        "id": "road-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "ab-0",
+              "width": 4
+            },
+            {
+              "id": "ab-1",
+              "width": 4
+            },
+            {
+              "id": "lane-1000",
+              "width": 4
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "ba-0",
+              "width": 4
+            },
+            {
+              "id": "ba-1",
+              "width": 4
+            },
+            {
+              "id": "lane-1001",
+              "width": 4
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "turnLane": {
+          "width": 6
+        }
+      },
+      "driveSide": "right",
+      "updatedAt": 1780169032732
     },
     {
       "id": "cfg-mpk6sz6z-jtrqco",

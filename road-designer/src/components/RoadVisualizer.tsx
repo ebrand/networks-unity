@@ -13,6 +13,7 @@ export type FocusTarget =
   | { kind: "lane"; direction: "AB" | "BA"; index: number }
   | { kind: "shoulder"; direction: "AB" | "BA" }
   | { kind: "median" }
+  | { kind: "turnLane" }
   | { kind: "none" };
 
 interface Props {
@@ -118,7 +119,7 @@ function LaneLabels({ lane, prefix, focused }: LaneLabelsProps) {
   );
 }
 
-function isFocused(target: FocusTarget, kind: "lane" | "shoulder" | "median", direction?: "AB" | "BA", index?: number): boolean {
+function isFocused(target: FocusTarget, kind: "lane" | "shoulder" | "median" | "turnLane", direction?: "AB" | "BA", index?: number): boolean {
   if (target.kind !== kind) return false;
   if (kind === "lane" && target.kind === "lane") {
     return target.direction === direction && target.index === index;
@@ -126,7 +127,8 @@ function isFocused(target: FocusTarget, kind: "lane" | "shoulder" | "median", di
   if (kind === "shoulder" && target.kind === "shoulder") {
     return target.direction === direction;
   }
-  return kind === "median" && target.kind === "median";
+  if (kind === "median" && target.kind === "median") return true;
+  return kind === "turnLane" && target.kind === "turnLane";
 }
 
 export function RoadVisualizer({ road, driveSide, focus }: Props) {
@@ -190,6 +192,76 @@ export function RoadVisualizer({ road, driveSide, focus }: Props) {
             stroke="#d4a017"
             strokeWidth={STROKE_LANE}
           />
+        )}
+
+        {/* Turn lane — drivable asphalt body with yellow markings along
+            its two long edges (the standard TWLTL look). Edges are drawn
+            below as separate lines so the strip itself reads as plain
+            asphalt. */}
+        {geo.turnLane && (
+          <>
+            <path
+              d={rectPath(geo.turnLane)}
+              fill="#e7efff"
+              stroke="#8899bb"
+              strokeWidth={STROKE_LANE}
+            />
+            {/* TWLTL paint: each long edge of the turn-lane rectangle
+                gets BOTH a solid yellow line (at the rectangle's edge)
+                and a dashed yellow line just inside it (toward the
+                turn lane's center). Standard two-way left-turn-lane
+                marking. */}
+            {(() => {
+              const t = geo.turnLane;
+              const inset = 0.3; // m — matches Unity TurnLaneStripeInset default
+              // Centroid Y of the rectangle (used to figure "inward").
+              const centerY = (t.origin.y + t.tertiary.y) / 2;
+              const edgeAY = t.origin.y;
+              const edgeBY = t.tertiary.y;
+              const inwardA = Math.sign(centerY - edgeAY);
+              const inwardB = Math.sign(centerY - edgeBY);
+              return (
+                <>
+                  {/* Edge A (origin→primary): solid + dashed-inside */}
+                  <line
+                    x1={t.origin.x}
+                    y1={edgeAY}
+                    x2={t.primary.x}
+                    y2={edgeAY}
+                    stroke="#d4a017"
+                    strokeWidth={STROKE_CENTERLINE}
+                  />
+                  <line
+                    x1={t.origin.x}
+                    y1={edgeAY + inwardA * inset}
+                    x2={t.primary.x}
+                    y2={edgeAY + inwardA * inset}
+                    stroke="#d4a017"
+                    strokeWidth={STROKE_CENTERLINE}
+                    strokeDasharray="0.6 0.4"
+                  />
+                  {/* Edge B (tertiary→secondary): solid + dashed-inside */}
+                  <line
+                    x1={t.tertiary.x}
+                    y1={edgeBY}
+                    x2={t.secondary.x}
+                    y2={edgeBY}
+                    stroke="#d4a017"
+                    strokeWidth={STROKE_CENTERLINE}
+                  />
+                  <line
+                    x1={t.tertiary.x}
+                    y1={edgeBY + inwardB * inset}
+                    x2={t.secondary.x}
+                    y2={edgeBY + inwardB * inset}
+                    stroke="#d4a017"
+                    strokeWidth={STROKE_CENTERLINE}
+                    strokeDasharray="0.6 0.4"
+                  />
+                </>
+              );
+            })()}
+          </>
         )}
 
         {/* Lanes */}
@@ -266,6 +338,13 @@ export function RoadVisualizer({ road, driveSide, focus }: Props) {
             lane={geo.median}
             prefix="median"
             focused={isFocused(focus, "median")}
+          />
+        )}
+        {geo.turnLane && (
+          <LaneLabels
+            lane={geo.turnLane}
+            prefix="turnLane"
+            focused={isFocused(focus, "turnLane")}
           />
         )}
 

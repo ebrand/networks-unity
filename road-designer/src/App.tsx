@@ -181,6 +181,7 @@ function App() {
       return { kind: "shoulder", direction: dir as "AB" | "BA" };
     }
     if (kind === "median") return { kind: "median" };
+    if (kind === "turnLane") return { kind: "turnLane" };
     return { kind: "none" };
   }, [focusKey]);
 
@@ -197,6 +198,7 @@ function App() {
     { value: "shoulder:AB", label: "shoulderAB" },
     { value: "shoulder:BA", label: "shoulderBA" },
     ...(road.median ? [{ value: "median", label: "median" }] : []),
+    ...(road.turnLane ? [{ value: "turnLane", label: "turnLane" }] : []),
   ];
 
   const isTuning = view === "tuning";

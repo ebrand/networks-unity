@@ -668,9 +668,11 @@ namespace NetworkDesigner.Geometry
             int abSign = driveSide == DriveSide.Right ? 1 : -1;
             int baSign = -abSign;
 
-            float medianHalf = d.Road.Profile.Median != null
-                ? d.Road.Profile.Median.Width * 0.5f
-                : 0f;
+            // Center-strip half — accounts for either a median OR a
+            // turn lane (mutually exclusive). Both shift lanes
+            // outward by the same amount; the resolver doesn't care
+            // which kind of strip is sitting in the middle.
+            float medianHalf = d.Road.Profile.CenterStripWidth * 0.5f;
 
             // Compute the centering shift so the asphalt midpoint sits
             // on the centerline. Matches RoadRenderer's shift — keeps
@@ -872,8 +874,9 @@ namespace NetworkDesigner.Geometry
             if (road == null || road.Profile == null) return 0f;
             int abSign = driveSide == DriveSide.Right ? 1 : -1;
             int baSign = -abSign;
-            float medianHalf = road.Profile.Median != null
-                ? road.Profile.Median.Width * 0.5f : 0f;
+            // Lanes are pushed outward by the center-strip half (median
+            // or turn lane — mutually exclusive, same lane-offset effect).
+            float medianHalf = road.Profile.CenterStripWidth * 0.5f;
 
             // Same asphalt-midpoint recentering as the resolver — for
             // asymmetric AB/BA lane counts this isn't zero.
@@ -987,6 +990,29 @@ namespace NetworkDesigner.Geometry
             return (3f * u * u) * (c1 - p0)
                  + (6f * u * t) * (c2 - c1)
                  + (3f * t * t) * (p3 - c2);
+        }
+
+        /// <summary>Second derivative of the cubic at t.</summary>
+        public static Vector2 CubicSecondDerivative(Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, float t)
+        {
+            return (6f * (1f - t)) * (c2 - 2f * c1 + p0)
+                 + (6f * t) * (p3 - 2f * c2 + c1);
+        }
+
+        /// <summary>
+        /// Signed curvature κ of the cubic at t (1/radius). Positive =
+        /// curving one way, negative the other (sign follows the 2D
+        /// cross product of first and second derivatives). |κ| ≈ 0 for
+        /// straight segments. Returns 0 when the tangent is degenerate.
+        /// </summary>
+        public static float CubicCurvature(Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, float t)
+        {
+            Vector2 d1 = CubicTangent(p0, c1, c2, p3, t);
+            Vector2 d2 = CubicSecondDerivative(p0, c1, c2, p3, t);
+            float speedSq = d1.sqrMagnitude;
+            if (speedSq < 1e-8f) return 0f;
+            float cross = d1.x * d2.y - d1.y * d2.x;
+            return cross / Mathf.Pow(speedSq, 1.5f);
         }
 
         /// <summary>

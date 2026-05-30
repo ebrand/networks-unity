@@ -51,6 +51,8 @@ namespace NetworkDesigner.Rendering
         public float LineWidth = 0.15f;
         public float DashLength = 3f;
         public float DashGap = 9f;
+        [Tooltip("Spacing (m) between the outer SOLID and inner DASHED yellow lines on each side of a turn lane (standard TWLTL paint). Forwarded to RoadRenderer.")]
+        public float TurnLaneStripeInset = 0.3f;
         public float MarkingHeight = 0.01f;
         [Tooltip("How far short of the setback line markings stop, at each road end. 0 = stop right at the setback.")]
         public float MarkingEndInset = 0f;
@@ -943,6 +945,7 @@ namespace NetworkDesigner.Rendering
             rr.LineWidth = LineWidth;
             rr.DashLength = DashLength;
             rr.DashGap = DashGap;
+            rr.TurnLaneStripeInset = TurnLaneStripeInset;
             rr.MarkingHeight = MarkingHeight;
             rr.DrawArrows = DrawArrows;
             rr.ArrowLength = ArrowLength;

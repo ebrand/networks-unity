@@ -278,12 +278,13 @@ namespace NetworkDesigner.Model
         public float LateralOffsetB;
 
         /// <summary>
-        /// Optional posted speed limit (m/s) on this road. When set, an
-        /// agent on this road has its effective TargetSpeed capped at
-        /// this value (TargetSpeed = min(NaturalSpeed, SpeedLimit)). When
-        /// null the road imposes no cap and agents cruise at their
-        /// natural speed. Edits take effect immediately for any agent
-        /// currently on the road (no rebuild required).
+        /// Optional posted speed limit (m/s) on this road. When set,
+        /// agents on this road hover around it: TargetSpeed = SpeedLimit
+        /// + per-agent SpeedBias (signed, sampled at spawn from
+        /// N(0, SpeedVariationStdDev)). When null, agents fall back to
+        /// AgentSystem.DefaultSpeed + their SpeedBias. Edits take effect
+        /// immediately for any agent currently on the road (no rebuild
+        /// required).
         /// </summary>
         public float? SpeedLimit;
     }

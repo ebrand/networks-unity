@@ -60,6 +60,22 @@ namespace NetworkDesigner.Model
     }
 
     /// <summary>
+    /// Two-way left-turn lane (TWLTL / "suicide lane") centered on the
+    /// road. Drivable asphalt strip flanked by yellow markings — used
+    /// for in-segment left turns and curb cuts. Mutually exclusive with
+    /// Median (a road has either a median, a turn lane, or neither).
+    /// As of this writing, agents don't yet USE the turn lane for
+    /// turning — it's rendered now and gets traffic logic when curb
+    /// cuts + mid-segment left turns land.
+    /// </summary>
+    [Serializable]
+    public class TurnLane
+    {
+        /// <summary>Turn-lane width in meters.</summary>
+        public float Width;
+    }
+
+    /// <summary>
     /// A road's cross-section profile: lanes per direction, optional
     /// median, and shoulders. Reused by NetworkRoad.Profile in the
     /// network model.
@@ -74,13 +90,31 @@ namespace NetworkDesigner.Model
         [JsonProperty("ba")] public Side BA = new Side();
         /// <summary>Null when the road has no median (always null for one-way roads).</summary>
         public Median Median;
+        /// <summary>Null when the road has no turn lane. Mutually exclusive with Median.</summary>
+        public TurnLane TurnLane;
         public Shoulder ShoulderAB = new Shoulder { Width = 1f };
         public Shoulder ShoulderBA = new Shoulder { Width = 1f };
 
         /// <summary>True when one of the two sides has zero lanes.</summary>
         [JsonIgnore] public bool IsOneWay => AB.Lanes.Count == 0 || BA.Lanes.Count == 0;
 
-        /// <summary>Total cross-section width (shoulder + lanes + median + lanes + shoulder), meters.</summary>
+        /// <summary>
+        /// Width of the center strip (median or turn lane) in meters,
+        /// or 0 if neither is present. Median + TurnLane are mutually
+        /// exclusive; if both are somehow set, Median takes precedence
+        /// (caller logged for diagnosis).
+        /// </summary>
+        [JsonIgnore] public float CenterStripWidth
+        {
+            get
+            {
+                if (Median != null) return Median.Width;
+                if (TurnLane != null) return TurnLane.Width;
+                return 0f;
+            }
+        }
+
+        /// <summary>Total cross-section width (shoulder + lanes + center strip + lanes + shoulder), meters.</summary>
         [JsonIgnore] public float TotalWidth
         {
             get
@@ -88,7 +122,7 @@ namespace NetworkDesigner.Model
                 float w = ShoulderAB.Width + ShoulderBA.Width;
                 foreach (Lane l in AB.Lanes) w += l.Width;
                 foreach (Lane l in BA.Lanes) w += l.Width;
-                if (Median != null) w += Median.Width;
+                w += CenterStripWidth;
                 return w;
             }
         }

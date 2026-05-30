@@ -31,6 +31,15 @@ export interface Median {
   width: number; // meters
 }
 
+// Optional two-way left-turn lane (TWLTL / "suicide lane") centered on
+// the centerline. Drivable asphalt strip flanked by yellow markings —
+// used for in-segment left turns and curb cuts. MUTUALLY EXCLUSIVE with
+// `median` (a road has either a median, a turn lane, or neither).
+// Only valid on two-way roads.
+export interface TurnLane {
+  width: number; // meters
+}
+
 // A road is an edge between two graph vertices (A and B). Geometry lives
 // elsewhere — this is the cross-section definition. The sides are named
 // by logical direction; their physical position is resolved at render time
@@ -40,6 +49,7 @@ export interface Road {
   ab: Side;
   ba: Side;
   median?: Median;
+  turnLane?: TurnLane;
   shoulderAB: Shoulder;
   shoulderBA: Shoulder;
 }

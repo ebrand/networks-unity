@@ -53,6 +53,8 @@ namespace NetworkDesigner.Designer
         [Tooltip("Each scroll tick changes Distance by this fraction of " +
                  "the current Distance.")]
         public float ZoomSensitivity = 5f;
+        [Tooltip("How quickly Distance eases toward the wheel-driven target (1/sec). Higher = snappier zoom, lower = floatier. 0 = instant (no easing, old behavior).")]
+        public float ZoomSmoothing = 10f;
         [Tooltip("WASD pan speed, in (meters per second) per (meter of Distance). " +
                  "Scales with Distance so panning feels the same regardless of " +
                  "zoom level — e.g. 1.5 means holding W moves Target forward by " +
@@ -67,14 +69,60 @@ namespace NetworkDesigner.Designer
         // the palette (so the palette's own scroll view consumes it).
         public System.Func<bool> ScrollSuppressor;
 
+        // The wheel-driven target Distance. The actual Distance eases
+        // toward this each frame so quantized scroll input produces
+        // smooth motion instead of snapping. Initialized lazily so
+        // Inspector-set / tuning-restored Distance values are honored
+        // on first frame.
+        float _distanceTarget;
+        bool _distanceTargetInit;
+
+        /// <summary>
+        /// Steady-state zoom target. Reading returns where the camera
+        /// will end up after smoothing settles; writing sets that
+        /// target (Distance then eases toward it). Bind the tuning
+        /// panel / persistence layer to THIS, not to Distance, so the
+        /// per-frame easing doesn't get mistaken for user edits.
+        /// </summary>
+        public float DistanceTarget
+        {
+            get => _distanceTargetInit ? _distanceTarget : Distance;
+            set
+            {
+                _distanceTarget = Mathf.Clamp(value, MinDistance, MaxDistance);
+                _distanceTargetInit = true;
+            }
+        }
+
         void OnEnable()
         {
             ApplyClipPlanes();
+            _distanceTarget = Distance;
+            _distanceTargetInit = true;
         }
 
         void LateUpdate()
         {
+            if (!_distanceTargetInit)
+            {
+                _distanceTarget = Distance;
+                _distanceTargetInit = true;
+            }
             HandleInput();
+            // Ease Distance toward _distanceTarget. Frame-rate-independent
+            // exponential approach — same feel at any FPS.
+            if (ZoomSmoothing > 0f)
+            {
+                float k = 1f - Mathf.Exp(-ZoomSmoothing * Time.deltaTime);
+                Distance = Mathf.Lerp(Distance, _distanceTarget, k);
+                // Snap when close enough so the camera doesn't infinitely
+                // crawl toward the target.
+                if (Mathf.Abs(Distance - _distanceTarget) < 0.01f) Distance = _distanceTarget;
+            }
+            else
+            {
+                Distance = _distanceTarget;
+            }
             ApplyTransform();
             ApplyClipPlanes();
         }
@@ -115,8 +163,12 @@ namespace NetworkDesigner.Designer
 
             if (Mathf.Abs(scroll) > 1e-4f)
             {
-                Distance -= scroll * ZoomSensitivity * Distance;
-                Distance = Mathf.Clamp(Distance, MinDistance, MaxDistance);
+                // Drive the smoothed target so wheel notches feel like
+                // a continuous zoom instead of stepwise snaps. Scale by
+                // the target itself so each notch is proportional (close
+                // = fine zoom, far = coarse zoom).
+                _distanceTarget -= scroll * ZoomSensitivity * _distanceTarget;
+                _distanceTarget = Mathf.Clamp(_distanceTarget, MinDistance, MaxDistance);
             }
 
             HandleKeyboardPan();

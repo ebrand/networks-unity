@@ -72,6 +72,8 @@ namespace NetworkDesigner.Designer
         public KeyCode AgentClearHotkey = KeyCode.H;
         [Tooltip("Toggle the simulation Paused state (freezes agent ticking + spawn drain).")]
         public KeyCode PauseHotkey = KeyCode.P;
+        [Tooltip("Toggle the agent chase camera (must have an agent selected). Drives the main PickCamera from the front of the selected agent looking forward; restores orbit camera on toggle off / agent deselect / agent despawn.")]
+        public KeyCode ChaseCamHotkey = KeyCode.F;
         [Tooltip("How many agents the G hotkey spawns in one batch.")]
         public int AgentSpawnBatchSize = 100;
 
@@ -81,7 +83,7 @@ namespace NetworkDesigner.Designer
         [Tooltip("Pixel position of the palette's top-left corner (Game-view).")]
         public Vector2 ToolPaletteOrigin = new Vector2(10, 10);
         [Tooltip("Palette width in pixels. Height auto-sizes (clipped at 600px).")]
-        public float ToolPaletteWidth = 220f;
+        public float ToolPaletteWidth = 320f;
 
         [Header("Road configs (palette source)")]
         [Tooltip("Path to road-config.json (exported from the React Road Designer). Relative to the Unity project root, or absolute.")]
@@ -264,6 +266,8 @@ namespace NetworkDesigner.Designer
         public int DefaultBaLanes = 1;
         public float DefaultLaneWidth = 4f;
         public float DefaultShoulderWidth = 1f;
+        [Tooltip("Speed limit (km/h) automatically posted on freshly-created roads. 0 = leave SpeedLimit null (road inherits AgentSystem.DefaultSpeed). Inherited values on split / collinear-merge are preserved either way.")]
+        public float DefaultNewRoadSpeedLimitKph = 70f;
 
         NetworkRenderer _renderer;
         Network _network;
@@ -280,6 +284,16 @@ namespace NetworkDesigner.Designer
         LineRenderer _agentPathLine;
         Color _selectedAgentOriginalColor;
         bool _selectedAgentColorCaptured;
+        // Chase-cam state. While active, the main PickCamera is driven
+        // from the selected agent each LateUpdate; OrbitCameraController
+        // is disabled so it doesn't compete for the camera transform.
+        // Camera state (position/rotation/fov) is snapshotted on enter
+        // and restored on exit so the orbit pose returns intact.
+        bool _chaseCamActive;
+        OrbitCameraController _chaseCamOrbit;
+        Vector3 _chaseCamSavedPos;
+        Quaternion _chaseCamSavedRot;
+        float _chaseCamSavedFov;
         [Header("Agent plan visualization")]
         [Tooltip("Color tint applied to a selected agent's capsule so it stands out.")]
         public Color SelectedAgentTint = new Color(1f, 0.95f, 0.2f, 1f);
@@ -291,6 +305,12 @@ namespace NetworkDesigner.Designer
         public float AgentPlanLineHeight = 0.1f;
         [Tooltip("Samples per segment along the agent's plan. More = smoother curves.")]
         public int AgentPlanSamplesPerSegment = 12;
+        [Tooltip("Meters in front of the agent's center to place the chase camera (positive = ahead). At AgentDiameter ≈ 1.6m, ~1.5m puts it just past the front of the capsule.")]
+        public float ChaseCamForwardOffset = 1.5f;
+        [Tooltip("Meters above the agent's center position to place the chase camera. With AgentYLift ≈ 0.9 + this ≈ 0.5 puts the camera at ~1.4m world Y — typical driver eye height.")]
+        public float ChaseCamHeightOffset = 0.5f;
+        [Tooltip("Field of view (degrees) for the chase camera. 70 is wider than a typical 60° game default so the agent's surroundings are more visible.")]
+        public float ChaseCamFieldOfView = 70f;
         [Tooltip("Color of the line from the selected agent to each FOLLOW blocker (another agent in its forward cone slowing it down).")]
         public Color BlockerFollowColor = new Color(1f, 0.2f, 0.2f, 0.85f);
         [Tooltip("Color of the line from the selected agent to each INTERSECTION blocker (another agent on a conflicting upcoming intersection bezier).")]
@@ -311,6 +331,10 @@ namespace NetworkDesigner.Designer
         public bool DetectionConeShowComfortRing = true;
         [Tooltip("Fill color for the inner FollowComfortDistance fan. Should be more saturated than DetectionConeColor.")]
         public Color DetectionConeComfortColor = new Color(0.3f, 0.7f, 1f, 0.28f);
+        [Tooltip("Show a REAR detection fan (sized to YieldRightLookBehind) so the user can see what zone the yield-right logic is scanning. Hidden when YieldRightEnabled is off.")]
+        public bool DetectionConeShowRear = true;
+        [Tooltip("Fill color for the rear yield-right detection fan. Distinct hue from the forward cones (default: warm yellow-orange).")]
+        public Color DetectionConeRearColor = new Color(1f, 0.75f, 0.2f, 0.22f);
 
         // Autosave debounce. Set by MarkDirty; consumed by Update to time
         // the actual disk write so a slider drag or vertex drag doesn't
@@ -673,6 +697,11 @@ namespace NetworkDesigner.Designer
         {
             if (Input.GetKeyDown(ModeToggleKey)) ToggleMode();
             if (Input.GetKeyDown(ToolToggleKey)) ToggleTool();
+            // Chase cam: only meaningful when an agent is selected.
+            // No mode gate — works in both Edit and Run so the user can
+            // ride an agent regardless of which mode they're in.
+            if (Input.GetKeyDown(ChaseCamHotkey) && _selectedAgent != null)
+                ToggleChaseCam();
             if (Input.GetKeyDown(RoundaboutHotkey)) TryRoundaboutHotkey();
             if (Input.GetKeyDown(VertexViewToggleHotkey)) SetVertexMarkersVisible(!ShowVertexMarkers);
 
@@ -1268,6 +1297,7 @@ namespace NetworkDesigner.Designer
                     Profile = CloneProfile(ringProfile),
                     Curve = new RoadCurve { ControlA = controlA, ControlB = controlB },
                 };
+                ApplyNewRoadDefaults(ringRoad);
                 _network.Roads.Add(ringRoad);
             }
 
@@ -1430,6 +1460,7 @@ namespace NetworkDesigner.Designer
                 Profile = BuildDefaultProfile(),
                 Curve = new RoadCurve { ControlA = controlA, ControlB = controlB },
             };
+            ApplyNewRoadDefaults(road);
             _network.Roads.Add(road);
             // New road — no existing agent's plan references it yet.
             MarkDirtyNoAgentRebuild();
@@ -1460,6 +1491,7 @@ namespace NetworkDesigner.Designer
                 Profile = BuildDefaultProfile(),
                 Curve = new RoadCurve { ControlA = controlA, ControlB = controlB },
             };
+            ApplyNewRoadDefaults(road);
             _network.Roads.Add(road);
             // New road — no existing agent's plan references it yet.
             MarkDirtyNoAgentRebuild();
@@ -2120,6 +2152,53 @@ namespace NetworkDesigner.Designer
                     GUI.Label(r, measurement);
                 }
             }
+
+            DrawSelectedAgentTooltip();
+        }
+
+        GUIStyle _agentTooltipStyle;
+
+        void DrawSelectedAgentTooltip()
+        {
+            if (_selectedAgent == null || _selectedAgent.Visual == null) return;
+            if (PickCamera == null) return;
+
+            // Lazy-build style on first paint (GUI.skin isn't safe earlier).
+            if (_agentTooltipStyle == null)
+            {
+                _agentTooltipStyle = new GUIStyle(GUI.skin.box)
+                {
+                    alignment = TextAnchor.UpperLeft,
+                    padding = new RectOffset(6, 6, 4, 4),
+                    fontSize = 12,
+                    richText = true,
+                };
+                _agentTooltipStyle.normal.textColor = Color.white;
+            }
+
+            // Project agent's world position to screen. Lift a couple of
+            // meters so the label sits above the capsule, not on top.
+            Vector3 worldPos = _selectedAgent.Visual.transform.position
+                + Vector3.up * 2.5f;
+            Vector3 sp = PickCamera.WorldToScreenPoint(worldPos);
+            if (sp.z < 0f) return; // agent is behind the camera
+
+            float kph(float ms) => ms * KPH_PER_MPS;
+            // Lines: target = NaturalSpeed + bias capped by road limit;
+            // current = actual moving speed; bias = signed delta from base.
+            string text =
+                $"<b>{_selectedAgent.Id}</b>\n" +
+                $"Target:  {kph(_selectedAgent.TargetSpeed):F1} km/h\n" +
+                $"Current: {kph(_selectedAgent.Speed):F1} km/h\n" +
+                $"Bias:    {kph(_selectedAgent.SpeedBias):+0.0;-0.0;0.0} km/h";
+
+            const float w = 170f, h = 70f;
+            float x = sp.x + 14f;
+            float y = Screen.height - sp.y - h - 6f; // above the agent
+            // Keep on-screen.
+            if (x + w > Screen.width) x = Screen.width - w - 4f;
+            if (y < 0f) y = 4f;
+            GUI.Label(new Rect(x, y, w, h), text, _agentTooltipStyle);
         }
 
         // Cached IMGUI styles built lazily on first OnGUI (Unity's GUI.skin
@@ -2377,11 +2456,12 @@ namespace NetworkDesigner.Designer
                 : 0f;
             GUILayout.Label($"w={_selectedRoad.Profile.TotalWidth:F1}m  chord={chordLen:F1}m", _paletteSubtle);
 
-            // Speed limit text field. Empty / non-numeric → null (no limit).
-            // Buffer keeps the text the user is typing across frames; flushed
-            // on Enter or focus loss via the equality check below.
+            // Speed limit text field. Stored internally in m/s; displayed
+            // and entered in km/h. Empty / non-numeric → null (no limit).
+            // Buffer keeps the text the user is typing across frames;
+            // flushed on Enter or focus loss via the equality check below.
             string current = _selectedRoad.SpeedLimit.HasValue
-                ? _selectedRoad.SpeedLimit.Value.ToString("0.##")
+                ? (_selectedRoad.SpeedLimit.Value * KPH_PER_MPS).ToString("0.##")
                 : "";
             if (_speedLimitEditingId != _selectedRoad.Id)
             {
@@ -2389,7 +2469,7 @@ namespace NetworkDesigner.Designer
                 _speedLimitEditBuf = current;
             }
             GUILayout.BeginHorizontal();
-            GUILayout.Label("speed limit (m/s)", _paletteSubtle, GUILayout.Width(120));
+            GUILayout.Label("speed limit (km/h)", _paletteSubtle, GUILayout.Width(120));
             string typed = GUILayout.TextField(_speedLimitEditBuf, GUILayout.Width(60));
             if (typed != _speedLimitEditBuf) _speedLimitEditBuf = typed;
             if (GUILayout.Button("set", _paletteButton, GUILayout.Width(40)))
@@ -2403,12 +2483,29 @@ namespace NetworkDesigner.Designer
                 MarkDirtyNoAgentRebuild();
             }
             GUILayout.EndHorizontal();
-            GUILayout.Label(
-                _selectedRoad.SpeedLimit.HasValue
-                    ? $"  posted: {_selectedRoad.SpeedLimit.Value:F1} m/s"
-                    : "  posted: (none — agents cruise at NaturalSpeed)",
-                _paletteSubtle);
+            // Always show the EFFECTIVE limit, whether posted or inherited.
+            // When no per-road override is set, falls back to AgentSystem.
+            // DefaultSpeed (the implicit global limit). Lets the user see
+            // what the agents will actually do on this road without first
+            // having to figure out if it was customized.
+            float effectiveKph;
+            string source;
+            if (_selectedRoad.SpeedLimit.HasValue)
+            {
+                effectiveKph = _selectedRoad.SpeedLimit.Value * KPH_PER_MPS;
+                source = "posted";
+            }
+            else
+            {
+                float defaultMps = _agentSystem != null ? _agentSystem.DefaultSpeed : 0f;
+                effectiveKph = defaultMps * KPH_PER_MPS;
+                source = "default (no override)";
+            }
+            GUILayout.Label($"  effective: {effectiveKph:F1} km/h  [{source}]", _paletteSubtle);
         }
+
+        // km/h ↔ m/s. Mirrors TuningSetup.KPH_PER_MPS.
+        const float KPH_PER_MPS = 3.6f;
 
         // Text buffer + which road we're currently editing — lets the
         // user type freely without each keystroke writing to the model.
@@ -2424,15 +2521,16 @@ namespace NetworkDesigner.Designer
                 _selectedRoad.SpeedLimit = null;
             }
             else if (float.TryParse(s, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out float v) && v > 0f)
+                System.Globalization.CultureInfo.InvariantCulture, out float kph) && kph > 0f)
             {
-                _selectedRoad.SpeedLimit = v;
+                // User entered km/h; store internally as m/s.
+                _selectedRoad.SpeedLimit = kph / KPH_PER_MPS;
             }
             else
             {
-                Debug.LogWarning($"[NetworkDesigner] Invalid speed limit '{s}' — expected a positive number or empty.");
+                Debug.LogWarning($"[NetworkDesigner] Invalid speed limit '{s}' — expected a positive km/h value or empty.");
                 _speedLimitEditBuf = _selectedRoad.SpeedLimit.HasValue
-                    ? _selectedRoad.SpeedLimit.Value.ToString("0.##")
+                    ? (_selectedRoad.SpeedLimit.Value * KPH_PER_MPS).ToString("0.##")
                     : "";
                 return;
             }
@@ -4169,6 +4267,10 @@ namespace NetworkDesigner.Designer
                 EndB = other2.Id,
                 Classification = r1.Classification,
                 Profile = r1.Profile,
+                // Inherit posted limit from one of the merged sources
+                // (they share a vertex; if their limits differ, the
+                // first-named wins — they should match in practice).
+                SpeedLimit = r1.SpeedLimit ?? r2.SpeedLimit,
             };
             _network.Roads.Add(merged);
             Debug.Log($"[NetworkDesigner] Collinear merge at vertex {v.Id}: " +
@@ -4402,6 +4504,7 @@ namespace NetworkDesigner.Designer
                     Profile = CloneProfile(ringProfile),
                     Curve = new RoadCurve { ControlA = controlA, ControlB = controlB },
                 };
+                ApplyNewRoadDefaults(ringRoad);
                 _network.Roads.Add(ringRoad);
             }
 
@@ -4668,6 +4771,17 @@ namespace NetworkDesigner.Designer
             return t;
         }
 
+        // Stamp the per-designer defaults on a freshly-created road
+        // (not on splits / merges, which inherit from their source).
+        // Currently sets only SpeedLimit; add other "new road" defaults
+        // here if needed later.
+        void ApplyNewRoadDefaults(NetworkRoad road)
+        {
+            if (road == null) return;
+            if (DefaultNewRoadSpeedLimitKph > 0f)
+                road.SpeedLimit = DefaultNewRoadSpeedLimitKph / KPH_PER_MPS;
+        }
+
         void CreateRoad(Vertex a, Vertex b)
         {
             if (a == b) return;
@@ -4858,6 +4972,7 @@ namespace NetworkDesigner.Designer
                 Classification = RoadClassification.Secondary,
                 Profile = BuildDefaultProfile(),
             };
+            ApplyNewRoadDefaults(road);
             _network.Roads.Add(road);
             // New road — no existing agent's plan references it yet.
             MarkDirtyNoAgentRebuild();
@@ -4890,6 +5005,7 @@ namespace NetworkDesigner.Designer
                 EndB = split.Id,
                 Classification = old.Classification,
                 Profile = old.Profile,
+                SpeedLimit = old.SpeedLimit,
             };
             NetworkRoad right = new NetworkRoad
             {
@@ -4898,6 +5014,7 @@ namespace NetworkDesigner.Designer
                 EndB = old.EndB,
                 Classification = old.Classification,
                 Profile = old.Profile,
+                SpeedLimit = old.SpeedLimit,
             };
 
             // Curved roads: De Casteljau-split the bezier at t.
@@ -5605,24 +5722,45 @@ namespace NetworkDesigner.Designer
 
         // ---- Agent selection + plan visualization ----
 
+        // Resolve the MeshRenderer that should carry the agent's tint
+        // (selected / blocker highlight). For capsules that's the
+        // root's own MR; for vehicle prefabs it's the body child
+        // (stashed on AgentClickTarget at spawn). Falls back to the
+        // root's MR for backward compat.
+        static MeshRenderer GetAgentBodyRenderer(Agent a)
+        {
+            if (a == null || a.Visual == null) return null;
+            AgentClickTarget tag = a.Visual.GetComponent<AgentClickTarget>();
+            if (tag != null && tag.BodyRenderer != null) return tag.BodyRenderer;
+            return a.Visual.GetComponent<MeshRenderer>();
+        }
+
         void SetSelectedAgent(Agent a)
         {
             if (_selectedAgent == a) return;
             // Restore the previously-selected agent's color.
             if (_selectedAgent != null && _selectedAgent.Visual != null && _selectedAgentColorCaptured)
             {
-                MeshRenderer pmr = _selectedAgent.Visual.GetComponent<MeshRenderer>();
+                MeshRenderer pmr = GetAgentBodyRenderer(_selectedAgent);
                 if (pmr != null && pmr.sharedMaterial != null)
                     pmr.sharedMaterial.color = _selectedAgentOriginalColor;
             }
             // Restore any blocker tints from the previous selection so
             // they don't carry into the new (or empty) selection's frame.
             RestoreAllBlockerTints();
+            // Chase cam follows the selected agent. If selection changes
+            // to a different agent the chase keeps going on the new one;
+            // if it clears entirely, drop chase too.
+            if (_chaseCamActive && a == null) ExitChaseCam();
             _selectedAgent = a;
+            // Push the selection down to AgentSystem so its diagnostic
+            // logging (yield-right rejection reasons) targets only this
+            // agent — keeps the console clean.
+            if (_agentSystem != null) _agentSystem.DebugAgent = a;
             _selectedAgentColorCaptured = false;
             if (a != null && a.Visual != null)
             {
-                MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+                MeshRenderer mr = GetAgentBodyRenderer(a);
                 if (mr != null && mr.sharedMaterial != null)
                 {
                     _selectedAgentOriginalColor = mr.sharedMaterial.color;
@@ -5710,6 +5848,83 @@ namespace NetworkDesigner.Designer
         // Reusable buffer to avoid per-frame allocation.
         Vector3[] _planLinePoints;
 
+        // ---- Chase cam ----
+
+        void ToggleChaseCam()
+        {
+            if (_chaseCamActive) ExitChaseCam();
+            else EnterChaseCam();
+        }
+
+        void EnterChaseCam()
+        {
+            if (_chaseCamActive) return;
+            if (_selectedAgent == null || _selectedAgent.Visual == null) return;
+            if (PickCamera == null) return;
+
+            // Snapshot camera state so ExitChaseCam can restore exactly
+            // what was there before — including whatever orbit pose the
+            // OrbitCameraController had written this frame.
+            _chaseCamSavedPos = PickCamera.transform.position;
+            _chaseCamSavedRot = PickCamera.transform.rotation;
+            _chaseCamSavedFov = PickCamera.fieldOfView;
+
+            _chaseCamOrbit = PickCamera.GetComponent<OrbitCameraController>();
+            if (_chaseCamOrbit != null) _chaseCamOrbit.enabled = false;
+
+            PickCamera.fieldOfView = ChaseCamFieldOfView;
+            _chaseCamActive = true;
+            UpdateChaseCamPosition();
+            Debug.Log($"[NetworkDesigner] Chase cam ON for agent '{_selectedAgent.Id}'. Press {ChaseCamHotkey} again to exit.");
+        }
+
+        void ExitChaseCam()
+        {
+            if (!_chaseCamActive) return;
+            if (PickCamera != null)
+            {
+                PickCamera.transform.position = _chaseCamSavedPos;
+                PickCamera.transform.rotation = _chaseCamSavedRot;
+                PickCamera.fieldOfView = _chaseCamSavedFov;
+            }
+            if (_chaseCamOrbit != null) _chaseCamOrbit.enabled = true;
+            _chaseCamOrbit = null;
+            _chaseCamActive = false;
+            Debug.Log("[NetworkDesigner] Chase cam OFF.");
+        }
+
+        // Position the camera at the front of the selected agent, looking
+        // along the agent's forward direction. Called from LateUpdate
+        // (and once from EnterChaseCam) so the camera tracks the agent's
+        // freshly-updated transform — AgentSystem moves the visual in
+        // its own Update, before any LateUpdate runs.
+        void UpdateChaseCamPosition()
+        {
+            if (!_chaseCamActive) return;
+            if (_selectedAgent == null || _selectedAgent.Visual == null || PickCamera == null)
+            {
+                ExitChaseCam();
+                return;
+            }
+            Transform t = _selectedAgent.Visual.transform;
+            Vector3 fwd = t.forward;
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f) fwd = Vector3.forward;
+            fwd.Normalize();
+            Vector3 pos = t.position + fwd * ChaseCamForwardOffset
+                + Vector3.up * ChaseCamHeightOffset;
+            PickCamera.transform.position = pos;
+            PickCamera.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
+        }
+
+        void LateUpdate()
+        {
+            // Run AFTER all Update methods (including AgentSystem.Update
+            // which moves the agent visual). This guarantees we see the
+            // agent's new position this frame instead of trailing by one.
+            if (_chaseCamActive) UpdateChaseCamPosition();
+        }
+
         // Pool of LineRenderer GameObjects for the per-frame blocker
         // visualization. Active ones connect the selected agent to
         // each of its current blockers; inactive ones stay around
@@ -5735,12 +5950,16 @@ namespace NetworkDesigner.Designer
         GameObject _agentDetectionConeGo;
         MeshFilter _agentDetectionConeMfOuter;
         MeshFilter _agentDetectionConeMfInner;
+        MeshFilter _agentDetectionConeMfRear;
         Mesh _agentDetectionConeMeshOuter;
         Mesh _agentDetectionConeMeshInner;
+        Mesh _agentDetectionConeMeshRear;
         Vector3[] _coneVertsOuter;
         int[] _coneTrisOuter;
         Vector3[] _coneVertsInner;
         int[] _coneTrisInner;
+        Vector3[] _coneVertsRear;
+        int[] _coneTrisRear;
 
         void UpdateBlockerLines()
         {
@@ -5796,7 +6015,7 @@ namespace NetworkDesigner.Designer
                 Agent a = _scratchTintsToClear[i];
                 if (a != null && a.Visual != null)
                 {
-                    MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+                    MeshRenderer mr = GetAgentBodyRenderer(a);
                     if (mr != null && mr.sharedMaterial != null)
                         mr.sharedMaterial.color = _tintedBlockerOriginals[a];
                 }
@@ -5804,13 +6023,14 @@ namespace NetworkDesigner.Designer
             }
         }
 
-        // Apply a tint to a blocker capsule. Captures the original color
-        // on first tint so we can restore it later. Skips the selected
-        // agent (which already has its own tint applied by SetSelectedAgent).
+        // Apply a tint to a blocker agent's body. Captures the original
+        // color on first tint so we can restore it later. Skips the
+        // selected agent (which already has its own tint applied by
+        // SetSelectedAgent).
         void TintBlocker(Agent a, Color tint)
         {
             if (a == null || a.Visual == null || a == _selectedAgent) return;
-            MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+            MeshRenderer mr = GetAgentBodyRenderer(a);
             if (mr == null || mr.sharedMaterial == null) return;
             _currentlyTintedBlockers.Add(a);
             if (!_tintedBlockerOriginals.ContainsKey(a))
@@ -5827,7 +6047,7 @@ namespace NetworkDesigner.Designer
             {
                 Agent a = kv.Key;
                 if (a == null || a.Visual == null) continue;
-                MeshRenderer mr = a.Visual.GetComponent<MeshRenderer>();
+                MeshRenderer mr = GetAgentBodyRenderer(a);
                 if (mr != null && mr.sharedMaterial != null)
                     mr.sharedMaterial.color = kv.Value;
             }
@@ -5886,6 +6106,24 @@ namespace NetworkDesigner.Designer
             else
             {
                 if (_agentDetectionConeMfInner != null) _agentDetectionConeMfInner.gameObject.SetActive(false);
+            }
+
+            // Rear fan: sized to YieldRightLookBehind, oriented opposite
+            // of forward. Hidden when yield-right is off — visualizing a
+            // detection range that does nothing would be misleading.
+            bool rearVisible = DetectionConeShowRear
+                && _agentSystem.YieldRightEnabled
+                && _agentSystem.YieldRightLookBehind > 0.1f;
+            if (rearVisible)
+            {
+                BuildConeFan(_agentDetectionConeMeshRear, ref _coneVertsRear, ref _coneTrisRear,
+                    pos, -fwd, _agentSystem.YieldRightLookBehind, halfAngle,
+                    DetectionConeLift + 0.02f);
+                if (_agentDetectionConeMfRear != null) _agentDetectionConeMfRear.gameObject.SetActive(true);
+            }
+            else
+            {
+                if (_agentDetectionConeMfRear != null) _agentDetectionConeMfRear.gameObject.SetActive(false);
             }
 
             UpdateConeMaterialColors();
@@ -5977,6 +6215,21 @@ namespace NetworkDesigner.Designer
             };
             innerMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             innerMr.receiveShadows = false;
+
+            // Rear fan child — visualizes YieldRightLookBehind.
+            var rearGo = new GameObject("RearFan");
+            rearGo.transform.SetParent(_agentDetectionConeGo.transform, worldPositionStays: false);
+            _agentDetectionConeMfRear = rearGo.AddComponent<MeshFilter>();
+            _agentDetectionConeMeshRear = new Mesh { name = "AgentDetectionConeRear" };
+            _agentDetectionConeMfRear.sharedMesh = _agentDetectionConeMeshRear;
+            var rearMr = rearGo.AddComponent<MeshRenderer>();
+            rearMr.sharedMaterial = new Material(Shader.Find("Sprites/Default"))
+            {
+                name = "DetectionConeRearMat",
+                color = DetectionConeRearColor,
+            };
+            rearMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            rearMr.receiveShadows = false;
         }
 
         void UpdateConeMaterialColors()
@@ -5992,6 +6245,12 @@ namespace NetworkDesigner.Designer
                 var mr = _agentDetectionConeMfInner.GetComponent<MeshRenderer>();
                 if (mr != null && mr.sharedMaterial != null)
                     mr.sharedMaterial.color = DetectionConeComfortColor;
+            }
+            if (_agentDetectionConeMfRear != null)
+            {
+                var mr = _agentDetectionConeMfRear.GetComponent<MeshRenderer>();
+                if (mr != null && mr.sharedMaterial != null)
+                    mr.sharedMaterial.color = DetectionConeRearColor;
             }
         }
 
