@@ -23,6 +23,10 @@ namespace NetworkDesigner.Rendering
         public Vector2 Center1;
         public float Half0; // turn-lane half-width at Center0
         public float Half1; // turn-lane half-width at Center1
+        // When a small median runs through this joint it sits on one side and
+        // covers that side's yellow lines — suppress them. -1 = the -PerpRight
+        // side, +1 = the +PerpRight side, 0 = draw both.
+        public int SuppressSide = 0;
 
         [Header("Style")]
         public float LineWidth = 0.15f;
@@ -64,6 +68,7 @@ namespace NetworkDesigner.Rendering
             // Two sides: solid line at ±turnHalf, dashed line just inside it.
             for (int s = -1; s <= 1; s += 2)
             {
+                if (s == SuppressSide) continue; // small median covers this side
                 float solid0 = s * Half0;
                 float solid1 = s * Half1;
                 AddRibbon(verts, tris, origin, fwd3, rt3, 0f, len, len,

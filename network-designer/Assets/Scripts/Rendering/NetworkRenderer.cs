@@ -61,6 +61,8 @@ namespace NetworkDesigner.Rendering
         public float TurnLaneCenterMedianTaperToWidthMultiplier = 1f;
         [Tooltip("Multiplier applied to the NEIGHBOR road's median width to compute the taper transition length. 2.0 = taper length is twice the neighbor median width (gentle curve).")]
         public float TurnLaneCenterMedianTaperLengthMultiplier = 2f;
+        [Tooltip("Thin width (m) of the dedicated-turn-lane median away from its flared end. Also the width carried through a collinear joint at the median's nose end. Forwarded to RoadRenderer.")]
+        public float TurnLaneCenterMedianWidth = 1f;
         public float MarkingHeight = 0.01f;
         [Tooltip("How far short of the setback line markings stop, at each road end. 0 = stop right at the setback.")]
         public float MarkingEndInset = 0f;
@@ -126,6 +128,23 @@ namespace NetworkDesigner.Rendering
         // Scratch for matched lane-divider segments across a promoted joint.
         readonly List<Vector2> _laneLineFromScratch = new List<Vector2>();
         readonly List<Vector2> _laneLineToScratch = new List<Vector2>();
+
+        // Per-road dedicated-turn-lane-median run classification, rebuilt
+        // each Rebuild. Lets the small median span a whole run of collinear
+        // turn-lane segments (flaring only at the median road, nosing only at
+        // the run end) instead of nosing at every intermediate joint.
+        enum TLMEnd { Nose, Flat, Flare } // terminus / collinear continuation / median road
+        class TurnLaneMedianRun
+        {
+            public bool Active;
+            public RoadEnd TowardMedian;
+            public TLMEnd EndA, EndB;
+            public float FlareMedianWidth;
+            public string NeighborAId, NeighborBId;
+            public RoadEnd NeighborAEnd, NeighborBEnd;
+        }
+        readonly Dictionary<string, TurnLaneMedianRun> _turnLaneMedianRuns =
+            new Dictionary<string, TurnLaneMedianRun>();
 
         [Header("Dead-end caps")]
         public bool ShowDeadEndCaps = true;
@@ -284,6 +303,7 @@ namespace NetworkDesigner.Rendering
             ClearPool(_roadLinePool);
 
             List<VertexGeometry> geos = GeometryResolver.ResolveNetwork(Network);
+            BuildTurnLaneMedianRuns(geos);
 
             // One IntersectionRenderer per vertex — except joint vertices
             // (2-way passthroughs), where the outline degenerates to a
@@ -342,11 +362,25 @@ namespace NetworkDesigner.Rendering
                 // approaches have an effective center median — both medians,
                 // or a turn-lane road meeting a median road — bridge the gap
                 // so the median isn't left broken across the junction.
+                bool hasRunMedian = false;
+                Vector2 runMedianC0 = Vector2.zero;
                 if (IsJointVertex(vg)
                     && TryGetJunctionMedianWidths(vg, out float bw0, out float bw1))
                 {
-                    SpawnOrUpdateMedianBridge(v, vg.Approaches[0], vg.Approaches[1], bw0, bw1);
+                    SpawnOrUpdateMedianBridge(v, vg.Approaches[0].Centerline,
+                        vg.Approaches[1].Centerline, bw0, bw1);
                     _liveMedianBridgeScratch.Add(v.Id);
+                }
+                else if (IsJointVertex(vg)
+                    && TryGetWithinRunThinMedian(vg, out Vector2 mc0, out Vector2 mc1, out float mw))
+                {
+                    // Promoted joint inside a turn-lane median run: the small
+                    // median's flat ends don't meet across the setback gap, so
+                    // bridge it at constant thin width + offset (no nose).
+                    SpawnOrUpdateMedianBridge(v, mc0, mc1, mw, mw);
+                    _liveMedianBridgeScratch.Add(v.Id);
+                    hasRunMedian = true;
+                    runMedianC0 = mc0;
                 }
 
                 // A turn lane (drivable, flat) continues through the junction
@@ -356,7 +390,19 @@ namespace NetworkDesigner.Rendering
                 if (IsJointVertex(vg)
                     && TryGetJunctionTurnLaneHalves(vg, out float th0, out float th1))
                 {
-                    SpawnOrUpdateTurnLaneBridge(v, vg.Approaches[0], vg.Approaches[1], th0, th1);
+                    // When a small median runs through this joint, suppress the
+                    // turn-lane yellow on the median's side (it sits on top),
+                    // matching RoadRenderer's per-body suppression.
+                    int suppressSide = 0;
+                    if (hasRunMedian)
+                    {
+                        Vector2 axis = vg.Approaches[1].Centerline - vg.Approaches[0].Centerline;
+                        Vector2 bridgeRight = new Vector2(axis.y, -axis.x);
+                        float d = Vector2.Dot(runMedianC0 - vg.Approaches[0].Centerline, bridgeRight);
+                        suppressSide = d > 1e-4f ? 1 : (d < -1e-4f ? -1 : 0);
+                    }
+                    SpawnOrUpdateTurnLaneBridge(v, vg.Approaches[0], vg.Approaches[1],
+                        th0, th1, suppressSide);
                     _liveTurnLaneBridgeScratch.Add(v.Id);
                 }
 
@@ -412,6 +458,79 @@ namespace NetworkDesigner.Rendering
             DestroyOrphans(_laneLinesBridgePool, _liveLaneLinesBridgeScratch);
         }
 
+        // Classify one end of a turn-lane road: does it touch (via a
+        // collinear 2-approach joint) a median road (Flare), another
+        // turn-lane road (Flat continuation), or neither (Nose terminus)?
+        TLMEnd ClassifyTurnLaneEnd(List<VertexGeometry> geos, NetworkRoad road, RoadEnd end,
+            out string neighborTLId, out RoadEnd neighborTLEnd, out float flareMedianWidth)
+        {
+            neighborTLId = null; neighborTLEnd = RoadEnd.A; flareMedianWidth = 0f;
+            string vId = end == RoadEnd.A ? road.EndA : road.EndB;
+            VertexGeometry vg = null;
+            for (int i = 0; i < geos.Count; i++)
+                if (geos[i].VertexId == vId) { vg = geos[i]; break; }
+            if (vg == null || !IsJointVertex(vg)) return TLMEnd.Nose;
+            foreach (VertexApproach ap in vg.Approaches)
+            {
+                if (ap.RoadId == road.Id) continue;
+                NetworkRoad other = FindRoad(ap.RoadId);
+                if (other == null || other.Profile == null) return TLMEnd.Nose;
+                // Any median-bearing neighbor is the run's median end (flare
+                // toward it); a turn-lane neighbor (no median) continues the
+                // run; anything else terminates it.
+                if (other.Profile.Median != null)
+                { flareMedianWidth = other.Profile.Median.Width; return TLMEnd.Flare; }
+                if (other.Profile.TurnLane != null)
+                { neighborTLId = other.Id; neighborTLEnd = ap.End; return TLMEnd.Flat; }
+                return TLMEnd.Nose;
+            }
+            return TLMEnd.Nose;
+        }
+
+        // Classify every turn-lane road's ends, then flood-fill from each
+        // median-road (Flare) end through collinear turn-lane continuations
+        // so the whole run is Active with a consistent TowardMedian end.
+        void BuildTurnLaneMedianRuns(List<VertexGeometry> geos)
+        {
+            _turnLaneMedianRuns.Clear();
+            if (Network == null || Network.Roads == null) return;
+
+            foreach (NetworkRoad road in Network.Roads)
+            {
+                if (road == null || road.Profile == null) continue;
+                if (road.Profile.TurnLane == null || road.Profile.Median != null) continue;
+                var run = new TurnLaneMedianRun();
+                run.EndA = ClassifyTurnLaneEnd(geos, road, RoadEnd.A,
+                    out run.NeighborAId, out run.NeighborAEnd, out float wA);
+                run.EndB = ClassifyTurnLaneEnd(geos, road, RoadEnd.B,
+                    out run.NeighborBId, out run.NeighborBEnd, out float wB);
+                run.FlareMedianWidth = run.EndA == TLMEnd.Flare ? wA
+                    : (run.EndB == TLMEnd.Flare ? wB : 0f);
+                _turnLaneMedianRuns[road.Id] = run;
+            }
+
+            var q = new Queue<(string id, RoadEnd toward)>();
+            foreach (KeyValuePair<string, TurnLaneMedianRun> kv in _turnLaneMedianRuns)
+            {
+                TurnLaneMedianRun r = kv.Value;
+                if (r.EndA == TLMEnd.Flare) { r.Active = true; r.TowardMedian = RoadEnd.A; q.Enqueue((kv.Key, RoadEnd.A)); }
+                else if (r.EndB == TLMEnd.Flare) { r.Active = true; r.TowardMedian = RoadEnd.B; q.Enqueue((kv.Key, RoadEnd.B)); }
+            }
+            while (q.Count > 0)
+            {
+                (string id, RoadEnd toward) = q.Dequeue();
+                TurnLaneMedianRun r = _turnLaneMedianRuns[id];
+                RoadEnd otherEnd = toward == RoadEnd.A ? RoadEnd.B : RoadEnd.A;
+                TLMEnd otherKind = otherEnd == RoadEnd.A ? r.EndA : r.EndB;
+                if (otherKind != TLMEnd.Flat) continue; // run ends or flares here
+                string nId = otherEnd == RoadEnd.A ? r.NeighborAId : r.NeighborBId;
+                RoadEnd nEnd = otherEnd == RoadEnd.A ? r.NeighborAEnd : r.NeighborBEnd;
+                if (nId == null || !_turnLaneMedianRuns.TryGetValue(nId, out TurnLaneMedianRun nr)) continue;
+                if (nr.Active) continue;
+                nr.Active = true; nr.TowardMedian = nEnd; q.Enqueue((nId, nEnd));
+            }
+        }
+
         NetworkRoad FindRoad(string id)
         {
             if (Network == null || Network.Roads == null) return null;
@@ -429,7 +548,7 @@ namespace NetworkDesigner.Rendering
         float EffectiveCenterMedianWidth(RoadProfile self, RoadProfile neighbor)
         {
             if (self.Median != null) return self.Median.Width;
-            if (self.TurnLane != null && neighbor.Median != null && neighbor.TurnLane == null)
+            if (self.TurnLane != null && neighbor.Median != null)
                 return neighbor.Median.Width * Mathf.Max(0f, TurnLaneCenterMedianTaperToWidthMultiplier);
             return 0f;
         }
@@ -446,8 +565,7 @@ namespace NetworkDesigner.Rendering
             return w0 > 0f && w1 > 0f;
         }
 
-        void SpawnOrUpdateMedianBridge(Vertex v, VertexApproach a0, VertexApproach a1,
-            float w0, float w1)
+        void SpawnOrUpdateMedianBridge(Vertex v, Vector2 c0, Vector2 c1, float w0, float w1)
         {
             if (!_medianBridgePool.TryGetValue(v.Id, out GameObject go) || go == null)
             {
@@ -458,8 +576,8 @@ namespace NetworkDesigner.Rendering
                 _medianBridgePool[v.Id] = go;
             }
             JunctionMedianBridgeRenderer br = go.GetComponent<JunctionMedianBridgeRenderer>();
-            br.Center0 = a0.Centerline;
-            br.Center1 = a1.Centerline;
+            br.Center0 = c0;
+            br.Center1 = c1;
             br.Width0 = w0;
             br.Width1 = w1;
             br.Height = MedianHeight;
@@ -467,6 +585,50 @@ namespace NetworkDesigner.Rendering
             br.MedianColor = MedianColor;
             br.UvTileSize = UvTileSize;
             br.Rebuild();
+        }
+
+        // A promoted joint INSIDE a turn-lane median run (both approaches are
+        // active run members whose end here is a Flat continuation). The small
+        // median's flat ends sit at each setback with a gap between, so bridge
+        // it at constant thin width and the same offset the run rides on.
+        bool TryGetWithinRunThinMedian(VertexGeometry vg,
+            out Vector2 c0, out Vector2 c1, out float width)
+        {
+            c0 = Vector2.zero; c1 = Vector2.zero; width = 0f;
+            if (vg.Approaches == null || vg.Approaches.Count != 2) return false;
+            VertexApproach a0 = vg.Approaches[0];
+            VertexApproach a1 = vg.Approaches[1];
+            if (!_turnLaneMedianRuns.TryGetValue(a0.RoadId, out TurnLaneMedianRun run0) || !run0.Active)
+                return false;
+            if (!_turnLaneMedianRuns.TryGetValue(a1.RoadId, out TurnLaneMedianRun run1) || !run1.Active)
+                return false;
+            TLMEnd k0 = a0.End == RoadEnd.A ? run0.EndA : run0.EndB;
+            TLMEnd k1 = a1.End == RoadEnd.A ? run1.EndA : run1.EndB;
+            if (k0 != TLMEnd.Flat || k1 != TLMEnd.Flat) return false; // continuation only
+            NetworkRoad r0 = FindRoad(a0.RoadId);
+            NetworkRoad r1 = FindRoad(a1.RoadId);
+            if (r0 == null || r1 == null || r0.Profile == null || r1.Profile == null) return false;
+            if (r0.Profile.TurnLane == null || r1.Profile.TurnLane == null) return false;
+            width = Mathf.Max(0f, TurnLaneCenterMedianWidth);
+            if (width <= 0f) return false;
+            c0 = RunMedianCenterAtJoint(r0, a0, run0, width);
+            c1 = RunMedianCenterAtJoint(r1, a1, run1, width);
+            return true;
+        }
+
+        // World center of the run's thin median at this approach's end —
+        // offset to the run's side, matching RoadRenderer's sideSign math
+        // (sideSign keyed off RenderDedicatedAtEnd == TowardMedian).
+        Vector2 RunMedianCenterAtJoint(NetworkRoad road, VertexApproach a,
+            TurnLaneMedianRun run, float w)
+        {
+            float turnHalf = road.Profile.TurnLane.Width * 0.5f;
+            int abSign = (Network != null && Network.DriveSide == DriveSide.Right) ? 1 : -1;
+            int sideSign = run.TowardMedian == RoadEnd.A ? -abSign : abSign;
+            float centerOff = sideSign * (turnHalf - w * 0.5f);
+            Vector2 fwd = a.End == RoadEnd.A ? a.OuterEdgeDir : -a.OuterEdgeDir;
+            Vector2 roadRight = new Vector2(fwd.y, -fwd.x); // PerpRight(forward)
+            return a.Centerline + roadRight * centerOff;
         }
 
         // Both approaches are turn-lane roads (TWLTL, no median) → carry the
@@ -487,7 +649,7 @@ namespace NetworkDesigner.Rendering
         }
 
         void SpawnOrUpdateTurnLaneBridge(Vertex v, VertexApproach a0, VertexApproach a1,
-            float half0, float half1)
+            float half0, float half1, int suppressSide)
         {
             if (!_turnLaneBridgePool.TryGetValue(v.Id, out GameObject go) || go == null)
             {
@@ -502,6 +664,7 @@ namespace NetworkDesigner.Rendering
             br.Center1 = a1.Centerline;
             br.Half0 = half0;
             br.Half1 = half1;
+            br.SuppressSide = suppressSide;
             br.LineWidth = LineWidth;
             br.StripeInset = TurnLaneStripeInset;
             br.DashLength = DashLength;
@@ -1228,12 +1391,29 @@ namespace NetworkDesigner.Rendering
             rr.DashGap = DashGap;
             rr.TurnLaneStripeInset = TurnLaneStripeInset;
             rr.MedianHeight = MedianHeight;
-            rr.RenderTurnLaneCenterMedian = ShouldRenderDedicatedTurnLane(road, out RoadEnd dedicatedEnd, out float neighborMedianW);
-            rr.RenderDedicatedAtEnd = dedicatedEnd;
-            rr.NeighborMedianWidth = neighborMedianW;
+            if (_turnLaneMedianRuns.TryGetValue(road.Id, out TurnLaneMedianRun tlm) && tlm.Active)
+            {
+                rr.RenderTurnLaneCenterMedian = true;
+                rr.RenderDedicatedAtEnd = tlm.TowardMedian;
+                rr.NeighborMedianWidth = tlm.FlareMedianWidth;
+                TLMEnd towardKind = tlm.TowardMedian == RoadEnd.A ? tlm.EndA : tlm.EndB;
+                TLMEnd otherKind = tlm.TowardMedian == RoadEnd.A ? tlm.EndB : tlm.EndA;
+                // Flare only on the segment directly at the median road;
+                // nose only where the run terminates. Mid-run ends stay flat
+                // so the median reads continuous across collinear joints.
+                rr.TurnLaneMedianFlareIntersectEnd = towardKind == TLMEnd.Flare;
+                rr.TurnLaneMedianNoseInternalEnd = otherKind == TLMEnd.Nose;
+            }
+            else
+            {
+                rr.RenderTurnLaneCenterMedian = false;
+                rr.TurnLaneMedianFlareIntersectEnd = true;
+                rr.TurnLaneMedianNoseInternalEnd = true;
+            }
             rr.TurnLaneCenterMedianFilletRadius = TurnLaneCenterMedianFilletRadius;
             rr.TurnLaneCenterMedianTaperToWidthMultiplier = TurnLaneCenterMedianTaperToWidthMultiplier;
             rr.TurnLaneCenterMedianTaperLengthMultiplier = TurnLaneCenterMedianTaperLengthMultiplier;
+            rr.TurnLaneCenterMedianWidth = TurnLaneCenterMedianWidth;
             rr.MarkingHeight = MarkingHeight;
             rr.DrawArrows = DrawArrows;
             rr.ArrowLength = ArrowLength;

@@ -170,6 +170,7 @@ MonoBehaviour:
   ShowToolPalette: 1
   ToolPaletteOrigin: {x: 10, y: 10}
   ToolPaletteWidth: 320
+  ToolPaletteMaxHeight: 1200
   RoadConfigPath: road-config.json
   FilletLeverFraction: 0.55
   ShowMeasurementTooltip: 1
@@ -241,6 +242,7 @@ MonoBehaviour:
   DefaultBaLanes: 1
   DefaultLaneWidth: 4
   DefaultShoulderWidth: 1
+  DefaultNewRoadSpeedLimitKph: 70
   SelectedAgentTint: {r: 1, g: 0.95, b: 0.2, a: 1}
   AgentPlanColor: {r: 1, g: 0.95, b: 0.2, a: 0.85}
   AgentPlanLineWidth: 0.4
@@ -277,6 +279,7 @@ MonoBehaviour:
   LateralOffsetHandleColor: {r: 0.45, g: 0.85, b: 1, a: 0.95}
   LateralOffsetHandleActiveColor: {r: 0.2, g: 0.7, b: 1, a: 1}
   LateralOffsetHandleInwardOffset: 4
+  HandleDragRebuildHz: 20
 --- !u!114 &715120602
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -305,6 +308,12 @@ MonoBehaviour:
   LineWidth: 0.15
   DashLength: 3
   DashGap: 9
+  TurnLaneStripeInset: 0.3
+  MedianHeight: 0.15
+  TurnLaneCenterMedianFilletRadius: 0.5
+  TurnLaneCenterMedianTaperToWidthMultiplier: 1
+  TurnLaneCenterMedianTaperLengthMultiplier: 2
+  TurnLaneCenterMedianWidth: 1
   MarkingHeight: 0.01
   MarkingEndInset: 0
   DrawArrows: 1
@@ -786,8 +795,10 @@ MonoBehaviour:
   PanSensitivity: 0.05
   ZoomSensitivity: 5
   ZoomSmoothing: 10
+  MinZoomReferenceDistance: 10
   KeyboardPanSensitivity: 1.5
   KeyboardPanShiftMultiplier: 3
+  MinPanReferenceDistance: 15
 --- !u!1 &1769303990
 GameObject:
   m_ObjectHideFlags: 0

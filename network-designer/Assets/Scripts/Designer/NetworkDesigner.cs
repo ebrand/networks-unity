@@ -82,8 +82,10 @@ namespace NetworkDesigner.Designer
         public bool ShowToolPalette = true;
         [Tooltip("Pixel position of the palette's top-left corner (Game-view).")]
         public Vector2 ToolPaletteOrigin = new Vector2(10, 10);
-        [Tooltip("Palette width in pixels. Height auto-sizes (clipped at 600px).")]
+        [Tooltip("Palette width in pixels.")]
         public float ToolPaletteWidth = 320f;
+        [Tooltip("Maximum palette height in pixels. The inner list scrolls past this; it's also clamped to fit the Game view.")]
+        public float ToolPaletteMaxHeight = 660f;
 
         [Header("Road configs (palette source)")]
         [Tooltip("Path to road-config.json (exported from the React Road Designer). Relative to the Unity project root, or absolute.")]
@@ -2334,7 +2336,7 @@ namespace NetworkDesigner.Designer
         bool MouseOverPalette()
         {
             if (!ShowToolPalette) return false;
-            float maxH = Mathf.Min(Screen.height - ToolPaletteOrigin.y - 10f, 660f);
+            float maxH = Mathf.Min(Screen.height - ToolPaletteOrigin.y - 10f, ToolPaletteMaxHeight);
             Vector2 m = Input.mousePosition;
             // Flip Y: Input.mousePosition has origin at bottom-left; the
             // palette rect uses GUI coords with origin at top-left.
@@ -2352,7 +2354,7 @@ namespace NetworkDesigner.Designer
             // Cap the visible height so the palette doesn't run off the
             // screen when there are many road configs. The inner area
             // scrolls past the cap.
-            float maxH = Mathf.Min(Screen.height - ToolPaletteOrigin.y - 10f, 660f);
+            float maxH = Mathf.Min(Screen.height - ToolPaletteOrigin.y - 10f, ToolPaletteMaxHeight);
             Rect area = new Rect(ToolPaletteOrigin.x, ToolPaletteOrigin.y, ToolPaletteWidth, maxH);
             GUILayout.BeginArea(area, _paletteBox);
             _paletteScroll = GUILayout.BeginScrollView(_paletteScroll, GUIStyle.none, GUI.skin.verticalScrollbar);

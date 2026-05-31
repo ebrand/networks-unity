@@ -112,6 +112,10 @@ namespace NetworkDesigner.Rendering
         public float TurnLaneCenterMedianTaperToWidthMultiplier = 1f;
         [Tooltip("Multiplier applied to NeighborMedianWidth to compute the taper transition length. 2.0 = taper is twice as long as the neighbor median is wide.")]
         public float TurnLaneCenterMedianTaperLengthMultiplier = 2f;
+        [Tooltip("Flare the dedicated turn-lane median at its intersection (RenderDedicatedAtEnd) end. False = thin flat end — a mid-run continuation segment that isn't directly adjacent to the median road.")]
+        public bool TurnLaneMedianFlareIntersectEnd = true;
+        [Tooltip("Nose (fillet) the dedicated turn-lane median at its internal end. False = thin flat end, so the median continues through a collinear turn-lane joint instead of nosing out.")]
+        public bool TurnLaneMedianNoseInternalEnd = true;
         [Tooltip("How far short of each setback line (each end of the road body) the markings stop. " +
                  "0 = markings extend right to the setback line. (m).")]
         public float MarkingEndInset = 0f;
@@ -999,7 +1003,12 @@ namespace NetworkDesigner.Rendering
             float intersectS = internalAtA ? roadLength : 0f;
             int   filletSig  = internalAtA ? +1 : -1; // forward direction from nose into body
 
-            float radius = Mathf.Clamp(TurnLaneCenterMedianFilletRadius, 0f, halfW);
+            // Internal end: fillet nose (run terminates here) or a flat
+            // square end (radius 0 → the median continues through a
+            // collinear joint to the next run segment).
+            float radius = TurnLaneMedianNoseInternalEnd
+                ? Mathf.Clamp(TurnLaneCenterMedianFilletRadius, 0f, halfW)
+                : 0f;
 
             // Pre-shift INNER vs OUTER edge offsets. Outer = the flush
             // edge (at the AB-driver-right edge of the turn lane);
@@ -1012,10 +1021,14 @@ namespace NetworkDesigner.Rendering
             // width so the thin median visually flares out to meet the
             // wider neighbor median.
             float taperToWidth = NeighborMedianWidth * TurnLaneCenterMedianTaperToWidthMultiplier;
-            float widenedInnerRaw = -sideSign * (taperToWidth * 0.5f);
             float taperLen = Mathf.Clamp(
                 NeighborMedianWidth * TurnLaneCenterMedianTaperLengthMultiplier,
                 0f, roadLength * 0.9f);
+            // Flare only at a genuine median-road (intersection) end. A
+            // mid-run continuation end stays thin (flat) so the median reads
+            // as one continuous strip across collinear joints.
+            bool doFlare = TurnLaneMedianFlareIntersectEnd && taperToWidth > w && taperLen > 0.01f;
+            float widenedInnerRaw = doFlare ? -sideSign * (taperToWidth * 0.5f) : innerEdgeRaw;
 
             // Cross-section structure:
             //   0..N         : internal-end fillet arc (nose at 0)
@@ -1024,7 +1037,7 @@ namespace NetworkDesigner.Rendering
             //                  from innerEdgeRaw → widenedInnerRaw)
             // Sample N+1+M sits at intersectS, intersection end.
             int N = radius > 0f ? 12 : 0;
-            int M = (taperLen > 0.01f && taperToWidth > w) ? 12 : 1;
+            int M = doFlare ? 12 : 1;
             int total = (N + 1) + M;
             float[] sArr  = new float[total];
             float[] loArr = new float[total];
