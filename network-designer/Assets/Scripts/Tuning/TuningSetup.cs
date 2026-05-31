@@ -525,6 +525,33 @@ namespace NetworkDesigner.Tuning
                         Renderer.Rebuild();
                     });
 
+                // Collinear-joint transition (lane-config change) tuning.
+                // factor scales taper length with the width change; floor
+                // is the minimum per-side setback for any promoted joint.
+                TuningRegistry.RegisterFloat(
+                    "renderer.transitionLengthFactor", "Rendering",
+                    "Lane-transition taper length (× width change)",
+                    () => GeometryResolver.TransitionLengthFactor,
+                    v => { GeometryResolver.TransitionLengthFactor = v; Renderer.Rebuild(); },
+                    0f, 4f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.minTransitionSetback", "Rendering",
+                    "Lane-transition minimum setback (m)",
+                    () => GeometryResolver.MinTransitionSetback,
+                    v => { GeometryResolver.MinTransitionSetback = v; Renderer.Rebuild(); },
+                    0f, 3f);
+                TuningRegistry.RegisterBool(
+                    "renderer.sCurveTaper", "Rendering",
+                    "S-curve taper at width-change joints",
+                    () => GeometryResolver.SCurveTaper,
+                    v => { GeometryResolver.SCurveTaper = v; Renderer.Rebuild(); });
+                TuningRegistry.RegisterFloat(
+                    "renderer.sCurveHandleFraction", "Rendering",
+                    "S-curve handle (× span)",
+                    () => GeometryResolver.SCurveHandleFraction,
+                    v => { GeometryResolver.SCurveHandleFraction = v; Renderer.Rebuild(); },
+                    0f, 1f);
+
                 TuningRegistry.RegisterFloat(
                     "renderer.curveTessellation", "Rendering", "Curve tessellation (segments)",
                     () => Renderer.CurveTessellation,

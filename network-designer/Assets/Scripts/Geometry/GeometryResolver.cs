@@ -50,6 +50,25 @@ namespace NetworkDesigner.Geometry
                 ? 0f
                 : (abOuter + baOuter) * 0.5f;
 
+        // --- Collinear-joint transition (lane-config change) -------------
+        // A collinear 2-approach vertex is normally a seamless passthrough
+        // (setback 0). When the two roads' profiles differ it is "promoted"
+        // to a short transition: each side gets a small setback so a gap
+        // opens that the intersection fill spans as a taper. Length scales
+        // with the width change so equal-ish profiles barely open. "As
+        // small as possible" — both knobs are live-tunable.
+        // Per-side setback = max(MinTransitionSetback, |Δwidth|/2 · factor).
+        public static float TransitionLengthFactor = 0.5f;
+        public static float MinTransitionSetback = 0.25f;
+
+        // When a collinear joint changes width, the outer-edge transition is
+        // an S-curve (cubic bezier tangent to both road edges) instead of a
+        // straight diagonal. SCurveHandleFraction is the bezier handle length
+        // as a fraction of the corner-to-corner span (0 ≈ straight, 0.5 ≈ a
+        // balanced ease). Set SCurveTaper false for the old linear taper.
+        public static bool SCurveTaper = true;
+        public static float SCurveHandleFraction = 0.5f;
+
         // Angles within this distance of π are treated as collinear
         // "joints" — the fillet collapses to a straight segment.
         const float JointAngleEpsilon = 0.5f * Mathf.Deg2Rad;
@@ -144,14 +163,41 @@ namespace NetworkDesigner.Geometry
 
                 if (bothStraight && Mathf.Abs(theta - Mathf.PI) < JointAngleEpsilon)
                 {
-                    // Joint: outer edges are collinear, no fillet.
-                    // Connect with a straight segment along the outer edge.
-                    result.Outline.Add(new OutlineSegment
+                    // Joint: outer edges are collinear. Equal width on both
+                    // sides → straight segment along the edge. A WIDTH CHANGE
+                    // (the two outer corners offset laterally) → S-curve so
+                    // the taper eases in/out instead of a hard diagonal.
+                    Vector2 from = self.OuterRight;
+                    Vector2 to = next.OuterLeft;
+                    Vector2 chord = to - from;
+                    // Lateral component = |chord × edgeAxis| (edge axis is unit).
+                    float lateral = Mathf.Abs(chord.x * self.OuterEdgeDir.y
+                                            - chord.y * self.OuterEdgeDir.x);
+                    if (SCurveTaper && lateral > Eps)
                     {
-                        Kind = SegmentKind.Line,
-                        From = self.OuterRight,
-                        To = next.OuterLeft,
-                    });
+                        float handle = chord.magnitude * Mathf.Clamp01(SCurveHandleFraction);
+                        result.Outline.Add(new OutlineSegment
+                        {
+                            Kind = SegmentKind.CubicBezier,
+                            From = from,
+                            // Handles run back along each road's outer edge
+                            // (OuterEdgeDir points away from the vertex into
+                            // the body), pulling the curve into the gap so it
+                            // leaves/arrives tangent to both edges.
+                            Control = from - self.OuterEdgeDir * handle,
+                            Control2 = to - next.OuterEdgeDir * handle,
+                            To = to,
+                        });
+                    }
+                    else
+                    {
+                        result.Outline.Add(new OutlineSegment
+                        {
+                            Kind = SegmentKind.Line,
+                            From = from,
+                            To = to,
+                        });
+                    }
                 }
                 else
                 {
@@ -338,6 +384,40 @@ namespace NetworkDesigner.Geometry
                     To = new LaneRef { RoadId = opp.RoadId, Direction = outboundDir, Index = k },
                 });
             }
+
+            // Lane drop (more inbound lanes than outbound): index-matching
+            // above leaves the surplus OUTER inbound lanes with no default
+            // connection, which would strand agents in a dropped lane. Merge
+            // each surplus lane into the outermost surviving outbound lane
+            // (highest index = farthest from centerline) — the standard
+            // outer-lane-drop behavior. User overrides still take precedence.
+            //
+            // Only for the STRAIGHT-THROUGH pairing (the road roughly
+            // continuing ahead). We don't auto-merge surplus lanes onto a
+            // TURN target — that would change established multi-way turn
+            // routing; leave turns to explicit user connections.
+            if (inboundLanes.Count > outboundLanes.Count && IsStraightThrough(self, opp))
+            {
+                int mergeTarget = outboundLanes.Count - 1;
+                for (int k = outboundLanes.Count; k < inboundLanes.Count; k++)
+                {
+                    outConnections.Add(new LaneConnection
+                    {
+                        From = new LaneRef { RoadId = self.RoadId, Direction = inboundDir, Index = k },
+                        To = new LaneRef { RoadId = opp.RoadId, Direction = outboundDir, Index = mergeTarget },
+                    });
+                }
+            }
+        }
+
+        // True when opp is roughly the straight-ahead continuation of self
+        // (their bearings are antiparallel within the straight tolerance) —
+        // i.e. a lane-drop continuation rather than a turn.
+        static bool IsStraightThrough(VertexApproach self, VertexApproach opp)
+        {
+            float diff = Mathf.Abs(self.Bearing - opp.Bearing);
+            if (diff > Mathf.PI) diff = 2f * Mathf.PI - diff;
+            return Mathf.Abs(diff - Mathf.PI) < StraightConnectionToleranceRad;
         }
 
         // Curbside (outermost) inbound lane → curbside outbound lane
@@ -590,16 +670,30 @@ namespace NetworkDesigner.Geometry
                     // CW angle from prev to self: theta of the corner CCW of self.
                     float thetaCCW = CWAngleDelta(data[prevIdx].Bearing, self.Bearing);
 
-                    // 2-way "joint" vertex (collinear approaches): just a
-                    // passthrough waypoint along an otherwise-straight
-                    // run. No intersection corner needed → setback = 0 so
-                    // the road bodies meet right at the vertex without
-                    // eating chord length around it.
+                    // 2-way "joint" vertex (collinear approaches): a
+                    // passthrough waypoint along an otherwise-straight run.
+                    // setback = 0 (bodies meet seamlessly) UNLESS the two
+                    // roads' profiles differ — then promote to a short
+                    // transition so a gap opens for the intersection fill
+                    // to taper across. See TransitionLengthFactor.
                     if (n == 2
                         && Mathf.Abs(thetaCW - Mathf.PI) < JointAngleEpsilon
                         && Mathf.Abs(thetaCCW - Mathf.PI) < JointAngleEpsilon)
                     {
-                        setback = 0f;
+                        RoadProfile selfProfile = self.Road != null ? self.Road.Profile : null;
+                        RoadProfile otherProfile = data[nextIdx].Road != null ? data[nextIdx].Road.Profile : null;
+                        bool promote = selfProfile != null && otherProfile != null
+                            && !selfProfile.Matches(otherProfile);
+                        if (promote)
+                        {
+                            float widthDelta = Mathf.Abs(self.RoadWidth - data[nextIdx].RoadWidth);
+                            setback = Mathf.Max(MinTransitionSetback,
+                                widthDelta * 0.5f * Mathf.Max(0f, TransitionLengthFactor));
+                        }
+                        else
+                        {
+                            setback = 0f;
+                        }
                     }
                     else
                     {

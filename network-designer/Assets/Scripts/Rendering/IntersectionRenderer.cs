@@ -103,6 +103,10 @@ namespace NetworkDesigner.Rendering
             // inner sampling also stays straight at the correct depth.
             Vector2[] outerControl = new Vector2[n];
             Vector2[] innerMiter = new Vector2[n];
+            // Second inner-bezier control, used only for CubicBezier
+            // (S-curve) transitions so the shoulder edge parallels the
+            // outer S. Defaults to innerMiter for Line/QuadraticBezier.
+            Vector2[] innerControl2 = new Vector2[n];
             for (int i = 0; i < n; i++)
             {
                 int transIdx = 2 * i + 1;
@@ -122,6 +126,22 @@ namespace NetworkDesigner.Rendering
                     Vector2 p2 = b.OuterLeft + PerpRight(e2) * b.ShoulderWidthCCW;
                     Vector2? mi = LineIntersect(p1, e1, p2, e2);
                     innerMiter[i] = mi ?? trans.Control;
+                    innerControl2[i] = innerMiter[i];
+                }
+                else if (trans.Kind == SegmentKind.CubicBezier)
+                {
+                    // S-curve taper (collinear width change). Outer samples
+                    // use trans.Control / trans.Control2 directly (below).
+                    // The inner shoulder edge is the SAME cubic shifted
+                    // inward by the shoulder vector at each end — the exact
+                    // vector that insets the outer corners to shrunkEnd /
+                    // shrunkStart — so it parallels the outer S and meets the
+                    // inset corners cleanly.
+                    outerControl[i] = trans.Control;
+                    Vector2 inShiftA = shrunkEnd[i] - a.OuterRight;
+                    Vector2 inShiftB = shrunkStart[(i + 1) % n] - b.OuterLeft;
+                    innerMiter[i] = trans.Control + inShiftA;
+                    innerControl2[i] = trans.Control2 + inShiftB;
                 }
                 else
                 {
@@ -139,6 +159,7 @@ namespace NetworkDesigner.Rendering
                     Vector2 innerLeft  = a.OuterRight + PerpRight(joinDir) * a.ShoulderWidthCW;
                     Vector2 innerRight = b.OuterLeft  + PerpRight(joinDir) * b.ShoulderWidthCCW;
                     innerMiter[i] = (innerLeft + innerRight) * 0.5f;
+                    innerControl2[i] = innerMiter[i];
                 }
             }
 
@@ -171,14 +192,16 @@ namespace NetworkDesigner.Rendering
                 verts[b + 0] = ToVec3(shrunkStart[i]);
                 verts[b + 1] = ToVec3(shrunkEnd[i]);
 
+                OutlineSegment innerTrans = Geometry.Outline[2 * i + 1];
                 Vector2 ibFrom = shrunkEnd[i];
-                Vector2 ibCtrl = innerMiter[i];
                 Vector2 ibTo = shrunkStart[(i + 1) % n];
                 for (int k = 1; k <= N - 1; k++)
                 {
                     float t = (float)k / N;
-                    verts[b + 1 + k] = ToVec3(
-                        GeometryResolver.SampleQuadratic(ibFrom, ibCtrl, ibTo, t));
+                    Vector2 p = innerTrans.Kind == SegmentKind.CubicBezier
+                        ? GeometryResolver.SampleCubic(ibFrom, innerMiter[i], innerControl2[i], ibTo, t)
+                        : GeometryResolver.SampleQuadratic(ibFrom, innerMiter[i], ibTo, t);
+                    verts[b + 1 + k] = ToVec3(p);
                 }
             }
 
@@ -189,8 +212,10 @@ namespace NetworkDesigner.Rendering
                 for (int k = 0; k <= N; k++)
                 {
                     float t = (float)k / N;
-                    verts[ob + k] = ToVec3(
-                        GeometryResolver.SampleQuadratic(trans.From, outerControl[i], trans.To, t));
+                    Vector2 p = trans.Kind == SegmentKind.CubicBezier
+                        ? GeometryResolver.SampleCubic(trans.From, trans.Control, trans.Control2, trans.To, t)
+                        : GeometryResolver.SampleQuadratic(trans.From, outerControl[i], trans.To, t);
+                    verts[ob + k] = ToVec3(p);
                 }
             }
 

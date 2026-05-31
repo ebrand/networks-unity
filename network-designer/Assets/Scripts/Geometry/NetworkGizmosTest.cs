@@ -218,8 +218,11 @@ namespace NetworkDesigner.Geometry
                             for (int i = 1; i <= BezierSamples; i++)
                             {
                                 float t = i / (float)BezierSamples;
-                                Vector2 cur = GeometryResolver.SampleQuadratic(
-                                    seg.From, seg.Control, seg.To, t);
+                                Vector2 cur = seg.Kind == SegmentKind.CubicBezier
+                                    ? GeometryResolver.SampleCubic(
+                                        seg.From, seg.Control, seg.Control2, seg.To, t)
+                                    : GeometryResolver.SampleQuadratic(
+                                        seg.From, seg.Control, seg.To, t);
                                 Gizmos.DrawLine(ToVec3(prev), ToVec3(cur));
                                 prev = cur;
                             }

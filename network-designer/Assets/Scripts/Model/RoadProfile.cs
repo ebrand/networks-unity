@@ -126,5 +126,50 @@ namespace NetworkDesigner.Model
                 return w;
             }
         }
+
+        /// <summary>
+        /// Structural cross-section equality, used to decide whether two
+        /// roads meeting at a collinear vertex form a seamless joint or
+        /// need a transition (lane drop / width change). Orientation-aware:
+        /// a road drawn in the opposite direction has its AB/BA sides (and
+        /// shoulders) swapped, so we accept either the same-facing pairing
+        /// (AB↔AB, BA↔BA) or the flipped one (AB↔BA, BA↔AB). The center
+        /// strip is centered and compared by kind (median / turn lane /
+        /// neither) and width. Orientation-naive on mirror-asymmetric
+        /// profiles is acceptable for now (Phase 1 limitation).
+        /// </summary>
+        public bool Matches(RoadProfile other)
+        {
+            if (other == null) return false;
+            if (!CenterStripMatches(other)) return false;
+
+            bool sameFacing =
+                SidesEqual(AB, other.AB) && SidesEqual(BA, other.BA)
+                && Approx(ShoulderAB.Width, other.ShoulderAB.Width)
+                && Approx(ShoulderBA.Width, other.ShoulderBA.Width);
+            bool flipped =
+                SidesEqual(AB, other.BA) && SidesEqual(BA, other.AB)
+                && Approx(ShoulderAB.Width, other.ShoulderBA.Width)
+                && Approx(ShoulderBA.Width, other.ShoulderAB.Width);
+            return sameFacing || flipped;
+        }
+
+        bool CenterStripMatches(RoadProfile other)
+        {
+            bool kindEqual =
+                (Median != null) == (other.Median != null)
+                && (TurnLane != null) == (other.TurnLane != null);
+            return kindEqual && Approx(CenterStripWidth, other.CenterStripWidth);
+        }
+
+        static bool SidesEqual(Side a, Side b)
+        {
+            if (a.Lanes.Count != b.Lanes.Count) return false;
+            for (int i = 0; i < a.Lanes.Count; i++)
+                if (!Approx(a.Lanes[i].Width, b.Lanes[i].Width)) return false;
+            return true;
+        }
+
+        static bool Approx(float a, float b) => System.Math.Abs(a - b) < 1e-4f;
     }
 }

@@ -107,6 +107,9 @@ namespace NetworkDesigner.Rendering
         readonly Dictionary<string, GameObject> _signsPool = new Dictionary<string, GameObject>();
         readonly Dictionary<string, GameObject> _laneMarkingsPool = new Dictionary<string, GameObject>();
         readonly Dictionary<string, GameObject> _deadEndCapPool = new Dictionary<string, GameObject>();
+        readonly Dictionary<string, GameObject> _medianBridgePool = new Dictionary<string, GameObject>();
+        readonly Dictionary<string, GameObject> _turnLaneBridgePool = new Dictionary<string, GameObject>();
+        readonly Dictionary<string, GameObject> _laneLinesBridgePool = new Dictionary<string, GameObject>();
 
         readonly HashSet<string> _liveVerticesScratch = new HashSet<string>();
         readonly HashSet<string> _liveRoadsScratch = new HashSet<string>();
@@ -116,6 +119,13 @@ namespace NetworkDesigner.Rendering
         readonly HashSet<string> _liveSignsScratch = new HashSet<string>();
         readonly HashSet<string> _liveLaneMarkingsScratch = new HashSet<string>();
         readonly HashSet<string> _liveDeadEndCapScratch = new HashSet<string>();
+        readonly HashSet<string> _liveMedianBridgeScratch = new HashSet<string>();
+        readonly HashSet<string> _liveTurnLaneBridgeScratch = new HashSet<string>();
+        readonly HashSet<string> _liveLaneLinesBridgeScratch = new HashSet<string>();
+
+        // Scratch for matched lane-divider segments across a promoted joint.
+        readonly List<Vector2> _laneLineFromScratch = new List<Vector2>();
+        readonly List<Vector2> _laneLineToScratch = new List<Vector2>();
 
         [Header("Dead-end caps")]
         public bool ShowDeadEndCaps = true;
@@ -222,6 +232,9 @@ namespace NetworkDesigner.Rendering
                 ClearPool(_signsPool);
                 ClearPool(_laneMarkingsPool);
                 ClearPool(_deadEndCapPool);
+                ClearPool(_medianBridgePool);
+                ClearPool(_turnLaneBridgePool);
+                ClearPool(_laneLinesBridgePool);
                 return;
             }
 
@@ -233,6 +246,9 @@ namespace NetworkDesigner.Rendering
             _liveSignsScratch.Clear();
             _liveLaneMarkingsScratch.Clear();
             _liveDeadEndCapScratch.Clear();
+            _liveMedianBridgeScratch.Clear();
+            _liveTurnLaneBridgeScratch.Clear();
+            _liveLaneLinesBridgeScratch.Clear();
 
             if (SimpleRender)
             {
@@ -246,6 +262,9 @@ namespace NetworkDesigner.Rendering
                 ClearPool(_signsPool);
                 ClearPool(_laneMarkingsPool);
                 ClearPool(_deadEndCapPool);
+                ClearPool(_medianBridgePool);
+                ClearPool(_turnLaneBridgePool);
+                ClearPool(_laneLinesBridgePool);
 
                 foreach (NetworkRoad road in Network.Roads)
                 {
@@ -274,7 +293,13 @@ namespace NetworkDesigner.Rendering
             {
                 VertexGeometry vg = FindGeometry(geos, v.Id);
                 if (vg == null) continue;
-                if (IsJointVertex(vg)) continue;
+                // Collinear 2-approach joints with setback 0 are seamless
+                // passthroughs — skip the intersection fill so the road
+                // bodies meet directly. A joint the resolver PROMOTED
+                // (gave a non-zero setback because the two profiles differ)
+                // falls through, so the intersection fill spans the opened
+                // gap as a short taper between the two lane configs.
+                if (IsJointVertex(vg) && IsSeamlessJoint(vg)) continue;
                 SpawnOrUpdateIntersection(v, vg);
                 _liveVerticesScratch.Add(v.Id);
 
@@ -310,6 +335,39 @@ namespace NetworkDesigner.Rendering
                 {
                     SpawnOrUpdateDeadEndCap(v, vg.Approaches[0]);
                     _liveDeadEndCapScratch.Add(v.Id);
+                }
+
+                // Carry the center median across a promoted collinear joint
+                // (we only reach here for non-seamless joints). When both
+                // approaches have an effective center median — both medians,
+                // or a turn-lane road meeting a median road — bridge the gap
+                // so the median isn't left broken across the junction.
+                if (IsJointVertex(vg)
+                    && TryGetJunctionMedianWidths(vg, out float bw0, out float bw1))
+                {
+                    SpawnOrUpdateMedianBridge(v, vg.Approaches[0], vg.Approaches[1], bw0, bw1);
+                    _liveMedianBridgeScratch.Add(v.Id);
+                }
+
+                // A turn lane (drivable, flat) continues through the junction
+                // as its yellow boundary markings — only when BOTH sides are
+                // turn lanes (no median). The turn-lane↔median case is the
+                // median bridge above instead.
+                if (IsJointVertex(vg)
+                    && TryGetJunctionTurnLaneHalves(vg, out float th0, out float th1))
+                {
+                    SpawnOrUpdateTurnLaneBridge(v, vg.Approaches[0], vg.Approaches[1], th0, th1);
+                    _liveTurnLaneBridgeScratch.Add(v.Id);
+                }
+
+                // Carry the white interior lane dividers through (independent
+                // of center strip): matched inner dividers connect; a dropped
+                // lane's outer divider is unmatched and simply ends.
+                if (DrawLaneMarkings && IsJointVertex(vg)
+                    && TryGetJunctionLaneLines(vg, _laneLineFromScratch, _laneLineToScratch))
+                {
+                    SpawnOrUpdateLaneLinesBridge(v, _laneLineFromScratch, _laneLineToScratch);
+                    _liveLaneLinesBridgeScratch.Add(v.Id);
                 }
             }
 
@@ -349,6 +407,190 @@ namespace NetworkDesigner.Rendering
             DestroyOrphans(_signsPool, _liveSignsScratch);
             DestroyOrphans(_laneMarkingsPool, _liveLaneMarkingsScratch);
             DestroyOrphans(_deadEndCapPool, _liveDeadEndCapScratch);
+            DestroyOrphans(_medianBridgePool, _liveMedianBridgeScratch);
+            DestroyOrphans(_turnLaneBridgePool, _liveTurnLaneBridgeScratch);
+            DestroyOrphans(_laneLinesBridgePool, _liveLaneLinesBridgeScratch);
+        }
+
+        NetworkRoad FindRoad(string id)
+        {
+            if (Network == null || Network.Roads == null) return null;
+            foreach (NetworkRoad r in Network.Roads)
+                if (r != null && r.Id == id) return r;
+            return null;
+        }
+
+        // Width of the RAISED center median a profile contributes at a
+        // junction, centered on the centerline. A plain median uses its own
+        // width; a turn-lane road next to a median road uses the dedicated
+        // turn-lane median's flared width (≈ the neighbor median — matches
+        // ShouldRenderDedicatedTurnLane's median+no-turn-lane condition). A
+        // plain TWLTL or no center strip contributes nothing.
+        float EffectiveCenterMedianWidth(RoadProfile self, RoadProfile neighbor)
+        {
+            if (self.Median != null) return self.Median.Width;
+            if (self.TurnLane != null && neighbor.Median != null && neighbor.TurnLane == null)
+                return neighbor.Median.Width * Mathf.Max(0f, TurnLaneCenterMedianTaperToWidthMultiplier);
+            return 0f;
+        }
+
+        bool TryGetJunctionMedianWidths(VertexGeometry vg, out float w0, out float w1)
+        {
+            w0 = 0f; w1 = 0f;
+            if (vg.Approaches == null || vg.Approaches.Count != 2) return false;
+            NetworkRoad r0 = FindRoad(vg.Approaches[0].RoadId);
+            NetworkRoad r1 = FindRoad(vg.Approaches[1].RoadId);
+            if (r0 == null || r1 == null || r0.Profile == null || r1.Profile == null) return false;
+            w0 = EffectiveCenterMedianWidth(r0.Profile, r1.Profile);
+            w1 = EffectiveCenterMedianWidth(r1.Profile, r0.Profile);
+            return w0 > 0f && w1 > 0f;
+        }
+
+        void SpawnOrUpdateMedianBridge(Vertex v, VertexApproach a0, VertexApproach a1,
+            float w0, float w1)
+        {
+            if (!_medianBridgePool.TryGetValue(v.Id, out GameObject go) || go == null)
+            {
+                go = new GameObject($"MedianBridge_{v.Id}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                go.transform.position = new Vector3(0f, MeshLift, 0f);
+                go.AddComponent<JunctionMedianBridgeRenderer>();
+                _medianBridgePool[v.Id] = go;
+            }
+            JunctionMedianBridgeRenderer br = go.GetComponent<JunctionMedianBridgeRenderer>();
+            br.Center0 = a0.Centerline;
+            br.Center1 = a1.Centerline;
+            br.Width0 = w0;
+            br.Width1 = w1;
+            br.Height = MedianHeight;
+            br.MedianMaterial = MedianMaterial;
+            br.MedianColor = MedianColor;
+            br.UvTileSize = UvTileSize;
+            br.Rebuild();
+        }
+
+        // Both approaches are turn-lane roads (TWLTL, no median) → carry the
+        // turn-lane markings through. Halves are each turn lane's half-width.
+        bool TryGetJunctionTurnLaneHalves(VertexGeometry vg, out float half0, out float half1)
+        {
+            half0 = 0f; half1 = 0f;
+            if (vg.Approaches == null || vg.Approaches.Count != 2) return false;
+            NetworkRoad r0 = FindRoad(vg.Approaches[0].RoadId);
+            NetworkRoad r1 = FindRoad(vg.Approaches[1].RoadId);
+            if (r0 == null || r1 == null || r0.Profile == null || r1.Profile == null) return false;
+            bool both = r0.Profile.TurnLane != null && r0.Profile.Median == null
+                     && r1.Profile.TurnLane != null && r1.Profile.Median == null;
+            if (!both) return false;
+            half0 = r0.Profile.TurnLane.Width * 0.5f;
+            half1 = r1.Profile.TurnLane.Width * 0.5f;
+            return half0 > 0f && half1 > 0f;
+        }
+
+        void SpawnOrUpdateTurnLaneBridge(Vertex v, VertexApproach a0, VertexApproach a1,
+            float half0, float half1)
+        {
+            if (!_turnLaneBridgePool.TryGetValue(v.Id, out GameObject go) || go == null)
+            {
+                go = new GameObject($"TurnLaneBridge_{v.Id}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                go.transform.position = new Vector3(0f, MeshLift, 0f);
+                go.AddComponent<JunctionTurnLaneMarkingsRenderer>();
+                _turnLaneBridgePool[v.Id] = go;
+            }
+            JunctionTurnLaneMarkingsRenderer br = go.GetComponent<JunctionTurnLaneMarkingsRenderer>();
+            br.Center0 = a0.Centerline;
+            br.Center1 = a1.Centerline;
+            br.Half0 = half0;
+            br.Half1 = half1;
+            br.LineWidth = LineWidth;
+            br.StripeInset = TurnLaneStripeInset;
+            br.DashLength = DashLength;
+            br.DashGap = DashGap;
+            br.MarkingHeight = MarkingHeight;
+            br.CenterlineMaterial = CenterlineMaterial;
+            br.CenterlineColor = CenterlineColor;
+            br.Rebuild();
+        }
+
+        // Match each approach's interior lane dividers by WORLD SIDE of the
+        // axis and order-from-centerline, producing (From→To) segments that
+        // bridge each matched divider across the gap. An outer-lane drop
+        // leaves the wider side's outermost divider unmatched (undrawn).
+        bool TryGetJunctionLaneLines(VertexGeometry vg, List<Vector2> from, List<Vector2> to)
+        {
+            from.Clear(); to.Clear();
+            if (vg.Approaches == null || vg.Approaches.Count != 2) return false;
+            VertexApproach a0 = vg.Approaches[0];
+            VertexApproach a1 = vg.Approaches[1];
+            Vector2 axis = a1.Centerline - a0.Centerline;
+            if (axis.sqrMagnitude < 1e-8f) return false;
+            Vector2 perp = new Vector2(axis.y, -axis.x).normalized; // world side reference
+
+            var pos0 = new List<Vector2>(); var neg0 = new List<Vector2>();
+            var pos1 = new List<Vector2>(); var neg1 = new List<Vector2>();
+            CollectInteriorBoundaries(a0, perp, pos0, neg0);
+            CollectInteriorBoundaries(a1, perp, pos1, neg1);
+
+            int posN = Mathf.Min(pos0.Count, pos1.Count);
+            for (int i = 0; i < posN; i++) { from.Add(pos0[i]); to.Add(pos1[i]); }
+            int negN = Mathf.Min(neg0.Count, neg1.Count);
+            for (int i = 0; i < negN; i++) { from.Add(neg0[i]); to.Add(neg1[i]); }
+            return from.Count > 0;
+        }
+
+        // Interior lane-divider world points for one approach, split by world
+        // side of the axis (perp sign) and sorted centerline-outward.
+        static void CollectInteriorBoundaries(VertexApproach a, Vector2 perp,
+            List<Vector2> posSorted, List<Vector2> negSorted)
+        {
+            var pos = new List<(Vector2 p, float d)>();
+            var neg = new List<(Vector2 p, float d)>();
+            AddDirBoundaries(a.LaneEndsAB, a.LaneWidthsAB, a.Centerline, perp, pos, neg);
+            AddDirBoundaries(a.LaneEndsBA, a.LaneWidthsBA, a.Centerline, perp, pos, neg);
+            pos.Sort((x, y) => x.d.CompareTo(y.d));   // ascending: near centerline first
+            neg.Sort((x, y) => y.d.CompareTo(x.d));   // descending: near centerline first
+            foreach (var e in pos) posSorted.Add(e.p);
+            foreach (var e in neg) negSorted.Add(e.p);
+        }
+
+        static void AddDirBoundaries(List<Vector2> ends, List<float> widths,
+            Vector2 center, Vector2 perp,
+            List<(Vector2 p, float d)> pos, List<(Vector2 p, float d)> neg)
+        {
+            if (ends == null) return;
+            for (int i = 0; i + 1 < ends.Count; i++)
+            {
+                Vector2 dir = ends[i + 1] - ends[i];
+                if (dir.sqrMagnitude < 1e-8f) continue;
+                dir.Normalize();
+                float w = (widths != null && i < widths.Count) ? widths[i] : 0f;
+                Vector2 boundary = ends[i] + dir * (w * 0.5f);
+                float d = Vector2.Dot(boundary - center, perp);
+                if (d >= 0f) pos.Add((boundary, d));
+                else neg.Add((boundary, d));
+            }
+        }
+
+        void SpawnOrUpdateLaneLinesBridge(Vertex v, List<Vector2> from, List<Vector2> to)
+        {
+            if (!_laneLinesBridgePool.TryGetValue(v.Id, out GameObject go) || go == null)
+            {
+                go = new GameObject($"LaneLinesBridge_{v.Id}");
+                go.transform.SetParent(transform, worldPositionStays: false);
+                go.transform.position = new Vector3(0f, MeshLift, 0f);
+                go.AddComponent<JunctionLaneMarkingsRenderer>();
+                _laneLinesBridgePool[v.Id] = go;
+            }
+            JunctionLaneMarkingsRenderer br = go.GetComponent<JunctionLaneMarkingsRenderer>();
+            br.SegFrom.Clear(); br.SegFrom.AddRange(from);
+            br.SegTo.Clear(); br.SegTo.AddRange(to);
+            br.LineWidth = LineWidth;
+            br.DashLength = DashLength;
+            br.DashGap = DashGap;
+            br.MarkingHeight = MarkingHeight;
+            br.LaneMarkingMaterial = LaneMarkingMaterial;
+            br.LaneMarkingColor = LaneMarkingColor;
+            br.Rebuild();
         }
 
         void SpawnOrUpdateDeadEndCap(Vertex v, VertexApproach approach)
@@ -1023,6 +1265,17 @@ namespace NetworkDesigner.Rendering
             float diff = Mathf.Abs(vg.Approaches[0].Bearing - vg.Approaches[1].Bearing);
             if (diff > Mathf.PI) diff = 2f * Mathf.PI - diff;
             return Mathf.Abs(diff - Mathf.PI) < 0.5f * Mathf.Deg2Rad;
+        }
+
+        // A joint is "seamless" when its approaches have zero setback — the
+        // road bodies meet directly and no intersection fill is needed. A
+        // joint the resolver promoted to a profile transition has a
+        // non-zero setback, so it is NOT seamless and gets a fill/taper.
+        static bool IsSeamlessJoint(VertexGeometry vg)
+        {
+            foreach (VertexApproach a in vg.Approaches)
+                if (a.Setback > 1e-3f) return false;
+            return true;
         }
 
         static float? FindSetback(List<VertexGeometry> geos,

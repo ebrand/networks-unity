@@ -120,12 +120,22 @@ namespace NetworkDesigner.Model
         /// Unused when Kind == Line.
         /// </summary>
         public Vector2 Control;
+        /// <summary>
+        /// Second cubic-bezier control point. Used only when
+        /// Kind == CubicBezier — the S-curve taper across a collinear
+        /// width-change joint. Control is the handle off From, Control2 the
+        /// handle off To, each pulled along its road's outer-edge direction
+        /// so the curve is tangent to both road edges (an ease-in/ease-out
+        /// S). Unused for Line / QuadraticBezier.
+        /// </summary>
+        public Vector2 Control2;
     }
 
     public enum SegmentKind
     {
         Line,
         QuadraticBezier,
+        CubicBezier,
     }
 
     /// <summary>
