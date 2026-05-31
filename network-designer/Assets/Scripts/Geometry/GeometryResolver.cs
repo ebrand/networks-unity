@@ -241,7 +241,21 @@ namespace NetworkDesigner.Geometry
             ComputeDefaultConnectivity(result.Approaches, network.DriveSide, result.Connectivity);
             ApplyConnectivityOverrides(vertex.ConnectivityOverrides, result.Connectivity);
 
+            // Mark turn-lane in/out availability (small-median split). Uses
+            // network topology, so it works for single-vertex resolves too.
+            ApplyTurnLaneDirectionality(network, _singleVgScratch(result));
+
             return result;
+        }
+
+        // Reused 1-element list so per-vertex directionality doesn't allocate.
+        [System.ThreadStatic] static List<VertexGeometry> _singleVgList;
+        static List<VertexGeometry> _singleVgScratch(VertexGeometry vg)
+        {
+            if (_singleVgList == null) _singleVgList = new List<VertexGeometry>(1);
+            _singleVgList.Clear();
+            _singleVgList.Add(vg);
+            return _singleVgList;
         }
 
         /// <summary>
@@ -360,6 +374,171 @@ namespace NetworkDesigner.Geometry
                 {
                     if (j == i) continue; // skip U-turn on same road
                     AddIndexMatchedConnections(self, apps[j], inboundDir, inboundLanes, outConnections);
+                }
+            }
+
+            AddTurnLaneConnections(apps, driveSide, outConnections);
+        }
+
+        // For each approach whose road has a center TURN LANE, connect the
+        // turn lane (entered by inbound traffic — LaneRef.TurnLaneIndex) to
+        // the CROSSING-turn target: a left turn for RHD (≈ +90° CCW), a right
+        // turn for LHD (≈ -90°). Targets the innermost (index 0) outbound lane.
+        // Agents prefer this for left turns; users can override.
+        static void AddTurnLaneConnections(
+            List<VertexApproach> apps, DriveSide driveSide, List<LaneConnection> outConnections)
+        {
+            int n = apps.Count;
+            float target = driveSide == DriveSide.Right ? Mathf.PI * 0.5f : -Mathf.PI * 0.5f;
+            const float tol = 50f * Mathf.Deg2Rad;
+            for (int i = 0; i < n; i++)
+            {
+                VertexApproach self = apps[i];
+                if (!self.HasTurnLane) continue;
+                Direction inboundDir = self.End == RoadEnd.A ? Direction.BA : Direction.AB;
+
+                int best = -1;
+                float bestErr = float.MaxValue;
+                for (int j = 0; j < n; j++)
+                {
+                    if (j == i) continue;
+                    float turn = SignedTurnAngle(self.Bearing, apps[j].Bearing);
+                    float err = Mathf.Abs(turn - target);
+                    if (err < bestErr) { bestErr = err; best = j; }
+                }
+                if (best < 0 || bestErr > tol) continue; // no clear crossing-turn target
+
+                VertexApproach opp = apps[best];
+                Direction outboundDir = opp.End == RoadEnd.A ? Direction.AB : Direction.BA;
+                List<Vector2> outboundLanes = outboundDir == Direction.AB ? opp.LaneEndsAB : opp.LaneEndsBA;
+                if (outboundLanes == null || outboundLanes.Count == 0) continue;
+
+                outConnections.Add(new LaneConnection
+                {
+                    From = new LaneRef { RoadId = self.RoadId, Direction = inboundDir, Index = LaneRef.TurnLaneIndex },
+                    To = new LaneRef { RoadId = opp.RoadId, Direction = outboundDir, Index = 0 },
+                });
+            }
+        }
+
+        // Signed turn angle (CCW positive) from inbound-on-self heading to
+        // outbound-on-opp heading. Bearings are FROM the vertex; inbound
+        // heading = selfBearing + π (toward the vertex). 0 = straight,
+        // +π/2 = left, -π/2 = right. Wrapped to (-π, π].
+        static float SignedTurnAngle(float selfBearing, float oppBearing)
+        {
+            float a = oppBearing - selfBearing - Mathf.PI;
+            while (a <= -Mathf.PI) a += 2f * Mathf.PI;
+            while (a > Mathf.PI) a -= 2f * Mathf.PI;
+            return a;
+        }
+
+        // --- Turn-lane directionality (small-median split) ----------------
+        // A dedicated small median splits the center turn lane so only the
+        // OPEN side is drivable — one direction, the one heading TOWARD the
+        // median road along the run. Classify, per turn-lane road, whether
+        // its run reaches a median road and which end faces it, then mark
+        // each VertexApproach's TurnLaneAllowsInbound/Outbound.
+
+        struct TurnLaneRun
+        {
+            public bool Active;
+            public RoadEnd TowardMedian;
+            public int EndAKind, EndBKind;   // 0 = terminus, 1 = turn-lane continuation, 2 = median road
+            public string NbrAId, NbrBId;
+            public RoadEnd NbrAEnd, NbrBEnd;
+        }
+
+        // Classify one end of a turn-lane road by its collinear 2-approach
+        // neighbor (pure topology — outward bearings + profiles).
+        static int ClassifyTurnEnd(Network network, NetworkRoad road, RoadEnd end,
+            out string nbrId, out RoadEnd nbrEnd)
+        {
+            nbrId = null; nbrEnd = RoadEnd.A;
+            string vId = end == RoadEnd.A ? road.EndA : road.EndB;
+            Vertex v = FindVertex(network, vId);
+            if (v == null) return 0;
+            Vertex selfOther = FindVertex(network, end == RoadEnd.A ? road.EndB : road.EndA);
+            Vector2 selfDir = OutwardDirection(road, end, v, selfOther);
+
+            NetworkRoad other = null; RoadEnd otherEndAt = RoadEnd.A; int count = 0;
+            foreach (NetworkRoad rr in network.Roads)
+            {
+                if (rr == null) continue;
+                bool atA = rr.EndA == vId, atB = rr.EndB == vId;
+                if (!atA && !atB) continue;
+                count++;
+                if (rr.Id == road.Id) continue;
+                other = rr; otherEndAt = atA ? RoadEnd.A : RoadEnd.B;
+            }
+            if (count != 2 || other == null || other.Profile == null) return 0;
+            Vertex otherOther = FindVertex(network, otherEndAt == RoadEnd.A ? other.EndB : other.EndA);
+            Vector2 otherDir = OutwardDirection(other, otherEndAt, v, otherOther);
+            if (Vector2.Dot(selfDir, otherDir) > -0.99f) return 0; // not collinear → terminus
+            if (other.Profile.Median != null) return 2;           // median road
+            if (other.Profile.TurnLane != null)
+            { nbrId = other.Id; nbrEnd = otherEndAt; return 1; }  // turn-lane continuation
+            return 0;
+        }
+
+        static Dictionary<string, TurnLaneRun> ClassifyTurnLaneMedianRuns(Network network)
+        {
+            var runs = new Dictionary<string, TurnLaneRun>();
+            if (network == null || network.Roads == null) return runs;
+            foreach (NetworkRoad road in network.Roads)
+            {
+                if (road == null || road.Profile == null) continue;
+                if (road.Profile.TurnLane == null || road.Profile.Median != null) continue;
+                var r = new TurnLaneRun();
+                r.EndAKind = ClassifyTurnEnd(network, road, RoadEnd.A, out r.NbrAId, out r.NbrAEnd);
+                r.EndBKind = ClassifyTurnEnd(network, road, RoadEnd.B, out r.NbrBId, out r.NbrBEnd);
+                runs[road.Id] = r;
+            }
+            var q = new Queue<(string id, RoadEnd toward)>();
+            foreach (string id in new List<string>(runs.Keys))
+            {
+                TurnLaneRun r = runs[id];
+                if (r.EndAKind == 2) { r.Active = true; r.TowardMedian = RoadEnd.A; runs[id] = r; q.Enqueue((id, RoadEnd.A)); }
+                else if (r.EndBKind == 2) { r.Active = true; r.TowardMedian = RoadEnd.B; runs[id] = r; q.Enqueue((id, RoadEnd.B)); }
+            }
+            while (q.Count > 0)
+            {
+                (string id, RoadEnd toward) = q.Dequeue();
+                TurnLaneRun r = runs[id];
+                RoadEnd otherEnd = toward == RoadEnd.A ? RoadEnd.B : RoadEnd.A;
+                int otherKind = otherEnd == RoadEnd.A ? r.EndAKind : r.EndBKind;
+                if (otherKind != 1) continue;
+                string nId = otherEnd == RoadEnd.A ? r.NbrAId : r.NbrBId;
+                RoadEnd nEnd = otherEnd == RoadEnd.A ? r.NbrAEnd : r.NbrBEnd;
+                if (nId == null || !runs.TryGetValue(nId, out TurnLaneRun nr) || nr.Active) continue;
+                nr.Active = true; nr.TowardMedian = nEnd; runs[nId] = nr; q.Enqueue((nId, nEnd));
+            }
+            return runs;
+        }
+
+        // Mark turn-lane in/out availability on the given geometries. Where a
+        // small median splits the turn lane, only the toward-median direction
+        // is allowed (open side); elsewhere it stays bidirectional.
+        static void ApplyTurnLaneDirectionality(Network network, List<VertexGeometry> geos)
+        {
+            Dictionary<string, TurnLaneRun> runs = null;
+            foreach (VertexGeometry vg in geos)
+            {
+                if (vg == null || vg.Approaches == null) continue;
+                foreach (VertexApproach a in vg.Approaches)
+                {
+                    if (!a.HasTurnLane) continue;
+                    if (runs == null) runs = ClassifyTurnLaneMedianRuns(network);
+                    if (!runs.TryGetValue(a.RoadId, out TurnLaneRun r) || !r.Active) continue;
+                    Direction towardDir = r.TowardMedian == RoadEnd.A ? Direction.BA : Direction.AB;
+                    Direction inboundDir = a.End == RoadEnd.A ? Direction.BA : Direction.AB;
+                    // The open half of the split turn lane serves the direction
+                    // LEAVING toward the median road, so at this approach it's
+                    // usable OUTBOUND when toward-median == the approach's
+                    // inbound direction, and inbound otherwise.
+                    bool inbound = towardDir != inboundDir;
+                    a.TurnLaneAllowsInbound = inbound;
+                    a.TurnLaneAllowsOutbound = !inbound;
                 }
             }
         }
@@ -869,6 +1048,13 @@ namespace NetworkDesigner.Geometry
                 ? d.Road.Profile.ShoulderBA.Width
                 : d.Road.Profile.ShoulderAB.Width;
 
+            // Turn-lane endpoint: the center strip sits on the axis (raw
+            // offset 0), shifted by -midpoint like every other strip. Shared
+            // by both travel directions (LaneRef.TurnLaneIndex).
+            bool hasTurnLane = d.Road.Profile.TurnLane != null;
+            Vector2 turnLaneEnd = setbackPoint + (-midpoint) * abRight;
+            float turnLaneWidth = hasTurnLane ? d.Road.Profile.TurnLane.Width : 0f;
+
             return new VertexApproach
             {
                 RoadId = d.Road.Id,
@@ -883,6 +1069,9 @@ namespace NetworkDesigner.Geometry
                 LaneEndsBA = laneEndsBA,
                 LaneWidthsAB = laneWidthsAB,
                 LaneWidthsBA = laneWidthsBA,
+                HasTurnLane = hasTurnLane,
+                TurnLaneEnd = turnLaneEnd,
+                TurnLaneWidth = turnLaneWidth,
                 Control = d.End == RoadEnd.A ? d.Road.ControlA : d.Road.ControlB,
                 ShoulderWidthCW = shoulderCW,
                 ShoulderWidthCCW = shoulderCCW,
@@ -1031,6 +1220,9 @@ namespace NetworkDesigner.Geometry
             float baOuter = baSign * (medianHalf
                 + ShoulderPlusLanesWidth(road.Profile.BA.Lanes, road.Profile.ShoulderBA.Width));
             float midpoint = CenteringShift(abOuter, baOuter);
+
+            // Center turn lane: on the axis (raw offset 0), shifted by -midpoint.
+            if (laneIndex == LaneRef.TurnLaneIndex) return -midpoint;
 
             List<Lane> lanes = dir == Direction.AB ? road.Profile.AB.Lanes : road.Profile.BA.Lanes;
             int sign = dir == Direction.AB ? abSign : baSign;

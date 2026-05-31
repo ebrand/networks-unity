@@ -65,6 +65,8 @@ namespace NetworkDesigner.Agents
         [Header("Lane changing")]
         [Tooltip("Distance (m) before the end of a road over which an agent smoothly drifts from its entering lane to its exiting lane when those differ. Short roads get a proportionally shorter merge.")]
         public float LaneChangeDistanceMeters = 30f;
+        [Tooltip("Distance (m) over which an agent merges INTO the center turn lane at the start of its approach run when a left turn is upcoming. Larger = enters/merges sooner and more gradually.")]
+        public float TurnLaneEntryRangeMeters = 30f;
 
         [Header("Overtaking")]
         [Tooltip("Enable mid-road lane changes to pass slower traffic. Only changes to lanes that still let the agent make their next turn. Disable to revert to follow-only Tier 1 behavior.")]
@@ -474,6 +476,27 @@ namespace NetworkDesigner.Agents
             }
             outLane[N - 1] = PickRandomLaneIndex(path[N - 1].Road, path[N - 1].Dir);
 
+            // Turn-lane run pass: a left turn through the turn lane sets
+            // outLane[i] = TurnLaneIndex on its approach segment. Ride the
+            // turn lane BACKWARD across every preceding straight collinear
+            // turn-lane segment so the agent merges in at the START of the
+            // run (back of the queue) and stays in the turn lane the whole
+            // way — instead of dropping to a travel lane at each run joint
+            // and re-merging (the S-wiggle), or merging only on the last
+            // segment near the front of the queue.
+            for (int i = 0; i <= N - 2; i++)
+            {
+                if (outLane[i] != LaneRef.TurnLaneIndex) continue;
+                int j = i;
+                while (j - 1 >= 0 &&
+                       IsStraightTurnLaneRun(path[j - 1].Road, path[j].Road, stepEndVertexIds[j - 1]))
+                {
+                    outLane[j - 1] = LaneRef.TurnLaneIndex;
+                    inLane[j] = LaneRef.TurnLaneIndex;
+                    j--;
+                }
+            }
+
             // Forward pass: build segments using inLane[i] → outLane[i].
             for (int i = 0; i < N; i++)
             {
@@ -622,9 +645,27 @@ namespace NetworkDesigner.Agents
             // end of the segment, clamped to [0, 1]. Shorter roads get
             // a proportionally shorter merge — the whole segment is the
             // merge if it's shorter than the requested distance.
-            seg.LaneChangeStartT = startLane == endLane
-                ? 0f
-                : Mathf.Clamp01(1f - LaneChangeDistanceMeters / Mathf.Max(seg.ArcLength, 1e-4f));
+            if (startLane == endLane)
+            {
+                seg.LaneChangeStartT = 0f; // equal offsets → no lane change
+            }
+            else if (endLane == LaneRef.TurnLaneIndex)
+            {
+                // Entering the center turn lane for a left turn: merge in over
+                // the FIRST LaneChangeDistanceMeters (right at the start of the
+                // approach, where the turn lane begins), then travel IN the
+                // turn lane the rest of the way — so the agent joins the BACK
+                // of the left-turn queue instead of drifting diagonally toward
+                // the front. (Holds the end offset past LaneChangeEndT.)
+                seg.LaneChangeStartT = 0f;
+                seg.LaneChangeEndT = Mathf.Clamp01(
+                    Mathf.Max(0f, TurnLaneEntryRangeMeters) / Mathf.Max(seg.ArcLength, 1e-4f));
+            }
+            else
+            {
+                seg.LaneChangeStartT = Mathf.Clamp01(
+                    1f - LaneChangeDistanceMeters / Mathf.Max(seg.ArcLength, 1e-4f));
+            }
             return seg;
         }
 
@@ -685,8 +726,14 @@ namespace NetworkDesigner.Agents
             VertexGeometry vg = ResolveCached(v);
             if (vg == null || vg.Connectivity == null) return null;
 
+            // A small median can make the turn lane one-directional; skip
+            // turn-lane connections the inbound approach doesn't permit.
+            VertexApproach inApp = FindApproach(vg, inRoad.Id);
+            bool turnLaneAllowed = inApp == null || inApp.TurnLaneAllowsInbound;
+
             List<LaneConnection> preferred = null;
             List<LaneConnection> anyMatch = null;
+            List<LaneConnection> turnLane = null;
             foreach (LaneConnection c in vg.Connectivity)
             {
                 if (c == null || c.From == null || c.To == null) continue;
@@ -694,19 +741,57 @@ namespace NetworkDesigner.Agents
                 if (c.From.Direction != inDir) continue;
                 if (c.To.RoadId != outRoad.Id) continue;
                 if (c.To.Direction != outDir) continue;
+                if (c.From.Index == LaneRef.TurnLaneIndex && !turnLaneAllowed) continue;
+                // Never ROUTE into the turn lane as a destination lane — only
+                // left-turners use it, and they enter it via a lane-change on
+                // the approach (outLane == turn lane from the left-turn
+                // connection). This stops straight-through agents from dipping
+                // into a drawn turn-lane entry and popping back out.
+                if (c.To.Index == LaneRef.TurnLaneIndex) continue;
                 if (anyMatch == null) anyMatch = new List<LaneConnection>();
                 anyMatch.Add(c);
-                if (c.From.Index == preferredInLane)
+                if (c.From.Index == LaneRef.TurnLaneIndex)
+                {
+                    if (turnLane == null) turnLane = new List<LaneConnection>();
+                    turnLane.Add(c);
+                }
+                else if (c.From.Index == preferredInLane)
                 {
                     if (preferred == null) preferred = new List<LaneConnection>();
                     preferred.Add(c);
                 }
             }
+            // Prefer the center turn lane for the designated turn: the resolver
+            // only creates turn-lane connections for the crossing (left) turn,
+            // so its presence means this maneuver should route through it — the
+            // agent will lane-change into the turn lane on approach.
+            if (turnLane != null && turnLane.Count > 0)
+                return turnLane[Random.Range(0, turnLane.Count)];
             if (preferred != null && preferred.Count > 0)
                 return preferred[Random.Range(0, preferred.Count)];
             if (anyMatch != null && anyMatch.Count > 0)
                 return anyMatch[Random.Range(0, anyMatch.Count)];
             return null;
+        }
+
+        // True when both roads carry a center turn lane and meet STRAIGHT
+        // (collinear) at the given vertex — a turn-lane run continuation the
+        // agent rides through (in the turn lane) toward a downstream left turn.
+        bool IsStraightTurnLaneRun(NetworkRoad ra, NetworkRoad rb, string vertexId)
+        {
+            if (ra == null || ra.Profile == null
+                || ra.Profile.TurnLane == null || ra.Profile.Median != null) return false;
+            if (rb == null || rb.Profile == null
+                || rb.Profile.TurnLane == null || rb.Profile.Median != null) return false;
+            Vertex v = FindVertex(vertexId);
+            if (v == null) return false;
+            VertexGeometry vg = ResolveCached(v);
+            VertexApproach aApp = FindApproach(vg, ra.Id);
+            VertexApproach bApp = FindApproach(vg, rb.Id);
+            if (aApp == null || bApp == null) return false;
+            float diff = Mathf.Abs(aApp.Bearing - bApp.Bearing);
+            if (diff > Mathf.PI) diff = 2f * Mathf.PI - diff;
+            return Mathf.Abs(diff - Mathf.PI) < 15f * Mathf.Deg2Rad; // ~collinear
         }
 
         VertexGeometry ResolveCached(Vertex v)
@@ -728,6 +813,8 @@ namespace NetworkDesigner.Agents
         static Vector2? LaneEndpointAt(VertexApproach a, Direction dir, int laneIndex)
         {
             if (a == null) return null;
+            if (laneIndex == LaneRef.TurnLaneIndex)
+                return a.HasTurnLane ? a.TurnLaneEnd : (Vector2?)null;
             List<Vector2> lanes = dir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
             if (lanes == null || laneIndex < 0 || laneIndex >= lanes.Count) return null;
             return lanes[laneIndex];

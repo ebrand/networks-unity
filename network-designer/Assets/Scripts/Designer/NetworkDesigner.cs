@@ -3709,6 +3709,14 @@ namespace NetworkDesigner.Designer
                         SpawnLaneRingMarker(v, road, lr, midNode, inboundLanes[i], isInbound: true, isCorner: false);
                     }
                 }
+
+                // Center turn lane (TWLTL): one inbound marker on the axis,
+                // armable as a left-turn source. Not a marking-corner concept.
+                if (a.HasTurnLane && a.TurnLaneAllowsInbound && !_markingShiftMode)
+                {
+                    LaneRef tlr = new LaneRef { RoadId = road.Id, Direction = inboundDir, Index = LaneRef.TurnLaneIndex };
+                    SpawnLaneRingMarker(v, road, tlr, midNode, a.TurnLaneEnd, isInbound: true, isCorner: false);
+                }
             }
         }
 
@@ -3743,7 +3751,13 @@ namespace NetworkDesigner.Designer
                     if (armedLane.Direction == inboundDir)
                     {
                         List<Vector2> inboundLanes = inboundDir == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
-                        if (armedLane.Index >= 0 && armedLane.Index < inboundLanes.Count)
+                        if (armedLane.Index == LaneRef.TurnLaneIndex && a.HasTurnLane && a.TurnLaneAllowsInbound)
+                        {
+                            // Armed turn lane: keep its marker visible.
+                            LaneRef tlr = new LaneRef { RoadId = road.Id, Direction = armedLane.Direction, Index = LaneRef.TurnLaneIndex };
+                            SpawnLaneRingMarker(v, road, tlr, midNode, a.TurnLaneEnd, isInbound: true, isCorner: false);
+                        }
+                        else if (armedLane.Index >= 0 && armedLane.Index < inboundLanes.Count)
                         {
                             LaneRef lr = new LaneRef { RoadId = road.Id, Direction = armedLane.Direction, Index = armedLane.Index };
                             if (_markingShiftMode)
@@ -3780,6 +3794,15 @@ namespace NetworkDesigner.Designer
                         {
                             SpawnLaneRingMarker(v, road, lr, midNode, outboundLanes[i], isInbound: false, isCorner: false);
                         }
+                    }
+
+                    // Center turn lane as an outbound TARGET — lets an incoming
+                    // lane connect INTO the turn lane (e.g. entering it across a
+                    // collinear joint, to turn left further along).
+                    if (a.HasTurnLane && a.TurnLaneAllowsOutbound && !_markingShiftMode)
+                    {
+                        LaneRef tlr = new LaneRef { RoadId = road.Id, Direction = outboundDir, Index = LaneRef.TurnLaneIndex };
+                        SpawnLaneRingMarker(v, road, tlr, midNode, a.TurnLaneEnd, isInbound: false, isCorner: false);
                     }
                 }
             }

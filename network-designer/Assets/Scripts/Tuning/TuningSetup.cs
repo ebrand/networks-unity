@@ -1071,6 +1071,11 @@ namespace NetworkDesigner.Tuning
                     v => Agents.MinSpawnGap = v,
                     0f, 30f);
                 TuningRegistry.RegisterFloat(
+                    "agents.turnLaneEntryRange", "Agents", "Turn-lane entry range (m)",
+                    () => Agents.TurnLaneEntryRangeMeters,
+                    v => Agents.TurnLaneEntryRangeMeters = v,
+                    0f, 200f);
+                TuningRegistry.RegisterFloat(
                     "agents.maxSpawnPerFrame", "Agents", "Max spawn attempts / frame",
                     () => Agents.MaxSpawnAttemptsPerFrame,
                     v => Agents.MaxSpawnAttemptsPerFrame = Mathf.Max(1, Mathf.RoundToInt(v)),

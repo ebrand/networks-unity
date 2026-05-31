@@ -147,6 +147,16 @@ namespace NetworkDesigner.Model
         public string RoadId;
         public Direction Direction;
         public int Index;
+
+        /// <summary>
+        /// Sentinel <see cref="Index"/> denoting the road's center TURN LANE
+        /// (TWLTL) rather than a positional travel lane. The turn lane is one
+        /// physical center lane shared by both directions; Direction records
+        /// which travel direction ENTERS it (AB vs BA → different left-turn
+        /// targets). Out of the 0..N-1 positional range, so it never collides
+        /// with a real lane index or appears in positional lane loops.
+        /// </summary>
+        public const int TurnLaneIndex = -1;
     }
 
     /// <summary>

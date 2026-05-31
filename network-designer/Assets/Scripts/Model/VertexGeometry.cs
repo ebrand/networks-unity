@@ -45,6 +45,25 @@ namespace NetworkDesigner.Model
         public List<float> LaneWidthsBA = new List<float>();
 
         /// <summary>
+        /// Whether this road has a center TURN LANE (TWLTL) and, if so, its
+        /// drivable endpoint on the setback line (on the road axis). Referenced
+        /// by LaneRef with Index == LaneRef.TurnLaneIndex; shared by both
+        /// travel directions. <see cref="TurnLaneWidth"/> is its width.
+        /// </summary>
+        public bool HasTurnLane;
+        public Vector2 TurnLaneEnd;
+        public float TurnLaneWidth;
+        /// <summary>
+        /// Whether the turn lane may be used as an inbound (From) and/or
+        /// outbound (To) lane at this approach. Both true normally (the TWLTL
+        /// is bidirectional). When a dedicated small median splits the turn
+        /// lane, only the open side's direction is allowed. Set by the
+        /// resolver's turn-lane-run directionality pass.
+        /// </summary>
+        public bool TurnLaneAllowsInbound = true;
+        public bool TurnLaneAllowsOutbound = true;
+
+        /// <summary>
         /// Outer edges of the entire road (shoulder-to-shoulder) at the
         /// setback line. Used as endpoints of the bezier fillets that
         /// connect adjacent approaches.

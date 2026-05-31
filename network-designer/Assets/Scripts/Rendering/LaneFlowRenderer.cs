@@ -192,6 +192,8 @@ namespace NetworkDesigner.Rendering
             foreach (VertexApproach a in Geometry.Approaches)
             {
                 if (a.RoadId != lr.RoadId) continue;
+                if (lr.Index == LaneRef.TurnLaneIndex)
+                    return a.HasTurnLane ? a.TurnLaneEnd : (Vector2?)null;
                 List<Vector2> lanes = lr.Direction == Direction.AB ? a.LaneEndsAB : a.LaneEndsBA;
                 if (lanes == null || lr.Index < 0 || lr.Index >= lanes.Count) return null;
                 return lanes[lr.Index];
