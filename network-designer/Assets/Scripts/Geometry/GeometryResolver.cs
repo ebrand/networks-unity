@@ -23,6 +23,33 @@ namespace NetworkDesigner.Geometry
     public static class GeometryResolver
     {
         const float Eps = 1e-4f;
+
+        // --- Centerline reference (prototype toggle) ---------------------
+        // Where the spline sits relative to the cross-section.
+        //   GeometricCenter (legacy/default): spline at the geometric
+        //     middle of total width (outer-shoulder to outer-shoulder), so
+        //     even asymmetric AB/BA layouts render visually centered on the
+        //     drawn line. The painted yellow line sits OFF the spline.
+        //   AxisSplit: spline on the AB/BA boundary, or the center of a
+        //     median / turn lane when one exists. Matches how real road
+        //     centerlines are referenced and lets profiles of different
+        //     widths share a common axis and flow together. Asymmetric and
+        //     one-way roads then hang to one side of the drawn line.
+        // Read by BOTH this resolver (lane endpoints → agents) and
+        // RoadRenderer (mesh) so the two never desync. Flip it via the
+        // "renderer.centerlineAtAxis" tunable; a rebuild redraws.
+        public enum CenterlineReference { GeometricCenter, AxisSplit }
+        public static CenterlineReference CenterlineMode = CenterlineReference.GeometricCenter;
+
+        // Lateral shift subtracted from every cross-section offset so the
+        // chosen reference lands on the spline. abOuter / baOuter are the
+        // signed outer-shoulder offsets in the raw axis-referenced frame
+        // (raw 0 = center of the center-strip / AB-BA split).
+        public static float CenteringShift(float abOuter, float baOuter)
+            => CenterlineMode == CenterlineReference.AxisSplit
+                ? 0f
+                : (abOuter + baOuter) * 0.5f;
+
         // Angles within this distance of π are treated as collinear
         // "joints" — the fillet collapses to a straight segment.
         const float JointAngleEpsilon = 0.5f * Mathf.Deg2Rad;
@@ -655,9 +682,9 @@ namespace NetworkDesigner.Geometry
                 rightFromV = PerpRight(dir);
             }
 
-            float halfW = d.RoadWidth * 0.5f;
-            Vector2 outerRight = setbackPoint + halfW * rightFromV;
-            Vector2 outerLeft = setbackPoint - halfW * rightFromV;
+            // Outer corners are computed below, AFTER the centering shift,
+            // so they track the actual (possibly off-spline) cross-section
+            // rather than assuming the body is centered on the spline.
 
             // Determine the intrinsic A→B direction. The cross-section
             // is laid out relative to this, not to V's outward direction.
@@ -682,7 +709,31 @@ namespace NetworkDesigner.Geometry
             // convention but gain symmetric rendering).
             float abOuter = abSign * (medianHalf + ShoulderPlusLanesWidth(d.Road.Profile.AB.Lanes, d.Road.Profile.ShoulderAB.Width));
             float baOuter = baSign * (medianHalf + ShoulderPlusLanesWidth(d.Road.Profile.BA.Lanes, d.Road.Profile.ShoulderBA.Width));
-            float midpoint = (abOuter + baOuter) * 0.5f;
+            float midpoint = CenteringShift(abOuter, baOuter);
+
+            // Outer corners = the TRUE outer shoulder edges in the final
+            // (shifted) frame, expressed along abRight. abOuter/baOuter are
+            // the signed outer-shoulder offsets; subtracting the same shift
+            // the lanes get keeps the corners on the actual asphalt edges.
+            // In GeometricCenter mode this reduces exactly to
+            // setbackPoint ± halfWidth (body centered on the spline). In
+            // AxisSplit mode the corners follow the body as it hangs to one
+            // side, so dead-end caps and intersection fillets stay on the
+            // pavement instead of the spline. OuterRight = CW side
+            // (+rightFromV), OuterLeft = CCW side.
+            Vector2 abEdge = setbackPoint + (abOuter - midpoint) * abRight;
+            Vector2 baEdge = setbackPoint + (baOuter - midpoint) * abRight;
+            Vector2 outerRight, outerLeft;
+            if (Vector2.Dot(abEdge - setbackPoint, rightFromV) >= 0f)
+            {
+                outerRight = abEdge;
+                outerLeft = baEdge;
+            }
+            else
+            {
+                outerRight = baEdge;
+                outerLeft = abEdge;
+            }
 
             // Lane endpoints: each is the CENTER of the lane's setback edge
             // (the lane-width midpoint between its inner and outer edges).
@@ -732,6 +783,7 @@ namespace NetworkDesigner.Geometry
                 Setback = d.Setback,
                 OuterLeft = outerLeft,
                 OuterRight = outerRight,
+                Centerline = setbackPoint,
                 OuterEdgeDir = outerEdgeDir,
                 LaneEndsAB = laneEndsAB,
                 LaneEndsBA = laneEndsBA,
@@ -884,7 +936,7 @@ namespace NetworkDesigner.Geometry
                 + ShoulderPlusLanesWidth(road.Profile.AB.Lanes, road.Profile.ShoulderAB.Width));
             float baOuter = baSign * (medianHalf
                 + ShoulderPlusLanesWidth(road.Profile.BA.Lanes, road.Profile.ShoulderBA.Width));
-            float midpoint = (abOuter + baOuter) * 0.5f;
+            float midpoint = CenteringShift(abOuter, baOuter);
 
             List<Lane> lanes = dir == Direction.AB ? road.Profile.AB.Lanes : road.Profile.BA.Lanes;
             int sign = dir == Direction.AB ? abSign : baSign;

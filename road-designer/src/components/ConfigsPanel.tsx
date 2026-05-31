@@ -3,6 +3,7 @@ import {
   Box,
   Button,
   Group,
+  Select,
   Stack,
   Text,
   TextInput,
@@ -12,14 +13,11 @@ import {
 import type { SavedConfig } from "../storage/configs";
 import type { Road } from "../model/types";
 
-// Compact cross-section formula for the list view. Walks across the
+// Compact cross-section formula for the dropdown label. Walks across the
 // road from the AB shoulder to the BA shoulder:
 //   |ab-shoulder|ab-lane-widths (outermost→innermost)|m|ba-lane-widths (innermost→outermost)|ba-shoulder|
-// One-way roads (one side empty) collapse to a single lane group with
-// no `m` segment.
 function formatCrossSection(road: Road): string {
   const fmt = (n: number) => {
-    // Up to 1 decimal, trim trailing zeros / dots ("4" not "4.0").
     const s = n.toFixed(1);
     return s.endsWith(".0") ? s.slice(0, -2) : s;
   };
@@ -33,12 +31,9 @@ function formatCrossSection(road: Road): string {
   const baPart = ba.length > 0
     ? ba.map((l) => fmt(l.width)).join(",")
     : "";
-  // Both directions present → include the median marker between them.
   if (abPart && baPart) return `|${sA}|${abPart}|m|${baPart}|${sB}|`;
-  // One-way: single lane group between the two shoulders, no median.
   if (abPart) return `|${sA}|${abPart}|${sB}|`;
   if (baPart) return `|${sA}|${baPart}|${sB}|`;
-  // Degenerate: no lanes at all.
   return `|${sA}||${sB}|`;
 }
 
@@ -67,9 +62,6 @@ export function ConfigsPanel({
   onNew,
   onExport,
 }: Props) {
-  // Known categories from existing saved configs — surfaced as a
-  // datalist on the category input so the user can re-use existing
-  // category strings instead of risking typos that split a group.
   const knownCategories = Array.from(
     new Set(
       configs
@@ -78,11 +70,71 @@ export function ConfigsPanel({
     ),
   ).sort((a, b) => a.localeCompare(b));
 
+  // Group saved configs by category for the Select. Each entry's label
+  // is "name — cross-section" so the dropdown reads like the old inline list.
+  const grouped = (() => {
+    const byCat = new Map<string, SavedConfig[]>();
+    for (const c of configs) {
+      const cat = (c.category ?? "").trim() || "Uncategorized";
+      const arr = byCat.get(cat) ?? [];
+      arr.push(c);
+      byCat.set(cat, arr);
+    }
+    const cats = Array.from(byCat.keys()).sort((a, b) => {
+      // Uncategorized last.
+      if (a === "Uncategorized") return 1;
+      if (b === "Uncategorized") return -1;
+      return a.localeCompare(b);
+    });
+    return cats.map((cat) => ({
+      group: cat,
+      items: byCat
+        .get(cat)!
+        .slice()
+        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+        .map((c) => ({
+          value: c.id,
+          label: `${c.name || "Untitled road"}  ${formatCrossSection(c.road)}`,
+        })),
+    }));
+  })();
+
   return (
     <Stack gap="xs">
       <Title order={6} c="dimmed" tt="uppercase" fz="xs" fw={600}>
         Configuration
       </Title>
+
+      {configs.length > 0 && (
+        <Group gap="xs" align="flex-end" wrap="nowrap">
+          <Box style={{ flex: 1, minWidth: 0 }}>
+            <Select
+              label={`Saved (${configs.length})`}
+              data={grouped}
+              value={activeId}
+              onChange={(id) => {
+                if (id && id !== activeId) onLoad(id);
+              }}
+              allowDeselect={false}
+              searchable
+              nothingFoundMessage="No matches"
+              checkIconPosition="right"
+              comboboxProps={{ withinPortal: true }}
+            />
+          </Box>
+          <Tooltip label="Delete current" withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="red"
+              size="lg"
+              onClick={() => onDelete(activeId)}
+            >
+              ×
+            </ActionIcon>
+          </Tooltip>
+        </Group>
+      )}
+
       <TextInput
         label="Name"
         value={activeName}
@@ -117,67 +169,6 @@ export function ConfigsPanel({
           Autosaved
         </Text>
       </Group>
-
-      {configs.length > 0 && (
-        <Box mt="sm">
-          <Text size="xs" c="dimmed" mb={4}>
-            Saved ({configs.length})
-          </Text>
-          <Stack gap={2}>
-            {configs.map((c) => {
-              const isActive = c.id === activeId;
-              return (
-                <Group
-                  key={c.id}
-                  justify="space-between"
-                  wrap="nowrap"
-                  gap="xs"
-                  px="xs"
-                  py={4}
-                  style={{
-                    borderRadius: 4,
-                    background: isActive
-                      ? "var(--mantine-color-indigo-0)"
-                      : undefined,
-                    cursor: isActive ? "default" : "pointer",
-                  }}
-                  onClick={() => {
-                    if (!isActive) onLoad(c.id);
-                  }}
-                >
-                  <Stack gap={0} style={{ flex: 1, minWidth: 0 }}>
-                    <Text
-                      size="sm"
-                      truncate
-                      fw={isActive ? 600 : 400}
-                    >
-                      {(c.name || "Untitled road") + " - " + formatCrossSection(c.road)}
-                    </Text>
-                    {c.category && c.category.trim().length > 0 && (
-                      <Text size="xs" c="dimmed" truncate>
-                        {c.category}
-                      </Text>
-                    )}
-                  </Stack>
-                  <Tooltip label="Delete" withArrow>
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDelete(c.id);
-                      }}
-                    >
-                      ×
-                    </ActionIcon>
-                  </Tooltip>
-                </Group>
-              );
-            })}
-          </Stack>
-        </Box>
-      )}
     </Stack>
   );
 }

@@ -41,7 +41,7 @@ namespace NetworkDesigner.Rendering
         [Header("Default colors when materials are auto-created")]
         public Color AsphaltColor = new Color(0.18f, 0.18f, 0.19f);
         public Color ShoulderColor = new Color(0.55f, 0.55f, 0.55f);
-        public Color MedianColor = new Color(0.95f, 0.78f, 0.25f);
+        public Color MedianColor = new Color(0.45f, 0.45f, 0.45f);
         public Color CenterlineColor = new Color(0.95f, 0.78f, 0.15f);
         public Color LaneMarkingColor = new Color(0.95f, 0.95f, 0.95f);
         public Color ArrowColor = new Color(0.95f, 0.95f, 0.95f);
@@ -53,6 +53,14 @@ namespace NetworkDesigner.Rendering
         public float DashGap = 9f;
         [Tooltip("Spacing (m) between the outer SOLID and inner DASHED yellow lines on each side of a turn lane (standard TWLTL paint). Forwarded to RoadRenderer.")]
         public float TurnLaneStripeInset = 0.3f;
+        [Tooltip("Median height (m). 0 = flat painted strip. >0 = raised 3D extrusion. ~0.15m curb, ~0.6m concrete barrier. Forwarded to RoadRenderer.")]
+        public float MedianHeight = 0.15f;
+        [Tooltip("Fillet radius (m) for the INTERNAL end of the dedicated-turn-lane median (the end NOT touching the intersection). 0 = sharp square nose. Clamped per-road to half the median's width. Forwarded to RoadRenderer.")]
+        public float TurnLaneCenterMedianFilletRadius = 0.5f;
+        [Tooltip("Multiplier applied to the NEIGHBOR road's median width to compute the dedicated-turn-lane median's widened taper-to width. 1.0 = match neighbor median exactly; >1 = flare wider; <1 = stop short.")]
+        public float TurnLaneCenterMedianTaperToWidthMultiplier = 1f;
+        [Tooltip("Multiplier applied to the NEIGHBOR road's median width to compute the taper transition length. 2.0 = taper length is twice the neighbor median width (gentle curve).")]
+        public float TurnLaneCenterMedianTaperLengthMultiplier = 2f;
         public float MarkingHeight = 0.01f;
         [Tooltip("How far short of the setback line markings stop, at each road end. 0 = stop right at the setback.")]
         public float MarkingEndInset = 0f;
@@ -859,6 +867,37 @@ namespace NetworkDesigner.Rendering
             ir.Rebuild();
         }
 
+        // Detects which end (if any) of `road` meets a median-road at a
+        // shared vertex. Returns the qualifying end + the neighbor's
+        // median width so the renderer can size the dedicated-turn-
+        // lane taper to match the adjacent median. If both ends
+        // qualify (rare; road between two median-roads), prefers EndB.
+        bool ShouldRenderDedicatedTurnLane(NetworkRoad road, out RoadEnd atEnd, out float neighborMedianWidth)
+        {
+            atEnd = RoadEnd.B;
+            neighborMedianWidth = 0f;
+            if (Network == null || Network.Roads == null) return false;
+            if (road == null || road.Profile == null || road.Profile.TurnLane == null) return false;
+            float widthA = 0f, widthB = 0f;
+            foreach (NetworkRoad other in Network.Roads)
+            {
+                if (other == null || other.Id == road.Id) continue;
+                if (other.Profile == null) continue;
+                bool otherHasMedian = other.Profile.Median != null && other.Profile.TurnLane == null;
+                if (!otherHasMedian) continue;
+                float w = other.Profile.Median.Width;
+                if (other.EndA == road.EndA || other.EndB == road.EndA)
+                    widthA = Mathf.Max(widthA, w);
+                if (other.EndA == road.EndB || other.EndB == road.EndB)
+                    widthB = Mathf.Max(widthB, w);
+            }
+            if (widthA <= 0f && widthB <= 0f) return false;
+            // Prefer B when both qualify (single-render phase).
+            if (widthB > 0f) { atEnd = RoadEnd.B; neighborMedianWidth = widthB; }
+            else             { atEnd = RoadEnd.A; neighborMedianWidth = widthA; }
+            return true;
+        }
+
         void SpawnOrUpdateRoad(NetworkRoad road, Vector2 endA, Vector2 endB, float setbackA, float setbackB)
         {
             if (!_roadPool.TryGetValue(road.Id, out GameObject go) || go == null)
@@ -946,6 +985,13 @@ namespace NetworkDesigner.Rendering
             rr.DashLength = DashLength;
             rr.DashGap = DashGap;
             rr.TurnLaneStripeInset = TurnLaneStripeInset;
+            rr.MedianHeight = MedianHeight;
+            rr.RenderTurnLaneCenterMedian = ShouldRenderDedicatedTurnLane(road, out RoadEnd dedicatedEnd, out float neighborMedianW);
+            rr.RenderDedicatedAtEnd = dedicatedEnd;
+            rr.NeighborMedianWidth = neighborMedianW;
+            rr.TurnLaneCenterMedianFilletRadius = TurnLaneCenterMedianFilletRadius;
+            rr.TurnLaneCenterMedianTaperToWidthMultiplier = TurnLaneCenterMedianTaperToWidthMultiplier;
+            rr.TurnLaneCenterMedianTaperLengthMultiplier = TurnLaneCenterMedianTaperLengthMultiplier;
             rr.MarkingHeight = MarkingHeight;
             rr.DrawArrows = DrawArrows;
             rr.ArrowLength = ArrowLength;
@@ -1002,7 +1048,7 @@ namespace NetworkDesigner.Rendering
                 foreach (VertexApproach a in vg.Approaches)
                 {
                     if (a.RoadId == roadId && a.End == end)
-                        return (a.OuterLeft + a.OuterRight) * 0.5f;
+                        return a.Centerline;
                 }
             }
             return null;

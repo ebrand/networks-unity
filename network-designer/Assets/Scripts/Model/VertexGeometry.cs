@@ -53,6 +53,18 @@ namespace NetworkDesigner.Model
         public Vector2 OuterRight;
 
         /// <summary>
+        /// The road's CENTERLINE (spline) point on the setback line — i.e.
+        /// where the A↔B axis meets the setback, NOT the geometric middle
+        /// of the pavement. These differ once the centerline reference is
+        /// AxisSplit and the profile is asymmetric: the pavement hangs to
+        /// one side, but the spline endpoint stays on the axis. The road
+        /// body mesh is rendered between the two ends' Centerline points;
+        /// OuterLeft/OuterRight remain the physical pavement corners for
+        /// caps and fillets.
+        /// </summary>
+        public Vector2 Centerline;
+
+        /// <summary>
         /// Unit direction the outer edges run AWAY from the vertex at the
         /// setback line. For straight roads this is identical to the
         /// bearing direction. For curved roads it's the local bezier

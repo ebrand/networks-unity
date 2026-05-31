@@ -21,6 +21,15 @@ function newLane(width = 4): Lane {
   return { id: `lane-${laneIdCounter++}`, width };
 }
 
+// Mantine NumberInput emits `number | string`. Empty / partial strings
+// arrive mid-edit (e.g. "", ".", "1."); coercing those to 0 makes the
+// field snap to 0 the moment you backspace, which kills typing. Treat
+// non-finite values as "keep the previous width" and skip the update.
+function parseWidth(v: number | string): number | null {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function RoadConfigForm({
   road,
   driveSide,
@@ -72,7 +81,7 @@ export function RoadConfigForm({
     onChange({
       ...road,
       // Mutually exclusive with turnLane: turning median on clears turnLane.
-      median: on ? { width: road.median?.width ?? 1 } : undefined,
+      median: on ? { width: road.median?.width ?? 1.5 } : undefined,
       turnLane: on ? undefined : road.turnLane,
     });
   }
@@ -146,12 +155,12 @@ export function RoadConfigForm({
               min={1}
               step={0.1}
               decimalScale={2}
-              fixedDecimalScale
               suffix=" m"
               value={lane.width}
-              onChange={(v) =>
-                setLaneWidth("ab", i, typeof v === "number" ? v : 0)
-              }
+              onChange={(v) => {
+                const n = parseWidth(v);
+                if (n !== null) setLaneWidth("ab", i, n);
+              }}
             />
           ))}
         </Stack>
@@ -180,12 +189,12 @@ export function RoadConfigForm({
               min={1}
               step={0.1}
               decimalScale={2}
-              fixedDecimalScale
               suffix=" m"
               value={lane.width}
-              onChange={(v) =>
-                setLaneWidth("ba", i, typeof v === "number" ? v : 0)
-              }
+              onChange={(v) => {
+                const n = parseWidth(v);
+                if (n !== null) setLaneWidth("ba", i, n);
+              }}
             />
           ))}
         </Stack>
@@ -215,12 +224,12 @@ export function RoadConfigForm({
             min={0.1}
             step={0.1}
             decimalScale={2}
-            fixedDecimalScale
             suffix=" m"
             value={road.median.width}
-            onChange={(v) =>
-              setMedianWidth(typeof v === "number" ? v : 0)
-            }
+            onChange={(v) => {
+              const n = parseWidth(v);
+              if (n !== null) setMedianWidth(n);
+            }}
           />
         )}
         <Checkbox
@@ -244,12 +253,12 @@ export function RoadConfigForm({
             min={0.1}
             step={0.1}
             decimalScale={2}
-            fixedDecimalScale
             suffix=" m"
             value={road.turnLane.width}
-            onChange={(v) =>
-              setTurnLaneWidth(typeof v === "number" ? v : 0)
-            }
+            onChange={(v) => {
+              const n = parseWidth(v);
+              if (n !== null) setTurnLaneWidth(n);
+            }}
           />
         )}
       </section>
@@ -264,24 +273,24 @@ export function RoadConfigForm({
             min={0}
             step={0.1}
             decimalScale={2}
-            fixedDecimalScale
             suffix=" m"
             value={road.shoulderAB.width}
-            onChange={(v) =>
-              setShoulderWidth("AB", typeof v === "number" ? v : 0)
-            }
+            onChange={(v) => {
+              const n = parseWidth(v);
+              if (n !== null) setShoulderWidth("AB", n);
+            }}
           />
           <NumberInput
             label="BA shoulder"
             min={0}
             step={0.1}
             decimalScale={2}
-            fixedDecimalScale
             suffix=" m"
             value={road.shoulderBA.width}
-            onChange={(v) =>
-              setShoulderWidth("BA", typeof v === "number" ? v : 0)
-            }
+            onChange={(v) => {
+              const n = parseWidth(v);
+              if (n !== null) setShoulderWidth("BA", n);
+            }}
           />
         </Group>
       </section>

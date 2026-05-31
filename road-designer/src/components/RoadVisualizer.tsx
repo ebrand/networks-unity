@@ -1,137 +1,63 @@
 import type { DriveSide, Road } from "../model/types";
 import {
   buildRoadGeometry,
+  spatialOffsetSign,
   type RoadGeometry,
 } from "../model/geometry";
-import type { LaneGeometry, Point2D } from "../model/types";
-
-// Identifies which strip the visualizer should label "in focus" — i.e.
-// in bright blue with text labels at every well-known point. Other strips
-// still render their crosshairs (faintly) but without text, to avoid the
-// label collisions at shared edges.
-export type FocusTarget =
-  | { kind: "lane"; direction: "AB" | "BA"; index: number }
-  | { kind: "shoulder"; direction: "AB" | "BA" }
-  | { kind: "median" }
-  | { kind: "turnLane" }
-  | { kind: "none" };
 
 interface Props {
   road: Road;
   driveSide: DriveSide;
-  focus: FocusTarget;
+  showCenterline: boolean;
 }
 
-const ROAD_LENGTH_M = 30; // length of the depicted road segment in meters
-const PADDING_M = 6; // extra space outside the outermost shoulder for labels
-const PX_PER_M = 18; // scale factor for rendering
+// Visual constants, in meters (the SVG viewBox unit).
+const ROAD_LENGTH_M = 30;
+const PADDING_LEFT_M = 8;   // width-label column + A vertex
+const PADDING_RIGHT_M = 5;  // B vertex
+const PADDING_VERT_M = 1.5;
+const PX_PER_M = 22;
 
-// All visual sizes below are in METERS (the SVG viewBox unit). They are
-// chosen to read well at PX_PER_M ≈ 18 — small enough not to swamp lane
-// rectangles, large enough to remain legible.
-const CROSS_R = 0.18;
-const CROSS_TICK = 0.32;
-const STROKE_THIN = 0.04;
-const STROKE_LANE = 0.05;
-const STROKE_CENTERLINE = 0.08;
-const LABEL_FONT = 0.55;
-const LABEL_GAP = 0.45;
-const TITLE_FONT = 0.7;
-const VERTEX_R = 1.0;
-const VERTEX_FONT = 1.1;
+// Surface palette.
+const COLOR_BORDER = "#000";
+const COLOR_SHOULDER = "#e6e6e6";
+const COLOR_ASPHALT = "#c0c0c0";
+const COLOR_MEDIAN = "#888";
+const COLOR_LANE_DIVIDER = "#ffffff";
+const COLOR_ARROW = "#ffffff";
+const COLOR_YELLOW = "#f4d030";
+const COLOR_TICK = "#888";
+const COLOR_AXIS = "#666";
+const COLOR_LABEL = "#333";
 
-function rectPath(g: LaneGeometry): string {
-  return `M ${g.origin.x},${g.origin.y} L ${g.primary.x},${g.primary.y} L ${g.secondary.x},${g.secondary.y} L ${g.tertiary.x},${g.tertiary.y} Z`;
+// Strokes (meters).
+const STROKE_BORDER = 0.35;
+const STROKE_LANE_DIVIDER = 0.18;
+const STROKE_YELLOW = 0.16;
+const STROKE_TICK = 0.05;
+const STROKE_AXIS = 0.06;
+const STROKE_VERTEX = 0.1;
+
+// Type (meters).
+const FONT_SIZE = 0.65;
+const VERTEX_FONT = 0.95;
+const VERTEX_R = 1.1;
+
+function widthLabel(w: number): string {
+  const s = w.toFixed(1);
+  return (s.endsWith(".0") ? s.slice(0, -2) : s) + "m";
 }
 
-interface CrosshairProps {
-  point: Point2D;
-  label?: string;
-  align?: "left" | "right";
-  faded?: boolean;
+interface Strip {
+  topY: number;
+  bottomY: number;
+  label: string;
+  fill: string;
+  kind: "shoulder" | "lane" | "median" | "turnLane";
+  laneDirection?: "AB" | "BA";
 }
 
-function Crosshair({ point, label, align = "left", faded }: CrosshairProps) {
-  const color = faded ? "#cccccc" : "#1a4fff";
-  const textX =
-    align === "left" ? point.x - LABEL_GAP : point.x + LABEL_GAP;
-  return (
-    <g>
-      <circle
-        cx={point.x}
-        cy={point.y}
-        r={CROSS_R}
-        fill="white"
-        stroke={color}
-        strokeWidth={STROKE_THIN}
-      />
-      <line
-        x1={point.x - CROSS_TICK}
-        y1={point.y}
-        x2={point.x + CROSS_TICK}
-        y2={point.y}
-        stroke={color}
-        strokeWidth={STROKE_THIN}
-      />
-      <line
-        x1={point.x}
-        y1={point.y - CROSS_TICK}
-        x2={point.x}
-        y2={point.y + CROSS_TICK}
-        stroke={color}
-        strokeWidth={STROKE_THIN}
-      />
-      {label && (
-        <text
-          x={textX}
-          y={point.y + LABEL_FONT * 0.35}
-          fontFamily="ui-monospace, Menlo, monospace"
-          fontSize={LABEL_FONT}
-          fill={color}
-          textAnchor={align === "left" ? "end" : "start"}
-        >
-          {label}
-        </text>
-      )}
-    </g>
-  );
-}
-
-interface LaneLabelsProps {
-  lane: LaneGeometry;
-  prefix: string;
-  // When true, the rectangle's points get bright-blue crosshairs and
-  // full text labels. When false, only faded crosshairs (no text).
-  focused: boolean;
-}
-
-function LaneLabels({ lane, prefix, focused }: LaneLabelsProps) {
-  const label = (suffix: string) => (focused ? `${prefix} ${suffix}` : undefined);
-  return (
-    <g>
-      <Crosshair point={lane.primary} label={label("primary")} align="left" faded={!focused} />
-      <Crosshair point={lane.A} label={label("A")} align="left" faded={!focused} />
-      <Crosshair point={lane.origin} label={label("origin")} align="left" faded={!focused} />
-      <Crosshair point={lane.secondary} label={label("secondary")} align="right" faded={!focused} />
-      <Crosshair point={lane.B} label={label("B")} align="right" faded={!focused} />
-      <Crosshair point={lane.tertiary} label={label("tertiary")} align="right" faded={!focused} />
-    </g>
-  );
-}
-
-function isFocused(target: FocusTarget, kind: "lane" | "shoulder" | "median" | "turnLane", direction?: "AB" | "BA", index?: number): boolean {
-  if (target.kind !== kind) return false;
-  if (kind === "lane" && target.kind === "lane") {
-    return target.direction === direction && target.index === index;
-  }
-  if (kind === "shoulder" && target.kind === "shoulder") {
-    return target.direction === direction;
-  }
-  if (kind === "median" && target.kind === "median") return true;
-  return kind === "turnLane" && target.kind === "turnLane";
-}
-
-export function RoadVisualizer({ road, driveSide, focus }: Props) {
+export function RoadVisualizer({ road, driveSide, showCenterline }: Props) {
   const ax = 0;
   const bx = ROAD_LENGTH_M;
   const cy = 0;
@@ -146,17 +72,76 @@ export function RoadVisualizer({ road, driveSide, focus }: Props) {
     return <div style={{ color: "crimson" }}>{(e as Error).message}</div>;
   }
 
-  // viewBox in meters, derived from the geometry's signed bbox so it
-  // fits any combination of lane counts (including one-way roads where
-  // one side has zero lanes). Padding adds room for labels that extend
-  // beyond the road rectangles.
-  const padX = 16; // room for the labels that hang off the A and B ends
-  const minY = geo.bbox.minY - PADDING_M;
-  const maxY = geo.bbox.maxY + PADDING_M;
-  const minX = geo.bbox.minX - padX;
-  const maxX = geo.bbox.maxX + padX;
+  // Flatten the geometry into stacking-order strips. Each strip is a
+  // horizontal band running from x=ax to x=bx; sorting by topY gives
+  // top-to-bottom render order regardless of which side hosts AB/BA.
+  const strips: Strip[] = [];
+
+  function pushLaneStrips(direction: "AB" | "BA") {
+    const lanesGeo = direction === "AB" ? geo.ab : geo.ba;
+    const lanes = direction === "AB" ? road.ab.lanes : road.ba.lanes;
+    for (let i = 0; i < lanesGeo.length; i++) {
+      const g = lanesGeo[i];
+      strips.push({
+        topY: Math.min(g.primary.y, g.origin.y),
+        bottomY: Math.max(g.primary.y, g.origin.y),
+        label: widthLabel(lanes[i].width),
+        fill: COLOR_ASPHALT,
+        kind: "lane",
+        laneDirection: direction,
+      });
+    }
+  }
+  function pushShoulder(direction: "AB" | "BA") {
+    const g = direction === "AB" ? geo.shoulderAB : geo.shoulderBA;
+    const w = direction === "AB" ? road.shoulderAB.width : road.shoulderBA.width;
+    strips.push({
+      topY: Math.min(g.primary.y, g.origin.y),
+      bottomY: Math.max(g.primary.y, g.origin.y),
+      label: widthLabel(w),
+      fill: COLOR_SHOULDER,
+      kind: "shoulder",
+    });
+  }
+  pushLaneStrips("AB");
+  pushLaneStrips("BA");
+  pushShoulder("AB");
+  pushShoulder("BA");
+  if (geo.median && road.median) {
+    const g = geo.median;
+    strips.push({
+      topY: Math.min(g.primary.y, g.origin.y),
+      bottomY: Math.max(g.primary.y, g.origin.y),
+      label: widthLabel(road.median.width),
+      fill: COLOR_MEDIAN,
+      kind: "median",
+    });
+  }
+  if (geo.turnLane && road.turnLane) {
+    const g = geo.turnLane;
+    strips.push({
+      topY: Math.min(g.primary.y, g.origin.y),
+      bottomY: Math.max(g.primary.y, g.origin.y),
+      label: widthLabel(road.turnLane.width),
+      fill: COLOR_ASPHALT,
+      kind: "turnLane",
+    });
+  }
+  strips.sort((a, b) => a.topY - b.topY);
+
+  const allMinY = strips.length ? strips[0].topY : -1;
+  const allMaxY = strips.length ? strips[strips.length - 1].bottomY : 1;
+
+  const minX = ax - PADDING_LEFT_M;
+  const maxX = bx + PADDING_RIGHT_M;
+  const minY = allMinY - PADDING_VERT_M;
+  const maxY = allMaxY + PADDING_VERT_M;
   const vbW = maxX - minX;
   const vbH = maxY - minY;
+
+  // Lane-divider line endpoints (insets a bit so they don't touch the
+  // road ends — matches the in-game striped look).
+  const stripeInsetX = 1.5;
 
   return (
     <div className="visualizer">
@@ -164,251 +149,180 @@ export function RoadVisualizer({ road, driveSide, focus }: Props) {
         width={vbW * PX_PER_M}
         height={vbH * PX_PER_M}
         viewBox={`${minX} ${minY} ${vbW} ${vbH}`}
-        style={{ background: "white", border: "1px solid #eee" }}
+        style={{ background: "white" }}
       >
-        {/* Flip y so that, in our model, +y is "down on the page" matches
-            the SVG default. We pass geometry in standard render coords
-            (centerline y=0, AB direction +y in RHD), so no flip is needed. */}
-
-        {/* Shoulders */}
-        <path
-          d={rectPath(geo.shoulderAB)}
-          fill="#f3f3f3"
-          stroke="#cccccc"
-          strokeWidth={STROKE_LANE}
-        />
-        <path
-          d={rectPath(geo.shoulderBA)}
-          fill="#f3f3f3"
-          stroke="#cccccc"
-          strokeWidth={STROKE_LANE}
-        />
-
-        {/* Median */}
-        {geo.median && (
-          <path
-            d={rectPath(geo.median)}
-            fill="#fff5cc"
-            stroke="#d4a017"
-            strokeWidth={STROKE_LANE}
-          />
-        )}
-
-        {/* Turn lane — drivable asphalt body with yellow markings along
-            its two long edges (the standard TWLTL look). Edges are drawn
-            below as separate lines so the strip itself reads as plain
-            asphalt. */}
-        {geo.turnLane && (
-          <>
-            <path
-              d={rectPath(geo.turnLane)}
-              fill="#e7efff"
-              stroke="#8899bb"
-              strokeWidth={STROKE_LANE}
-            />
-            {/* TWLTL paint: each long edge of the turn-lane rectangle
-                gets BOTH a solid yellow line (at the rectangle's edge)
-                and a dashed yellow line just inside it (toward the
-                turn lane's center). Standard two-way left-turn-lane
-                marking. */}
-            {(() => {
-              const t = geo.turnLane;
-              const inset = 0.3; // m — matches Unity TurnLaneStripeInset default
-              // Centroid Y of the rectangle (used to figure "inward").
-              const centerY = (t.origin.y + t.tertiary.y) / 2;
-              const edgeAY = t.origin.y;
-              const edgeBY = t.tertiary.y;
-              const inwardA = Math.sign(centerY - edgeAY);
-              const inwardB = Math.sign(centerY - edgeBY);
-              return (
-                <>
-                  {/* Edge A (origin→primary): solid + dashed-inside */}
-                  <line
-                    x1={t.origin.x}
-                    y1={edgeAY}
-                    x2={t.primary.x}
-                    y2={edgeAY}
-                    stroke="#d4a017"
-                    strokeWidth={STROKE_CENTERLINE}
-                  />
-                  <line
-                    x1={t.origin.x}
-                    y1={edgeAY + inwardA * inset}
-                    x2={t.primary.x}
-                    y2={edgeAY + inwardA * inset}
-                    stroke="#d4a017"
-                    strokeWidth={STROKE_CENTERLINE}
-                    strokeDasharray="0.6 0.4"
-                  />
-                  {/* Edge B (tertiary→secondary): solid + dashed-inside */}
-                  <line
-                    x1={t.tertiary.x}
-                    y1={edgeBY}
-                    x2={t.secondary.x}
-                    y2={edgeBY}
-                    stroke="#d4a017"
-                    strokeWidth={STROKE_CENTERLINE}
-                  />
-                  <line
-                    x1={t.tertiary.x}
-                    y1={edgeBY + inwardB * inset}
-                    x2={t.secondary.x}
-                    y2={edgeBY + inwardB * inset}
-                    stroke="#d4a017"
-                    strokeWidth={STROKE_CENTERLINE}
-                    strokeDasharray="0.6 0.4"
-                  />
-                </>
-              );
-            })()}
-          </>
-        )}
-
-        {/* Lanes */}
-        {geo.ab.map((lane, i) => (
-          <path
-            key={`ab-${i}`}
-            d={rectPath(lane)}
-            fill={i === 0 ? "#e7efff" : "#f4f8ff"}
-            stroke="#8899bb"
-            strokeWidth={STROKE_LANE}
-          />
-        ))}
-        {geo.ba.map((lane, i) => (
-          <path
-            key={`ba-${i}`}
-            d={rectPath(lane)}
-            fill={i === 0 ? "#e7efff" : "#f4f8ff"}
-            stroke="#8899bb"
-            strokeWidth={STROKE_LANE}
+        {/* Strip fills */}
+        {strips.map((s, i) => (
+          <rect
+            key={`fill-${i}`}
+            x={ax}
+            y={s.topY}
+            width={bx - ax}
+            height={s.bottomY - s.topY}
+            fill={s.fill}
           />
         ))}
 
-        {/* Road centerline */}
-        <line
-          x1={ax}
-          y1={cy}
-          x2={bx}
-          y2={cy}
-          stroke="#111111"
-          strokeWidth={STROKE_CENTERLINE}
-        />
-        <text
-          x={(ax + bx) / 2}
-          y={cy - TITLE_FONT * 0.5}
-          fontFamily="ui-monospace, Menlo, monospace"
-          fontSize={TITLE_FONT}
-          fill="#111111"
-          textAnchor="middle"
-        >
-          road centerline
-        </text>
+        {/* Lane dividers (white dashed) between same-direction lanes */}
+        {(["AB", "BA"] as const).map((dir) => {
+          const lanesGeo = dir === "AB" ? geo.ab : geo.ba;
+          const sign = spatialOffsetSign(dir, driveSide);
+          const elems: React.ReactNode[] = [];
+          for (let i = 0; i < lanesGeo.length - 1; i++) {
+            const lane = lanesGeo[i];
+            const boundY =
+              sign === 1
+                ? Math.max(lane.primary.y, lane.origin.y)
+                : Math.min(lane.primary.y, lane.origin.y);
+            elems.push(
+              <line
+                key={`${dir}-div-${i}`}
+                x1={ax + stripeInsetX}
+                y1={boundY}
+                x2={bx - stripeInsetX}
+                y2={boundY}
+                stroke={COLOR_LANE_DIVIDER}
+                strokeWidth={STROKE_LANE_DIVIDER}
+                strokeDasharray="2 1.4"
+                strokeLinecap="butt"
+              />,
+            );
+          }
+          return <g key={`div-${dir}`}>{elems}</g>;
+        })}
 
-        {/* Well-known points — non-focused strips render faint crosshairs
-            only (no text), focused strip gets bright-blue labels. Order:
-            faded first, then focused on top so labels aren't covered. */}
-        {geo.ab.map((lane, i) => (
-          <LaneLabels
-            key={`ab-pts-${i}`}
-            lane={lane}
-            prefix={`lanesAB[${i}]`}
-            focused={isFocused(focus, "lane", "AB", i)}
-          />
-        ))}
-        {geo.ba.map((lane, i) => (
-          <LaneLabels
-            key={`ba-pts-${i}`}
-            lane={lane}
-            prefix={`lanesBA[${i}]`}
-            focused={isFocused(focus, "lane", "BA", i)}
-          />
-        ))}
-        <LaneLabels
-          lane={geo.shoulderAB}
-          prefix="shoulderAB"
-          focused={isFocused(focus, "shoulder", "AB")}
-        />
-        <LaneLabels
-          lane={geo.shoulderBA}
-          prefix="shoulderBA"
-          focused={isFocused(focus, "shoulder", "BA")}
-        />
-        {geo.median && (
-          <LaneLabels
-            lane={geo.median}
-            prefix="median"
-            focused={isFocused(focus, "median")}
-          />
-        )}
-        {geo.turnLane && (
-          <LaneLabels
-            lane={geo.turnLane}
-            prefix="turnLane"
-            focused={isFocused(focus, "turnLane")}
-          />
-        )}
+        {/* Undivided two-way road — double solid yellow centerline */}
+        {!geo.median && !geo.turnLane && geo.ab.length > 0 && geo.ba.length > 0 && (() => {
+          const halfGap = 0.12;
+          return (
+            <g key="double-yellow">
+              <line x1={ax} y1={cy - halfGap} x2={bx} y2={cy - halfGap}
+                stroke={COLOR_YELLOW} strokeWidth={STROKE_YELLOW} />
+              <line x1={ax} y1={cy + halfGap} x2={bx} y2={cy + halfGap}
+                stroke={COLOR_YELLOW} strokeWidth={STROKE_YELLOW} />
+            </g>
+          );
+        })()}
 
-        {/* Vertex circles, last so they sit on top */}
-        <circle
-          cx={ax}
-          cy={cy}
-          r={VERTEX_R}
-          fill="white"
-          stroke="#111111"
-          strokeWidth={STROKE_LANE * 1.5}
-        />
-        <text
-          x={ax}
-          y={cy + VERTEX_FONT * 0.35}
-          fontFamily="ui-monospace, Menlo, monospace"
-          fontSize={VERTEX_FONT}
-          fill="#111111"
-          textAnchor="middle"
-        >
-          A
-        </text>
-        <circle
-          cx={bx}
-          cy={cy}
-          r={VERTEX_R}
-          fill="white"
-          stroke="#111111"
-          strokeWidth={STROKE_LANE * 1.5}
-        />
-        <text
-          x={bx}
-          y={cy + VERTEX_FONT * 0.35}
-          fontFamily="ui-monospace, Menlo, monospace"
-          fontSize={VERTEX_FONT}
-          fill="#111111"
-          textAnchor="middle"
-        >
-          B
-        </text>
+        {/* TWLTL yellow markings — solid on edge, dashed just inside */}
+        {geo.turnLane && (() => {
+          const g = geo.turnLane;
+          const topY = Math.min(g.primary.y, g.origin.y);
+          const botY = Math.max(g.primary.y, g.origin.y);
+          const inset = 0.3;
+          return (
+            <g key="twltl">
+              <line x1={ax} y1={topY} x2={bx} y2={topY}
+                stroke={COLOR_YELLOW} strokeWidth={STROKE_YELLOW} />
+              <line x1={ax} y1={topY + inset} x2={bx} y2={topY + inset}
+                stroke={COLOR_YELLOW} strokeWidth={STROKE_YELLOW}
+                strokeDasharray="1.6 1" />
+              <line x1={ax} y1={botY} x2={bx} y2={botY}
+                stroke={COLOR_YELLOW} strokeWidth={STROKE_YELLOW} />
+              <line x1={ax} y1={botY - inset} x2={bx} y2={botY - inset}
+                stroke={COLOR_YELLOW} strokeWidth={STROKE_YELLOW}
+                strokeDasharray="1.6 1" />
+            </g>
+          );
+        })()}
 
-        {/* Side labels — place each at the midpoint of its actual signed
-            extent so the label sits inside the strip whether the side is
-            above, below, or absent. If a side has 0-extent (no lanes, no
-            shoulder), the label still renders at the inner edge — fine. */}
-        <text
-          x={minX + 1}
-          y={geo.outerYAB / 2 + TITLE_FONT * 0.35}
-          fontFamily="ui-monospace, Menlo, monospace"
-          fontSize={TITLE_FONT}
-          fill="#666666"
-        >
-          side AB
-        </text>
-        <text
-          x={minX + 1}
-          y={geo.outerYBA / 2 + TITLE_FONT * 0.35}
-          fontFamily="ui-monospace, Menlo, monospace"
-          fontSize={TITLE_FONT}
-          fill="#666666"
-        >
-          side BA
-        </text>
+        {/* Directional arrows per lane */}
+        {(["AB", "BA"] as const).map((dir) => {
+          const lanesGeo = dir === "AB" ? geo.ab : geo.ba;
+          const out: React.ReactNode[] = [];
+          for (let i = 0; i < lanesGeo.length; i++) {
+            const lg = lanesGeo[i];
+            const yMid = (lg.primary.y + lg.origin.y) / 2;
+            for (const fx of [0.3, 0.7]) {
+              const x = ax + (bx - ax) * fx;
+              out.push(arrowGlyph(x, yMid, dir, `arrow-${dir}-${i}-${fx}`));
+            }
+          }
+          return <g key={`arrows-${dir}`}>{out}</g>;
+        })}
+
+        {/* Outer road-edge borders (top + bottom black bars) */}
+        <line x1={ax} y1={allMinY} x2={bx} y2={allMinY}
+          stroke={COLOR_BORDER} strokeWidth={STROKE_BORDER} />
+        <line x1={ax} y1={allMaxY} x2={bx} y2={allMaxY}
+          stroke={COLOR_BORDER} strokeWidth={STROKE_BORDER} />
+
+        {/* Width labels + ticks on the left margin */}
+        <g>
+          {strips.map((s, i) => {
+            const tickX = ax - 2.5;
+            const railX = ax - 1.8;
+            const labelX = ax - 3.2;
+            return (
+              <g key={`label-${i}`}>
+                <line x1={tickX} y1={s.topY} x2={ax - 0.3} y2={s.topY}
+                  stroke={COLOR_TICK} strokeWidth={STROKE_TICK} />
+                <line x1={tickX} y1={s.bottomY} x2={ax - 0.3} y2={s.bottomY}
+                  stroke={COLOR_TICK} strokeWidth={STROKE_TICK} />
+                <line x1={railX} y1={s.topY} x2={railX} y2={s.bottomY}
+                  stroke={COLOR_TICK} strokeWidth={STROKE_TICK} />
+                <text
+                  x={labelX}
+                  y={(s.topY + s.bottomY) / 2 + FONT_SIZE * 0.35}
+                  fontFamily="ui-monospace, Menlo, monospace"
+                  fontSize={FONT_SIZE}
+                  fill={COLOR_LABEL}
+                  textAnchor="end"
+                >
+                  {s.label}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+
+        {/* Centerline (A→B axis) — circles sit at the viewBox margins so
+            they don't overlap the width-label column on the left or the
+            road on the right. */}
+        {showCenterline && (() => {
+          const aCx = minX + VERTEX_R + 0.3;
+          const bCx = maxX - VERTEX_R - 0.3;
+          return (
+            <g>
+              <line
+                x1={aCx}
+                y1={cy}
+                x2={bCx}
+                y2={cy}
+                stroke={COLOR_AXIS}
+                strokeWidth={STROKE_AXIS}
+                strokeDasharray="0.9 0.6"
+              />
+              <circle cx={aCx} cy={cy} r={VERTEX_R} fill="white"
+                stroke={COLOR_AXIS} strokeWidth={STROKE_VERTEX} />
+              <text x={aCx} y={cy + VERTEX_FONT * 0.35}
+                fontFamily="ui-monospace, Menlo, monospace"
+                fontSize={VERTEX_FONT} fill={COLOR_AXIS}
+                textAnchor="middle">A</text>
+              <circle cx={bCx} cy={cy} r={VERTEX_R} fill="white"
+                stroke={COLOR_AXIS} strokeWidth={STROKE_VERTEX} />
+              <text x={bCx} y={cy + VERTEX_FONT * 0.35}
+                fontFamily="ui-monospace, Menlo, monospace"
+                fontSize={VERTEX_FONT} fill={COLOR_AXIS}
+                textAnchor="middle">B</text>
+            </g>
+          );
+        })()}
       </svg>
     </div>
   );
+}
+
+function arrowGlyph(
+  cx: number,
+  cy: number,
+  dir: "AB" | "BA",
+  key: string,
+) {
+  const half = 0.85;
+  const pts =
+    dir === "AB"
+      ? `${cx - half},${cy - half} ${cx + half},${cy} ${cx - half},${cy + half}`
+      : `${cx + half},${cy - half} ${cx - half},${cy} ${cx + half},${cy + half}`;
+  return <polygon key={key} points={pts} fill={COLOR_ARROW} />;
 }

@@ -6,16 +6,17 @@ import {
   Group,
   ScrollArea,
   SegmentedControl,
-  Select,
   Stack,
+  Switch,
   Text,
   Title,
 } from "@mantine/core";
 import { modals } from "@mantine/modals";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import "./App.css";
 import { ConfigsPanel } from "./components/ConfigsPanel";
 import { RoadConfigForm } from "./components/RoadConfigForm";
-import { RoadVisualizer, type FocusTarget } from "./components/RoadVisualizer";
+import { RoadVisualizer } from "./components/RoadVisualizer";
 import { TuningPanel } from "./components/TuningPanel";
 import type { DriveSide, Road } from "./model/types";
 import {
@@ -80,8 +81,14 @@ function App() {
   const [road, setRoad] = useState<Road>(initial.active.road);
   const [driveSide, setDriveSide] = useState<DriveSide>(initial.active.driveSide);
   const [configs, setConfigs] = useState<SavedConfig[]>(initial.list);
-  const [focusKey, setFocusKey] = useState<string>("lane:BA:1");
-  const [view, setView] = useState<"designer" | "tuning">("designer");
+  const [showCenterline, setShowCenterline] = useState<boolean>(true);
+
+  // View is derived from the route so /designer and /tuning are
+  // directly navigable (deep-linkable, refresh-safe via Vite's SPA
+  // history fallback). The header's SegmentedControl just navigates.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isTuning = location.pathname.startsWith("/tuning");
 
   // Autosave: any change to name/road/driveSide while a config is active
   // persists to localStorage and refreshes the in-memory list. We guard
@@ -168,41 +175,6 @@ function App() {
     });
   }
 
-  const focus: FocusTarget = useMemo(() => {
-    const [kind, dir, idx] = focusKey.split(":");
-    if (kind === "lane") {
-      return {
-        kind: "lane",
-        direction: dir as "AB" | "BA",
-        index: parseInt(idx),
-      };
-    }
-    if (kind === "shoulder") {
-      return { kind: "shoulder", direction: dir as "AB" | "BA" };
-    }
-    if (kind === "median") return { kind: "median" };
-    if (kind === "turnLane") return { kind: "turnLane" };
-    return { kind: "none" };
-  }, [focusKey]);
-
-  const focusOptions: { value: string; label: string }[] = [
-    { value: "none", label: "(none — show all faded)" },
-    ...road.ab.lanes.map((_, i) => ({
-      value: `lane:AB:${i}`,
-      label: `lanesAB[${i}]`,
-    })),
-    ...road.ba.lanes.map((_, i) => ({
-      value: `lane:BA:${i}`,
-      label: `lanesBA[${i}]`,
-    })),
-    { value: "shoulder:AB", label: "shoulderAB" },
-    { value: "shoulder:BA", label: "shoulderBA" },
-    ...(road.median ? [{ value: "median", label: "median" }] : []),
-    ...(road.turnLane ? [{ value: "turnLane", label: "turnLane" }] : []),
-  ];
-
-  const isTuning = view === "tuning";
-
   return (
     <AppShell
       header={{ height: 64 }}
@@ -223,8 +195,8 @@ function App() {
           </Box>
           <SegmentedControl
             size="xs"
-            value={view}
-            onChange={(v) => setView(v as "designer" | "tuning")}
+            value={isTuning ? "tuning" : "designer"}
+            onChange={(v) => navigate(`/${v}`)}
             data={[
               { value: "designer", label: "Designer" },
               { value: "tuning", label: "Tuning" },
@@ -250,25 +222,12 @@ function App() {
                 onExport={downloadExport}
               />
               <Divider />
-              <Box>
-                <Title
-                  order={6}
-                  c="dimmed"
-                  tt="uppercase"
-                  mb="xs"
-                  fz="xs"
-                  fw={600}
-                >
-                  Focus (labeled in blue)
-                </Title>
-                <Select
-                  data={focusOptions}
-                  value={focusKey}
-                  onChange={(v) => v && setFocusKey(v)}
-                  allowDeselect={false}
-                  checkIconPosition="right"
-                />
-              </Box>
+              <Switch
+                checked={showCenterline}
+                onChange={(e) => setShowCenterline(e.currentTarget.checked)}
+                label="Show centerline (A–B axis)"
+                size="sm"
+              />
               <RoadConfigForm
                 road={road}
                 driveSide={driveSide}
@@ -281,11 +240,21 @@ function App() {
       )}
 
       <AppShell.Main>
-        {isTuning ? (
-          <TuningPanel />
-        ) : (
-          <RoadVisualizer road={road} driveSide={driveSide} focus={focus} />
-        )}
+        <Routes>
+          <Route path="/" element={<Navigate to="/designer" replace />} />
+          <Route
+            path="/designer"
+            element={
+              <RoadVisualizer
+                road={road}
+                driveSide={driveSide}
+                showCenterline={showCenterline}
+              />
+            }
+          />
+          <Route path="/tuning" element={<TuningPanel />} />
+          <Route path="*" element={<Navigate to="/designer" replace />} />
+        </Routes>
       </AppShell.Main>
     </AppShell>
   );

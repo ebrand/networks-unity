@@ -65,7 +65,7 @@ namespace NetworkDesigner.Rendering
         [Header("Default colors when materials are auto-created")]
         public Color AsphaltColor = new Color(0.18f, 0.18f, 0.19f);
         public Color ShoulderColor = new Color(0.55f, 0.55f, 0.55f);
-        public Color MedianColor = new Color(0.95f, 0.78f, 0.25f);
+        public Color MedianColor = new Color(0.45f, 0.45f, 0.45f);
         public Color CenterlineColor = new Color(0.95f, 0.78f, 0.15f);
         public Color LaneMarkingColor = new Color(0.95f, 0.95f, 0.95f);
         public Color ArrowColor = new Color(0.95f, 0.95f, 0.95f);
@@ -96,6 +96,22 @@ namespace NetworkDesigner.Rendering
         public float TurnLaneStripeInset = 0.3f;
         [Tooltip("Vertical lift above road surface to avoid Z-fighting (m).")]
         public float MarkingHeight = 0.01f;
+        [Tooltip("Median height (m). 0 = flat painted strip (legacy). >0 = raised 3D extrusion with top + side walls at this height. ~0.15m matches a curb; ~0.6m is a concrete barrier. Only renders 3D on two-way roads with an actual Median.")]
+        public float MedianHeight = 0.15f;
+        [Tooltip("When true AND this road has a TurnLane, render a thin median strip along the turn lane's edge so that the road fashions a dedicated turn lane near an intersection. Set by NetworkRenderer when the road's endpoint shares a vertex with a median-road. The SIDE of the turn lane the strip lands on depends on RenderDedicatedAtEnd.")]
+        public bool RenderTurnLaneCenterMedian = false;
+        [Tooltip("If RenderTurnLaneCenterMedian is true, which END of the road meets the median-road intersection. Determines which direction's driver is 'entering the intersection' (and thus which side of the turn lane is their LEFT for the dedicated-turn-lane median).")]
+        public NetworkDesigner.Model.RoadEnd RenderDedicatedAtEnd = NetworkDesigner.Model.RoadEnd.B;
+        [Tooltip("Width (m) of the thin median strip drawn at the turn lane's edge when RenderTurnLaneCenterMedian is true. Placed flush against the entering driver's LEFT edge of the turn lane.")]
+        public float TurnLaneCenterMedianWidth = 1f;
+        [Tooltip("Fillet radius (m) at the INTERNAL end of the dedicated-turn-lane median (the end NOT touching the intersection). 0 = sharp square nose; radius equal to half the median width = full semicircle.")]
+        public float TurnLaneCenterMedianFilletRadius = 0.5f;
+        [Tooltip("Width (m) of the adjacent median-road's median at the dedicated-turn-lane's intersection end. Set automatically by NetworkRenderer; taper-to width + taper length derive from this × their multipliers so the taper visually matches the adjacent wide median.")]
+        public float NeighborMedianWidth = 0f;
+        [Tooltip("Multiplier applied to NeighborMedianWidth to compute the taper-to width. 1.0 = match neighbor median exactly.")]
+        public float TurnLaneCenterMedianTaperToWidthMultiplier = 1f;
+        [Tooltip("Multiplier applied to NeighborMedianWidth to compute the taper transition length. 2.0 = taper is twice as long as the neighbor median is wide.")]
+        public float TurnLaneCenterMedianTaperLengthMultiplier = 2f;
         [Tooltip("How far short of each setback line (each end of the road body) the markings stop. " +
                  "0 = markings extend right to the setback line. (m).")]
         public float MarkingEndInset = 0f;
@@ -146,6 +162,8 @@ namespace NetworkDesigner.Rendering
                 BuildCurvedStrips(strips, verts, triByKind);
                 if (DrawMarkings) BuildCurvedMarkings(midpoint, verts, triByKind);
                 if (DrawArrows && Profile.IsOneWay) BuildCurvedArrows(midpoint, verts, triByKind);
+                BuildCurvedMedianExtrusion(midpoint, verts, triByKind);
+                BuildCurvedTurnLaneCenterMedian(midpoint, verts, triByKind);
             }
             else
             {
@@ -156,6 +174,8 @@ namespace NetworkDesigner.Rendering
                 if (DrawMarkings) BuildStraightMarkings(forward, right, midpoint, roadLength, verts, triByKind);
                 if (DrawArrows && Profile.IsOneWay)
                     BuildStraightArrows(forward, right, midpoint, roadLength, verts, triByKind);
+                BuildStraightMedianExtrusion(forward, right, midpoint, verts, triByKind);
+                BuildStraightTurnLaneCenterMedian(forward, right, midpoint, verts, triByKind);
             }
 
             // Reuse the existing Mesh if one was already created on this
@@ -312,24 +332,30 @@ namespace NetworkDesigner.Rendering
                 {
                     // Standard TWLTL paint: SOLID yellow on each outer
                     // edge of the turn lane, plus a DASHED yellow line
-                    // just inside (toward the turn lane). Each side
-                    // gets two parallel yellow lines.
+                    // just inside. When the dedicated-turn-lane median
+                    // is rendered, the side it sits on has its yellow
+                    // paint suppressed (the median replaces it).
                     float half = Profile.TurnLane.Width * 0.5f;
                     float stripeInset = TurnLaneStripeInset;
-                    // Outer solid lines — at the turn lane's edges.
-                    AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
-                        forward, right, origin, -half - midpoint, startAlong, endAlong, LineWidth);
-                    AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
-                        forward, right, origin,  half - midpoint, startAlong, endAlong, LineWidth);
-                    // Inner dashed lines — offset by stripeInset toward
-                    // the turn lane's centerline (so the negative-side
-                    // dashed line is at -half + stripeInset, etc.).
-                    AppendDashedLine(verts, triByKind[(int)MaterialKind.Centerline],
-                        forward, right, origin, -half + stripeInset - midpoint, startAlong, endAlong,
-                        LineWidth, DashLength, DashGap);
-                    AppendDashedLine(verts, triByKind[(int)MaterialKind.Centerline],
-                        forward, right, origin,  half - stripeInset - midpoint, startAlong, endAlong,
-                        LineWidth, DashLength, DashGap);
+                    int suppressSide = TurnLaneSuppressedYellowSide();
+                    bool drawNeg = suppressSide >= 0;
+                    bool drawPos = suppressSide <= 0;
+                    if (drawNeg)
+                    {
+                        AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
+                            forward, right, origin, -half - midpoint, startAlong, endAlong, LineWidth);
+                        AppendDashedLine(verts, triByKind[(int)MaterialKind.Centerline],
+                            forward, right, origin, -half + stripeInset - midpoint, startAlong, endAlong,
+                            LineWidth, DashLength, DashGap);
+                    }
+                    if (drawPos)
+                    {
+                        AppendSolidLine(verts, triByKind[(int)MaterialKind.Centerline],
+                            forward, right, origin,  half - midpoint, startAlong, endAlong, LineWidth);
+                        AppendDashedLine(verts, triByKind[(int)MaterialKind.Centerline],
+                            forward, right, origin,  half - stripeInset - midpoint, startAlong, endAlong,
+                            LineWidth, DashLength, DashGap);
+                    }
                 }
                 else
                 {
@@ -382,21 +408,31 @@ namespace NetworkDesigner.Rendering
                 if (Profile.TurnLane != null && Profile.TurnLane.Width > 0f)
                 {
                     // TWLTL: solid yellow outer edges + dashed yellow
-                    // inside lines (mirroring the straight path).
+                    // inside lines. Suppress on the side covered by the
+                    // dedicated-turn-lane median (see straight version).
                     float half = Profile.TurnLane.Width * 0.5f;
                     float stripeInset = TurnLaneStripeInset;
-                    EmitCurvedLine(tbl, y, -half - midpoint, startAlong, endAlong, step,
-                        LineWidth, dashed: false,
-                        verts, triByKind[(int)MaterialKind.Centerline]);
-                    EmitCurvedLine(tbl, y,  half - midpoint, startAlong, endAlong, step,
-                        LineWidth, dashed: false,
-                        verts, triByKind[(int)MaterialKind.Centerline]);
-                    EmitCurvedLine(tbl, y, -half + stripeInset - midpoint, startAlong, endAlong, step,
-                        LineWidth, dashed: true,
-                        verts, triByKind[(int)MaterialKind.Centerline]);
-                    EmitCurvedLine(tbl, y,  half - stripeInset - midpoint, startAlong, endAlong, step,
-                        LineWidth, dashed: true,
-                        verts, triByKind[(int)MaterialKind.Centerline]);
+                    int suppressSide = TurnLaneSuppressedYellowSide();
+                    bool drawNeg = suppressSide >= 0;
+                    bool drawPos = suppressSide <= 0;
+                    if (drawNeg)
+                    {
+                        EmitCurvedLine(tbl, y, -half - midpoint, startAlong, endAlong, step,
+                            LineWidth, dashed: false,
+                            verts, triByKind[(int)MaterialKind.Centerline]);
+                        EmitCurvedLine(tbl, y, -half + stripeInset - midpoint, startAlong, endAlong, step,
+                            LineWidth, dashed: true,
+                            verts, triByKind[(int)MaterialKind.Centerline]);
+                    }
+                    if (drawPos)
+                    {
+                        EmitCurvedLine(tbl, y,  half - midpoint, startAlong, endAlong, step,
+                            LineWidth, dashed: false,
+                            verts, triByKind[(int)MaterialKind.Centerline]);
+                        EmitCurvedLine(tbl, y,  half - stripeInset - midpoint, startAlong, endAlong, step,
+                            LineWidth, dashed: true,
+                            verts, triByKind[(int)MaterialKind.Centerline]);
+                    }
                 }
                 else
                 {
@@ -706,7 +742,7 @@ namespace NetworkDesigner.Rendering
                 AddStrip(strips, -centerHalf, centerHalf, kind);
             }
 
-            midpoint = (abOuter + baOuter) * 0.5f;
+            midpoint = GeometryResolver.CenteringShift(abOuter, baOuter);
             if (Mathf.Abs(midpoint) > 1e-5f)
             {
                 for (int i = 0; i < strips.Count; i++)
@@ -817,6 +853,337 @@ namespace NetworkDesigner.Rendering
             tris.Add(baseIdx + 0);
             tris.Add(baseIdx + 2);
             tris.Add(baseIdx + 3);
+        }
+
+        // 3D median extrusion (straight road). Adds a raised top face at
+        // y = surface + MedianHeight plus four side walls (two long
+        // sides + two end caps). The existing flat strip stays in place
+        // as the "bottom" — invisible from above (covered by the top
+        // face) but harmless. All triangles go into the Median sub-mesh.
+        void BuildStraightMedianExtrusion(Vector3 forward, Vector3 right,
+            float midpoint, List<Vector3> verts, List<int>[] triByKind)
+        {
+            if (MedianHeight <= 0f) return;
+            if (Profile == null || Profile.Median == null || Profile.IsOneWay) return;
+            float centerHalf = Profile.Median.Width * 0.5f;
+            if (centerHalf <= 0f) return;
+
+            List<int> tris = triByKind[(int)MaterialKind.Median];
+            float lowOff  = -centerHalf - midpoint;
+            float highOff =  centerHalf - midpoint;
+            Vector3 up = Vector3.up * MedianHeight;
+
+            // 8 box corners.
+            Vector3 aLoB = EndpointA + right * lowOff;
+            Vector3 bLoB = EndpointB + right * lowOff;
+            Vector3 bHiB = EndpointB + right * highOff;
+            Vector3 aHiB = EndpointA + right * highOff;
+            Vector3 aLoT = aLoB + up;
+            Vector3 bLoT = bLoB + up;
+            Vector3 bHiT = bHiB + up;
+            Vector3 aHiT = aHiB + up;
+
+            EmitQuadCWFromOutside(verts, tris, aLoT, bLoT, bHiT, aHiT); // top (+Y)
+            EmitQuadCWFromOutside(verts, tris, aLoB, aLoT, bLoT, bLoB); // -right wall
+            EmitQuadCWFromOutside(verts, tris, bHiB, bHiT, aHiT, aHiB); // +right wall
+            EmitQuadCWFromOutside(verts, tris, aHiB, aHiT, aLoT, aLoB); // -forward end
+            EmitQuadCWFromOutside(verts, tris, bLoB, bLoT, bHiT, bHiB); // +forward end
+        }
+
+        // 3D median extrusion (curved road). Same idea as straight but
+        // walks N+1 cross-section frames and stitches box segments.
+        void BuildCurvedMedianExtrusion(float midpoint,
+            List<Vector3> verts, List<int>[] triByKind)
+        {
+            if (MedianHeight <= 0f) return;
+            if (Profile == null || Profile.Median == null || Profile.IsOneWay) return;
+            float centerHalf = Profile.Median.Width * 0.5f;
+            if (centerHalf <= 0f) return;
+
+            int N = Mathf.Max(2, CurveTessellation);
+            Vector2 p0 = new Vector2(EndpointA.x, EndpointA.z);
+            Vector2 c1 = new Vector2(CurveControlA.x, CurveControlA.z);
+            Vector2 c2 = new Vector2(CurveControlB.x, CurveControlB.z);
+            Vector2 p3 = new Vector2(EndpointB.x, EndpointB.z);
+            float y = EndpointA.y;
+
+            Vector3 up = Vector3.up * MedianHeight;
+            float lowOff  = -centerHalf - midpoint;
+            float highOff =  centerHalf - midpoint;
+
+            Vector3[] lowB = new Vector3[N + 1];
+            Vector3[] highB = new Vector3[N + 1];
+            Vector3[] lowT = new Vector3[N + 1];
+            Vector3[] highT = new Vector3[N + 1];
+            for (int i = 0; i <= N; i++)
+            {
+                float t = i / (float)N;
+                Vector2 pos = GeometryResolver.SampleCubic(p0, c1, c2, p3, t);
+                Vector2 tan = GeometryResolver.CubicTangent(p0, c1, c2, p3, t);
+                if (tan.sqrMagnitude < 1e-8f) tan = p3 - p0;
+                tan.Normalize();
+                Vector3 sp = new Vector3(pos.x, y, pos.y);
+                Vector3 sr = new Vector3(tan.y, 0f, -tan.x);
+                lowB[i]  = sp + sr * lowOff;
+                highB[i] = sp + sr * highOff;
+                lowT[i]  = lowB[i] + up;
+                highT[i] = highB[i] + up;
+            }
+
+            List<int> tris = triByKind[(int)MaterialKind.Median];
+            for (int i = 0; i < N; i++)
+            {
+                EmitQuadCWFromOutside(verts, tris, lowT[i], lowT[i + 1], highT[i + 1], highT[i]); // top
+                EmitQuadCWFromOutside(verts, tris, lowB[i], lowT[i], lowT[i + 1], lowB[i + 1]);   // -right wall
+                EmitQuadCWFromOutside(verts, tris, highB[i + 1], highT[i + 1], highT[i], highB[i]); // +right wall
+            }
+            // End caps.
+            EmitQuadCWFromOutside(verts, tris, highB[0], highT[0], lowT[0], lowB[0]);             // start cap
+            EmitQuadCWFromOutside(verts, tris, lowB[N], lowT[N], highT[N], highB[N]);             // end cap
+        }
+
+        // Returns -1 / 0 / +1 indicating which offset-side of the turn
+        // lane is covered by the dedicated-turn-lane median (and thus
+        // should have its yellow TWLTL paint suppressed). 0 = no
+        // median, draw both sides. Matches the position math used by
+        // BuildStraightTurnLaneCenterMedian.
+        int TurnLaneSuppressedYellowSide()
+        {
+            if (!RenderTurnLaneCenterMedian) return 0;
+            if (Profile == null || Profile.TurnLane == null) return 0;
+            int abSign = DriveSide == DriveSide.Right ? 1 : -1;
+            return RenderDedicatedAtEnd == NetworkDesigner.Model.RoadEnd.A
+                ? -abSign : abSign;
+        }
+
+        // Thin median strip centered on the road's centerline, drawn on
+        // top of the turn lane's asphalt. Splits the original turn lane
+        // into two halves — used to fashion a dedicated turn lane near
+        // an intersection where an adjacent road has a real median.
+        // Straight road version.
+        void BuildStraightTurnLaneCenterMedian(Vector3 forward, Vector3 right,
+            float midpoint, List<Vector3> verts, List<int>[] triByKind)
+        {
+            if (!RenderTurnLaneCenterMedian) return;
+            if (Profile == null || Profile.TurnLane == null) return;
+            float w = TurnLaneCenterMedianWidth;
+            if (w <= 0f) return;
+
+            List<int> tris = triByKind[(int)MaterialKind.Median];
+            // Place the strip flush against the entering driver's RIGHT
+            // EDGE of the original turn lane.
+            // Direction: if the intersection is at EndB, the driver is
+            // going AB (their right = +abSign side). If at EndA, the
+            // driver is going BA (their right = -abSign side).
+            float turnHalf = Profile.TurnLane.Width * 0.5f;
+            int abSign = DriveSide == DriveSide.Right ? 1 : -1;
+            int sideSign = RenderDedicatedAtEnd == NetworkDesigner.Model.RoadEnd.A
+                ? -abSign     // BA driver: right = -abSign
+                :  abSign;    // AB driver: right = +abSign
+            float outerOff = sideSign * turnHalf;
+            float innerOff = sideSign * (turnHalf - w);
+            float lowOff   = Mathf.Min(outerOff, innerOff) - midpoint;
+            float highOff  = Mathf.Max(outerOff, innerOff) - midpoint;
+            float halfW    = (highOff - lowOff) * 0.5f;
+            // Use the same height as the regular median for visual
+            // consistency. If MedianHeight is 0 the strip falls back to
+            // a flat painted surface.
+            float h = Mathf.Max(MedianHeight, 0.01f);
+            Vector3 up = Vector3.up * h;
+            float roadLength = (EndpointB - EndpointA).magnitude;
+
+            // The INTERNAL end (where the median terminates with the
+            // fillet) is the end NOT touching the intersection.
+            bool internalAtA = RenderDedicatedAtEnd == NetworkDesigner.Model.RoadEnd.B;
+            float internalS  = internalAtA ? 0f : roadLength;
+            float intersectS = internalAtA ? roadLength : 0f;
+            int   filletSig  = internalAtA ? +1 : -1; // forward direction from nose into body
+
+            float radius = Mathf.Clamp(TurnLaneCenterMedianFilletRadius, 0f, halfW);
+
+            // Pre-shift INNER vs OUTER edge offsets. Outer = the flush
+            // edge (at the AB-driver-right edge of the turn lane);
+            // inner = the centerline-side edge of the thin median.
+            float outerEdgeRaw = sideSign * turnHalf;
+            float innerEdgeRaw = sideSign * (turnHalf - w);
+            // Taper-end target: derived from the adjacent median-road's
+            // median width × the user's multiplier. The inner edge is
+            // pushed across the centerline by half the target widened
+            // width so the thin median visually flares out to meet the
+            // wider neighbor median.
+            float taperToWidth = NeighborMedianWidth * TurnLaneCenterMedianTaperToWidthMultiplier;
+            float widenedInnerRaw = -sideSign * (taperToWidth * 0.5f);
+            float taperLen = Mathf.Clamp(
+                NeighborMedianWidth * TurnLaneCenterMedianTaperLengthMultiplier,
+                0f, roadLength * 0.9f);
+
+            // Cross-section structure:
+            //   0..N         : internal-end fillet arc (nose at 0)
+            //   N+1          : start of taper zone (full thin width)
+            //   N+2 .. N+1+M : taper samples (inner edge interpolates
+            //                  from innerEdgeRaw → widenedInnerRaw)
+            // Sample N+1+M sits at intersectS, intersection end.
+            int N = radius > 0f ? 12 : 0;
+            int M = (taperLen > 0.01f && taperToWidth > w) ? 12 : 1;
+            int total = (N + 1) + M;
+            float[] sArr  = new float[total];
+            float[] loArr = new float[total];
+            float[] hiArr = new float[total];
+
+            // 1) Internal-end fillet (sample 0..N).
+            for (int i = 0; i <= N; i++)
+            {
+                float theta = (N > 0 ? (i / (float)N) : 1f) * Mathf.PI * 0.5f;
+                float fwdOff = radius * (1f - Mathf.Cos(theta));
+                float perpInset = radius * (1f - Mathf.Sin(theta));
+                sArr[i]  = internalS + filletSig * fwdOff;
+                loArr[i] = lowOff + perpInset;
+                hiArr[i] = highOff - perpInset;
+            }
+            // 2) Taper samples (sample N+1 .. N+M). Sample N+1 sits at
+            //    the start of the taper zone (full thin width); sample
+            //    N+M sits at the intersection end (full widened).
+            float taperStartS = intersectS - filletSig * taperLen;
+            for (int j = 1; j <= M; j++)
+            {
+                float t = j / (float)M; // 0 < t ≤ 1 (avoid duplicating sample N)
+                float s = Mathf.Lerp(taperStartS, intersectS, t);
+                // Smooth-step ease so the curve flares gracefully.
+                float u = Mathf.SmoothStep(0f, 1f, t);
+                float innerRaw = Mathf.Lerp(innerEdgeRaw, widenedInnerRaw, u);
+                // Build cross-section bounds (low/high = min/max).
+                float a = innerRaw - midpoint;
+                float b = outerEdgeRaw - midpoint;
+                sArr[N + j]  = s;
+                loArr[N + j] = Mathf.Min(a, b);
+                hiArr[N + j] = Mathf.Max(a, b);
+            }
+
+            // Convert (S, perp) cross-sections to world-space bottom +
+            // top vertex pairs.
+            Vector3[] loB = new Vector3[total];
+            Vector3[] hiB = new Vector3[total];
+            Vector3[] loT = new Vector3[total];
+            Vector3[] hiT = new Vector3[total];
+            for (int i = 0; i < total; i++)
+            {
+                Vector3 p = EndpointA + forward * sArr[i];
+                loB[i] = p + right * loArr[i];
+                hiB[i] = p + right * hiArr[i];
+                loT[i] = loB[i] + up;
+                hiT[i] = hiB[i] + up;
+            }
+
+            // Stitch quads between consecutive cross-sections. Reverse
+            // winding when forward S decreases (filletSig < 0) so the
+            // outward normals stay outward.
+            bool rev = filletSig < 0;
+            for (int i = 0; i < total - 1; i++)
+            {
+                Vector3 lb0 = loB[i],  hb0 = hiB[i],  lt0 = loT[i],  ht0 = hiT[i];
+                Vector3 lb1 = loB[i+1], hb1 = hiB[i+1], lt1 = loT[i+1], ht1 = hiT[i+1];
+                if (!rev)
+                {
+                    EmitQuadCWFromOutside(verts, tris, lt0, lt1, ht1, ht0); // top
+                    EmitQuadCWFromOutside(verts, tris, lb0, lt0, lt1, lb1); // -right wall
+                    EmitQuadCWFromOutside(verts, tris, hb1, ht1, ht0, hb0); // +right wall
+                }
+                else
+                {
+                    EmitQuadCWFromOutside(verts, tris, lt1, lt0, ht0, ht1);
+                    EmitQuadCWFromOutside(verts, tris, lb1, lt1, lt0, lb0);
+                    EmitQuadCWFromOutside(verts, tris, hb0, ht0, ht1, hb1);
+                }
+            }
+
+            // Intersection-end cap (always a flat square wall, facing
+            // the intersection / +filletSig direction).
+            int last = total - 1;
+            if (!rev)
+                EmitQuadCWFromOutside(verts, tris, loB[last], loT[last], hiT[last], hiB[last]);
+            else
+                EmitQuadCWFromOutside(verts, tris, hiB[last], hiT[last], loT[last], loB[last]);
+
+            // Nose cap — only needed when the fillet doesn't fully
+            // collapse the nose to a point (radius < halfW).
+            if (radius < halfW - 1e-4f)
+            {
+                if (!rev)
+                    EmitQuadCWFromOutside(verts, tris, hiB[0], hiT[0], loT[0], loB[0]);
+                else
+                    EmitQuadCWFromOutside(verts, tris, loB[0], loT[0], hiT[0], hiB[0]);
+            }
+        }
+
+        // Curved-road version of the thin center median.
+        void BuildCurvedTurnLaneCenterMedian(float midpoint,
+            List<Vector3> verts, List<int>[] triByKind)
+        {
+            if (!RenderTurnLaneCenterMedian) return;
+            if (Profile == null || Profile.TurnLane == null) return;
+            float w = TurnLaneCenterMedianWidth;
+            if (w <= 0f) return;
+
+            int N = Mathf.Max(2, CurveTessellation);
+            Vector2 p0 = new Vector2(EndpointA.x, EndpointA.z);
+            Vector2 c1 = new Vector2(CurveControlA.x, CurveControlA.z);
+            Vector2 c2 = new Vector2(CurveControlB.x, CurveControlB.z);
+            Vector2 p3 = new Vector2(EndpointB.x, EndpointB.z);
+            float y = EndpointA.y;
+
+            float h = Mathf.Max(MedianHeight, 0.01f);
+            Vector3 up = Vector3.up * h;
+            // Same right-edge logic as the straight version — see
+            // BuildStraightTurnLaneCenterMedian.
+            float turnHalf = Profile.TurnLane.Width * 0.5f;
+            int abSign = DriveSide == DriveSide.Right ? 1 : -1;
+            int sideSign = RenderDedicatedAtEnd == NetworkDesigner.Model.RoadEnd.A
+                ? -abSign :  abSign;
+            float outerOff = sideSign * turnHalf;
+            float innerOff = sideSign * (turnHalf - w);
+            float lowOff   = Mathf.Min(outerOff, innerOff) - midpoint;
+            float highOff  = Mathf.Max(outerOff, innerOff) - midpoint;
+
+            Vector3[] lowB = new Vector3[N + 1];
+            Vector3[] highB = new Vector3[N + 1];
+            Vector3[] lowT = new Vector3[N + 1];
+            Vector3[] highT = new Vector3[N + 1];
+            for (int i = 0; i <= N; i++)
+            {
+                float t = i / (float)N;
+                Vector2 pos = GeometryResolver.SampleCubic(p0, c1, c2, p3, t);
+                Vector2 tan = GeometryResolver.CubicTangent(p0, c1, c2, p3, t);
+                if (tan.sqrMagnitude < 1e-8f) tan = p3 - p0;
+                tan.Normalize();
+                Vector3 sp = new Vector3(pos.x, y, pos.y);
+                Vector3 sr = new Vector3(tan.y, 0f, -tan.x);
+                lowB[i]  = sp + sr * lowOff;
+                highB[i] = sp + sr * highOff;
+                lowT[i]  = lowB[i] + up;
+                highT[i] = highB[i] + up;
+            }
+
+            List<int> tris = triByKind[(int)MaterialKind.Median];
+            for (int i = 0; i < N; i++)
+            {
+                EmitQuadCWFromOutside(verts, tris, lowT[i], lowT[i + 1], highT[i + 1], highT[i]);
+                EmitQuadCWFromOutside(verts, tris, lowB[i], lowT[i], lowT[i + 1], lowB[i + 1]);
+                EmitQuadCWFromOutside(verts, tris, highB[i + 1], highT[i + 1], highT[i], highB[i]);
+            }
+            EmitQuadCWFromOutside(verts, tris, highB[0], highT[0], lowT[0], lowB[0]);
+            EmitQuadCWFromOutside(verts, tris, lowB[N], lowT[N], highT[N], highB[N]);
+        }
+
+        // Triangulate a quad given 4 corners listed CW when viewed from
+        // the side the outward normal points (Unity = left-handed, CW
+        // faces forward). Used by the median extrusion above.
+        static void EmitQuadCWFromOutside(List<Vector3> verts, List<int> tris,
+            Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3)
+        {
+            int b = verts.Count;
+            verts.Add(p0); verts.Add(p1); verts.Add(p2); verts.Add(p3);
+            tris.Add(b);     tris.Add(b + 1); tris.Add(b + 2);
+            tris.Add(b);     tris.Add(b + 2); tris.Add(b + 3);
         }
 
         static void AddStrip(List<Strip> strips, float a, float b, MaterialKind kind)

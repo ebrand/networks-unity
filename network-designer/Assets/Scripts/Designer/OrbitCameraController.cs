@@ -35,7 +35,7 @@ namespace NetworkDesigner.Designer
         [Range(0f, 89f)] public float Pitch = 45f;
 
         [Header("Limits")]
-        public float MinDistance = 2f;
+        public float MinDistance = 0.5f;
         public float MaxDistance = 5000f;
         [Range(0f, 89f)] public float MinPitch = 5f;
         [Range(0f, 89f)] public float MaxPitch = 89f;
@@ -55,6 +55,8 @@ namespace NetworkDesigner.Designer
         public float ZoomSensitivity = 5f;
         [Tooltip("How quickly Distance eases toward the wheel-driven target (1/sec). Higher = snappier zoom, lower = floatier. 0 = instant (no easing, old behavior).")]
         public float ZoomSmoothing = 10f;
+        [Tooltip("Floor (m) for the Distance value used in ZOOM step math. Zoom step scales with Distance (each wheel notch = ZoomSensitivity × Distance) — close zoom otherwise shrinks the step exponentially, making it hard to zoom in further or escape back out. Below this floor, zoom step acts as if you were at MinZoomReferenceDistance. Doesn't change MinDistance / MaxDistance limits.")]
+        public float MinZoomReferenceDistance = 10f;
         [Tooltip("WASD pan speed, in (meters per second) per (meter of Distance). " +
                  "Scales with Distance so panning feels the same regardless of " +
                  "zoom level — e.g. 1.5 means holding W moves Target forward by " +
@@ -62,6 +64,8 @@ namespace NetworkDesigner.Designer
         public float KeyboardPanSensitivity = 1.5f;
         [Tooltip("Multiplier applied to keyboard pan speed while Shift is held.")]
         public float KeyboardPanShiftMultiplier = 3f;
+        [Tooltip("Floor (m) for the Distance value used in pan-speed math. Pan scales with Distance so far zooms sweep fast and close zooms move precisely — but at very close zooms (Distance → MinDistance) the scaling makes pan crawl. Below this floor, pan acts as if you were zoomed out to MinPanReferenceDistance. Doesn't affect actual zoom or rotate.")]
+        public float MinPanReferenceDistance = 15f;
 
         // External predicate that, when set and returning true, causes
         // HandleInput to ignore the scroll wheel this frame. Used by
@@ -153,12 +157,15 @@ namespace NetworkDesigner.Designer
             else if (middle && shift)
             {
                 // Pan in screen space, then convert to world-space target
-                // motion. Scale by Distance so the same pixel-drag moves
-                // the target the same amount on screen at any zoom level.
+                // motion. Scale by Distance (floored at
+                // MinPanReferenceDistance) so the same pixel-drag moves
+                // the target the same amount on screen at any zoom
+                // level — without crawling when fully zoomed in.
+                float panRef = Mathf.Max(Distance, MinPanReferenceDistance);
                 Vector3 right = transform.right;
                 Vector3 up = transform.up;
-                Target -= right * (dx * PanSensitivity * Distance);
-                Target -= up * (dy * PanSensitivity * Distance);
+                Target -= right * (dx * PanSensitivity * panRef);
+                Target -= up * (dy * PanSensitivity * panRef);
             }
 
             if (Mathf.Abs(scroll) > 1e-4f)
@@ -166,8 +173,12 @@ namespace NetworkDesigner.Designer
                 // Drive the smoothed target so wheel notches feel like
                 // a continuous zoom instead of stepwise snaps. Scale by
                 // the target itself so each notch is proportional (close
-                // = fine zoom, far = coarse zoom).
-                _distanceTarget -= scroll * ZoomSensitivity * _distanceTarget;
+                // = fine zoom, far = coarse zoom) — but floor the
+                // reference at MinZoomReferenceDistance so close zoom
+                // doesn't decay to imperceptible notches and trap the
+                // user near MinDistance.
+                float zoomRef = Mathf.Max(_distanceTarget, MinZoomReferenceDistance);
+                _distanceTarget -= scroll * ZoomSensitivity * zoomRef;
                 _distanceTarget = Mathf.Clamp(_distanceTarget, MinDistance, MaxDistance);
             }
 
@@ -200,7 +211,10 @@ namespace NetworkDesigner.Designer
             if (right.sqrMagnitude < 1e-6f) right = Vector3.right;
             right.Normalize();
 
-            float speed = KeyboardPanSensitivity * Distance;
+            // Floor Distance at MinPanReferenceDistance so close-zoom pan
+            // doesn't crawl. Pan still scales with zoom past the floor.
+            float panRef = Mathf.Max(Distance, MinPanReferenceDistance);
+            float speed = KeyboardPanSensitivity * panRef;
             bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
             if (shift) speed *= KeyboardPanShiftMultiplier;
 

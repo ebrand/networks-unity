@@ -674,6 +674,24 @@ namespace NetworkDesigner.Designer
                       $"(category: {CategoryKey(c)}, id: {c.Id}).");
         }
 
+        // Find the SavedConfig whose Road.Id matches `p.Id` and select
+        // it in the palette (sets _activeCategory + _activeConfigId).
+        // Used as confirmation after a shift+click sample.
+        void TryUpdateActiveConfigFromProfile(RoadProfile p)
+        {
+            if (p == null || _configs == null || string.IsNullOrEmpty(p.Id)) return;
+            foreach (SavedConfig c in _configs)
+            {
+                if (c.Road == null) continue;
+                if (c.Road.Id == p.Id)
+                {
+                    _activeConfigId = c.Id;
+                    _activeCategory = CategoryKey(c);
+                    return;
+                }
+            }
+        }
+
         void OnDisable()
         {
             // Flush any pending changes before the play session ends.
@@ -843,18 +861,22 @@ namespace NetworkDesigner.Designer
         // has its own marker recolor — we don't double-highlight.
         void UpdateRoadIntersectionHover()
         {
-            if (CurrentMode != DesignerMode.Edit || PickCamera == null)
+            // Active in Edit mode normally, and in Create mode when
+            // Shift is held (the "sample road profile" gesture).
+            bool active = (CurrentMode == DesignerMode.Edit)
+                          || IsInCreateSampleMode();
+            if (!active || PickCamera == null)
             {
                 ClearHoverHighlight();
                 return;
             }
 
-            // While editing a specific vertex OR road, suppress the
-            // road/intersection hover overlay — the user is focused on
-            // per-object overlays (setback handles, lane endpoint
-            // markers, bezier handles) and stray asphalt highlights
-            // from moving the cursor around the scene are pure noise.
-            if (_selectedVertex != null || _selectedRoad != null)
+            // In Edit mode, suppress the hover overlay when focused on
+            // a specific vertex or road (per-object overlays already
+            // convey the selection; stray asphalt highlights are noise).
+            // Doesn't apply in Create-sample mode.
+            if (CurrentMode == DesignerMode.Edit
+                && (_selectedVertex != null || _selectedRoad != null))
             {
                 ClearHoverHighlight();
                 return;
@@ -1102,6 +1124,29 @@ namespace NetworkDesigner.Designer
 
             if (Input.GetMouseButtonDown(0) && !MouseOverPalette())
             {
+                // Shift+left-click samples an existing road's profile
+                // into the active profile slot (eyedropper). Skips the
+                // normal create-tool handling — the user usually doesn't
+                // want to ALSO start placing a road when sampling.
+                bool shiftHeld = Input.GetKey(KeyCode.LeftShift)
+                              || Input.GetKey(KeyCode.RightShift);
+                if (shiftHeld)
+                {
+                    NetworkRoad sampled = PickRoad();
+                    if (sampled != null && sampled.Profile != null)
+                    {
+                        SetActiveProfile(CloneProfile(sampled.Profile));
+                        // Move the palette to highlight the matching
+                        // road-config button so the user sees confirmation.
+                        TryUpdateActiveConfigFromProfile(sampled.Profile);
+                        Debug.Log($"[NetworkDesigner] Active profile sampled from road '{sampled.Id}' (shift+click).");
+                        return;
+                    }
+                    // Shift+click on empty ground → no-op; don't start
+                    // an edge or place a vertex by accident.
+                    return;
+                }
+
                 if (CurrentTool == BuildTool.Straight)
                 {
                     Vertex hitVertex = PickVertex();
@@ -1653,10 +1698,19 @@ namespace NetworkDesigner.Designer
                             {
                                 // Road body click → select for curve
                                 // edit (bezier control handles appear).
+                                // ALSO copy this road's profile into the
+                                // active profile slot so subsequent new
+                                // roads are created with the same cross-
+                                // section (eyedropper-style profile pick).
                                 NetworkRoad hitRoad = PickRoad();
                                 if (hitRoad != null)
                                 {
                                     SetSelectedRoad(hitRoad);
+                                    if (hitRoad.Profile != null)
+                                    {
+                                        SetActiveProfile(CloneProfile(hitRoad.Profile));
+                                        Debug.Log($"[NetworkDesigner] Active profile picked from road '{hitRoad.Id}'.");
+                                    }
                                 }
                                 else
                                 {
@@ -2127,6 +2181,9 @@ namespace NetworkDesigner.Designer
             {
                 RefreshHandleMaterial(hgo, active: false);
             }
+            // Final unthrottled rebuild so the last cursor position is
+            // applied (the throttle may have skipped the trailing frames).
+            Rebuild();
         }
 
         // -----------------------------------------------------------------
@@ -3298,11 +3355,15 @@ namespace NetworkDesigner.Designer
             else
                 _draggedLateralHandle.Road.LateralOffsetB = signed;
             MarkRoadDirty(_draggedLateralHandle.Road.Id);
-            Rebuild();
+            RebuildThrottledForDrag();
         }
 
         void EndLateralOffsetDrag()
         {
+            // Force a final unthrottled rebuild so the released cursor
+            // position is exactly reflected (the throttle might have
+            // skipped the last few mouseMove frames).
+            if (_draggedLateralHandle != null) Rebuild();
             _draggedLateralHandle = null;
         }
 
@@ -3520,13 +3581,17 @@ namespace NetworkDesigner.Designer
             else r.Curve.ControlB = ground.Value;
 
             MarkRoadDirty(r.Id);
-            Rebuild();
+            RebuildThrottledForDrag();
         }
 
         void EndBezierDrag()
         {
+            bool was = _draggedBezier != null;
             _draggedBezier = null;
             _draggedBezierMaterialized = false;
+            // Final unthrottled rebuild so the last cursor position is
+            // applied (the throttle may have skipped the trailing frames).
+            if (was) Rebuild();
         }
 
         // ---- Lane-endpoint markers (click-to-edit overrides) ----
@@ -3904,7 +3969,30 @@ namespace NetworkDesigner.Designer
             else r.SetbackB = t;
 
             MarkRoadDirty(r.Id);
-            Rebuild();
+            RebuildThrottledForDrag();
+        }
+
+        // Throttle for the per-frame Rebuild() during handle drags
+        // (setback / lateral / bezier). A full Rebuild walks every road,
+        // re-tessellates meshes, re-spawns lane markers, and refreshes
+        // every handle — too expensive to do 60×/sec while the user
+        // holds the mouse on a handle. Limit to ~20 FPS during drag;
+        // EndHandleDrag / EndLateralOffsetDrag / EndBezierDrag force a
+        // final unthrottled Rebuild so the released position is
+        // exactly reflected.
+        float _lastDragRebuildRealtime;
+        [Tooltip("Maximum Rebuild frequency (1/sec) while a handle is being dragged. Lower = less work per frame during drag but more visual lag; ~20 stays smooth on dense networks.")]
+        public float HandleDragRebuildHz = 20f;
+
+        void RebuildThrottledForDrag()
+        {
+            float interval = HandleDragRebuildHz > 0.1f ? 1f / HandleDragRebuildHz : 0f;
+            if (interval <= 0f
+                || Time.realtimeSinceStartup - _lastDragRebuildRealtime >= interval)
+            {
+                _lastDragRebuildRealtime = Time.realtimeSinceStartup;
+                Rebuild();
+            }
         }
 
         void ClearSetbackOverride(NetworkRoad r, RoadEnd end)
@@ -6638,9 +6726,23 @@ namespace NetworkDesigner.Designer
         //   - cursor is over an existing vertex (clicking would pick it,
         //     not place a new one — showing a ghost there would lie)
         //   - GhostPuckAlpha == 0
+        // True when the user is hovering with Shift held in Create mode
+        // — the "sample existing road's profile" gesture. While true,
+        // create-mode authoring visuals (ghost puck, range circle, etc.)
+        // hide, and the road hover highlight (normally Edit-mode-only)
+        // turns on instead.
+        bool IsInCreateSampleMode()
+        {
+            return CurrentMode == DesignerMode.Create
+                && (Input.GetKey(KeyCode.LeftShift)
+                 || Input.GetKey(KeyCode.RightShift));
+        }
+
         void UpdateGhostPuck()
         {
-            bool wantShow = CurrentMode == DesignerMode.Create && GhostPuckAlpha > 0f;
+            bool wantShow = CurrentMode == DesignerMode.Create
+                && GhostPuckAlpha > 0f
+                && !IsInCreateSampleMode();
             Vector2? ground = wantShow ? PickGround() : null;
             bool overVertex = wantShow && PickVertex() != null;
             bool shouldShow = wantShow && ground.HasValue && !overVertex;
@@ -6855,6 +6957,7 @@ namespace NetworkDesigner.Designer
         {
             bool wantShow = RangeCircleEnabled
                             && CurrentMode == DesignerMode.Create
+                            && !IsInCreateSampleMode()
                             && RangeCircleRadius > 0.1f;
 
             Vector2? ground = wantShow ? PickGround() : null;

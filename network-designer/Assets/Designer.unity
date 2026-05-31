@@ -297,7 +297,7 @@ MonoBehaviour:
   ArrowMaterial: {fileID: 0}
   AsphaltColor: {r: 0.18, g: 0.18, b: 0.19, a: 1}
   ShoulderColor: {r: 0.55, g: 0.55, b: 0.55, a: 1}
-  MedianColor: {r: 0.95, g: 0.78, b: 0.25, a: 1}
+  MedianColor: {r: 0.45, g: 0.45, b: 0.45, a: 1}
   CenterlineColor: {r: 0.95, g: 0.78, b: 0.15, a: 1}
   LaneMarkingColor: {r: 0.95, g: 0.95, b: 0.95, a: 1}
   ArrowColor: {r: 0.95, g: 0.95, b: 0.95, a: 1}
@@ -776,7 +776,7 @@ MonoBehaviour:
   Distance: 50
   Yaw: 0
   Pitch: 45
-  MinDistance: 2
+  MinDistance: 0.5
   MaxDistance: 500
   MinPitch: 5
   MaxPitch: 89

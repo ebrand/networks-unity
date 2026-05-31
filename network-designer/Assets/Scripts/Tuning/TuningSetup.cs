@@ -46,6 +46,13 @@ namespace NetworkDesigner.Tuning
 
         void OnEnable()
         {
+            // Keep Unity's Update loop running when the Editor / Player
+            // loses focus. Without this, the TuningServer's WebSocket
+            // stops processing whenever you click into the React tuning
+            // panel, so slider edits don't push to Unity until you
+            // re-focus Unity. With runInBackground on, both stay live.
+            Application.runInBackground = true;
+
             if (Designer == null) Designer = FindFirstObjectByType<NetworkDesigner.Designer.NetworkDesigner>();
             if (Renderer == null) Renderer = FindFirstObjectByType<NetworkRenderer>();
             if (Ambiance == null) Ambiance = FindFirstObjectByType<SceneAmbiance>();
@@ -500,6 +507,24 @@ namespace NetworkDesigner.Tuning
                     () => Renderer.SimpleRender,
                     v => { Renderer.SimpleRender = v; Renderer.Rebuild(); });
 
+                // PROTOTYPE: when on, the spline sits on the AB/BA axis
+                // (or median/turn-lane center) instead of the geometric
+                // center of total width. Lets different-width profiles
+                // share a centerline; makes asymmetric/one-way roads hang
+                // to one side of the drawn line. See GeometryResolver.
+                TuningRegistry.RegisterBool(
+                    "renderer.centerlineAtAxis", "Rendering",
+                    "Centerline at AB/BA axis (vs geometric center)",
+                    () => GeometryResolver.CenterlineMode
+                          == GeometryResolver.CenterlineReference.AxisSplit,
+                    v =>
+                    {
+                        GeometryResolver.CenterlineMode = v
+                            ? GeometryResolver.CenterlineReference.AxisSplit
+                            : GeometryResolver.CenterlineReference.GeometricCenter;
+                        Renderer.Rebuild();
+                    });
+
                 TuningRegistry.RegisterFloat(
                     "renderer.curveTessellation", "Rendering", "Curve tessellation (segments)",
                     () => Renderer.CurveTessellation,
@@ -523,6 +548,30 @@ namespace NetworkDesigner.Tuning
                     () => Renderer.TurnLaneStripeInset,
                     v => { Renderer.TurnLaneStripeInset = v; Renderer.Rebuild(); },
                     0f, 2f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.medianHeight", "Road lines",
+                    "Median height (m)",
+                    () => Renderer.MedianHeight,
+                    v => { Renderer.MedianHeight = v; Renderer.Rebuild(); },
+                    0f, 2f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.dedicatedTurnFilletRadius", "Road lines",
+                    "Dedicated turn median fillet radius (m)",
+                    () => Renderer.TurnLaneCenterMedianFilletRadius,
+                    v => { Renderer.TurnLaneCenterMedianFilletRadius = v; Renderer.Rebuild(); },
+                    0f, 3f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.dedicatedTurnTaperToWidthMul", "Road lines",
+                    "Dedicated turn taper-to width (× neighbor median)",
+                    () => Renderer.TurnLaneCenterMedianTaperToWidthMultiplier,
+                    v => { Renderer.TurnLaneCenterMedianTaperToWidthMultiplier = v; Renderer.Rebuild(); },
+                    0f, 4f);
+                TuningRegistry.RegisterFloat(
+                    "renderer.dedicatedTurnTaperLengthMul", "Road lines",
+                    "Dedicated turn taper length (× neighbor median)",
+                    () => Renderer.TurnLaneCenterMedianTaperLengthMultiplier,
+                    v => { Renderer.TurnLaneCenterMedianTaperLengthMultiplier = v; Renderer.Rebuild(); },
+                    0f, 8f);
 
                 TuningRegistry.RegisterBool(
                     "renderer.drawArrows", "One-way arrows", "Show direction arrows",
@@ -902,6 +951,11 @@ namespace NetworkDesigner.Tuning
                     v => Orbit.MaxDistance = v,
                     100f, 10000f);
                 TuningRegistry.RegisterFloat(
+                    "orbit.minDistance", "Camera", "Min distance",
+                    () => Orbit.MinDistance,
+                    v => Orbit.MinDistance = Mathf.Max(0.05f, v),
+                    0.05f, 500f);
+                TuningRegistry.RegisterFloat(
                     "orbit.farClipPlane", "Camera", "Far clip plane (m)",
                     () => Orbit.FarClipPlane,
                     v => Orbit.FarClipPlane = v,
@@ -932,6 +986,11 @@ namespace NetworkDesigner.Tuning
                     v => Orbit.KeyboardPanShiftMultiplier = v,
                     1f, 10f);
                 TuningRegistry.RegisterFloat(
+                    "orbit.minPanReference", "Camera", "Min pan reference distance (m)",
+                    () => Orbit.MinPanReferenceDistance,
+                    v => Orbit.MinPanReferenceDistance = v,
+                    0f, 500f);
+                TuningRegistry.RegisterFloat(
                     "orbit.zoomSensitivity", "Camera", "Zoom per wheel notch (× distance)",
                     () => Orbit.ZoomSensitivity,
                     v => Orbit.ZoomSensitivity = v,
@@ -941,6 +1000,11 @@ namespace NetworkDesigner.Tuning
                     () => Orbit.ZoomSmoothing,
                     v => Orbit.ZoomSmoothing = v,
                     0f, 40f);
+                TuningRegistry.RegisterFloat(
+                    "orbit.minZoomReference", "Camera", "Min zoom reference distance (m)",
+                    () => Orbit.MinZoomReferenceDistance,
+                    v => Orbit.MinZoomReferenceDistance = v,
+                    0f, 500f);
             }
 
             if (Agents != null)

@@ -14,7 +14,8 @@
     "@mantine/hooks": "^9.2.1",
     "@mantine/modals": "^9.2.1",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6"
+    "react-dom": "^19.2.6",
+    "react-router-dom": "^7.16.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

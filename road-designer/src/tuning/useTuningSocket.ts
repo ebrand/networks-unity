@@ -31,7 +31,14 @@ export function useTuningSocket(url: string): UseTuningSocket {
   const [lastError, setLastError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
   const [reconnectTick, setReconnectTick] = useState(0);
+
+  // Polling interval (ms) for fetching fresh snapshots from Unity.
+  // Without this, Unity-side value changes (camera zoom via wheel,
+  // simulation state, etc.) never reach the panel because the server
+  // only pushes snapshots on demand.
+  const POLL_INTERVAL_MS = 250;
 
   const reconnect = useCallback(() => {
     setReconnectTick((t) => t + 1);
@@ -54,6 +61,15 @@ export function useTuningSocket(url: string): UseTuningSocket {
       if (cancelled) return;
       setStatus("open");
       setLastError(null);
+      // Periodically request fresh snapshots so Unity-driven value
+      // changes (camera zoom, etc.) appear in the panel live.
+      if (pollTimerRef.current != null) {
+        window.clearInterval(pollTimerRef.current);
+      }
+      pollTimerRef.current = window.setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        try { ws.send(JSON.stringify({ op: "snapshot" })); } catch { /* */ }
+      }, POLL_INTERVAL_MS);
     };
     ws.onerror = () => {
       if (cancelled) return;
@@ -62,6 +78,10 @@ export function useTuningSocket(url: string): UseTuningSocket {
     ws.onclose = () => {
       if (cancelled) return;
       setStatus("closed");
+      if (pollTimerRef.current != null) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
       // Schedule a reconnect attempt; useful when Unity restarts.
       if (reconnectTimerRef.current != null) {
         window.clearTimeout(reconnectTimerRef.current);
@@ -92,6 +112,10 @@ export function useTuningSocket(url: string): UseTuningSocket {
       if (reconnectTimerRef.current != null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
+      }
+      if (pollTimerRef.current != null) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
       }
       try {
         ws.close();
