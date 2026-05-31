@@ -439,42 +439,45 @@ namespace NetworkDesigner.Agents
                 fromVertexId = stepEndVertexIds[i];
             }
 
-            // Forward pass: pick (outLane[i], inLane[i+1]) connection
-            // at each vertex, preferring no-lane-change.
+            // Backward lane pass: assign lanes from the destination upstream
+            // so the agent ENTERS each road already in the lane it must EXIT
+            // (the lane that makes the next turn) whenever connectivity allows.
+            // This pushes every turn-required lane change as EARLY as possible
+            // instead of waiting until the approach — generalizing right/left
+            // turns, lane drops, and the turn lane into one rule (be in the
+            // lane your next maneuver needs, as far upstream as you can).
             int[] inLane = new int[N];
             int[] outLane = new int[N];
-            inLane[0] = PickRandomLaneIndex(path[0].Road, path[0].Dir);
-            for (int i = 0; i < N - 1; i++)
+            outLane[N - 1] = PickRandomLaneIndex(path[N - 1].Road, path[N - 1].Dir);
+            for (int i = N - 2; i >= 0; i--)
             {
-                var conn = PickConnectionAtVertex(
+                // Prefer entering road i+1 in the lane it must exit in
+                // (outLane[i+1]) so the lane change lands on road i (earlier).
+                var conn = PickConnectionBackward(
                     stepEndVertexIds[i],
-                    path[i].Road, path[i].Dir, inLane[i],
-                    path[i + 1].Road, path[i + 1].Dir);
-                if (conn != null)
+                    path[i].Road, path[i].Dir,
+                    path[i + 1].Road, path[i + 1].Dir,
+                    outLane[i + 1]);
+                if (conn == null)
                 {
-                    outLane[i] = conn.From.Index;
-                    inLane[i + 1] = conn.To.Index;
-                }
-                else
-                {
-                    // No connection at all matches this path step
-                    // (resolver produced nothing for this in→out pair,
-                    // including defaults — user has explicitly removed
-                    // every connection from this road's lanes to the
-                    // next road). FAIL the build: the agent literally
-                    // can't legally make this turn. SpawnAgent /
-                    // RebuildAgent will despawn the agent (or, in
-                    // rebuild's case, re-run the pathfinder from the
-                    // current vertex which may find an alternate
-                    // route).
+                    // No connection at all for this path step — the agent
+                    // can't legally make this turn. FAIL the build (caller
+                    // despawns or re-routes).
                     Debug.LogWarning($"[AgentSystem] Path step {i} → {i+1} at vertex " +
                                      $"'{stepEndVertexIds[i]}' has no valid lane connection " +
                                      $"({path[i].Road.Id}|{path[i].Dir} → {path[i+1].Road.Id}|{path[i+1].Dir}). " +
                                      $"Aborting segment build.");
                     return null;
                 }
+                outLane[i] = conn.From.Index;
+                inLane[i + 1] = conn.To.Index;
             }
-            outLane[N - 1] = PickRandomLaneIndex(path[N - 1].Road, path[N - 1].Dir);
+            // Road 0 entry: a random spawn lane (preserves spawn spread; the
+            // agent merges to outLane[0] ASAP). For a single-road path there's
+            // no maneuver, so just hold the lane.
+            inLane[0] = N >= 2
+                ? PickRandomLaneIndex(path[0].Road, path[0].Dir)
+                : outLane[0];
 
             // Turn-lane run pass: a left turn through the turn lane sets
             // outLane[i] = TurnLaneIndex on its approach segment. Ride the
@@ -663,8 +666,15 @@ namespace NetworkDesigner.Agents
             }
             else
             {
-                seg.LaneChangeStartT = Mathf.Clamp01(
-                    1f - LaneChangeDistanceMeters / Mathf.Max(seg.ArcLength, 1e-4f));
+                // Pre-baked route lane change (e.g. moving into the only lane
+                // that can turn right/left at the upcoming intersection): get
+                // into position ASAP — merge over the FIRST
+                // LaneChangeDistanceMeters from the start of the road, then
+                // hold in the target lane — instead of drifting over at the
+                // last moment near the intersection.
+                seg.LaneChangeStartT = 0f;
+                seg.LaneChangeEndT = Mathf.Clamp01(
+                    LaneChangeDistanceMeters / Mathf.Max(seg.ArcLength, 1e-4f));
             }
             return seg;
         }
@@ -769,6 +779,59 @@ namespace NetworkDesigner.Agents
                 return turnLane[Random.Range(0, turnLane.Count)];
             if (preferred != null && preferred.Count > 0)
                 return preferred[Random.Range(0, preferred.Count)];
+            if (anyMatch != null && anyMatch.Count > 0)
+                return anyMatch[Random.Range(0, anyMatch.Count)];
+            return null;
+        }
+
+        // Backward lane choice for the plan pass. Among connections
+        // (inRoad,inDir → outRoad,outDir): prefer the turn lane for a left
+        // turn; else a connection whose To lane is the next road's required
+        // EXIT lane (desiredToLane) so the agent enters already positioned and
+        // the lane change lands earlier; else any. Never routes INTO the turn
+        // lane (To == TurnLaneIndex) and respects small-median directionality.
+        LaneConnection PickConnectionBackward(
+            string vertexId,
+            NetworkRoad inRoad, Direction inDir,
+            NetworkRoad outRoad, Direction outDir, int desiredToLane)
+        {
+            Vertex v = FindVertex(vertexId);
+            if (v == null) return null;
+            VertexGeometry vg = ResolveCached(v);
+            if (vg == null || vg.Connectivity == null) return null;
+
+            VertexApproach inApp = FindApproach(vg, inRoad.Id);
+            bool turnLaneAllowed = inApp == null || inApp.TurnLaneAllowsInbound;
+
+            List<LaneConnection> turnLane = null;
+            List<LaneConnection> preferredTo = null;
+            List<LaneConnection> anyMatch = null;
+            foreach (LaneConnection c in vg.Connectivity)
+            {
+                if (c == null || c.From == null || c.To == null) continue;
+                if (c.From.RoadId != inRoad.Id) continue;
+                if (c.From.Direction != inDir) continue;
+                if (c.To.RoadId != outRoad.Id) continue;
+                if (c.To.Direction != outDir) continue;
+                if (c.From.Index == LaneRef.TurnLaneIndex && !turnLaneAllowed) continue;
+                if (c.To.Index == LaneRef.TurnLaneIndex) continue; // never route into the turn lane
+                if (anyMatch == null) anyMatch = new List<LaneConnection>();
+                anyMatch.Add(c);
+                if (c.From.Index == LaneRef.TurnLaneIndex)
+                {
+                    if (turnLane == null) turnLane = new List<LaneConnection>();
+                    turnLane.Add(c);
+                }
+                else if (c.To.Index == desiredToLane)
+                {
+                    if (preferredTo == null) preferredTo = new List<LaneConnection>();
+                    preferredTo.Add(c);
+                }
+            }
+            if (turnLane != null && turnLane.Count > 0)
+                return turnLane[Random.Range(0, turnLane.Count)];
+            if (preferredTo != null && preferredTo.Count > 0)
+                return preferredTo[Random.Range(0, preferredTo.Count)];
             if (anyMatch != null && anyMatch.Count > 0)
                 return anyMatch[Random.Range(0, anyMatch.Count)];
             return null;

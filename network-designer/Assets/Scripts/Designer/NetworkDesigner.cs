@@ -40,7 +40,7 @@ namespace NetworkDesigner.Designer
     {
         // NOTE: enum order matters — Unity serializes the int value, so
         // keeping Create=0/Edit=1 preserves existing scene asset values.
-        public enum DesignerMode { Create, Edit, Run }
+        public enum DesignerMode { Create, Edit, Run, Tree }
         public enum BuildTool { Straight, Fillet, SCurve, Roundabout, CulDeSac }
         enum BuildState { Idle, EdgeFromVertex }
         // Shared state machine for the 3-click curve tools (Fillet, SCurve).
@@ -129,6 +129,12 @@ namespace NetworkDesigner.Designer
         public Camera PickCamera;
         [Tooltip("World Y of the ground plane that mouse rays hit.")]
         public float GroundY = 0f;
+
+        [Header("Trees (Tree mode)")]
+        [Tooltip("Tree prefabs to place in Tree mode. Drag your tree prefabs here; left-click places a RANDOM one (random Y rotation), right-click removes the tree under the cursor.")]
+        public System.Collections.Generic.List<GameObject> TreePrefabs = new System.Collections.Generic.List<GameObject>();
+        [Tooltip("Random uniform scale range applied to each placed tree (1 = prefab scale). Set both to 1 to disable.")]
+        public Vector2 TreeScaleRange = new Vector2(0.85f, 1.2f);
 
         [Header("Snap")]
         [Tooltip("When on, ground picks snap to the GroundGrid. Minor lines = " +
@@ -549,6 +555,15 @@ namespace NetworkDesigner.Designer
 
             ReloadConfigs();
 
+            // Re-instantiate decorative trees saved with the network.
+            SpawnTreesFromModel();
+
+            // Ensure scene lighting/ambiance is applied (dimmer ambient + a
+            // configured warm "sun" directional light). If one isn't already
+            // present in the scene, attach it here so it just works at runtime.
+            if (FindFirstObjectByType<SceneAmbiance>() == null)
+                gameObject.AddComponent<SceneAmbiance>();
+
             Debug.Log($"[NetworkDesigner] Initialized. {loadedVertexCount} vertices loaded from autosave. " +
                       $"Build-mode ready. Left-click ground to place a vertex.");
         }
@@ -751,6 +766,7 @@ namespace NetworkDesigner.Designer
 
             if (CurrentMode == DesignerMode.Create) HandleCreateInput();
             else if (CurrentMode == DesignerMode.Edit) HandleEditInput();
+            else if (CurrentMode == DesignerMode.Tree) HandleTreeInput();
             else HandleRunInput();
 
             // Runs unconditionally so the ghost hides correctly the
@@ -1035,11 +1051,12 @@ namespace NetworkDesigner.Designer
 
         void ToggleMode()
         {
-            // Cycle: Create → Edit → Run → Create.
+            // Cycle: Create → Edit → Run → Tree → Create.
             DesignerMode next = CurrentMode switch
             {
                 DesignerMode.Create => DesignerMode.Edit,
                 DesignerMode.Edit => DesignerMode.Run,
+                DesignerMode.Run => DesignerMode.Tree,
                 _ => DesignerMode.Create,
             };
             SetMode(next);
@@ -1066,6 +1083,158 @@ namespace NetworkDesigner.Designer
             // edit overlays). User can still toggle with V at any time.
             SetVertexMarkersVisible(m == DesignerMode.Create);
             Debug.Log($"[NetworkDesigner] Mode → {CurrentMode}");
+        }
+
+        // ---------------------------------------------------------------
+        // Tree mode: left-click places a random tree (random Y rotation +
+        // scale jitter), right-click removes the tree under the cursor.
+        // Trees are decorative scene objects under a container, NOT part of
+        // the Network model (not saved/loaded yet).
+        // ---------------------------------------------------------------
+
+        Transform _treeContainer;
+
+        Transform EnsureTreeContainer()
+        {
+            if (_treeContainer == null)
+            {
+                GameObject go = GameObject.Find("__PlacedTrees") ?? new GameObject("__PlacedTrees");
+                _treeContainer = go.transform;
+            }
+            return _treeContainer;
+        }
+
+        void HandleTreeInput()
+        {
+            if (MouseOverPalette()) return;
+            if (Input.GetMouseButtonDown(0))
+            {
+                Vector2? g = PickGroundRaw();
+                if (g.HasValue) PlaceRandomTree(g.Value);
+            }
+            else if (Input.GetMouseButtonDown(1))
+            {
+                RemoveTreeUnderCursor();
+            }
+        }
+
+        void PlaceRandomTree(Vector2 xz)
+        {
+            if (TreePrefabs == null || TreePrefabs.Count == 0)
+            {
+                Debug.LogWarning("[NetworkDesigner] Tree mode: no TreePrefabs assigned — drag tree prefabs onto the NetworkDesigner's 'Tree Prefabs' list.");
+                return;
+            }
+            GameObject prefab = null;
+            for (int attempt = 0; attempt < 4 && prefab == null; attempt++)
+                prefab = TreePrefabs[Random.Range(0, TreePrefabs.Count)];
+            if (prefab == null) return;
+
+            float rotY = Random.Range(0f, 360f);
+            float lo = Mathf.Min(TreeScaleRange.x, TreeScaleRange.y);
+            float hi = Mathf.Max(TreeScaleRange.x, TreeScaleRange.y);
+            float scale = (hi > 0f && !(Mathf.Approximately(lo, 1f) && Mathf.Approximately(hi, 1f)))
+                ? Random.Range(Mathf.Max(0.01f, lo), hi)
+                : 1f;
+
+            PlacedTree pt = SpawnTreeObject(prefab, xz, rotY, scale);
+            if (pt == null) return;
+
+            // Record in the network model so it autosaves + reloads.
+            if (_network != null)
+            {
+                if (_network.Trees == null) _network.Trees = new List<Model.PlacedTreeData>();
+                var data = new Model.PlacedTreeData
+                {
+                    Prefab = prefab.name, Position = xz, RotationY = rotY, Scale = scale,
+                };
+                _network.Trees.Add(data);
+                pt.Data = data;
+                MarkDirtyNoAgentRebuild();
+            }
+        }
+
+        // Spawn one tree GameObject (shared by interactive placement + reload
+        // from the model). Does NOT touch the model.
+        PlacedTree SpawnTreeObject(GameObject prefab, Vector2 xz, float rotY, float scale)
+        {
+            if (prefab == null) return null;
+            GameObject tree = Instantiate(prefab, EnsureTreeContainer());
+            tree.transform.position = new Vector3(xz.x, GroundY, xz.y);
+            tree.transform.rotation = Quaternion.Euler(0f, rotY, 0f);
+            if (scale > 0f && !Mathf.Approximately(scale, 1f)) tree.transform.localScale *= scale;
+            PlacedTree pt = tree.GetComponent<PlacedTree>();
+            if (pt == null) pt = tree.AddComponent<PlacedTree>();
+            EnsureTreeCollider(tree);
+            return pt;
+        }
+
+        // Re-instantiate trees from the loaded network (called on init after
+        // the network + TreePrefabs are available). Missing prefabs are skipped.
+        void SpawnTreesFromModel()
+        {
+            if (_network == null || _network.Trees == null) return;
+            foreach (Model.PlacedTreeData data in _network.Trees)
+            {
+                if (data == null) continue;
+                GameObject prefab = FindTreePrefab(data.Prefab);
+                if (prefab == null) continue;
+                float scale = data.Scale <= 0f ? 1f : data.Scale;
+                PlacedTree pt = SpawnTreeObject(prefab, data.Position, data.RotationY, scale);
+                if (pt != null) pt.Data = data;
+            }
+        }
+
+        GameObject FindTreePrefab(string name)
+        {
+            if (string.IsNullOrEmpty(name) || TreePrefabs == null) return null;
+            foreach (GameObject p in TreePrefabs)
+                if (p != null && p.name == name) return p;
+            return null;
+        }
+
+        void RemoveTreeUnderCursor()
+        {
+            if (PickCamera == null) return;
+            Ray ray = PickCamera.ScreenPointToRay(Input.mousePosition);
+            RaycastHit[] hits = Physics.RaycastAll(ray, 10000f);
+            PlacedTree best = null;
+            float bestDist = float.MaxValue;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                if (hits[i].collider == null) continue;
+                PlacedTree pt = hits[i].collider.GetComponentInParent<PlacedTree>();
+                if (pt != null && hits[i].distance < bestDist)
+                {
+                    best = pt;
+                    bestDist = hits[i].distance;
+                }
+            }
+            if (best == null) return;
+            if (_network != null && _network.Trees != null && best.Data != null)
+            {
+                _network.Trees.Remove(best.Data);
+                MarkDirtyNoAgentRebuild();
+            }
+            Destroy(best.gameObject);
+        }
+
+        // Adds a clickable BoxCollider (for right-click removal) sized from the
+        // tree's renderer bounds, if the prefab doesn't already have a collider.
+        void EnsureTreeCollider(GameObject tree)
+        {
+            if (tree.GetComponentInChildren<Collider>() != null) return;
+            Renderer[] rends = tree.GetComponentsInChildren<Renderer>();
+            if (rends.Length == 0) return;
+            Bounds wb = rends[0].bounds;
+            for (int i = 1; i < rends.Length; i++) wb.Encapsulate(rends[i].bounds);
+            Vector3 ls = tree.transform.lossyScale;
+            BoxCollider box = tree.AddComponent<BoxCollider>();
+            box.center = tree.transform.InverseTransformPoint(wb.center);
+            box.size = new Vector3(
+                wb.size.x / Mathf.Max(1e-3f, Mathf.Abs(ls.x)),
+                wb.size.y / Mathf.Max(1e-3f, Mathf.Abs(ls.y)),
+                wb.size.z / Mathf.Max(1e-3f, Mathf.Abs(ls.z)));
         }
 
         void ToggleTool()
@@ -2363,8 +2532,11 @@ namespace NetworkDesigner.Designer
             GUILayout.BeginHorizontal();
             DrawModeButton("Create", DesignerMode.Create);
             DrawModeButton("Edit", DesignerMode.Edit);
+            DrawModeButton("Trees", DesignerMode.Tree);
             GUILayout.EndHorizontal();
             GUILayout.Label($"toggle: {ModeToggleKey}", _paletteSubtle);
+            if (CurrentMode == DesignerMode.Tree)
+                GUILayout.Label("L-click: plant • R-click: remove", _paletteSubtle);
 
             GUILayout.Space(4);
 
@@ -5441,6 +5613,7 @@ namespace NetworkDesigner.Designer
                 if (n == null) return null;
                 if (n.Vertices == null) n.Vertices = new List<Vertex>();
                 if (n.Roads == null) n.Roads = new List<NetworkRoad>();
+                if (n.Trees == null) n.Trees = new List<Model.PlacedTreeData>();
                 loadedVertexCount = n.Vertices.Count;
                 return n;
             }

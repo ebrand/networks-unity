@@ -23,19 +23,23 @@ namespace NetworkDesigner.Designer
     {
         [Header("Sun (directional light)")]
         public Light Sun;
-        [Range(0f, 2f)] public float SunIntensity = 0.6f;
-        public Color SunColor = new Color(1f, 0.95f, 0.85f); // warm white
+        [Range(0f, 2f)] public float SunIntensity = 0.9f;
+        public Color SunColor = new Color(1f, 0.96f, 0.88f); // warm white
         [Tooltip("Light rotation in degrees. X is pitch (sun height); a low " +
                  "value gives long shadows. Y is yaw (sun direction).")]
-        public Vector3 SunEulerAngles = new Vector3(35f, 30f, 0f);
+        public Vector3 SunEulerAngles = new Vector3(50f, 40f, 0f);
         public LightShadows Shadows = LightShadows.Soft;
-        [Range(0f, 1f)] public float ShadowStrength = 0.8f;
+        [Range(0f, 1f)] public float ShadowStrength = 0.7f;
 
         [Header("Ambient")]
-        [Tooltip("Flat ambient light color. Cooler/darker = more atmospheric.")]
-        public Color AmbientColor = new Color(0.22f, 0.27f, 0.35f);
+        [Tooltip("Flat ambient light color. Lower value = a bit less bright. " +
+                 "This sets the fill/ambient light; the skybox still renders.")]
+        public Color AmbientColor = new Color(0.45f, 0.47f, 0.50f);
 
         [Header("Background")]
+        [Tooltip("When OFF, the existing camera background/skybox is left alone " +
+                 "(recommended for a daytime look). Turn ON for a moody solid bg.")]
+        public bool OverrideBackground = false;
         public Camera MainCamera;
         public Color BackgroundColor = new Color(0.08f, 0.10f, 0.14f);
 
@@ -68,11 +72,14 @@ namespace NetworkDesigner.Designer
             RenderSettings.ambientMode = AmbientMode.Flat;
             RenderSettings.ambientLight = AmbientColor;
 
-            if (MainCamera == null) MainCamera = Camera.main;
-            if (MainCamera != null)
+            if (OverrideBackground)
             {
-                MainCamera.clearFlags = CameraClearFlags.SolidColor;
-                MainCamera.backgroundColor = BackgroundColor;
+                if (MainCamera == null) MainCamera = Camera.main;
+                if (MainCamera != null)
+                {
+                    MainCamera.clearFlags = CameraClearFlags.SolidColor;
+                    MainCamera.backgroundColor = BackgroundColor;
+                }
             }
         }
     }

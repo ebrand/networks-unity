@@ -344,5 +344,22 @@ namespace NetworkDesigner.Model
         public List<Vertex> Vertices = new List<Vertex>();
         public List<NetworkRoad> Roads = new List<NetworkRoad>();
         public List<CulDeSacBulb> CulDeSacs = new List<CulDeSacBulb>();
+        /// <summary>Decorative trees placed via the designer's Tree mode.
+        /// Saved with the network autosave; respawned on load.</summary>
+        public List<PlacedTreeData> Trees = new List<PlacedTreeData>();
+    }
+
+    /// <summary>
+    /// A decorative tree placed in Tree mode. <see cref="Prefab"/> is the
+    /// prefab's name, matched against NetworkDesigner.TreePrefabs on load (so
+    /// it survives reordering; a renamed/removed prefab is just skipped).
+    /// </summary>
+    [Serializable]
+    public class PlacedTreeData
+    {
+        public string Prefab;
+        public Vector2 Position;   // world XZ (Y from GroundY)
+        public float RotationY;    // degrees
+        public float Scale = 1f;   // uniform scale factor applied to the prefab
     }
 }
