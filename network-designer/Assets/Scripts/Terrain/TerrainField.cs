@@ -68,4 +68,18 @@ namespace NetworkDesigner.Terrain
             z = Mathf.Clamp(Mathf.RoundToInt((worldZ - Origin.z) / CellSize), 0, RowsZ - 1);
         }
     }
+
+    // Sparse on-disk form of a TerrainField: grid dimensions + only the
+    // altered (non-zero) heights, keyed by row-major index. Zeros are implied,
+    // so a mostly-flat large terrain serializes tiny. Origin is NOT stored —
+    // it's recomputed from the GameObject placement on load.
+    [Serializable]
+    public class TerrainSave
+    {
+        public int ColumnsX;
+        public int RowsZ;
+        public float CellSize;
+        public int[] Idx;    // row-major indices of non-zero heights
+        public float[] H;    // parallel heights for each Idx
+    }
 }

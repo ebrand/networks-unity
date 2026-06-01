@@ -27,11 +27,11 @@ namespace NetworkDesigner.Terrain
 
         [Header("Grid")]
         [Tooltip("Vertex count along X / Z. Total verts = ColumnsX * RowsZ. " +
-                 "Keep the product under ~250k for a snappy MVP.")]
-        public int ColumnsX = 64;
-        public int RowsZ = 64;
-        [Tooltip("Metres between adjacent grid vertices.")]
-        public float CellSize = 2f;
+                 "201 x 10 m = 2 km. Higher counts hitch on per-frame rebuilds.")]
+        public int ColumnsX = 201;
+        public int RowsZ = 201;
+        [Tooltip("Metres between adjacent grid vertices. 201 verts x 10 m = 2 km.")]
+        public float CellSize = 10f;
 
         [Header("Appearance")]
         public Color TerrainColor = new Color(0.42f, 0.5f, 0.30f); // grassy
@@ -42,9 +42,9 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Brush radius in metres. Resize live with numpad +/-.")]
         public float BrushRadius = 10f;
         [Tooltip("Numpad +/- resize speed (metres/second, while held).")]
-        public float BrushResizeRate = 15f;
+        public float BrushResizeRate = 50f;
         [Tooltip("Upper clamp for the brush radius (metres).")]
-        public float MaxBrushRadius = 100f;
+        public float MaxBrushRadius = 500f;
         [Tooltip("Height change rate (metres/second) at the brush centre.")]
         public float BrushStrength = 20f;
         [Tooltip("0 = hard edge, 1 = soft (smoothstep) falloff to the rim.")]
@@ -86,8 +86,8 @@ namespace NetworkDesigner.Terrain
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
                  "so there's something to sculpt. Does NOT re-apply on rebuild.")]
-        public bool TestHill = true;
-        public float TestHillHeight = 25f;
+        public bool TestHill = false;
+        public float TestHillHeight = 80f;
 
         [Header("Autosave (terrain persistence across Play stop/start)")]
         public bool Autosave = true;
@@ -141,14 +141,20 @@ namespace NetworkDesigner.Terrain
                  "terrain live (ws://localhost:8787). Off = no tuning server.")]
         public bool AutoTuning = true;
 
+        [Header("Ground grid")]
+        [Tooltip("On Start, create a GroundGrid (same as the network designer) " +
+                 "on its own GameObject at origin, sized to the terrain.")]
+        public bool AutoGrid = true;
+        [Tooltip("Grid line spacing (m) for the auto-created ground grid.")]
+        public float GridSpacing = 50f;
+
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
-            if (AutoLighting) EnsureAmbiance();
-            if (AutoCameraControl) EnsureCameraControl();
-            if (AutoTuning) EnsureTuning();
 
+            // Establish the field first (load or create) so dimensions are known
+            // before the scene services size themselves to the terrain.
             if (Autosave) _field = TryLoadTerrain();
             if (_field == null)
             {
@@ -168,6 +174,37 @@ namespace NetworkDesigner.Terrain
             }
             RebuildMesh();
             RebuildContours();
+
+            // Stand up scene services, sized to the actual terrain.
+            if (AutoLighting) EnsureAmbiance();
+            if (AutoCameraControl) EnsureCameraControl();
+            if (AutoGrid) EnsureGrid();
+            if (AutoTuning) EnsureTuning(); // after the grid so its tunables register
+        }
+
+        // Create a GroundGrid (reusing the network designer's component) on its
+        // OWN GameObject at origin — never parented to the terrain (see the
+        // GroundGrid placement rule) — sized to span the terrain footprint.
+        void EnsureGrid()
+        {
+            if (FindFirstObjectByType<GroundGrid>() == null)
+            {
+                GroundGrid grid = new GameObject("GroundGrid").AddComponent<GroundGrid>();
+                grid.transform.position = Vector3.zero;
+                grid.Spacing = Mathf.Max(0.1f, GridSpacing);
+                grid.MajorEvery = 10;
+            }
+            ResizeGridToTerrain();
+        }
+
+        // Match the ground grid's half-extent to the terrain footprint.
+        void ResizeGridToTerrain()
+        {
+            GroundGrid grid = FindFirstObjectByType<GroundGrid>();
+            if (grid == null) return;
+            float span = _field != null ? Mathf.Max(_field.WidthX, _field.LengthZ) : 2000f;
+            grid.Extent = Mathf.Max(span, 100f) * 0.5f; // half-extent
+            grid.Rebuild();
         }
 
         // Stand up the live-tuning endpoint (TuningServer + registration) if
@@ -512,7 +549,21 @@ namespace NetworkDesigner.Terrain
             EnsureField(forceRebuild: true);
             RebuildMesh();
             RebuildContours();
+            ResizeGridToTerrain(); // keep the grid matched to the new size
             _dirtySince = Time.realtimeSinceStartup; // persist the reset
+        }
+
+        // Zero all heights in place (keeps the current grid size). Reliable
+        // flat slate regardless of the test-hill / size settings.
+        [ContextMenu("Flatten Terrain")]
+        public void FlattenTerrain()
+        {
+            if (_field == null) EnsureField(forceRebuild: true);
+            System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
+            RebuildMesh();
+            RebuildContours();
+            ResizeGridToTerrain();
+            _dirtySince = Time.realtimeSinceStartup;
         }
 
         // Rebuild the render mesh + collider from the current field. Cheap
@@ -586,7 +637,23 @@ namespace NetworkDesigner.Terrain
             if (_field == null) return;
             try
             {
-                string json = JsonConvert.SerializeObject(_field, TerrainJsonSettings);
+                // Sparse: store only altered (non-zero) heights; zeros implied.
+                float[] heights = _field.Heights;
+                var idx = new List<int>();
+                var hs = new List<float>();
+                for (int i = 0; i < heights.Length; i++)
+                {
+                    if (Mathf.Abs(heights[i]) > 1e-4f) { idx.Add(i); hs.Add(heights[i]); }
+                }
+                TerrainSave save = new TerrainSave
+                {
+                    ColumnsX = _field.ColumnsX,
+                    RowsZ = _field.RowsZ,
+                    CellSize = _field.CellSize,
+                    Idx = idx.ToArray(),
+                    H = hs.ToArray(),
+                };
+                string json = JsonConvert.SerializeObject(save, TerrainJsonSettings);
                 System.IO.File.WriteAllText(ResolveAutosavePath(), json);
             }
             catch (System.Exception ex)
@@ -601,12 +668,21 @@ namespace NetworkDesigner.Terrain
             {
                 string path = ResolveAutosavePath();
                 if (!System.IO.File.Exists(path)) return null;
-                TerrainField f = JsonConvert.DeserializeObject<TerrainField>(
+                TerrainSave save = JsonConvert.DeserializeObject<TerrainSave>(
                     System.IO.File.ReadAllText(path), TerrainJsonSettings);
-                // Reject missing/corrupt/mismatched data rather than crash.
-                if (f == null || f.Heights == null) return null;
-                if (f.ColumnsX < 2 || f.RowsZ < 2) return null;
-                if (f.Heights.Length != f.ColumnsX * f.RowsZ) return null;
+                if (save == null || save.ColumnsX < 2 || save.RowsZ < 2) return null;
+
+                float cs = save.CellSize > 0f ? save.CellSize : 1f;
+                TerrainField f = new TerrainField(save.ColumnsX, save.RowsZ, cs, Vector3.zero);
+                if (save.Idx != null && save.H != null)
+                {
+                    int n = Mathf.Min(save.Idx.Length, save.H.Length);
+                    for (int k = 0; k < n; k++)
+                    {
+                        int i = save.Idx[k];
+                        if (i >= 0 && i < f.Heights.Length) f.Heights[i] = save.H[k];
+                    }
+                }
                 return f;
             }
             catch (System.Exception ex)

@@ -9,6 +9,7 @@
 // with no manual setup.
 
 using UnityEngine;
+using NetworkDesigner.Designer; // GroundGrid
 using NetworkDesigner.Tuning;
 
 namespace NetworkDesigner.Terrain
@@ -17,12 +18,14 @@ namespace NetworkDesigner.Terrain
     public class TerrainTuningSetup : MonoBehaviour
     {
         public TerrainDesigner Terrain;
+        public GroundGrid Grid;
 
         void OnEnable()
         {
             // Keep Unity ticking when focus is on the React panel (see TuningSetup).
             Application.runInBackground = true;
             if (Terrain == null) Terrain = FindFirstObjectByType<TerrainDesigner>();
+            if (Grid == null) Grid = FindFirstObjectByType<GroundGrid>();
             if (Terrain == null) return;
             TuningRegistry.Clear();
             RegisterAll();
@@ -76,6 +79,29 @@ namespace NetworkDesigner.Terrain
             // TerrainColor maps through Material.color (BaseColor) on rebuild.
             TuningRegistry.RegisterColor("terrain.color", "Appearance", "Terrain color",
                 () => t.TerrainColor, v => { t.TerrainColor = v; t.RebuildMesh(); });
+
+            // --- Ground grid --- (mirrors NetworkDesigner.Tuning.TuningSetup)
+            if (Grid != null)
+            {
+                TuningRegistry.RegisterBool("grid.enabled", "Ground grid", "Visible",
+                    () => Grid.Enabled, v => { Grid.Enabled = v; Grid.Rebuild(); });
+                TuningRegistry.RegisterBool("grid.showMinor", "Ground grid", "Show minor lines",
+                    () => Grid.ShowMinor, v => { Grid.ShowMinor = v; Grid.Rebuild(); });
+                TuningRegistry.RegisterBool("grid.showMajor", "Ground grid", "Show major lines",
+                    () => Grid.ShowMajor, v => { Grid.ShowMajor = v; Grid.Rebuild(); });
+                TuningRegistry.RegisterFloat("grid.spacing", "Ground grid", "Spacing (m)",
+                    () => Grid.Spacing, v => { Grid.Spacing = v; Grid.Rebuild(); }, 1f, 200f);
+                TuningRegistry.RegisterFloat("grid.extent", "Ground grid", "Half-extent (m, grid spans 2x)",
+                    () => Grid.Extent, v => { Grid.Extent = v; Grid.Rebuild(); }, 50f, 2000f);
+                TuningRegistry.RegisterFloat("grid.majorEvery", "Ground grid", "Major line every Nth",
+                    () => Grid.MajorEvery,
+                    v => { Grid.MajorEvery = Mathf.Max(1, Mathf.RoundToInt(v)); Grid.Rebuild(); },
+                    1f, 100f, 1f);
+                TuningRegistry.RegisterColor("grid.minorColor", "Ground grid", "Minor line color",
+                    () => Grid.MinorColor, v => { Grid.MinorColor = v; Grid.Rebuild(); });
+                TuningRegistry.RegisterColor("grid.majorColor", "Ground grid", "Major line color",
+                    () => Grid.MajorColor, v => { Grid.MajorColor = v; Grid.Rebuild(); });
+            }
         }
     }
 }
