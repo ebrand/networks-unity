@@ -37,14 +37,34 @@ namespace NetworkDesigner.Terrain
         [HideInInspector] public int RowsZ = 2049;
         [HideInInspector] public float CellSize = 2000f / 2048f;
 
-        // Appearance (terrain color/material) is now owned by the Unity Terrain
-        // (its material + terrain layers), not this component.
+        [Header("Ground layers (grass + slope rock)")]
+        [Tooltip("On Start, if the Terrain has no layers, build a grass layer " +
+                 "(plus a rock layer blended by slope when rock textures are " +
+                 "assigned). Editor-assigned layers are kept.")]
+        public bool AutoGrass = true;
+        [Tooltip("Grass albedo (e.g. grass/grassy-meadow1_albedo).")]
+        public Texture2D GrassAlbedo;
+        [Tooltip("Grass normal map (import as Normal map).")]
+        public Texture2D GrassNormal;
+        [Tooltip("Grass tile size in metres.")]
+        public float GrassTileSize = 30f;
+
+        [Tooltip("Optional rock/dirt albedo — blended in on steeper slopes.")]
+        public Texture2D RockAlbedo;
+        [Tooltip("Rock normal map (import as Normal map).")]
+        public Texture2D RockNormal;
+        [Tooltip("Rock tile size in metres.")]
+        public float RockTileSize = 20f;
+        [Tooltip("Slope (degrees) at/below which it's all grass.")]
+        [Range(0f, 90f)] public float SlopeGrassMaxAngle = 25f;
+        [Tooltip("Slope (degrees) at/above which it's all rock.")]
+        [Range(0f, 90f)] public float SlopeRockMinAngle = 45f;
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
-        [Tooltip("Brush radius in metres. Resize live with numpad +/-.")]
+        [Tooltip("Brush radius in metres. Resize live with [ (smaller) and ] (larger).")]
         public float BrushRadius = 10f;
-        [Tooltip("Numpad +/- resize speed (metres/second, while held).")]
+        [Tooltip("Brush resize speed (metres/second, while [ or ] is held).")]
         public float BrushResizeRate = 50f;
         [Tooltip("Upper clamp for the brush radius (metres).")]
         public float MaxBrushRadius = 500f;
@@ -173,6 +193,7 @@ namespace NetworkDesigner.Terrain
 
             SyncTerrainFull();
             RebuildContours();
+            if (AutoGrass) EnsureGroundLayers();
 
             // Stand up scene services, sized to the actual terrain.
             if (AutoLighting) EnsureAmbiance();
@@ -188,6 +209,91 @@ namespace NetworkDesigner.Terrain
             TerrainTuningSetup setup = new GameObject("TerrainTuning")
                 .AddComponent<TerrainTuningSetup>(); // RequireComponent adds TuningServer
             setup.Terrain = this;
+        }
+
+        // Build the ground Terrain Layers (grass, + rock when assigned) and the
+        // slope-blended splatmap — only if the Terrain has no layers yet, so an
+        // editor-painted setup is respected.
+        void EnsureGroundLayers()
+        {
+            if (Surface == null || GrassAlbedo == null) return;
+            TerrainData td = Surface.terrainData;
+            if (td.terrainLayers == null || td.terrainLayers.Length == 0)
+            {
+                var layers = new List<TerrainLayer>
+                {
+                    new TerrainLayer
+                    {
+                        name = "GrassLayer",
+                        diffuseTexture = GrassAlbedo,
+                        normalMapTexture = GrassNormal,
+                        tileSize = new Vector2(GrassTileSize, GrassTileSize),
+                    },
+                };
+                if (RockAlbedo != null)
+                {
+                    layers.Add(new TerrainLayer
+                    {
+                        name = "RockLayer",
+                        diffuseTexture = RockAlbedo,
+                        normalMapTexture = RockNormal,
+                        tileSize = new Vector2(RockTileSize, RockTileSize),
+                    });
+                }
+                td.terrainLayers = layers.ToArray();
+            }
+            RebuildSplatFull();
+        }
+
+        // Recompute the whole splatmap: grass on flat ground, rock on steep
+        // slopes (smooth blend between the two angle thresholds). Cheap-ish —
+        // alphamap res is well below the heightmap res. Used on start/reset.
+        public void RebuildSplatFull()
+        {
+            if (Surface == null) return;
+            TerrainData td = Surface.terrainData;
+            int layers = td.terrainLayers != null ? td.terrainLayers.Length : 0;
+            if (layers == 0) return;
+            int ar = td.alphamapResolution;
+            float[,,] maps = new float[ar, ar, layers];
+            for (int z = 0; z < ar; z++)
+                for (int x = 0; x < ar; x++)
+                    WriteSplat(td, maps, z, x, x, z, ar, layers);
+            td.SetAlphamaps(0, 0, maps);
+        }
+
+        // Reblend the splatmap only where a sculpt changed the slope. Maps a
+        // heightmap-cell region to alphamap cells (alphamap is lower-res).
+        void PushSplatRegion(int hx0, int hz0, int hw, int hh)
+        {
+            if (Surface == null || _field == null) return;
+            TerrainData td = Surface.terrainData;
+            int layers = td.terrainLayers != null ? td.terrainLayers.Length : 0;
+            if (layers < 2) return; // single grass layer — nothing to reblend
+            int ar = td.alphamapResolution;
+            float s = ar / (float)(_field.ColumnsX - 1); // alphamap cells per heightmap cell
+            int ax0 = Mathf.Clamp(Mathf.FloorToInt(hx0 * s) - 1, 0, ar - 1);
+            int az0 = Mathf.Clamp(Mathf.FloorToInt(hz0 * s) - 1, 0, ar - 1);
+            int ax1 = Mathf.Clamp(Mathf.CeilToInt((hx0 + hw) * s) + 1, 0, ar - 1);
+            int az1 = Mathf.Clamp(Mathf.CeilToInt((hz0 + hh) * s) + 1, 0, ar - 1);
+            int aw = ax1 - ax0 + 1, ah = az1 - az0 + 1;
+            float[,,] maps = new float[ah, aw, layers];
+            for (int z = 0; z < ah; z++)
+                for (int x = 0; x < aw; x++)
+                    WriteSplat(td, maps, z, x, ax0 + x, az0 + z, ar, layers);
+            td.SetAlphamaps(ax0, az0, maps);
+        }
+
+        // Slope-based blend for global alphamap cell (gx,gz); writes into the
+        // (possibly offset) local map cell [lz,lx]. Layer 0 = grass, 1 = rock.
+        void WriteSplat(TerrainData td, float[,,] maps, int lz, int lx, int gx, int gz, int ar, int layers)
+        {
+            if (layers < 2) { maps[lz, lx, 0] = 1f; return; }
+            float slope = td.GetSteepness((gx + 0.5f) / ar, (gz + 0.5f) / ar); // degrees
+            float rock = Mathf.SmoothStep(0f, 1f,
+                Mathf.InverseLerp(SlopeGrassMaxAngle, SlopeRockMinAngle, slope));
+            maps[lz, lx, 0] = 1f - rock; // grass
+            maps[lz, lx, 1] = rock;      // rock
         }
 
         // If the (empty) scene has no SceneAmbiance, create one configured to
@@ -238,9 +344,9 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
 
-            // Brush resize: numpad + / - (held = continuous).
-            if (Input.GetKey(KeyCode.KeypadPlus)) BrushRadius += BrushResizeRate * Time.deltaTime;
-            if (Input.GetKey(KeyCode.KeypadMinus)) BrushRadius -= BrushResizeRate * Time.deltaTime;
+            // Brush resize: ] bigger, [ smaller (held = continuous).
+            if (Input.GetKey(KeyCode.RightBracket)) BrushRadius += BrushResizeRate * Time.deltaTime;
+            if (Input.GetKey(KeyCode.LeftBracket)) BrushRadius -= BrushResizeRate * Time.deltaTime;
             BrushRadius = Mathf.Clamp(BrushRadius, 0.5f, MaxBrushRadius);
 
             if (_field == null) return;
@@ -287,8 +393,10 @@ namespace NetworkDesigner.Terrain
             ApplyBrush(hit.point, Time.deltaTime);
             GridFromWorld(hit.point, out float bfx, out float bfz);
             int rad = Mathf.CeilToInt(BrushRadius / Mathf.Max(0.01f, _field.CellSize)) + 1;
-            PushRegionToTerrain(Mathf.RoundToInt(bfx) - rad, Mathf.RoundToInt(bfz) - rad,
-                                rad * 2 + 1, rad * 2 + 1);
+            int rx0 = Mathf.RoundToInt(bfx) - rad, rz0 = Mathf.RoundToInt(bfz) - rad;
+            int rw = rad * 2 + 1;
+            PushRegionToTerrain(rx0, rz0, rw, rw);  // heights (incl. SyncHeightmap)
+            PushSplatRegion(rx0, rz0, rw, rw);      // reblend grass/rock by new slope
             _dirtySince = Time.realtimeSinceStartup;
             if (LiveContours) RebuildContours();
         }
@@ -531,6 +639,7 @@ namespace NetworkDesigner.Terrain
             _field = null;
             EnsureField(forceRebuild: true);
             SyncTerrainFull();
+            RebuildSplatFull(); // re-blend grass/rock for the new slopes
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup; // persist the reset
         }
@@ -543,6 +652,7 @@ namespace NetworkDesigner.Terrain
             if (_field == null) EnsureField(forceRebuild: true);
             System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
             SyncTerrainFull();
+            RebuildSplatFull(); // flat now -> all grass
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
         }

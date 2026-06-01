@@ -72,7 +72,11 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.contourDashGap", "Contours", "Dash gap (m)",
                 () => t.ContourDashGap, v => { t.ContourDashGap = v; t.RebuildContours(); }, 0.25f, 20f);
 
-            // (Terrain color is now the Unity Terrain material's job, not ours.)
+            // --- Ground (grass/rock slope blend) ---
+            TuningRegistry.RegisterFloat("terrain.grassMaxAngle", "Ground", "Grass below (deg)",
+                () => t.SlopeGrassMaxAngle, v => { t.SlopeGrassMaxAngle = v; t.RebuildSplatFull(); }, 0f, 90f);
+            TuningRegistry.RegisterFloat("terrain.rockMinAngle", "Ground", "Rock above (deg)",
+                () => t.SlopeRockMinAngle, v => { t.SlopeRockMinAngle = v; t.RebuildSplatFull(); }, 0f, 90f);
         }
     }
 }
