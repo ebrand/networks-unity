@@ -16,6 +16,7 @@
 using System.Collections.Generic;
 using Newtonsoft.Json;
 using UnityEngine;
+using NetworkDesigner.Designer; // SceneAmbiance
 
 namespace NetworkDesigner.Terrain
 {
@@ -71,9 +72,20 @@ namespace NetworkDesigner.Terrain
 
         public TerrainField Field => _field;
 
+        [Header("Scene lighting")]
+        [Tooltip("On Start, if the scene has no SceneAmbiance, create one that " +
+                 "lights itself: a directional sun, soft shadows, ambient fill, " +
+                 "and a large URP shadow distance. Turn off to manage lighting " +
+                 "yourself in the Lighting window.")]
+        public bool AutoLighting = true;
+        [Tooltip("URP shadow distance (metres) the auto-lighting requests — " +
+                 "should comfortably exceed the terrain footprint.")]
+        public float ShadowDistance = 300f;
+
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
+            if (AutoLighting) EnsureAmbiance();
 
             if (Autosave) _field = TryLoadTerrain();
             if (_field == null)
@@ -93,6 +105,18 @@ namespace NetworkDesigner.Terrain
                 _field.Origin = transform.position - new Vector3(halfW, 0f, halfL);
             }
             RebuildMesh();
+        }
+
+        // If the (empty) scene has no SceneAmbiance, create one configured to
+        // light itself — sun + soft shadows + ambient fill + URP shadow range.
+        void EnsureAmbiance()
+        {
+            if (FindFirstObjectByType<SceneAmbiance>() != null) return;
+            SceneAmbiance amb = new GameObject("SceneAmbiance").AddComponent<SceneAmbiance>();
+            amb.CreateSunIfMissing = true;
+            amb.ManageAmbient = true;
+            amb.ShadowDistance = ShadowDistance;
+            amb.Apply();
         }
 
         void Update()

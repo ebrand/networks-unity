@@ -4,9 +4,11 @@
 // shadows) and, optionally, the camera background color. All values are
 // exposed for tuning in the Inspector.
 //
-// NOTE: skybox + ambient (environment) lighting are intentionally NOT
-// managed here — set those in Window > Rendering > Lighting so that
-// window stays authoritative. This component only drives the sun.
+// By default this only drives the sun (skybox + ambient stay owned by the
+// Window > Rendering > Lighting settings). For code-managed scenes (e.g. an
+// empty TerrainDesigner scene), the opt-in "Auto-setup" flags let it also
+// create a sun if none exists, drive ambient fill, and set the URP shadow
+// distance — so the scene lights itself with no manual Lighting-window work.
 //
 // Attach to ANY GameObject in the scene (typically a dedicated empty
 // "Ambiance" GameObject, but the Designer GameObject works fine too).
@@ -17,6 +19,7 @@
 // tune the look live.
 
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace NetworkDesigner.Designer
 {
@@ -32,6 +35,18 @@ namespace NetworkDesigner.Designer
         public Vector3 SunEulerAngles = new Vector3(50f, 40f, 0f);
         public LightShadows Shadows = LightShadows.Soft;
         [Range(0f, 1f)] public float ShadowStrength = 0.7f;
+
+        [Header("Auto-setup (opt-in; for code-managed scenes)")]
+        [Tooltip("If no Light exists in the scene, create a directional sun.")]
+        public bool CreateSunIfMissing = false;
+        [Tooltip("Drive ambient lighting from here so shadowed areas get fill " +
+                 "(Skybox source if a skybox is set, else a flat fill color). " +
+                 "Leave OFF to let the Lighting window own ambient.")]
+        public bool ManageAmbient = false;
+        public Color FillAmbientColor = new Color(0.40f, 0.44f, 0.50f);
+        [Tooltip("If > 0 and URP is active, set the pipeline's shadow distance " +
+                 "(metres) so shadows reach across large scenes. 0 = leave it.")]
+        public float ShadowDistance = 0f;
 
         [Header("Background")]
         [Tooltip("When OFF, the existing camera background/skybox is left alone " +
@@ -57,6 +72,11 @@ namespace NetworkDesigner.Designer
         public void Apply()
         {
             if (Sun == null) Sun = FindFirstObjectByType<Light>();
+            if (Sun == null && CreateSunIfMissing)
+            {
+                Sun = new GameObject("Sun").AddComponent<Light>();
+                Sun.type = LightType.Directional;
+            }
             if (Sun != null)
             {
                 Sun.intensity = SunIntensity;
@@ -64,6 +84,30 @@ namespace NetworkDesigner.Designer
                 Sun.transform.rotation = Quaternion.Euler(SunEulerAngles);
                 Sun.shadows = Shadows;
                 Sun.shadowStrength = ShadowStrength;
+            }
+
+            if (ManageAmbient)
+            {
+                if (RenderSettings.skybox != null)
+                {
+                    RenderSettings.ambientMode = AmbientMode.Skybox;
+                    DynamicGI.UpdateEnvironment();
+                }
+                else
+                {
+                    // No skybox assigned (empty scene) — a flat fill keeps
+                    // shadowed areas from going pure black.
+                    RenderSettings.ambientMode = AmbientMode.Flat;
+                    RenderSettings.ambientLight = FillAmbientColor;
+                }
+            }
+
+            // URP clips shadows at the pipeline asset's shadow distance, which
+            // defaults too short for large scenes. Push it out (URP only).
+            if (ShadowDistance > 0f
+                && GraphicsSettings.currentRenderPipeline is UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset urp)
+            {
+                urp.shadowDistance = ShadowDistance;
             }
 
             if (OverrideBackground)
