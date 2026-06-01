@@ -61,6 +61,17 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Metres the ring floats above the surface so it doesn't z-fight.")]
         public float BrushCursorLift = 0.15f;
 
+        [Header("Topographic lines")]
+        public bool ShowContours = true;
+        [Tooltip("Elevation between contour lines, in metres.")]
+        public float ContourInterval = 1f;
+        public Color ContourColor = new Color(0.22f, 0.15f, 0.08f, 1f); // dark brown
+        [Tooltip("Metres the lines float above the surface to avoid z-fighting.")]
+        public float ContourLift = 0.05f;
+        [Tooltip("Rebuild contours every sculpt frame (live) vs only when the " +
+                 "stroke ends. Live can hitch on large grids.")]
+        public bool LiveContours = false;
+
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
                  "so there's something to sculpt. Does NOT re-apply on rebuild.")]
@@ -81,6 +92,10 @@ namespace NetworkDesigner.Terrain
         Material _mat;
         MeshCollider _collider;
         LineRenderer _cursor;
+        MeshFilter _contourMf;
+        MeshRenderer _contourMr;
+        Mesh _contourMesh;
+        Material _contourMat;
         bool _hasFlattenTarget;
         float _flattenTarget; // height offset (field space) captured on mouse-down
 
@@ -106,6 +121,7 @@ namespace NetworkDesigner.Terrain
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
+            if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
             if (AutoLighting) EnsureAmbiance();
             if (AutoCameraControl) EnsureCameraControl();
 
@@ -127,6 +143,7 @@ namespace NetworkDesigner.Terrain
                 _field.Origin = transform.position - new Vector3(halfW, 0f, halfL);
             }
             RebuildMesh();
+            RebuildContours();
         }
 
         // If the (empty) scene has no SceneAmbiance, create one configured to
@@ -145,17 +162,28 @@ namespace NetworkDesigner.Terrain
         // terrain. Left alone if one already exists (respect manual setup).
         void EnsureCameraControl()
         {
+            // Prefer the assigned camera, then the tagged main, then ANY camera
+            // (an untagged camera is the common scene-setup footgun), and as a
+            // last resort create one so even a bare scene is usable.
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
-            if (cam == null) return;
-            if (cam.GetComponent<OrbitCameraController>() != null) return;
+            if (cam == null) cam = FindFirstObjectByType<Camera>();
+            if (cam == null)
+            {
+                GameObject camGo = new GameObject("Main Camera") { tag = "MainCamera" };
+                cam = camGo.AddComponent<Camera>();
+            }
+            PickCamera = cam; // sculpt raycast uses the same camera
 
-            OrbitCameraController orbit = cam.gameObject.AddComponent<OrbitCameraController>();
-            orbit.Target = transform.position; // terrain centre
-            float span = Mathf.Max((Mathf.Max(2, ColumnsX) - 1) * CellSize,
-                                   (Mathf.Max(2, RowsZ) - 1) * CellSize);
-            orbit.DistanceTarget = span * 1.2f; // frame the whole footprint
-            orbit.Distance = orbit.DistanceTarget;
-            orbit.Pitch = 45f;
+            if (cam.GetComponent<OrbitCameraController>() == null)
+            {
+                OrbitCameraController orbit = cam.gameObject.AddComponent<OrbitCameraController>();
+                orbit.Target = transform.position; // terrain centre
+                float span = Mathf.Max((Mathf.Max(2, ColumnsX) - 1) * CellSize,
+                                       (Mathf.Max(2, RowsZ) - 1) * CellSize);
+                orbit.DistanceTarget = span * 1.2f; // frame the whole footprint
+                orbit.Distance = orbit.DistanceTarget;
+                orbit.Pitch = 45f;
+            }
         }
 
         void Update()
@@ -196,6 +224,10 @@ namespace NetworkDesigner.Terrain
 
             UpdateBrushCursor(ShowBrushCursor && overTerrain, hit.point);
 
+            // Refresh contours when a stroke ends (cheap path); live rebuild
+            // during the drag is opt-in via LiveContours.
+            if (Input.GetMouseButtonUp(0)) RebuildContours();
+
             if (!overTerrain || !Input.GetMouseButton(0)) return;
 
             if (!_hasFlattenTarget)
@@ -208,6 +240,7 @@ namespace NetworkDesigner.Terrain
             ApplyBrush(hit.point, Time.deltaTime);
             RebuildMesh();
             _dirtySince = Time.realtimeSinceStartup;
+            if (LiveContours) RebuildContours();
         }
 
         // World hit -> fractional grid coords, through the GameObject transform
@@ -281,6 +314,37 @@ namespace NetworkDesigner.Terrain
             // Sprites/Default is cross-pipeline and honors LineRenderer vertex
             // colors (start/endColor), so the ring tint works in URP.
             _cursor.material = new Material(Shader.Find("Sprites/Default"));
+        }
+
+        // Rebuild the topographic contour lines from the current field.
+        [ContextMenu("Rebuild Contours")]
+        public void RebuildContours()
+        {
+            EnsureContours();
+            if (!ShowContours || ContourInterval <= 0f)
+            {
+                _contourMr.enabled = false;
+                return;
+            }
+            _contourMr.enabled = true;
+            if (_contourMat != null) _contourMat.color = ContourColor;
+            TerrainContourBuilder.Build(_field, ContourInterval, ContourLift, _contourMesh);
+            _contourMf.sharedMesh = _contourMesh;
+        }
+
+        void EnsureContours()
+        {
+            if (_contourMf != null) return;
+            GameObject go = new GameObject("ContourLines");
+            go.transform.SetParent(transform, worldPositionStays: false);
+            _contourMf = go.AddComponent<MeshFilter>();
+            _contourMr = go.AddComponent<MeshRenderer>();
+            _contourMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _contourMr.receiveShadows = false;
+            _contourMesh = new Mesh { name = "TerrainContours" };
+            _contourMf.sharedMesh = _contourMesh;
+            _contourMat = PipelineMaterials.CreateUnlitColor(ContourColor, "ContourMat");
+            _contourMr.sharedMaterial = _contourMat;
         }
 
         // Modify the heightfield under the brush, in field (height-offset) space.
@@ -377,6 +441,7 @@ namespace NetworkDesigner.Terrain
             _field = null;
             EnsureField(forceRebuild: true);
             RebuildMesh();
+            RebuildContours();
             _dirtySince = Time.realtimeSinceStartup; // persist the reset
         }
 
