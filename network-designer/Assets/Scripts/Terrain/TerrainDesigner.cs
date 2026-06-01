@@ -141,13 +141,6 @@ namespace NetworkDesigner.Terrain
                  "terrain live (ws://localhost:8787). Off = no tuning server.")]
         public bool AutoTuning = true;
 
-        [Header("Ground grid")]
-        [Tooltip("On Start, create a GroundGrid (same as the network designer) " +
-                 "on its own GameObject at origin, sized to the terrain.")]
-        public bool AutoGrid = true;
-        [Tooltip("Grid line spacing (m) for the auto-created ground grid.")]
-        public float GridSpacing = 50f;
-
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
@@ -178,33 +171,7 @@ namespace NetworkDesigner.Terrain
             // Stand up scene services, sized to the actual terrain.
             if (AutoLighting) EnsureAmbiance();
             if (AutoCameraControl) EnsureCameraControl();
-            if (AutoGrid) EnsureGrid();
-            if (AutoTuning) EnsureTuning(); // after the grid so its tunables register
-        }
-
-        // Create a GroundGrid (reusing the network designer's component) on its
-        // OWN GameObject at origin — never parented to the terrain (see the
-        // GroundGrid placement rule) — sized to span the terrain footprint.
-        void EnsureGrid()
-        {
-            if (FindFirstObjectByType<GroundGrid>() == null)
-            {
-                GroundGrid grid = new GameObject("GroundGrid").AddComponent<GroundGrid>();
-                grid.transform.position = Vector3.zero;
-                grid.Spacing = Mathf.Max(0.1f, GridSpacing);
-                grid.MajorEvery = 10;
-            }
-            ResizeGridToTerrain();
-        }
-
-        // Match the ground grid's half-extent to the terrain footprint.
-        void ResizeGridToTerrain()
-        {
-            GroundGrid grid = FindFirstObjectByType<GroundGrid>();
-            if (grid == null) return;
-            float span = _field != null ? Mathf.Max(_field.WidthX, _field.LengthZ) : 2000f;
-            grid.Extent = Mathf.Max(span, 100f) * 0.5f; // half-extent
-            grid.Rebuild();
+            if (AutoTuning) EnsureTuning();
         }
 
         // Stand up the live-tuning endpoint (TuningServer + registration) if
@@ -549,7 +516,6 @@ namespace NetworkDesigner.Terrain
             EnsureField(forceRebuild: true);
             RebuildMesh();
             RebuildContours();
-            ResizeGridToTerrain(); // keep the grid matched to the new size
             _dirtySince = Time.realtimeSinceStartup; // persist the reset
         }
 
@@ -562,7 +528,6 @@ namespace NetworkDesigner.Terrain
             System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
             RebuildMesh();
             RebuildContours();
-            ResizeGridToTerrain();
             _dirtySince = Time.realtimeSinceStartup;
         }
 
