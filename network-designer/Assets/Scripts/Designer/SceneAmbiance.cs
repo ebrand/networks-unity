@@ -1,9 +1,12 @@
 // Lighting/atmosphere setup for the designer scene.
 //
 // Tweaks the existing directional light (intensity, color, angle, soft
-// shadows), the ambient light color/mode, and the camera background
-// color to give the scene a "lights down" look while you build. All
-// values are exposed for tuning in the Inspector.
+// shadows) and, optionally, the camera background color. All values are
+// exposed for tuning in the Inspector.
+//
+// NOTE: skybox + ambient (environment) lighting are intentionally NOT
+// managed here — set those in Window > Rendering > Lighting so that
+// window stays authoritative. This component only drives the sun.
 //
 // Attach to ANY GameObject in the scene (typically a dedicated empty
 // "Ambiance" GameObject, but the Designer GameObject works fine too).
@@ -14,7 +17,6 @@
 // tune the look live.
 
 using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace NetworkDesigner.Designer
 {
@@ -30,11 +32,6 @@ namespace NetworkDesigner.Designer
         public Vector3 SunEulerAngles = new Vector3(50f, 40f, 0f);
         public LightShadows Shadows = LightShadows.Soft;
         [Range(0f, 1f)] public float ShadowStrength = 0.7f;
-
-        [Header("Ambient")]
-        [Tooltip("Flat ambient light color. Lower value = a bit less bright. " +
-                 "This sets the fill/ambient light; the skybox still renders.")]
-        public Color AmbientColor = new Color(0.45f, 0.47f, 0.50f);
 
         [Header("Background")]
         [Tooltip("When OFF, the existing camera background/skybox is left alone " +
@@ -68,9 +65,6 @@ namespace NetworkDesigner.Designer
                 Sun.shadows = Shadows;
                 Sun.shadowStrength = ShadowStrength;
             }
-
-            RenderSettings.ambientMode = AmbientMode.Flat;
-            RenderSettings.ambientLight = AmbientColor;
 
             if (OverrideBackground)
             {

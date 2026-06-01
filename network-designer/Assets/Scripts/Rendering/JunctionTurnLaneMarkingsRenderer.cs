@@ -106,7 +106,7 @@ namespace NetworkDesigner.Rendering
 
             Material mat = CenterlineMaterial != null
                 ? CenterlineMaterial
-                : CreateUnlit(CenterlineColor, "JunctionTurnLaneMat");
+                : CreateLitMatte(CenterlineColor, "JunctionTurnLaneMat");
             mr.sharedMaterials = new[] { mat };
         }
 
@@ -151,11 +151,16 @@ namespace NetworkDesigner.Rendering
             }
         }
 
-        static Material CreateUnlit(Color c, string name)
+        // Lit matte material — MUST match RoadRenderer.CreateFlatMaterial so
+        // the bridged turn-lane yellow receives lighting/shadows identically to
+        // the road body's own markings. (An Unlit material here renders
+        // full-bright and looks brighter than the rest of the line.)
+        static Material CreateLitMatte(Color c, string name)
         {
-            Shader sh = Shader.Find("Unlit/Color");
-            if (sh == null) sh = Shader.Find("Standard");
-            return new Material(sh) { name = name, color = c };
+            Material m = new Material(Shader.Find("Standard")) { name = name, color = c };
+            m.SetFloat("_Glossiness", 0f);
+            m.SetFloat("_Metallic", 0f);
+            return m;
         }
     }
 }

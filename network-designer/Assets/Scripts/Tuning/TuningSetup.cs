@@ -889,10 +889,8 @@ namespace NetworkDesigner.Tuning
                     () => Ambiance.SunColor,
                     v => { Ambiance.SunColor = v; ReapplyAmbiance(); });
 
-                TuningRegistry.RegisterColor(
-                    "ambiance.ambientColor", "Ambiance", "Ambient color",
-                    () => Ambiance.AmbientColor,
-                    v => { Ambiance.AmbientColor = v; ReapplyAmbiance(); });
+                // Ambient color removed — ambient/skybox lighting is now set in
+                // Window > Rendering > Lighting, not on SceneAmbiance.
 
                 TuningRegistry.RegisterColor(
                     "ambiance.backgroundColor", "Ambiance", "Background color",

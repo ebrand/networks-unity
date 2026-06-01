@@ -95,6 +95,12 @@ namespace NetworkDesigner.Rendering
             MeshFilter mf = go.AddComponent<MeshFilter>();
             MeshRenderer mr = go.AddComponent<MeshRenderer>();
             mr.sharedMaterial = _mat;
+            // Per-marking color via a property block (the shared material is a
+            // lit Standard material; vertex colors are ignored by it). _Color
+            // is Standard's albedo tint.
+            MaterialPropertyBlock mpb = new MaterialPropertyBlock();
+            mpb.SetColor("_Color", color);
+            mr.SetPropertyBlock(mpb);
 
             // Build the strip mesh.
             List<Vector3> verts = new List<Vector3>();
@@ -110,6 +116,9 @@ namespace NetworkDesigner.Rendering
             mesh.SetVertices(verts);
             mesh.SetTriangles(tris, 0);
             mesh.SetColors(colors);
+            // +Y normals (strips are wound CW-from-above) so the lit material
+            // shades them like the road's own paint.
+            mesh.RecalculateNormals();
             mesh.RecalculateBounds();
             mf.sharedMesh = mesh;
 
@@ -142,9 +151,16 @@ namespace NetworkDesigner.Rendering
         void EnsureMaterial()
         {
             if (_mat != null) return;
-            Shader sh = Shader.Find("NetworkDesigner/EditorOverlay");
-            if (sh == null) sh = Shader.Find("Sprites/Default");
-            _mat = new Material(sh) { name = "LaneMarkingMat" };
+            // Lit matte material matching RoadRenderer.CreateFlatMaterial, so
+            // painted markings receive lighting/shadows exactly like the road's
+            // own lane lines. (Previously an unlit EditorOverlay shader, which
+            // renders full-bright and looked brighter than the road paint once
+            // the scene lighting was dimmed.) Per-marking color is supplied via
+            // a MaterialPropertyBlock in SpawnMarkingGameObject.
+            Material m = new Material(Shader.Find("Standard")) { name = "LaneMarkingMat" };
+            m.SetFloat("_Glossiness", 0f);
+            m.SetFloat("_Metallic", 0f);
+            _mat = m;
         }
     }
 }
