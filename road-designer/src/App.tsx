@@ -89,6 +89,8 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const isTuning = location.pathname.startsWith("/tuning");
+  const isTerrain = location.pathname.startsWith("/terrain");
+  const isPanel = isTuning || isTerrain; // panel views have no designer sidebar
 
   // Autosave: any change to name/road/driveSide while a config is active
   // persists to localStorage and refreshes the in-memory list. We guard
@@ -178,34 +180,35 @@ function App() {
   return (
     <AppShell
       header={{ height: 64 }}
-      navbar={isTuning ? undefined : { width: 440, breakpoint: 0 }}
+      navbar={isPanel ? undefined : { width: 440, breakpoint: 0 }}
       padding="md"
     >
       <AppShell.Header>
         <Group justify="space-between" align="center" h="100%" px="md">
           <Box>
             <Title order={3}>
-              {isTuning ? "Live tuning" : "Road Designer"}
+              {isTerrain ? "Terrain tuning" : isTuning ? "Live tuning" : "Road Designer"}
             </Title>
             <Text size="xs" c="dimmed">
-              {isTuning
+              {isPanel
                 ? "Adjust runtime parameters in the Unity scene. Requires Play mode."
                 : "Configure a road's cross-section. Toggle drive side to see the AB/BA sides swap across the centerline without touching lane data."}
             </Text>
           </Box>
           <SegmentedControl
             size="xs"
-            value={isTuning ? "tuning" : "designer"}
+            value={isTerrain ? "terrain" : isTuning ? "tuning" : "designer"}
             onChange={(v) => navigate(`/${v}`)}
             data={[
               { value: "designer", label: "Designer" },
               { value: "tuning", label: "Tuning" },
+              { value: "terrain", label: "Terrain" },
             ]}
           />
         </Group>
       </AppShell.Header>
 
-      {!isTuning && (
+      {!isPanel && (
         <AppShell.Navbar p="md">
           <ScrollArea h="100%" type="auto" offsetScrollbars>
             <Stack gap="lg">
@@ -253,6 +256,7 @@ function App() {
             }
           />
           <Route path="/tuning" element={<TuningPanel />} />
+          <Route path="/terrain" element={<TuningPanel />} />
           <Route path="*" element={<Navigate to="/designer" replace />} />
         </Routes>
       </AppShell.Main>

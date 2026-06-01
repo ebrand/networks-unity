@@ -55,11 +55,15 @@ namespace NetworkDesigner.Terrain
         [Header("Brush cursor (ring)")]
         public bool ShowBrushCursor = true;
         public Color BrushCursorColor = new Color(0.2f, 0.9f, 1f, 0.9f);
-        [Tooltip("Ring line width in metres.")]
-        public float BrushCursorWidth = 0.3f;
         [Range(8, 128)] public int BrushCursorSegments = 48;
         [Tooltip("Metres the ring floats above the surface so it doesn't z-fight.")]
         public float BrushCursorLift = 0.15f;
+        [Tooltip("Draw the cursor ring dashed instead of solid.")]
+        public bool BrushCursorDashed = false;
+        [Tooltip("Dash length (m) when Brush Cursor Dashed is on.")]
+        public float BrushCursorDashLength = 1.5f;
+        [Tooltip("Gap length (m) between dashes when Brush Cursor Dashed is on.")]
+        public float BrushCursorDashGap = 1.5f;
 
         [Header("Topographic lines")]
         public bool ShowContours = true;
@@ -68,9 +72,16 @@ namespace NetworkDesigner.Terrain
         public Color ContourColor = new Color(0.22f, 0.15f, 0.08f, 1f); // dark brown
         [Tooltip("Metres the lines float above the surface to avoid z-fighting.")]
         public float ContourLift = 0.05f;
-        [Tooltip("Rebuild contours every sculpt frame (live) vs only when the " +
-                 "stroke ends. Live can hitch on large grids.")]
-        public bool LiveContours = false;
+        [Tooltip("Draw the contour lines dashed instead of solid.")]
+        public bool ContourDashed = false;
+        [Tooltip("Dash length (m) when Contour Dashed is on.")]
+        public float ContourDashLength = 2f;
+        [Tooltip("Gap length (m) between dashes when Contour Dashed is on.")]
+        public float ContourDashGap = 2f;
+        [Tooltip("Rebuild contours every sculpt frame so they track the terrain " +
+                 "in real time. Turn off (rebuild only on stroke-end) if it " +
+                 "hitches on very large grids.")]
+        public bool LiveContours = true;
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -91,7 +102,13 @@ namespace NetworkDesigner.Terrain
         Mesh _mesh;
         Material _mat;
         MeshCollider _collider;
-        LineRenderer _cursor;
+        MeshFilter _cursorMf;
+        MeshRenderer _cursorMr;
+        Mesh _cursorMesh;
+        Material _cursorMat;
+        readonly List<Vector3> _ring = new List<Vector3>();
+        readonly List<Vector3> _cursorVerts = new List<Vector3>();
+        readonly List<int> _cursorIdx = new List<int>();
         MeshFilter _contourMf;
         MeshRenderer _contourMr;
         Mesh _contourMesh;
@@ -118,12 +135,19 @@ namespace NetworkDesigner.Terrain
                  "left-drag, so they don't conflict. Off = manage the camera yourself.")]
         public bool AutoCameraControl = true;
 
+        [Header("Live tuning")]
+        [Tooltip("On Start, stand up a TuningServer + TerrainTuningSetup if the " +
+                 "scene has none, so the React tuning panel can adjust the " +
+                 "terrain live (ws://localhost:8787). Off = no tuning server.")]
+        public bool AutoTuning = true;
+
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
             if (AutoLighting) EnsureAmbiance();
             if (AutoCameraControl) EnsureCameraControl();
+            if (AutoTuning) EnsureTuning();
 
             if (Autosave) _field = TryLoadTerrain();
             if (_field == null)
@@ -144,6 +168,16 @@ namespace NetworkDesigner.Terrain
             }
             RebuildMesh();
             RebuildContours();
+        }
+
+        // Stand up the live-tuning endpoint (TuningServer + registration) if
+        // the scene has none, so the React panel can tune the terrain.
+        void EnsureTuning()
+        {
+            if (FindFirstObjectByType<TerrainTuningSetup>() != null) return;
+            TerrainTuningSetup setup = new GameObject("TerrainTuning")
+                .AddComponent<TerrainTuningSetup>(); // RequireComponent adds TuningServer
+            setup.Terrain = this;
         }
 
         // If the (empty) scene has no SceneAmbiance, create one configured to
@@ -272,48 +306,83 @@ namespace NetworkDesigner.Terrain
         // A ring at the hovered point showing the brush footprint, conforming
         // to the terrain surface (each point sampled via HeightAtGrid) and
         // transform-correct (built in local space, then TransformPoint'd).
+        // Rendered as a line mesh (like the contours) so it can be dashed.
         void UpdateBrushCursor(bool visible, Vector3 worldCenter)
         {
             EnsureCursor();
-            _cursor.enabled = visible;
+            _cursorMr.enabled = visible;
             if (!visible) return;
+            if (_cursorMat != null) _cursorMat.color = BrushCursorColor;
 
             int n = Mathf.Max(8, BrushCursorSegments);
-            if (_cursor.positionCount != n) _cursor.positionCount = n;
-            _cursor.startWidth = _cursor.endWidth = BrushCursorWidth;
-            _cursor.startColor = _cursor.endColor = BrushCursorColor;
-
             float cs = _field.CellSize;
             float halfW = (_field.ColumnsX - 1) * cs * 0.5f;
             float halfL = (_field.RowsZ - 1) * cs * 0.5f;
             Vector3 localCenter = transform.InverseTransformPoint(worldCenter);
 
+            // Conforming ring points (world space).
+            _ring.Clear();
             for (int i = 0; i < n; i++)
             {
-                float a = (i / (float)n) * Mathf.PI * 2f;
-                float lx = localCenter.x + Mathf.Cos(a) * BrushRadius;
-                float lz = localCenter.z + Mathf.Sin(a) * BrushRadius;
+                float ang = (i / (float)n) * Mathf.PI * 2f;
+                float lx = localCenter.x + Mathf.Cos(ang) * BrushRadius;
+                float lz = localCenter.z + Mathf.Sin(ang) * BrushRadius;
                 float ly = HeightAtGrid((lx + halfW) / cs, (lz + halfL) / cs) + BrushCursorLift;
-                _cursor.SetPosition(i, transform.TransformPoint(new Vector3(lx, ly, lz)));
+                _ring.Add(transform.TransformPoint(new Vector3(lx, ly, lz)));
+            }
+
+            // Build the closed-loop line mesh, optionally dashed.
+            _cursorVerts.Clear();
+            _cursorIdx.Clear();
+            float dash = BrushCursorDashed ? BrushCursorDashLength : 0f;
+            for (int i = 0; i < n; i++)
+                EmitCursorSegment(_ring[i], _ring[(i + 1) % n], dash, BrushCursorDashGap);
+
+            _cursorMesh.Clear();
+            _cursorMesh.SetVertices(_cursorVerts);
+            _cursorMesh.SetIndices(_cursorIdx, MeshTopology.Lines, 0);
+            _cursorMesh.RecalculateBounds();
+            _cursorMf.sharedMesh = _cursorMesh;
+        }
+
+        // Like TerrainContourBuilder.EmitSegment: one line a->b, or dash/gap
+        // pieces. Phase restarts per ring edge — even spacing on a regular ring.
+        void EmitCursorSegment(Vector3 a, Vector3 b, float dash, float gap)
+        {
+            if (dash <= 0f)
+            {
+                int s = _cursorVerts.Count;
+                _cursorVerts.Add(a); _cursorVerts.Add(b);
+                _cursorIdx.Add(s); _cursorIdx.Add(s + 1);
+                return;
+            }
+            Vector3 d = b - a;
+            float len = d.magnitude;
+            if (len < 1e-5f) return;
+            Vector3 dir = d / len;
+            float period = dash + Mathf.Max(0f, gap);
+            for (float pos = 0f; pos < len; pos += period)
+            {
+                float e0 = pos, e1 = Mathf.Min(pos + dash, len);
+                int s = _cursorVerts.Count;
+                _cursorVerts.Add(a + dir * e0); _cursorVerts.Add(a + dir * e1);
+                _cursorIdx.Add(s); _cursorIdx.Add(s + 1);
             }
         }
 
         void EnsureCursor()
         {
-            if (_cursor != null) return;
+            if (_cursorMf != null) return;
             GameObject go = new GameObject("BrushCursor");
             go.transform.SetParent(transform, worldPositionStays: false);
-            _cursor = go.AddComponent<LineRenderer>();
-            _cursor.useWorldSpace = true;
-            _cursor.loop = true;
-            _cursor.numCapVertices = 2;
-            _cursor.numCornerVertices = 2;
-            _cursor.positionCount = Mathf.Max(8, BrushCursorSegments);
-            _cursor.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            _cursor.receiveShadows = false;
-            // Sprites/Default is cross-pipeline and honors LineRenderer vertex
-            // colors (start/endColor), so the ring tint works in URP.
-            _cursor.material = new Material(Shader.Find("Sprites/Default"));
+            _cursorMf = go.AddComponent<MeshFilter>();
+            _cursorMr = go.AddComponent<MeshRenderer>();
+            _cursorMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _cursorMr.receiveShadows = false;
+            _cursorMesh = new Mesh { name = "BrushCursorMesh" };
+            _cursorMf.sharedMesh = _cursorMesh;
+            _cursorMat = PipelineMaterials.CreateUnlitColor(BrushCursorColor, "BrushCursorMat");
+            _cursorMr.sharedMaterial = _cursorMat;
         }
 
         // Rebuild the topographic contour lines from the current field.
@@ -328,7 +397,8 @@ namespace NetworkDesigner.Terrain
             }
             _contourMr.enabled = true;
             if (_contourMat != null) _contourMat.color = ContourColor;
-            TerrainContourBuilder.Build(_field, ContourInterval, ContourLift, _contourMesh);
+            TerrainContourBuilder.Build(_field, ContourInterval, ContourLift,
+                ContourDashed ? ContourDashLength : 0f, ContourDashGap, _contourMesh);
             _contourMf.sharedMesh = _contourMesh;
         }
 

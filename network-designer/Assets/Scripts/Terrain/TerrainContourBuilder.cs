@@ -38,7 +38,14 @@ namespace NetworkDesigner.Terrain
             new int[0],        // 15
         };
 
-        public static void Build(TerrainField field, float interval, float lift, Mesh mesh)
+        // Reused across calls so per-frame (live) rebuilds don't allocate/GC.
+        static readonly List<Vector3> verts = new List<Vector3>();
+        static readonly List<int> idx = new List<int>();
+
+        // dashLength <= 0 => solid lines; otherwise each segment is broken into
+        // dashLength-on / dashGap-off pieces.
+        public static void Build(TerrainField field, float interval, float lift,
+            float dashLength, float dashGap, Mesh mesh)
         {
             mesh.Clear();
             if (field == null || interval <= 0f) return;
@@ -48,8 +55,8 @@ namespace NetworkDesigner.Terrain
             float halfW = (cx - 1) * cs * 0.5f;
             float halfL = (rz - 1) * cs * 0.5f;
 
-            var verts = new List<Vector3>();
-            var idx = new List<int>();
+            verts.Clear();
+            idx.Clear();
 
             for (int z = 0; z < rz - 1; z++)
             {
@@ -75,9 +82,7 @@ namespace NetworkDesigner.Terrain
                         {
                             Vector3 a = EdgePoint(edges[e], L, x, z, cs, halfW, halfL, lift, h00, h10, h11, h01);
                             Vector3 b = EdgePoint(edges[e + 1], L, x, z, cs, halfW, halfL, lift, h00, h10, h11, h01);
-                            int bi = verts.Count;
-                            verts.Add(a); verts.Add(b);
-                            idx.Add(bi); idx.Add(bi + 1);
+                            EmitSegment(a, b, dashLength, dashGap);
                         }
                     }
                 }
@@ -88,6 +93,34 @@ namespace NetworkDesigner.Terrain
             mesh.SetVertices(verts);
             mesh.SetIndices(idx, MeshTopology.Lines, 0);
             mesh.RecalculateBounds();
+        }
+
+        // Emit a->b as one line segment when dashLength<=0, else as dash/gap
+        // pieces. Phase restarts per segment (contours aren't traced into
+        // continuous polylines), which reads fine at terrain scale.
+        static void EmitSegment(Vector3 a, Vector3 b, float dashLength, float dashGap)
+        {
+            if (dashLength <= 0f)
+            {
+                int s = verts.Count;
+                verts.Add(a); verts.Add(b);
+                idx.Add(s); idx.Add(s + 1);
+                return;
+            }
+            Vector3 d = b - a;
+            float len = d.magnitude;
+            if (len < 1e-5f) return;
+            Vector3 dir = d / len;
+            float period = dashLength + Mathf.Max(0f, dashGap);
+            for (float pos = 0f; pos < len; pos += period)
+            {
+                float e0 = pos;
+                float e1 = Mathf.Min(pos + dashLength, len);
+                int s = verts.Count;
+                verts.Add(a + dir * e0);
+                verts.Add(a + dir * e1);
+                idx.Add(s); idx.Add(s + 1);
+            }
         }
 
         // Interpolated crossing point of level L on a cell edge, in centered
