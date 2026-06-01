@@ -150,10 +150,7 @@ namespace NetworkDesigner.Rendering
 
         static Material CreateLitMatte(Color c, string name)
         {
-            Material m = new Material(Shader.Find("Standard")) { name = name, color = c };
-            m.SetFloat("_Glossiness", 0f);
-            m.SetFloat("_Metallic", 0f);
-            return m;
+            return PipelineMaterials.CreateLitMatte(c, name);
         }
     }
 }

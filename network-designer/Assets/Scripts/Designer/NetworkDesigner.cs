@@ -6911,10 +6911,7 @@ namespace NetworkDesigner.Designer
         // ambient — reads as a tangible disc rather than a flat sprite.
         static Material CreateLitMarker(Color c, string name)
         {
-            Material m = new Material(Shader.Find("Standard")) { name = name, color = c };
-            m.SetFloat("_Glossiness", 0.25f);
-            m.SetFloat("_Metallic", 0f);
-            return m;
+            return PipelineMaterials.CreateLit(c, 0.25f, name);
         }
 
         // Translucent placement preview shown in Create mode at the snapped
@@ -7011,22 +7008,9 @@ namespace NetworkDesigner.Designer
         Material GetGhostPuckMaterial()
         {
             if (_ghostPuckMaterial != null) return _ghostPuckMaterial;
-            Material m = new Material(Shader.Find("Standard")) { name = "VertexGhostMat" };
             Color c = MarkerColor;
             c.a = GhostPuckAlpha;
-            m.color = c;
-            m.SetFloat("_Mode", 3f); // Transparent
-            m.SetOverrideTag("RenderType", "Transparent");
-            m.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-            m.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-            m.SetInt("_ZWrite", 0);
-            m.DisableKeyword("_ALPHATEST_ON");
-            m.EnableKeyword("_ALPHABLEND_ON");
-            m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-            m.renderQueue = 3000;
-            m.SetFloat("_Glossiness", 0.1f);
-            m.SetFloat("_Metallic", 0f);
-            _ghostPuckMaterial = m;
+            _ghostPuckMaterial = PipelineMaterials.CreateLitTransparent(c, 0.1f, "VertexGhostMat");
             return _ghostPuckMaterial;
         }
 
@@ -7126,7 +7110,7 @@ namespace NetworkDesigner.Designer
         {
             _roundaboutGhostGo = new GameObject("RoundaboutGhost");
             _roundaboutGhostGo.transform.SetParent(transform, worldPositionStays: false);
-            _roundaboutGhostMaterial = new Material(Shader.Find("Unlit/Color")) { name = "RoundaboutGhostMat" };
+            _roundaboutGhostMaterial = PipelineMaterials.CreateUnlitColor(Color.white, "RoundaboutGhostMat");
 
             _roundaboutGhostCenter = MakeRoundaboutGhostLine("Center", 0.2f);
             _roundaboutGhostOuter = MakeRoundaboutGhostLine("Outer", 0.4f);
@@ -7256,7 +7240,7 @@ namespace NetworkDesigner.Designer
                 _previewLine.useWorldSpace = true;
                 _previewLine.startWidth = PreviewLineWidth;
                 _previewLine.endWidth = PreviewLineWidth;
-                _previewLine.material = new Material(Shader.Find("Unlit/Color")) { color = PreviewLineColor, name = "EdgePreviewMat" };
+                _previewLine.material = PipelineMaterials.CreateUnlitColor(PreviewLineColor, "EdgePreviewMat");
             }
 
             _previewLine.enabled = true;

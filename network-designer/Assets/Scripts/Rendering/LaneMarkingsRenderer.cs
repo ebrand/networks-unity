@@ -157,10 +157,9 @@ namespace NetworkDesigner.Rendering
             // renders full-bright and looked brighter than the road paint once
             // the scene lighting was dimmed.) Per-marking color is supplied via
             // a MaterialPropertyBlock in SpawnMarkingGameObject.
-            Material m = new Material(Shader.Find("Standard")) { name = "LaneMarkingMat" };
-            m.SetFloat("_Glossiness", 0f);
-            m.SetFloat("_Metallic", 0f);
-            _mat = m;
+            // Per-marking color is supplied via a MaterialPropertyBlock, so the
+            // shared material's base color is irrelevant (white).
+            _mat = PipelineMaterials.CreateLitMatte(Color.white, "LaneMarkingMat");
         }
     }
 }

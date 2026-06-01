@@ -2236,8 +2236,7 @@ namespace NetworkDesigner.Agents
             MeshRenderer mr = go.GetComponent<MeshRenderer>();
             if (mr != null)
             {
-                Material mat = new Material(Shader.Find("Standard")) { color = AgentColor, name = "AgentMat" };
-                mr.sharedMaterial = mat;
+                mr.sharedMaterial = PipelineMaterials.CreateLitMatte(AgentColor, "AgentMat");
             }
             tag.BodyRenderer = mr;
             return go;

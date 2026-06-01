@@ -303,15 +303,10 @@ namespace NetworkDesigner.Rendering
             mc.sharedMesh = mesh;
         }
 
-        // Standard shader with matte settings — gives the surface real
-        // lighting / shadow behavior. Glossiness 0 + metallic 0 reads as
-        // asphalt-ish under any lighting.
+        // Pipeline-agnostic lit matte material (Built-in Standard or URP Lit).
         static Material CreateLitMatte(Color c, string name)
         {
-            Material m = new Material(Shader.Find("Standard")) { name = name, color = c };
-            m.SetFloat("_Glossiness", 0f);
-            m.SetFloat("_Metallic", 0f);
-            return m;
+            return PipelineMaterials.CreateLitMatte(c, name);
         }
 
         // Maps (corner i, bezier sample k) back to its vertex index in the

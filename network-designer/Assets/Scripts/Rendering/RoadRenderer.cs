@@ -1232,14 +1232,9 @@ namespace NetworkDesigner.Rendering
 
         static Material CreateFlatMaterial(Color c, string name)
         {
-            // Standard shader so the surface picks up directional + ambient
-            // lighting and casts/receives shadows. Glossiness 0 + metallic 0
-            // keeps the look matte (asphalt-ish) regardless of color.
-            Shader sh = Shader.Find("Standard");
-            Material m = new Material(sh) { name = name, color = c };
-            m.SetFloat("_Glossiness", 0f);
-            m.SetFloat("_Metallic", 0f);
-            return m;
+            // Pipeline-agnostic lit matte material (Built-in Standard or URP
+            // Lit, chosen at runtime). See PipelineMaterials.
+            return PipelineMaterials.CreateLitMatte(c, name);
         }
     }
 }

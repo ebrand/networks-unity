@@ -1104,15 +1104,8 @@ namespace NetworkDesigner.Rendering
             if (asphalt == null)
             {
                 if (_autoAsphaltMaterial == null)
-                {
-                    _autoAsphaltMaterial = new Material(Shader.Find("Standard"))
-                    {
-                        name = "CulDeSacAsphaltMat",
-                        color = AsphaltColor,
-                    };
-                    _autoAsphaltMaterial.SetFloat("_Glossiness", 0f);
-                    _autoAsphaltMaterial.SetFloat("_Metallic", 0f);
-                }
+                    _autoAsphaltMaterial = PipelineMaterials.CreateLitMatte(
+                        AsphaltColor, "CulDeSacAsphaltMat");
                 asphalt = _autoAsphaltMaterial;
             }
             mr.sharedMaterial = asphalt;
@@ -1172,7 +1165,7 @@ namespace NetworkDesigner.Rendering
                 go.AddComponent<RoadMarker>();
                 LineRenderer newLr = go.AddComponent<LineRenderer>();
                 newLr.useWorldSpace = true;
-                newLr.sharedMaterial = new Material(Shader.Find("Unlit/Color")) { color = RoadLineColor, name = "RoadLineMat" };
+                newLr.sharedMaterial = PipelineMaterials.CreateUnlitColor(RoadLineColor, "RoadLineMat");
                 _roadLinePool[road.Id] = go;
             }
 

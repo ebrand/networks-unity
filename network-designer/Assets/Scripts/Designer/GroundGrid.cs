@@ -162,18 +162,7 @@ namespace NetworkDesigner.Designer
             mesh.RecalculateBounds();
             mf.sharedMesh = mesh;
 
-            Shader sh = Shader.Find("Unlit/Color");
-            if (sh == null)
-            {
-                Debug.LogWarning("[GroundGrid] Unlit/Color shader not found; grid will be invisible.");
-                return go;
-            }
-            Material mat = new Material(sh)
-            {
-                name = name + "_Mat",
-                color = color,
-            };
-            mr.sharedMaterial = mat;
+            mr.sharedMaterial = PipelineMaterials.CreateUnlitColor(color, name + "_Mat");
 
             return go;
         }
