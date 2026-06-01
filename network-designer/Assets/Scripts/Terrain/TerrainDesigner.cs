@@ -1,17 +1,18 @@
-// Terrain designer — grid-heightfield terrain with sculpt brushes (URP).
+// Terrain designer — drives a Unity Terrain (heightmap) with sculpt brushes.
 //
-// Setup: put this on an empty GameObject (ideally at world origin, like the
-// road designer's GroundGrid). RequireComponent adds the MeshFilter /
-// MeshRenderer; a MeshCollider is added for the sculpt raycast. The mesh is
-// centered on the GameObject, so its transform positions the terrain.
+// The Terrain (assigned to `Surface`, or auto-found) does the rendering, LOD
+// and collision — so it scales to 1 m over 2 km (~4M cells) where a single
+// mesh + MeshCollider could not. `TerrainField` stays the working heightfield
+// (source of truth for contours / cursor / save); sculpting edits it and then
+// pushes only the brush-affected region into the heightmap (SetHeightsDelayLOD).
+// Coordinates are corner-anchored (the Terrain's world position = field Origin).
 //
-// Sculpting runs in Play mode: hold the left mouse button over the terrain
-// and drag. Brush mode: 1=Raise, 2=Lower, 3=Smooth, 4=Flatten (or set in the
-// Inspector). Save/load is a later slice.
+// Sculpting runs in Play mode: hold the left mouse button over the terrain and
+// drag. Brush mode: 1=Raise, 2=Lower, 3=Smooth, 4=Flatten.
 //
-// The "test hill" is stamped ONCE when the field is first created, so it's
-// just starting relief you can sculpt on top of — it is not re-applied on
-// rebuilds.
+// LIMITS (this slice): heights clamp to [0, terrain height] — no digging below
+// the floor yet; contours are skipped on the full-res heightmap (region-based
+// contours are a later pass). The "test hill" stamps once on a fresh field.
 
 using System.Collections.Generic;
 using Newtonsoft.Json;
@@ -20,22 +21,24 @@ using NetworkDesigner.Designer; // SceneAmbiance
 
 namespace NetworkDesigner.Terrain
 {
-    [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
     public class TerrainDesigner : MonoBehaviour
     {
         public enum BrushMode { Raise, Lower, Smooth, Flatten }
 
-        [Header("Grid")]
-        [Tooltip("Vertex count along X / Z. Total verts = ColumnsX * RowsZ. " +
-                 "201 x 10 m = 2 km. Higher counts hitch on per-frame rebuilds.")]
-        public int ColumnsX = 201;
-        public int RowsZ = 201;
-        [Tooltip("Metres between adjacent grid vertices. 201 verts x 10 m = 2 km.")]
-        public float CellSize = 10f;
+        [Header("Unity Terrain surface")]
+        [Tooltip("The Unity Terrain to drive. Create one in the editor (Terrain " +
+                 "Settings: heightmap resolution e.g. 2049, size e.g. 2000x2000x600, " +
+                 "positioned at -W/2,0,-L/2 to center on origin) and assign it here.")]
+        public UnityEngine.Terrain Surface;
 
-        [Header("Appearance")]
-        public Color TerrainColor = new Color(0.42f, 0.5f, 0.30f); // grassy
-        [Range(0f, 1f)] public float Smoothness = 0f;
+        // Heightfield dimensions are derived from Surface in EnsureField:
+        // ColumnsX = RowsZ = heightmap resolution, CellSize = size / (res-1).
+        [HideInInspector] public int ColumnsX = 2049;
+        [HideInInspector] public int RowsZ = 2049;
+        [HideInInspector] public float CellSize = 2000f / 2048f;
+
+        // Appearance (terrain color/material) is now owned by the Unity Terrain
+        // (its material + terrain layers), not this component.
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
@@ -99,9 +102,6 @@ namespace NetworkDesigner.Terrain
 
         TerrainField _field;
         float _dirtySince = -1f; // realtime when last edited; -1 = clean
-        Mesh _mesh;
-        Material _mat;
-        MeshCollider _collider;
         MeshFilter _cursorMf;
         MeshRenderer _cursorMr;
         Mesh _cursorMesh;
@@ -146,26 +146,32 @@ namespace NetworkDesigner.Terrain
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
 
-            // Establish the field first (load or create) so dimensions are known
-            // before the scene services size themselves to the terrain.
-            if (Autosave) _field = TryLoadTerrain();
-            if (_field == null)
+            if (Surface == null) Surface = FindFirstObjectByType<UnityEngine.Terrain>();
+            if (Surface == null)
             {
-                EnsureField(forceRebuild: true); // fresh field (+ test hill)
+                Debug.LogError("[TerrainDesigner] No 'Surface' Terrain assigned or found. " +
+                    "Create a Unity Terrain (resolution e.g. 2049, size 2000x2000x600, " +
+                    "centered at -1000,0,-1000) and assign it to Surface.");
+                enabled = false;
+                return;
             }
-            else
+
+            // Field dimensions come from the Terrain's heightmap.
+            EnsureField(forceRebuild: true);
+
+            // Adopt a saved heightfield only if it matches the terrain resolution.
+            if (Autosave)
             {
-                // Adopt loaded dimensions; refresh Origin to the current
-                // GameObject placement so sculpt mapping stays correct even if
-                // the object moved between sessions.
-                ColumnsX = _field.ColumnsX;
-                RowsZ = _field.RowsZ;
-                CellSize = _field.CellSize;
-                float halfW = (ColumnsX - 1) * CellSize * 0.5f;
-                float halfL = (RowsZ - 1) * CellSize * 0.5f;
-                _field.Origin = transform.position - new Vector3(halfW, 0f, halfL);
+                TerrainField loaded = TryLoadTerrain();
+                if (loaded != null && loaded.ColumnsX == _field.ColumnsX
+                                   && loaded.RowsZ == _field.RowsZ)
+                {
+                    loaded.Origin = _field.Origin;
+                    _field = loaded;
+                }
             }
-            RebuildMesh();
+
+            SyncTerrainFull();
             RebuildContours();
 
             // Stand up scene services, sized to the actual terrain.
@@ -249,15 +255,16 @@ namespace NetworkDesigner.Terrain
 
             if (Input.GetMouseButtonDown(0)) _hasFlattenTarget = false;
 
-            // One hover raycast per frame, shared by the brush cursor and the
-            // sculpt itself.
+            // One hover raycast per frame (against the TerrainCollider), shared
+            // by the brush cursor and the sculpt itself.
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             bool overTerrain = false;
             RaycastHit hit = default;
-            if (cam != null && _collider != null)
+            if (cam != null)
             {
                 Ray ray = cam.ScreenPointToRay(Input.mousePosition);
-                overTerrain = _collider.Raycast(ray, out hit, 100000f);
+                overTerrain = Physics.Raycast(ray, out hit, 100000f)
+                              && hit.collider is TerrainCollider;
             }
 
             UpdateBrushCursor(ShowBrushCursor && overTerrain, hit.point);
@@ -275,23 +282,24 @@ namespace NetworkDesigner.Terrain
                 _hasFlattenTarget = true;
             }
 
+            // Sculpt the field, then push ONLY the brush-affected heightmap
+            // region to the Terrain (cheap — never the whole 4M-cell map).
             ApplyBrush(hit.point, Time.deltaTime);
-            RebuildMesh();
+            GridFromWorld(hit.point, out float bfx, out float bfz);
+            int rad = Mathf.CeilToInt(BrushRadius / Mathf.Max(0.01f, _field.CellSize)) + 1;
+            PushRegionToTerrain(Mathf.RoundToInt(bfx) - rad, Mathf.RoundToInt(bfz) - rad,
+                                rad * 2 + 1, rad * 2 + 1);
             _dirtySince = Time.realtimeSinceStartup;
             if (LiveContours) RebuildContours();
         }
 
-        // World hit -> fractional grid coords, through the GameObject transform
-        // so it's correct under any position/rotation/scale. The mesh is built
-        // centered-local, so local (0,0) is the grid centre.
+        // World hit -> fractional grid coords, relative to the terrain corner
+        // (Origin). Unity Terrain is axis-aligned and corner-anchored.
         void GridFromWorld(Vector3 worldHit, out float fx, out float fz)
         {
             float cs = _field.CellSize;
-            float halfW = (_field.ColumnsX - 1) * cs * 0.5f;
-            float halfL = (_field.RowsZ - 1) * cs * 0.5f;
-            Vector3 local = transform.InverseTransformPoint(worldHit);
-            fx = (local.x + halfW) / cs;
-            fz = (local.z + halfL) / cs;
+            fx = (worldHit.x - _field.Origin.x) / cs;
+            fz = (worldHit.z - _field.Origin.z) / cs;
         }
 
         // Bilinear height (field offset space) at fractional grid coords.
@@ -319,20 +327,17 @@ namespace NetworkDesigner.Terrain
             if (_cursorMat != null) _cursorMat.color = BrushCursorColor;
 
             int n = Mathf.Max(8, BrushCursorSegments);
-            float cs = _field.CellSize;
-            float halfW = (_field.ColumnsX - 1) * cs * 0.5f;
-            float halfL = (_field.RowsZ - 1) * cs * 0.5f;
-            Vector3 localCenter = transform.InverseTransformPoint(worldCenter);
 
-            // Conforming ring points (world space).
+            // Conforming ring points in world space; the cursor mesh object
+            // lives at world identity so these render as-is.
             _ring.Clear();
             for (int i = 0; i < n; i++)
             {
                 float ang = (i / (float)n) * Mathf.PI * 2f;
-                float lx = localCenter.x + Mathf.Cos(ang) * BrushRadius;
-                float lz = localCenter.z + Mathf.Sin(ang) * BrushRadius;
-                float ly = HeightAtGrid((lx + halfW) / cs, (lz + halfL) / cs) + BrushCursorLift;
-                _ring.Add(transform.TransformPoint(new Vector3(lx, ly, lz)));
+                float wx = worldCenter.x + Mathf.Cos(ang) * BrushRadius;
+                float wz = worldCenter.z + Mathf.Sin(ang) * BrushRadius;
+                float wy = _field.SampleHeight(wx, wz) + BrushCursorLift;
+                _ring.Add(new Vector3(wx, wy, wz));
             }
 
             // Build the closed-loop line mesh, optionally dashed.
@@ -377,15 +382,19 @@ namespace NetworkDesigner.Terrain
         void EnsureCursor()
         {
             if (_cursorMf != null) return;
+            // Root object at world identity — the ring verts are world-space.
             GameObject go = new GameObject("BrushCursor");
-            go.transform.SetParent(transform, worldPositionStays: false);
             _cursorMf = go.AddComponent<MeshFilter>();
             _cursorMr = go.AddComponent<MeshRenderer>();
             _cursorMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             _cursorMr.receiveShadows = false;
             _cursorMesh = new Mesh { name = "BrushCursorMesh" };
             _cursorMf.sharedMesh = _cursorMesh;
-            _cursorMat = PipelineMaterials.CreateUnlitColor(BrushCursorColor, "BrushCursorMat");
+            // Always-on-top so the ring isn't occluded by terrain relief.
+            Shader sh = Shader.Find("NetworkDesigner/CursorOverlay");
+            _cursorMat = sh != null
+                ? new Material(sh) { name = "BrushCursorMat", color = BrushCursorColor }
+                : PipelineMaterials.CreateUnlitColor(BrushCursorColor, "BrushCursorMat");
             _cursorMr.sharedMaterial = _cursorMat;
         }
 
@@ -394,9 +403,13 @@ namespace NetworkDesigner.Terrain
         public void RebuildContours()
         {
             EnsureContours();
-            if (!ShowContours || ContourInterval <= 0f)
+            // Contours over the full 2 km / 1 m heightmap (~4M cells) are far
+            // too heavy to rebuild whole; that's a later region-based pass.
+            // Skip above a cell budget for now.
+            long cells = _field != null ? (long)_field.ColumnsX * _field.RowsZ : 0;
+            if (_field == null || !ShowContours || ContourInterval <= 0f || cells > 300000)
             {
-                _contourMr.enabled = false;
+                if (_contourMr != null) _contourMr.enabled = false;
                 return;
             }
             _contourMr.enabled = true;
@@ -482,30 +495,33 @@ namespace NetworkDesigner.Terrain
             return n > 0 ? sum / n : _field.GetHeight(x, z);
         }
 
-        // (Re)create the field. Stamps the test hill only on a fresh field.
+        // (Re)create the field to match the Terrain's heightmap. Origin is the
+        // terrain's world corner; CellSize = terrain size / (resolution - 1).
         void EnsureField(bool forceRebuild)
         {
-            int cx = Mathf.Max(2, ColumnsX);
-            int rz = Mathf.Max(2, RowsZ);
-            float cs = Mathf.Max(0.01f, CellSize);
-            float halfW = (cx - 1) * cs * 0.5f;
-            float halfL = (rz - 1) * cs * 0.5f;
-            Vector3 origin = transform.position - new Vector3(halfW, 0f, halfL);
+            int res = Surface != null ? Surface.terrainData.heightmapResolution : Mathf.Max(2, ColumnsX);
+            float sizeX = Surface != null ? Surface.terrainData.size.x : (res - 1) * Mathf.Max(0.01f, CellSize);
+            float cs = sizeX / Mathf.Max(1, res - 1);
+            Vector3 origin = Surface != null
+                ? Surface.transform.position
+                : transform.position - new Vector3((res - 1) * cs * 0.5f, 0f, (res - 1) * cs * 0.5f);
 
-            bool fresh = _field == null || _field.ColumnsX != cx || _field.RowsZ != rz;
-            if (fresh || forceRebuild)
+            bool fresh = _field == null || _field.ColumnsX != res || _field.RowsZ != res;
+            if (fresh)
             {
-                if (fresh)
-                {
-                    _field = new TerrainField(cx, rz, cs, origin);
-                    if (TestHill) StampTestHill();
-                }
-                else
-                {
-                    _field.CellSize = cs;
-                    _field.Origin = origin;
-                }
+                _field = new TerrainField(res, res, cs, origin);
+                if (TestHill) StampTestHill();
             }
+            else if (forceRebuild)
+            {
+                _field.CellSize = cs;
+                _field.Origin = origin;
+            }
+
+            // Keep the (hidden) public dims in sync for camera framing etc.
+            ColumnsX = _field.ColumnsX;
+            RowsZ = _field.RowsZ;
+            CellSize = _field.CellSize;
         }
 
         // Full reset: new flat field (+ optional test hill) and rebuild.
@@ -514,7 +530,7 @@ namespace NetworkDesigner.Terrain
         {
             _field = null;
             EnsureField(forceRebuild: true);
-            RebuildMesh();
+            SyncTerrainFull();
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup; // persist the reset
         }
@@ -526,34 +542,43 @@ namespace NetworkDesigner.Terrain
         {
             if (_field == null) EnsureField(forceRebuild: true);
             System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
-            RebuildMesh();
+            SyncTerrainFull();
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
         }
 
-        // Rebuild the render mesh + collider from the current field. Cheap
-        // enough to call every drag frame at MVP grid sizes.
-        public void RebuildMesh()
+        // Push the ENTIRE heightfield into the Terrain heightmap. Use sparingly
+        // (Start / reset / flatten) — it's a ~res^2 upload. Sculpt uses the
+        // region push instead.
+        public void SyncTerrainFull()
         {
-            if (_field == null) EnsureField(forceRebuild: true);
+            if (Surface == null || _field == null) return;
+            int res = _field.ColumnsX;
+            float maxH = Mathf.Max(0.01f, Surface.terrainData.size.y);
+            float[,] hm = new float[res, res]; // Unity heightmap is [z, x]
+            for (int z = 0; z < res; z++)
+                for (int x = 0; x < res; x++)
+                    hm[z, x] = Mathf.Clamp01(_field.GetHeight(x, z) / maxH);
+            Surface.terrainData.SetHeights(0, 0, hm);
+        }
 
-            if (_mesh == null) _mesh = new Mesh { name = "TerrainMesh" };
-            TerrainMeshBuilder.Build(_field, _mesh);
-            GetComponent<MeshFilter>().sharedMesh = _mesh;
-
-            if (_mat == null)
-                _mat = PipelineMaterials.CreateLit(TerrainColor, Smoothness, "TerrainMat");
-            else
-                _mat.color = TerrainColor;
-            GetComponent<MeshRenderer>().sharedMaterial = _mat;
-
-            if (_collider == null)
-            {
-                _collider = GetComponent<MeshCollider>();
-                if (_collider == null) _collider = gameObject.AddComponent<MeshCollider>();
-            }
-            _collider.sharedMesh = null;
-            _collider.sharedMesh = _mesh;
+        // Push only a rectangular cell region [x0,z0]..(+w,+h) to the heightmap.
+        // Cheap (brush-sized), so it runs every sculpt frame.
+        void PushRegionToTerrain(int x0, int z0, int w, int h)
+        {
+            if (Surface == null || _field == null) return;
+            int res = _field.ColumnsX;
+            x0 = Mathf.Clamp(x0, 0, res - 1);
+            z0 = Mathf.Clamp(z0, 0, res - 1);
+            w = Mathf.Clamp(w, 1, res - x0);
+            h = Mathf.Clamp(h, 1, res - z0);
+            float maxH = Mathf.Max(0.01f, Surface.terrainData.size.y);
+            float[,] region = new float[h, w]; // [z, x]
+            for (int zr = 0; zr < h; zr++)
+                for (int xr = 0; xr < w; xr++)
+                    region[zr, xr] = Mathf.Clamp01(_field.GetHeight(x0 + xr, z0 + zr) / maxH);
+            Surface.terrainData.SetHeightsDelayLOD(x0, z0, region);
+            Surface.terrainData.SyncHeightmap(); // refresh mesh LOD + collider
         }
 
         void StampTestHill()

@@ -72,10 +72,7 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.contourDashGap", "Contours", "Dash gap (m)",
                 () => t.ContourDashGap, v => { t.ContourDashGap = v; t.RebuildContours(); }, 0.25f, 20f);
 
-            // --- Appearance ---
-            // TerrainColor maps through Material.color (BaseColor) on rebuild.
-            TuningRegistry.RegisterColor("terrain.color", "Appearance", "Terrain color",
-                () => t.TerrainColor, v => { t.TerrainColor = v; t.RebuildMesh(); });
+            // (Terrain color is now the Unity Terrain material's job, not ours.)
         }
     }
 }
