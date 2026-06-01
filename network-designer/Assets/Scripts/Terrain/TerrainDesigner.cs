@@ -39,14 +39,27 @@ namespace NetworkDesigner.Terrain
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
-        [Tooltip("Brush radius in metres.")]
+        [Tooltip("Brush radius in metres. Resize live with numpad +/-.")]
         public float BrushRadius = 10f;
+        [Tooltip("Numpad +/- resize speed (metres/second, while held).")]
+        public float BrushResizeRate = 15f;
+        [Tooltip("Upper clamp for the brush radius (metres).")]
+        public float MaxBrushRadius = 100f;
         [Tooltip("Height change rate (metres/second) at the brush centre.")]
         public float BrushStrength = 20f;
         [Tooltip("0 = hard edge, 1 = soft (smoothstep) falloff to the rim.")]
         [Range(0f, 1f)] public float BrushFalloff = 0.7f;
         [Tooltip("Camera used for the sculpt raycast. Defaults to Camera.main.")]
         public Camera PickCamera;
+
+        [Header("Brush cursor (ring)")]
+        public bool ShowBrushCursor = true;
+        public Color BrushCursorColor = new Color(0.2f, 0.9f, 1f, 0.9f);
+        [Tooltip("Ring line width in metres.")]
+        public float BrushCursorWidth = 0.3f;
+        [Range(8, 128)] public int BrushCursorSegments = 48;
+        [Tooltip("Metres the ring floats above the surface so it doesn't z-fight.")]
+        public float BrushCursorLift = 0.15f;
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -67,6 +80,7 @@ namespace NetworkDesigner.Terrain
         Mesh _mesh;
         Material _mat;
         MeshCollider _collider;
+        LineRenderer _cursor;
         bool _hasFlattenTarget;
         float _flattenTarget; // height offset (field space) captured on mouse-down
 
@@ -152,6 +166,11 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
 
+            // Brush resize: numpad + / - (held = continuous).
+            if (Input.GetKey(KeyCode.KeypadPlus)) BrushRadius += BrushResizeRate * Time.deltaTime;
+            if (Input.GetKey(KeyCode.KeypadMinus)) BrushRadius -= BrushResizeRate * Time.deltaTime;
+            BrushRadius = Mathf.Clamp(BrushRadius, 0.5f, MaxBrushRadius);
+
             if (_field == null) return;
 
             // Debounced autosave: write once sculpting has paused.
@@ -163,12 +182,21 @@ namespace NetworkDesigner.Terrain
             }
 
             if (Input.GetMouseButtonDown(0)) _hasFlattenTarget = false;
-            if (!Input.GetMouseButton(0)) return;
 
+            // One hover raycast per frame, shared by the brush cursor and the
+            // sculpt itself.
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
-            if (cam == null) return;
-            Ray ray = cam.ScreenPointToRay(Input.mousePosition);
-            if (_collider == null || !_collider.Raycast(ray, out RaycastHit hit, 100000f)) return;
+            bool overTerrain = false;
+            RaycastHit hit = default;
+            if (cam != null && _collider != null)
+            {
+                Ray ray = cam.ScreenPointToRay(Input.mousePosition);
+                overTerrain = _collider.Raycast(ray, out hit, 100000f);
+            }
+
+            UpdateBrushCursor(ShowBrushCursor && overTerrain, hit.point);
+
+            if (!overTerrain || !Input.GetMouseButton(0)) return;
 
             if (!_hasFlattenTarget)
             {
@@ -206,6 +234,53 @@ namespace NetworkDesigner.Terrain
             float h0 = Mathf.Lerp(_field.GetHeight(x0, z0), _field.GetHeight(x1, z0), tx);
             float h1 = Mathf.Lerp(_field.GetHeight(x0, z1), _field.GetHeight(x1, z1), tx);
             return Mathf.Lerp(h0, h1, tz);
+        }
+
+        // A ring at the hovered point showing the brush footprint, conforming
+        // to the terrain surface (each point sampled via HeightAtGrid) and
+        // transform-correct (built in local space, then TransformPoint'd).
+        void UpdateBrushCursor(bool visible, Vector3 worldCenter)
+        {
+            EnsureCursor();
+            _cursor.enabled = visible;
+            if (!visible) return;
+
+            int n = Mathf.Max(8, BrushCursorSegments);
+            if (_cursor.positionCount != n) _cursor.positionCount = n;
+            _cursor.startWidth = _cursor.endWidth = BrushCursorWidth;
+            _cursor.startColor = _cursor.endColor = BrushCursorColor;
+
+            float cs = _field.CellSize;
+            float halfW = (_field.ColumnsX - 1) * cs * 0.5f;
+            float halfL = (_field.RowsZ - 1) * cs * 0.5f;
+            Vector3 localCenter = transform.InverseTransformPoint(worldCenter);
+
+            for (int i = 0; i < n; i++)
+            {
+                float a = (i / (float)n) * Mathf.PI * 2f;
+                float lx = localCenter.x + Mathf.Cos(a) * BrushRadius;
+                float lz = localCenter.z + Mathf.Sin(a) * BrushRadius;
+                float ly = HeightAtGrid((lx + halfW) / cs, (lz + halfL) / cs) + BrushCursorLift;
+                _cursor.SetPosition(i, transform.TransformPoint(new Vector3(lx, ly, lz)));
+            }
+        }
+
+        void EnsureCursor()
+        {
+            if (_cursor != null) return;
+            GameObject go = new GameObject("BrushCursor");
+            go.transform.SetParent(transform, worldPositionStays: false);
+            _cursor = go.AddComponent<LineRenderer>();
+            _cursor.useWorldSpace = true;
+            _cursor.loop = true;
+            _cursor.numCapVertices = 2;
+            _cursor.numCornerVertices = 2;
+            _cursor.positionCount = Mathf.Max(8, BrushCursorSegments);
+            _cursor.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _cursor.receiveShadows = false;
+            // Sprites/Default is cross-pipeline and honors LineRenderer vertex
+            // colors (start/endColor), so the ring tint works in URP.
+            _cursor.material = new Material(Shader.Find("Sprites/Default"));
         }
 
         // Modify the heightfield under the brush, in field (height-offset) space.
