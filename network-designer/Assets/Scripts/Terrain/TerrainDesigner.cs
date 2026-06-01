@@ -13,6 +13,8 @@
 // just starting relief you can sculpt on top of — it is not re-applied on
 // rebuilds.
 
+using System.Collections.Generic;
+using Newtonsoft.Json;
 using UnityEngine;
 
 namespace NetworkDesigner.Terrain
@@ -51,7 +53,16 @@ namespace NetworkDesigner.Terrain
         public bool TestHill = true;
         public float TestHillHeight = 25f;
 
+        [Header("Autosave (terrain persistence across Play stop/start)")]
+        public bool Autosave = true;
+        [Tooltip("Where the terrain is saved. Empty → project_root/TerrainAutosave.json " +
+                 "in the Editor, persistentDataPath in a Player build.")]
+        public string AutosavePath = "";
+        [Tooltip("Seconds of no sculpting before the terrain is written to disk.")]
+        public float AutosaveDebounceSeconds = 1f;
+
         TerrainField _field;
+        float _dirtySince = -1f; // realtime when last edited; -1 = clean
         Mesh _mesh;
         Material _mat;
         MeshCollider _collider;
@@ -63,7 +74,24 @@ namespace NetworkDesigner.Terrain
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
-            EnsureField(forceRebuild: true);
+
+            if (Autosave) _field = TryLoadTerrain();
+            if (_field == null)
+            {
+                EnsureField(forceRebuild: true); // fresh field (+ test hill)
+            }
+            else
+            {
+                // Adopt loaded dimensions; refresh Origin to the current
+                // GameObject placement so sculpt mapping stays correct even if
+                // the object moved between sessions.
+                ColumnsX = _field.ColumnsX;
+                RowsZ = _field.RowsZ;
+                CellSize = _field.CellSize;
+                float halfW = (ColumnsX - 1) * CellSize * 0.5f;
+                float halfL = (RowsZ - 1) * CellSize * 0.5f;
+                _field.Origin = transform.position - new Vector3(halfW, 0f, halfL);
+            }
             RebuildMesh();
         }
 
@@ -76,6 +104,15 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
 
             if (_field == null) return;
+
+            // Debounced autosave: write once sculpting has paused.
+            if (Autosave && _dirtySince >= 0f
+                && Time.realtimeSinceStartup - _dirtySince >= AutosaveDebounceSeconds)
+            {
+                SaveTerrain();
+                _dirtySince = -1f;
+            }
+
             if (Input.GetMouseButtonDown(0)) _hasFlattenTarget = false;
             if (!Input.GetMouseButton(0)) return;
 
@@ -92,6 +129,7 @@ namespace NetworkDesigner.Terrain
 
             ApplyBrush(hit.point, Time.deltaTime);
             RebuildMesh();
+            _dirtySince = Time.realtimeSinceStartup;
         }
 
         // Modify the heightfield under the brush, in field (height-offset) space.
@@ -187,6 +225,7 @@ namespace NetworkDesigner.Terrain
             _field = null;
             EnsureField(forceRebuild: true);
             RebuildMesh();
+            _dirtySince = Time.realtimeSinceStartup; // persist the reset
         }
 
         // Rebuild the render mesh + collider from the current field. Cheap
@@ -228,6 +267,106 @@ namespace NetworkDesigner.Terrain
                     float g = Mathf.Exp(-(dx * dx + dz * dz) / twoSigSq);
                     _field.SetHeight(x, z, g * TestHillHeight);
                 }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Save / load (JSON, mirrors the road designer's autosave)
+        // -----------------------------------------------------------------
+
+        void OnDisable()
+        {
+            // Flush any pending edits when Play stops / the object is disabled.
+            if (Autosave && _dirtySince >= 0f)
+            {
+                SaveTerrain();
+                _dirtySince = -1f;
+            }
+        }
+
+        string ResolveAutosavePath()
+        {
+            if (!string.IsNullOrEmpty(AutosavePath)) return AutosavePath;
+#if UNITY_EDITOR
+            return System.IO.Path.Combine(Application.dataPath, "..", "TerrainAutosave.json");
+#else
+            return System.IO.Path.Combine(Application.persistentDataPath, "TerrainAutosave.json");
+#endif
+        }
+
+        public void SaveTerrain()
+        {
+            if (_field == null) return;
+            try
+            {
+                string json = JsonConvert.SerializeObject(_field, TerrainJsonSettings);
+                System.IO.File.WriteAllText(ResolveAutosavePath(), json);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Save failed: {ex.Message}");
+            }
+        }
+
+        TerrainField TryLoadTerrain()
+        {
+            try
+            {
+                string path = ResolveAutosavePath();
+                if (!System.IO.File.Exists(path)) return null;
+                TerrainField f = JsonConvert.DeserializeObject<TerrainField>(
+                    System.IO.File.ReadAllText(path), TerrainJsonSettings);
+                // Reject missing/corrupt/mismatched data rather than crash.
+                if (f == null || f.Heights == null) return null;
+                if (f.ColumnsX < 2 || f.RowsZ < 2) return null;
+                if (f.Heights.Length != f.ColumnsX * f.RowsZ) return null;
+                return f;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Load failed: {ex.Message} — starting fresh.");
+                return null;
+            }
+        }
+
+        static JsonSerializerSettings _terrainJsonSettings;
+        static JsonSerializerSettings TerrainJsonSettings
+        {
+            get
+            {
+                if (_terrainJsonSettings == null)
+                    _terrainJsonSettings = new JsonSerializerSettings
+                    {
+                        Formatting = Formatting.Indented,
+                        Converters = new List<JsonConverter> { new Vector3JsonConverter() },
+                        NullValueHandling = NullValueHandling.Ignore,
+                        MissingMemberHandling = MissingMemberHandling.Ignore,
+                    };
+                return _terrainJsonSettings;
+            }
+        }
+
+        // Vector3 as { x, y, z } — keeps Newtonsoft from chasing the derived
+        // properties (normalized/magnitude) on UnityEngine.Vector3.
+        class Vector3JsonConverter : JsonConverter<Vector3>
+        {
+            public override void WriteJson(JsonWriter writer, Vector3 value, JsonSerializer serializer)
+            {
+                writer.WriteStartObject();
+                writer.WritePropertyName("x"); writer.WriteValue(value.x);
+                writer.WritePropertyName("y"); writer.WriteValue(value.y);
+                writer.WritePropertyName("z"); writer.WriteValue(value.z);
+                writer.WriteEndObject();
+            }
+
+            public override Vector3 ReadJson(JsonReader reader, System.Type objectType,
+                Vector3 existingValue, bool hasExistingValue, JsonSerializer serializer)
+            {
+                Newtonsoft.Json.Linq.JObject jo = Newtonsoft.Json.Linq.JObject.Load(reader);
+                return new Vector3(
+                    jo["x"]?.ToObject<float>() ?? 0f,
+                    jo["y"]?.ToObject<float>() ?? 0f,
+                    jo["z"]?.ToObject<float>() ?? 0f);
             }
         }
     }
