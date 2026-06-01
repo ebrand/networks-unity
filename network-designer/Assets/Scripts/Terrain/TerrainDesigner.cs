@@ -147,7 +147,8 @@ namespace NetworkDesigner.Terrain
 
             if (!_hasFlattenTarget)
             {
-                _flattenTarget = _field.SampleHeight(hit.point.x, hit.point.z) - _field.Origin.y;
+                GridFromWorld(hit.point, out float cfx, out float cfz);
+                _flattenTarget = HeightAtGrid(cfx, cfz);
                 _hasFlattenTarget = true;
             }
 
@@ -156,12 +157,39 @@ namespace NetworkDesigner.Terrain
             _dirtySince = Time.realtimeSinceStartup;
         }
 
+        // World hit -> fractional grid coords, through the GameObject transform
+        // so it's correct under any position/rotation/scale. The mesh is built
+        // centered-local, so local (0,0) is the grid centre.
+        void GridFromWorld(Vector3 worldHit, out float fx, out float fz)
+        {
+            float cs = _field.CellSize;
+            float halfW = (_field.ColumnsX - 1) * cs * 0.5f;
+            float halfL = (_field.RowsZ - 1) * cs * 0.5f;
+            Vector3 local = transform.InverseTransformPoint(worldHit);
+            fx = (local.x + halfW) / cs;
+            fz = (local.z + halfL) / cs;
+        }
+
+        // Bilinear height (field offset space) at fractional grid coords.
+        float HeightAtGrid(float fx, float fz)
+        {
+            int x0 = Mathf.Clamp(Mathf.FloorToInt(fx), 0, _field.ColumnsX - 1);
+            int z0 = Mathf.Clamp(Mathf.FloorToInt(fz), 0, _field.RowsZ - 1);
+            int x1 = Mathf.Min(x0 + 1, _field.ColumnsX - 1);
+            int z1 = Mathf.Min(z0 + 1, _field.RowsZ - 1);
+            float tx = Mathf.Clamp01(fx - x0), tz = Mathf.Clamp01(fz - z0);
+            float h0 = Mathf.Lerp(_field.GetHeight(x0, z0), _field.GetHeight(x1, z0), tx);
+            float h1 = Mathf.Lerp(_field.GetHeight(x0, z1), _field.GetHeight(x1, z1), tx);
+            return Mathf.Lerp(h0, h1, tz);
+        }
+
         // Modify the heightfield under the brush, in field (height-offset) space.
         void ApplyBrush(Vector3 worldHit, float dt)
         {
             float cs = _field.CellSize;
-            float fx = (worldHit.x - _field.Origin.x) / cs;
-            float fz = (worldHit.z - _field.Origin.z) / cs;
+            // Map the world hit to grid space through the GameObject transform
+            // (handles any position/rotation/scale), NOT world-Origin algebra.
+            GridFromWorld(worldHit, out float fx, out float fz);
             int cx0 = Mathf.RoundToInt(fx);
             int cz0 = Mathf.RoundToInt(fz);
             int rad = Mathf.Max(1, Mathf.CeilToInt(BrushRadius / cs));
