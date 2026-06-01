@@ -82,10 +82,18 @@ namespace NetworkDesigner.Terrain
                  "should comfortably exceed the terrain footprint.")]
         public float ShadowDistance = 300f;
 
+        [Header("Camera")]
+        [Tooltip("On Start, add an OrbitCameraController to the pick camera if it " +
+                 "has none, framed on the terrain. Middle-drag = orbit, " +
+                 "shift+middle = pan, scroll = zoom, WASD = pan. Sculpt is " +
+                 "left-drag, so they don't conflict. Off = manage the camera yourself.")]
+        public bool AutoCameraControl = true;
+
         void Start()
         {
             if (PickCamera == null) PickCamera = Camera.main;
             if (AutoLighting) EnsureAmbiance();
+            if (AutoCameraControl) EnsureCameraControl();
 
             if (Autosave) _field = TryLoadTerrain();
             if (_field == null)
@@ -117,6 +125,23 @@ namespace NetworkDesigner.Terrain
             amb.ManageAmbient = true;
             amb.ShadowDistance = ShadowDistance;
             amb.Apply();
+        }
+
+        // If the pick camera has no orbit controller, add one framed on the
+        // terrain. Left alone if one already exists (respect manual setup).
+        void EnsureCameraControl()
+        {
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            if (cam.GetComponent<OrbitCameraController>() != null) return;
+
+            OrbitCameraController orbit = cam.gameObject.AddComponent<OrbitCameraController>();
+            orbit.Target = transform.position; // terrain centre
+            float span = Mathf.Max((Mathf.Max(2, ColumnsX) - 1) * CellSize,
+                                   (Mathf.Max(2, RowsZ) - 1) * CellSize);
+            orbit.DistanceTarget = span * 1.2f; // frame the whole footprint
+            orbit.Distance = orbit.DistanceTarget;
+            orbit.Pitch = 45f;
         }
 
         void Update()
