@@ -1,23 +1,24 @@
-// Terrain designer — drives a Unity Terrain (heightmap) with sculpt brushes.
+// Terrain designer — LOW-POLY chunked flat-shaded mesh with sculpt brushes.
 //
-// The Terrain (assigned to `Surface`, or auto-found) does the rendering, LOD
-// and collision — so it scales to 1 m over 2 km (~4M cells) where a single
-// mesh + MeshCollider could not. `TerrainField` stays the working heightfield
-// (source of truth for contours / cursor / save); sculpting edits it and then
-// pushes only the brush-affected region into the heightmap (SetHeightsDelayLOD).
-// Coordinates are corner-anchored (the Terrain's world position = field Origin).
+// `TerrainField` is the working heightfield. It's rendered as a grid of CHUNKS
+// (each a flat-shaded mesh with un-shared verts -> per-face normals = visible
+// facets) plus a MeshCollider per chunk. Sculpting edits the field, then
+// rebuilds only the brush-touched chunks (mesh + collider) — so it stays
+// interactive at 5 m over 2 km without rebuilding the whole ~1M-vert mesh.
+// Coordinates are corner-anchored (field.Origin = the centered world corner).
+// Single lit color for now; height/slope vertex-color bands are a follow-up.
 //
-// Sculpting runs in Play mode: hold the left mouse button over the terrain and
-// drag. Brush mode: 1=Raise, 2=Lower, 3=Smooth, 4=Flatten.
+// Sculpting runs in Play mode: hold left mouse over the terrain and drag.
+// Brush: 1=Raise 2=Lower 3=Smooth 4=Flatten; [ / ] resize the brush.
 //
-// LIMITS (this slice): heights clamp to [0, terrain height] — no digging below
-// the floor yet; contours are skipped on the full-res heightmap (region-based
-// contours are a later pass). The "test hill" stamps once on a fresh field.
+// (Replaced an earlier Unity-Terrain heightmap renderer; we went low-poly,
+// which is coarse enough that a custom flat-shaded mesh is the right tool.)
 
 using System.Collections.Generic;
 using Newtonsoft.Json;
 using UnityEngine;
 using NetworkDesigner.Designer; // SceneAmbiance
+using NetworkDesigner.Model;    // PlacedTreeData
 
 namespace NetworkDesigner.Terrain
 {
@@ -25,40 +26,19 @@ namespace NetworkDesigner.Terrain
     {
         public enum BrushMode { Raise, Lower, Smooth, Flatten }
 
-        [Header("Unity Terrain surface")]
-        [Tooltip("The Unity Terrain to drive. Create one in the editor (Terrain " +
-                 "Settings: heightmap resolution e.g. 2049, size e.g. 2000x2000x600, " +
-                 "positioned at -W/2,0,-L/2 to center on origin) and assign it here.")]
-        public UnityEngine.Terrain Surface;
+        [Header("Terrain (low-poly chunked mesh)")]
+        [Tooltip("Terrain width/length in metres (square).")]
+        public float TerrainSizeMeters = 2000f;
+        [Tooltip("Metres between grid vertices = facet size. 5 m is low-poly + road-usable.")]
+        public float CellSize = 5f;
+        [Tooltip("Cells per chunk side. Chunks rebuild independently on sculpt; keep <= ~100.")]
+        public int ChunkCells = 50;
+        [Tooltip("Flat terrain color (single lit color for now; height/slope vertex-color bands later).")]
+        public Color TerrainColor = new Color(0.40f, 0.5f, 0.30f);
 
-        // Heightfield dimensions are derived from Surface in EnsureField:
-        // ColumnsX = RowsZ = heightmap resolution, CellSize = size / (res-1).
-        [HideInInspector] public int ColumnsX = 2049;
-        [HideInInspector] public int RowsZ = 2049;
-        [HideInInspector] public float CellSize = 2000f / 2048f;
-
-        [Header("Ground layers (grass + slope rock)")]
-        [Tooltip("On Start, if the Terrain has no layers, build a grass layer " +
-                 "(plus a rock layer blended by slope when rock textures are " +
-                 "assigned). Editor-assigned layers are kept.")]
-        public bool AutoGrass = true;
-        [Tooltip("Grass albedo (e.g. grass/grassy-meadow1_albedo).")]
-        public Texture2D GrassAlbedo;
-        [Tooltip("Grass normal map (import as Normal map).")]
-        public Texture2D GrassNormal;
-        [Tooltip("Grass tile size in metres.")]
-        public float GrassTileSize = 30f;
-
-        [Tooltip("Optional rock/dirt albedo — blended in on steeper slopes.")]
-        public Texture2D RockAlbedo;
-        [Tooltip("Rock normal map (import as Normal map).")]
-        public Texture2D RockNormal;
-        [Tooltip("Rock tile size in metres.")]
-        public float RockTileSize = 20f;
-        [Tooltip("Slope (degrees) at/below which it's all grass.")]
-        [Range(0f, 90f)] public float SlopeGrassMaxAngle = 25f;
-        [Tooltip("Slope (degrees) at/above which it's all rock.")]
-        [Range(0f, 90f)] public float SlopeRockMinAngle = 45f;
+        // Vertex counts, derived from TerrainSizeMeters / CellSize in EnsureField.
+        [HideInInspector] public int ColumnsX = 401;
+        [HideInInspector] public int RowsZ = 401;
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
@@ -89,7 +69,7 @@ namespace NetworkDesigner.Terrain
         public float BrushCursorDashGap = 1.5f;
 
         [Header("Topographic lines")]
-        public bool ShowContours = true;
+        public bool ShowContours = false;
         [Tooltip("Elevation between contour lines, in metres.")]
         public float ContourInterval = 1f;
         public Color ContourColor = new Color(0.22f, 0.15f, 0.08f, 1f); // dark brown
@@ -105,6 +85,21 @@ namespace NetworkDesigner.Terrain
                  "in real time. Turn off (rebuild only on stroke-end) if it " +
                  "hitches on very large grids.")]
         public bool LiveContours = true;
+
+        [Header("Tree brush")]
+        [Tooltip("Press T to toggle Tree mode: left-drag PAINTS trees in the " +
+                 "brush, right-drag ERASES them. Sculpt is disabled while on.")]
+        public bool TreeMode = false;
+        [Tooltip("Low-poly tree prefabs to scatter (one picked at random per tree).")]
+        public List<GameObject> TreePrefabs = new List<GameObject>();
+        [Tooltip("Trees painted per second while dragging.")]
+        public float TreePaintRate = 25f;
+        [Tooltip("Lattice spacing (m): trees fill a jittered grid of this cell " +
+                 "size — controls density (smaller = denser). At most one tree " +
+                 "per cell, so repainting the same spot adds nothing.")]
+        public float TreeMinSpacing = 4f;
+        [Tooltip("Random uniform scale range applied to each tree.")]
+        public Vector2 TreeScaleRange = new Vector2(1.2f, 1.95f);
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -122,6 +117,33 @@ namespace NetworkDesigner.Terrain
 
         TerrainField _field;
         float _dirtySince = -1f; // realtime when last edited; -1 = clean
+        System.Threading.Tasks.Task _saveTask; // in-flight async autosave (serialize+write off-thread)
+        GameObject _chunkRoot;
+        Mesh[] _chunkMesh;
+        MeshCollider[] _chunkCol;
+        Material _mat;
+        int _chunksX, _chunksZ;
+        GameObject _treeRoot;
+        readonly List<PlacedTree> _trees = new List<PlacedTree>();
+        // Trees live on a JITTERED LATTICE keyed by cell: at most one tree per
+        // TreeMinSpacing-sized cell, placed at a deterministic jittered point.
+        // Even spacing is structural, so painting never scans neighbours — it
+        // just fills the unoccupied cells under the brush. This dict is the
+        // occupancy + erase index; _trees stays the canonical list for save.
+        readonly Dictionary<long, PlacedTree> _treeByCell = new Dictionary<long, PlacedTree>();
+        readonly List<long> _candKey = new List<long>();   // reused paint scratch
+        readonly List<Vector2> _candPos = new List<Vector2>();
+        const float TreeJitter = 0.4f; // max per-axis jitter as a fraction of the cell (<0.5 keeps the point in-cell)
+        float _treeAccum;                         // fractional trees pending this frame
+        List<PlacedTreeData> _pendingTrees;       // loaded trees, spawned after chunks build
+        bool[] _treeEnabled;                      // which TreePrefabs the brush may use
+        string[] _treeLabels;                     // cached toggle labels (avoid per-repaint concat)
+        Vector2 _treeScroll;
+        Rect _treePanelRect;                      // palette rect (screen space) — block painting over it
+        readonly Dictionary<GameObject, Texture2D> _treeThumbs = new Dictionary<GameObject, Texture2D>();
+        readonly List<TreePack> _packs = new List<TreePack>(); // saved include/exclude presets
+        int _activePack = -1;                     // index into _packs; -1 = custom selection
+        string _newPackName = "";                 // pack-name text field buffer
         MeshFilter _cursorMf;
         MeshRenderer _cursorMr;
         Mesh _cursorMesh;
@@ -166,20 +188,9 @@ namespace NetworkDesigner.Terrain
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
 
-            if (Surface == null) Surface = FindFirstObjectByType<UnityEngine.Terrain>();
-            if (Surface == null)
-            {
-                Debug.LogError("[TerrainDesigner] No 'Surface' Terrain assigned or found. " +
-                    "Create a Unity Terrain (resolution e.g. 2049, size 2000x2000x600, " +
-                    "centered at -1000,0,-1000) and assign it to Surface.");
-                enabled = false;
-                return;
-            }
-
-            // Field dimensions come from the Terrain's heightmap.
             EnsureField(forceRebuild: true);
 
-            // Adopt a saved heightfield only if it matches the terrain resolution.
+            // Adopt a saved heightfield only if it matches the current grid.
             if (Autosave)
             {
                 TerrainField loaded = TryLoadTerrain();
@@ -191,9 +202,9 @@ namespace NetworkDesigner.Terrain
                 }
             }
 
-            SyncTerrainFull();
+            BuildAllChunks();
+            SpawnLoadedTrees(); // trees from the save (surface heights now known)
             RebuildContours();
-            if (AutoGrass) EnsureGroundLayers();
 
             // Stand up scene services, sized to the actual terrain.
             if (AutoLighting) EnsureAmbiance();
@@ -211,94 +222,435 @@ namespace NetworkDesigner.Terrain
             setup.Terrain = this;
         }
 
-        // Build the ground Terrain Layers (grass, + rock when assigned) and the
-        // slope-blended splatmap — only if the Terrain has no layers yet, so an
-        // editor-painted setup is respected.
-        void EnsureGroundLayers()
+        // --- Chunked flat-shaded mesh ---
+
+        void EnsureMaterial()
         {
-            if (Surface == null || GrassAlbedo == null) return;
-            TerrainData td = Surface.terrainData;
-            // Rebuild when there's no valid layer. Runtime-created TerrainLayers
-            // aren't saved assets, so after a recompile / reopen their refs go
-            // null — treat that (a null first entry) as "missing" and rebuild.
-            bool hasValid = td.terrainLayers != null && td.terrainLayers.Length > 0
-                            && td.terrainLayers[0] != null;
-            if (!hasValid)
+            if (_mat == null) _mat = PipelineMaterials.CreateLitMatte(TerrainColor, "TerrainMat");
+            else _mat.color = TerrainColor;
+        }
+
+        // Live color tweak from the tuning panel — no mesh rebuild needed.
+        public void ApplyTerrainColor()
+        {
+            if (_mat != null) _mat.color = TerrainColor;
+        }
+
+        int ChunkSide => Mathf.Clamp(ChunkCells, 8, 100);
+
+        // Build (or rebuild) all chunk meshes from the field. Recreates the
+        // chunk GameObjects only when the grid/chunk count changed.
+        void BuildAllChunks()
+        {
+            EnsureMaterial();
+            int cells = _field.ColumnsX - 1; // quads per side
+            int cc = ChunkSide;
+            int chunksX = Mathf.Max(1, Mathf.CeilToInt(cells / (float)cc));
+            int n = chunksX * chunksX;
+
+            bool recreate = _chunkRoot == null || _chunkMesh == null
+                            || _chunkMesh.Length != n || _chunksX != chunksX;
+            if (recreate)
             {
-                var layers = new List<TerrainLayer>
-                {
-                    new TerrainLayer
-                    {
-                        name = "GrassLayer",
-                        diffuseTexture = GrassAlbedo,
-                        normalMapTexture = GrassNormal,
-                        tileSize = new Vector2(GrassTileSize, GrassTileSize),
-                    },
-                };
-                if (RockAlbedo != null)
-                {
-                    layers.Add(new TerrainLayer
-                    {
-                        name = "RockLayer",
-                        diffuseTexture = RockAlbedo,
-                        normalMapTexture = RockNormal,
-                        tileSize = new Vector2(RockTileSize, RockTileSize),
-                    });
-                }
-                td.terrainLayers = layers.ToArray();
+                if (_chunkRoot != null) DestroySafe(_chunkRoot);
+                _chunkRoot = new GameObject("TerrainChunks");
+                _chunksX = _chunksZ = chunksX;
+                _chunkMesh = new Mesh[n];
+                _chunkCol = new MeshCollider[n];
+                for (int cz = 0; cz < _chunksZ; cz++)
+                    for (int cx = 0; cx < _chunksX; cx++)
+                        CreateChunk(cx, cz, cc);
             }
-            RebuildSplatFull();
+            else
+            {
+                for (int cz = 0; cz < _chunksZ; cz++)
+                    for (int cx = 0; cx < _chunksX; cx++)
+                        RebuildChunk(cx, cz, cc);
+            }
         }
 
-        // Recompute the whole splatmap: grass on flat ground, rock on steep
-        // slopes (smooth blend between the two angle thresholds). Cheap-ish —
-        // alphamap res is well below the heightmap res. Used on start/reset.
-        public void RebuildSplatFull()
+        void CreateChunk(int cx, int cz, int cc)
         {
-            if (Surface == null) return;
-            TerrainData td = Surface.terrainData;
-            int layers = td.terrainLayers != null ? td.terrainLayers.Length : 0;
-            if (layers == 0) return;
-            int ar = td.alphamapResolution;
-            float[,,] maps = new float[ar, ar, layers];
-            for (int z = 0; z < ar; z++)
-                for (int x = 0; x < ar; x++)
-                    WriteSplat(td, maps, z, x, x, z, ar, layers);
-            td.SetAlphamaps(0, 0, maps);
+            int idx = cz * _chunksX + cx;
+            GameObject go = new GameObject($"Chunk_{cx}_{cz}");
+            go.transform.SetParent(_chunkRoot.transform, worldPositionStays: false);
+            MeshFilter mf = go.AddComponent<MeshFilter>();
+            MeshRenderer mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = _mat;
+            MeshCollider mc = go.AddComponent<MeshCollider>();
+            Mesh mesh = new Mesh { name = go.name };
+            BuildChunkMesh(cx, cz, cc, mesh);
+            mf.sharedMesh = mesh;
+            mc.sharedMesh = mesh;
+            _chunkMesh[idx] = mesh;
+            _chunkCol[idx] = mc;
         }
 
-        // Reblend the splatmap only where a sculpt changed the slope. Maps a
-        // heightmap-cell region to alphamap cells (alphamap is lower-res).
-        void PushSplatRegion(int hx0, int hz0, int hw, int hh)
+        void RebuildChunk(int cx, int cz, int cc)
         {
-            if (Surface == null || _field == null) return;
-            TerrainData td = Surface.terrainData;
-            int layers = td.terrainLayers != null ? td.terrainLayers.Length : 0;
-            if (layers < 2) return; // single grass layer — nothing to reblend
-            int ar = td.alphamapResolution;
-            float s = ar / (float)(_field.ColumnsX - 1); // alphamap cells per heightmap cell
-            int ax0 = Mathf.Clamp(Mathf.FloorToInt(hx0 * s) - 1, 0, ar - 1);
-            int az0 = Mathf.Clamp(Mathf.FloorToInt(hz0 * s) - 1, 0, ar - 1);
-            int ax1 = Mathf.Clamp(Mathf.CeilToInt((hx0 + hw) * s) + 1, 0, ar - 1);
-            int az1 = Mathf.Clamp(Mathf.CeilToInt((hz0 + hh) * s) + 1, 0, ar - 1);
-            int aw = ax1 - ax0 + 1, ah = az1 - az0 + 1;
-            float[,,] maps = new float[ah, aw, layers];
-            for (int z = 0; z < ah; z++)
-                for (int x = 0; x < aw; x++)
-                    WriteSplat(td, maps, z, x, ax0 + x, az0 + z, ar, layers);
-            td.SetAlphamaps(ax0, az0, maps);
+            int idx = cz * _chunksX + cx;
+            Mesh mesh = _chunkMesh[idx];
+            if (mesh == null) { CreateChunk(cx, cz, cc); return; }
+            BuildChunkMesh(cx, cz, cc, mesh);
+            _chunkCol[idx].sharedMesh = null;     // force collider re-cook
+            _chunkCol[idx].sharedMesh = mesh;
         }
 
-        // Slope-based blend for global alphamap cell (gx,gz); writes into the
-        // (possibly offset) local map cell [lz,lx]. Layer 0 = grass, 1 = rock.
-        void WriteSplat(TerrainData td, float[,,] maps, int lz, int lx, int gx, int gz, int ar, int layers)
+        void BuildChunkMesh(int cx, int cz, int cc, Mesh mesh)
         {
-            if (layers < 2) { maps[lz, lx, 0] = 1f; return; }
-            float slope = td.GetSteepness((gx + 0.5f) / ar, (gz + 0.5f) / ar); // degrees
-            float rock = Mathf.SmoothStep(0f, 1f,
-                Mathf.InverseLerp(SlopeGrassMaxAngle, SlopeRockMinAngle, slope));
-            maps[lz, lx, 0] = 1f - rock; // grass
-            maps[lz, lx, 1] = rock;      // rock
+            int x0 = cx * cc, z0 = cz * cc;
+            int x1 = Mathf.Min(x0 + cc, _field.ColumnsX - 1);
+            int z1 = Mathf.Min(z0 + cc, _field.RowsZ - 1);
+            TerrainChunkBuilder.Build(_field, x0, z0, x1, z1, mesh);
+        }
+
+        // Rebuild only the chunks overlapping a cell region (after a sculpt).
+        void RebuildChunkRegion(int x0, int z0, int w, int h)
+        {
+            if (_chunkMesh == null) return;
+            int cc = ChunkSide;
+            int cxa = Mathf.Clamp(x0 / cc, 0, _chunksX - 1);
+            int cxb = Mathf.Clamp((x0 + w) / cc, 0, _chunksX - 1);
+            int cza = Mathf.Clamp(z0 / cc, 0, _chunksZ - 1);
+            int czb = Mathf.Clamp((z0 + h) / cc, 0, _chunksZ - 1);
+            for (int cz = cza; cz <= czb; cz++)
+                for (int cx = cxa; cx <= cxb; cx++)
+                    RebuildChunk(cx, cz, cc);
+        }
+
+        static void DestroySafe(GameObject go)
+        {
+            if (Application.isPlaying) Destroy(go);
+            else DestroyImmediate(go);
+        }
+
+        // --- Tree brush ---
+
+        void EnsureTreeRoot()
+        {
+            if (_treeRoot == null) _treeRoot = new GameObject("TerrainTrees");
+        }
+
+        // Keep _treeEnabled parallel to TreePrefabs; new entries default ON.
+        void SyncTreeEnabled()
+        {
+            int n = TreePrefabs != null ? TreePrefabs.Count : 0;
+            if (_treeEnabled != null && _treeEnabled.Length == n) return;
+            bool[] old = _treeEnabled;
+            _treeEnabled = new bool[n];
+            for (int i = 0; i < n; i++) _treeEnabled[i] = (old != null && i < old.Length) ? old[i] : true;
+            // Cache the toggle labels so OnGUI doesn't concat a string per row
+            // per repaint (IMGUI garbage adds up).
+            _treeLabels = new string[n];
+            for (int i = 0; i < n; i++)
+                _treeLabels[i] = TreePrefabs[i] != null ? " " + TreePrefabs[i].name : " (missing)";
+        }
+
+        void SetAllTrees(bool on)
+        {
+            SyncTreeEnabled();
+            for (int i = 0; i < _treeEnabled.Length; i++) _treeEnabled[i] = on;
+            _activePack = -1; // manual override no longer matches a pack
+        }
+
+        // --- Tree packs (named include/exclude presets) ---
+
+        // Set the brush toggles to a pack's membership (prefabs not in the pack
+        // are excluded). Unknown prefab names in the pack are simply ignored.
+        void ApplyPack(int packIdx)
+        {
+            SyncTreeEnabled();
+            if (packIdx < 0 || packIdx >= _packs.Count) { _activePack = -1; return; }
+            List<string> names = _packs[packIdx].Trees;
+            for (int i = 0; i < TreePrefabs.Count; i++)
+                if (TreePrefabs[i] != null) _treeEnabled[i] = names.Contains(TreePrefabs[i].name);
+            _activePack = packIdx;
+        }
+
+        // Snapshot the current enabled set into a (new or replaced) named pack.
+        void CreatePack(string name)
+        {
+            SyncTreeEnabled();
+            name = (name ?? "").Trim();
+            if (name.Length == 0) name = "Pack " + (_packs.Count + 1);
+            TreePack pack = new TreePack { Name = name, Trees = new List<string>() };
+            for (int i = 0; i < TreePrefabs.Count; i++)
+                if (TreePrefabs[i] != null && _treeEnabled[i]) pack.Trees.Add(TreePrefabs[i].name);
+            int existing = _packs.FindIndex(p => p != null && p.Name == name);
+            if (existing >= 0) _packs[existing] = pack; else _packs.Add(pack);
+            _activePack = _packs.IndexOf(pack);
+            _dirtySince = Time.realtimeSinceStartup; // persist via autosave
+        }
+
+        void DeletePack(int idx)
+        {
+            if (idx < 0 || idx >= _packs.Count) return;
+            _packs.RemoveAt(idx);
+            if (_activePack == idx) _activePack = -1;
+            else if (_activePack > idx) _activePack--;
+            _dirtySince = Time.realtimeSinceStartup;
+        }
+
+        // Build at most one missing tree thumbnail per call (cheap-amortized) —
+        // driven from Update while in Tree mode, NOT from OnGUI.
+        void EnsureOneTreeThumb()
+        {
+            if (TreePrefabs == null) return;
+            for (int i = 0; i < TreePrefabs.Count; i++)
+            {
+                GameObject p = TreePrefabs[i];
+                if (p != null && !_treeThumbs.ContainsKey(p))
+                {
+                    _treeThumbs[p] = RuntimeTreePreview.Generate(p, 96);
+                    return;
+                }
+            }
+        }
+
+        // Pick a random prefab among the ENABLED, non-null trees.
+        GameObject RandomTreePrefab()
+        {
+            if (TreePrefabs == null || TreePrefabs.Count == 0) return null;
+            SyncTreeEnabled();
+            int enabled = 0;
+            for (int i = 0; i < TreePrefabs.Count; i++)
+                if (TreePrefabs[i] != null && _treeEnabled[i]) enabled++;
+            if (enabled == 0) return null;
+            int pick = Random.Range(0, enabled);
+            for (int i = 0; i < TreePrefabs.Count; i++)
+                if (TreePrefabs[i] != null && _treeEnabled[i] && pick-- == 0) return TreePrefabs[i];
+            return null;
+        }
+
+        static long TreeCellKey(int cx, int cz) => ((long)cx << 32) ^ (uint)cz;
+
+        // Stable per-cell hash in [0,1). salt picks an independent stream so x
+        // and z jitter (and any future use) don't correlate.
+        static float CellHash01(int a, int b, int salt)
+        {
+            unchecked
+            {
+                uint h = (uint)(a * 73856093) ^ (uint)(b * 19349663) ^ (uint)(salt * 83492791);
+                h ^= h >> 13; h *= 0x85ebca6b; h ^= h >> 16;
+                return (h & 0xFFFFFF) / (float)0x1000000;
+            }
+        }
+
+        // The deterministic jittered point for lattice cell (cx,cz), spacing s.
+        void CellPoint(int cx, int cz, float s, out float px, out float pz)
+        {
+            px = (cx + 0.5f) * s + (CellHash01(cx, cz, 1) - 0.5f) * 2f * TreeJitter * s;
+            pz = (cz + 0.5f) * s + (CellHash01(cx, cz, 2) - 0.5f) * 2f * TreeJitter * s;
+        }
+
+        // Fill the unoccupied lattice cells under the brush. No neighbour scan:
+        // spacing is the lattice itself. Rate-limited so a big brush fills over
+        // a few frames of dragging rather than freezing on one.
+        void PaintTrees(Vector3 center, float dt)
+        {
+            if (TreePrefabs == null || TreePrefabs.Count == 0) return;
+            float s = Mathf.Max(0.5f, TreeMinSpacing);
+
+            _treeAccum += TreePaintRate * dt;
+            int budget = Mathf.FloorToInt(_treeAccum);
+            if (budget <= 0) return;
+            if (budget > 60) budget = 60; // ceiling so a long-dt hitch can't dump everything at once
+
+            float r2 = BrushRadius * BrushRadius;
+            int reach = Mathf.CeilToInt(BrushRadius / s) + 1;
+            int ccx = Mathf.FloorToInt(center.x / s);
+            int ccz = Mathf.FloorToInt(center.z / s);
+
+            _candKey.Clear();
+            _candPos.Clear();
+            for (int gz = ccz - reach; gz <= ccz + reach; gz++)
+                for (int gx = ccx - reach; gx <= ccx + reach; gx++)
+                {
+                    long key = TreeCellKey(gx, gz);
+                    if (_treeByCell.ContainsKey(key)) continue;
+                    CellPoint(gx, gz, s, out float px, out float pz);
+                    float dx = px - center.x, dz = pz - center.z;
+                    if (dx * dx + dz * dz > r2) continue;
+                    _candKey.Add(key);
+                    _candPos.Add(new Vector2(px, pz));
+                }
+            if (_candKey.Count == 0) return;
+
+            float lo = Mathf.Min(TreeScaleRange.x, TreeScaleRange.y);
+            float hi = Mathf.Max(TreeScaleRange.x, TreeScaleRange.y);
+            int place = Mathf.Min(budget, _candKey.Count);
+            // Partial Fisher–Yates: place a random subset so fill looks even,
+            // not corner-first.
+            for (int i = 0; i < place; i++)
+            {
+                int j = Random.Range(i, _candKey.Count);
+                (_candKey[i], _candKey[j]) = (_candKey[j], _candKey[i]);
+                (_candPos[i], _candPos[j]) = (_candPos[j], _candPos[i]);
+                Vector2 p = _candPos[i];
+                SpawnTree(RandomTreePrefab(), _candKey[i], p.x, p.y,
+                          Random.Range(0f, 360f), Random.Range(lo, hi));
+            }
+            _treeAccum -= place; // consume only what we actually placed
+            _dirtySince = Time.realtimeSinceStartup;
+        }
+
+        // cellKey is the lattice cell the tree occupies (CellKeyFromWorld for
+        // loaded trees). The first tree to claim a cell keeps it.
+        PlacedTree SpawnTree(GameObject prefab, long cellKey, float wx, float wz, float rotY, float scale)
+        {
+            if (prefab == null) return null;
+            EnsureTreeRoot();
+            float wy = _field != null ? _field.SampleHeight(wx, wz) : 0f;
+            GameObject go = Instantiate(prefab, new Vector3(wx, wy, wz),
+                                        Quaternion.Euler(0f, rotY, 0f), _treeRoot.transform);
+            if (scale > 0f && !Mathf.Approximately(scale, 1f)) go.transform.localScale *= scale;
+            // Trees need no physics. Strip colliders so they (a) cost nothing in
+            // the physics step and (b) can't be hit by the sculpt/cursor raycast
+            // (which accepts any MeshCollider as "terrain").
+            Collider[] cols = go.GetComponentsInChildren<Collider>();
+            for (int c = 0; c < cols.Length; c++)
+            {
+                if (Application.isPlaying) Destroy(cols[c]); else DestroyImmediate(cols[c]);
+            }
+            PlacedTree pt = go.GetComponent<PlacedTree>();
+            if (pt == null) pt = go.AddComponent<PlacedTree>();
+            pt.Data = new PlacedTreeData
+            {
+                Prefab = prefab.name,
+                Position = new Vector2(wx, wz),
+                RotationY = rotY,
+                Scale = scale,
+            };
+            _trees.Add(pt);
+            if (!_treeByCell.ContainsKey(cellKey)) _treeByCell[cellKey] = pt; // keep first on collision
+            return pt;
+        }
+
+        // Map a world XZ to its lattice cell key at the current spacing.
+        long CellKeyFromWorld(float wx, float wz)
+        {
+            float s = Mathf.Max(0.5f, TreeMinSpacing);
+            return TreeCellKey(Mathf.FloorToInt(wx / s), Mathf.FloorToInt(wz / s));
+        }
+
+        // Erase trees whose base is within the brush radius. Visits only lattice
+        // cells overlapping the brush — no full-list scan.
+        void EraseTrees(Vector3 center)
+        {
+            float s = Mathf.Max(0.5f, TreeMinSpacing);
+            float r2 = BrushRadius * BrushRadius;
+            int reach = Mathf.CeilToInt(BrushRadius / s) + 1;
+            int ccx = Mathf.FloorToInt(center.x / s);
+            int ccz = Mathf.FloorToInt(center.z / s);
+            bool any = false;
+            for (int gz = ccz - reach; gz <= ccz + reach; gz++)
+                for (int gx = ccx - reach; gx <= ccx + reach; gx++)
+                {
+                    long key = TreeCellKey(gx, gz);
+                    if (!_treeByCell.TryGetValue(key, out PlacedTree t)) continue;
+                    if (t == null) { _treeByCell.Remove(key); continue; }
+                    Vector3 p = t.transform.position;
+                    float dx = p.x - center.x, dz = p.z - center.z;
+                    if (dx * dx + dz * dz <= r2)
+                    {
+                        DestroySafe(t.gameObject);
+                        _treeByCell.Remove(key);
+                        _trees.Remove(t); // bounded: only erased trees
+                        any = true;
+                    }
+                }
+            if (any) _dirtySince = Time.realtimeSinceStartup;
+        }
+
+        // Re-instantiate trees loaded from the save (after chunks exist, so the
+        // surface heights are known). Missing prefabs are skipped.
+        void SpawnLoadedTrees()
+        {
+            if (_pendingTrees == null) return;
+            foreach (PlacedTreeData d in _pendingTrees)
+            {
+                if (d == null) continue;
+                GameObject prefab = FindTreePrefab(d.Prefab);
+                if (prefab != null)
+                    SpawnTree(prefab, CellKeyFromWorld(d.Position.x, d.Position.y),
+                              d.Position.x, d.Position.y, d.RotationY, d.Scale);
+            }
+            _pendingTrees = null;
+        }
+
+        GameObject FindTreePrefab(string name)
+        {
+            if (string.IsNullOrEmpty(name) || TreePrefabs == null) return null;
+            foreach (GameObject p in TreePrefabs)
+                if (p != null && p.name == name) return p;
+            return null;
+        }
+
+        // Cached GUILayoutOption arrays — passing GUILayout.Width(n) inline
+        // allocates a fresh options array on EVERY call; these are reused.
+        static readonly GUILayoutOption[] GlThumb = { GUILayout.Width(38), GUILayout.Height(38) };
+        static readonly GUILayoutOption[] GlRow = { GUILayout.Height(38) };
+        static readonly GUILayoutOption[] GlDel = { GUILayout.Width(24) };
+        static readonly GUILayoutOption[] GlField = { GUILayout.Width(190) };
+
+        // Tree palette (Play-mode IMGUI): a panel of every tree prefab with a
+        // thumbnail + include/exclude toggle. Only shown in Tree mode.
+        void OnGUI()
+        {
+            if (!TreeMode) { _treePanelRect = new Rect(); return; }
+            SyncTreeEnabled();
+            const float w = 300f, pad = 8f;
+            _treePanelRect = new Rect(Screen.width - w - pad, pad, w, Screen.height - 2f * pad);
+            GUILayout.BeginArea(_treePanelRect, GUI.skin.box);
+            GUILayout.Label("Tree brush — include:");
+            if (TreePrefabs == null || TreePrefabs.Count == 0)
+            {
+                GUILayout.Label("Assign Tree Prefabs on the\nTerrainDesigner component.");
+                GUILayout.EndArea();
+                return;
+            }
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("All")) SetAllTrees(true);
+            if (GUILayout.Button("None")) SetAllTrees(false);
+            GUILayout.EndHorizontal();
+
+            // --- Packs ---
+            GUILayout.Space(4);
+            GUILayout.Label(_activePack >= 0 && _activePack < _packs.Count
+                ? "Packs (active: " + _packs[_activePack].Name + "):" : "Packs:");
+            for (int i = 0; i < _packs.Count; i++)
+            {
+                GUILayout.BeginHorizontal();
+                bool sel = _activePack == i;
+                bool nowSel = GUILayout.Toggle(sel, _packs[i].Name + "  (" + _packs[i].Trees.Count + ")",
+                                               GUI.skin.button);
+                if (nowSel && !sel) ApplyPack(i);
+                if (GUILayout.Button("x", GlDel)) { DeletePack(i); GUILayout.EndHorizontal(); break; }
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.BeginHorizontal();
+            _newPackName = GUILayout.TextField(_newPackName, GlField);
+            if (GUILayout.Button("Save pack")) { CreatePack(_newPackName); _newPackName = ""; }
+            GUILayout.EndHorizontal();
+
+            // --- Trees ---
+            GUILayout.Space(4);
+            _treeScroll = GUILayout.BeginScrollView(_treeScroll);
+            for (int i = 0; i < TreePrefabs.Count; i++)
+            {
+                if (TreePrefabs[i] == null) continue;
+                GUILayout.BeginHorizontal();
+                _treeThumbs.TryGetValue(TreePrefabs[i], out Texture2D preview);
+                if (preview != null) GUILayout.Label(preview, GlThumb);
+                else GUILayout.Box("…", GlThumb);
+                bool before = _treeEnabled[i];
+                string label = (_treeLabels != null && i < _treeLabels.Length) ? _treeLabels[i] : "";
+                _treeEnabled[i] = GUILayout.Toggle(before, label, GlRow);
+                if (_treeEnabled[i] != before) _activePack = -1; // diverged from any pack
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.EndScrollView();
+            GUILayout.EndArea();
         }
 
         // If the (empty) scene has no SceneAmbiance, create one configured to
@@ -329,9 +681,10 @@ namespace NetworkDesigner.Terrain
             }
             PickCamera = cam; // sculpt raycast uses the same camera
 
-            if (cam.GetComponent<OrbitCameraController>() == null)
+            OrbitCameraController orbit = cam.GetComponent<OrbitCameraController>();
+            if (orbit == null)
             {
-                OrbitCameraController orbit = cam.gameObject.AddComponent<OrbitCameraController>();
+                orbit = cam.gameObject.AddComponent<OrbitCameraController>();
                 orbit.Target = transform.position; // terrain centre
                 float span = Mathf.Max((Mathf.Max(2, ColumnsX) - 1) * CellSize,
                                        (Mathf.Max(2, RowsZ) - 1) * CellSize);
@@ -339,6 +692,20 @@ namespace NetworkDesigner.Terrain
                 orbit.Distance = orbit.DistanceTarget;
                 orbit.Pitch = 45f;
             }
+            // Don't zoom the camera when scrolling over the tree palette — let
+            // its own scroll view consume the wheel instead.
+            orbit.ScrollSuppressor = MouseOverTreePanel;
+        }
+
+        // True when the cursor is inside the (Tree-mode) palette rect. The rect
+        // is reset to empty when the palette is hidden, so this is false outside
+        // Tree mode. Y is flipped: GUI rects are top-left origin, mouse is
+        // bottom-left.
+        bool MouseOverTreePanel()
+        {
+            if (!TreeMode || _treePanelRect.width <= 0f) return false;
+            return _treePanelRect.Contains(
+                new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
         }
 
         void Update()
@@ -348,6 +715,11 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha2)) Brush = BrushMode.Lower;
             else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
+            if (Input.GetKeyDown(KeyCode.T)) TreeMode = !TreeMode; // sculpt <-> trees
+            // Bake thumbnails only while NOT painting — the first render of each
+            // tree compiles its shader variant (a one-time editor stall), and we
+            // don't want that landing mid-stroke.
+            if (TreeMode && !Input.GetMouseButton(0)) EnsureOneTreeThumb();
 
             // Brush resize: ] bigger, [ smaller (held = continuous).
             if (Input.GetKey(KeyCode.RightBracket)) BrushRadius += BrushResizeRate * Time.deltaTime;
@@ -360,8 +732,7 @@ namespace NetworkDesigner.Terrain
             if (Autosave && _dirtySince >= 0f
                 && Time.realtimeSinceStartup - _dirtySince >= AutosaveDebounceSeconds)
             {
-                SaveTerrain();
-                _dirtySince = -1f;
+                SaveTerrain(); // clears _dirtySince only if a write actually starts
             }
 
             if (Input.GetMouseButtonDown(0)) _hasFlattenTarget = false;
@@ -375,10 +746,22 @@ namespace NetworkDesigner.Terrain
             {
                 Ray ray = cam.ScreenPointToRay(Input.mousePosition);
                 overTerrain = Physics.Raycast(ray, out hit, 100000f)
-                              && hit.collider is TerrainCollider;
+                              && hit.collider is MeshCollider;
             }
 
             UpdateBrushCursor(ShowBrushCursor && overTerrain, hit.point);
+
+            // Tree mode: left-drag paints, right-drag erases; no sculpting.
+            // Don't act when the cursor is over the tree palette panel.
+            if (TreeMode)
+            {
+                bool overPanel = _treePanelRect.Contains(
+                    new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
+                if (!overPanel && overTerrain && Input.GetMouseButton(0)) PaintTrees(hit.point, Time.deltaTime);
+                else _treeAccum = 0f; // reset accumulation between strokes
+                if (!overPanel && overTerrain && Input.GetMouseButton(1)) EraseTrees(hit.point);
+                return;
+            }
 
             // Refresh contours when a stroke ends (cheap path); live rebuild
             // during the drag is opt-in via LiveContours.
@@ -400,8 +783,7 @@ namespace NetworkDesigner.Terrain
             int rad = Mathf.CeilToInt(BrushRadius / Mathf.Max(0.01f, _field.CellSize)) + 1;
             int rx0 = Mathf.RoundToInt(bfx) - rad, rz0 = Mathf.RoundToInt(bfz) - rad;
             int rw = rad * 2 + 1;
-            PushRegionToTerrain(rx0, rz0, rw, rw);  // heights (incl. SyncHeightmap)
-            PushSplatRegion(rx0, rz0, rw, rw);      // reblend grass/rock by new slope
+            RebuildChunkRegion(rx0, rz0, rw, rw);   // rebuild touched chunk meshes + colliders
             _dirtySince = Time.realtimeSinceStartup;
             if (LiveContours) RebuildContours();
         }
@@ -612,12 +994,11 @@ namespace NetworkDesigner.Terrain
         // terrain's world corner; CellSize = terrain size / (resolution - 1).
         void EnsureField(bool forceRebuild)
         {
-            int res = Surface != null ? Surface.terrainData.heightmapResolution : Mathf.Max(2, ColumnsX);
-            float sizeX = Surface != null ? Surface.terrainData.size.x : (res - 1) * Mathf.Max(0.01f, CellSize);
-            float cs = sizeX / Mathf.Max(1, res - 1);
-            Vector3 origin = Surface != null
-                ? Surface.transform.position
-                : transform.position - new Vector3((res - 1) * cs * 0.5f, 0f, (res - 1) * cs * 0.5f);
+            float size = Mathf.Max(1f, TerrainSizeMeters);
+            float cs = Mathf.Max(0.1f, CellSize);
+            int res = Mathf.Max(2, Mathf.RoundToInt(size / cs) + 1); // vertices per side
+            float half = (res - 1) * cs * 0.5f;
+            Vector3 origin = transform.position - new Vector3(half, 0f, half); // centered on this object
 
             bool fresh = _field == null || _field.ColumnsX != res || _field.RowsZ != res;
             if (fresh)
@@ -643,8 +1024,7 @@ namespace NetworkDesigner.Terrain
         {
             _field = null;
             EnsureField(forceRebuild: true);
-            SyncTerrainFull();
-            RebuildSplatFull(); // re-blend grass/rock for the new slopes
+            BuildAllChunks();
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup; // persist the reset
         }
@@ -656,44 +1036,9 @@ namespace NetworkDesigner.Terrain
         {
             if (_field == null) EnsureField(forceRebuild: true);
             System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
-            SyncTerrainFull();
-            RebuildSplatFull(); // flat now -> all grass
+            BuildAllChunks();
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
-        }
-
-        // Push the ENTIRE heightfield into the Terrain heightmap. Use sparingly
-        // (Start / reset / flatten) — it's a ~res^2 upload. Sculpt uses the
-        // region push instead.
-        public void SyncTerrainFull()
-        {
-            if (Surface == null || _field == null) return;
-            int res = _field.ColumnsX;
-            float maxH = Mathf.Max(0.01f, Surface.terrainData.size.y);
-            float[,] hm = new float[res, res]; // Unity heightmap is [z, x]
-            for (int z = 0; z < res; z++)
-                for (int x = 0; x < res; x++)
-                    hm[z, x] = Mathf.Clamp01(_field.GetHeight(x, z) / maxH);
-            Surface.terrainData.SetHeights(0, 0, hm);
-        }
-
-        // Push only a rectangular cell region [x0,z0]..(+w,+h) to the heightmap.
-        // Cheap (brush-sized), so it runs every sculpt frame.
-        void PushRegionToTerrain(int x0, int z0, int w, int h)
-        {
-            if (Surface == null || _field == null) return;
-            int res = _field.ColumnsX;
-            x0 = Mathf.Clamp(x0, 0, res - 1);
-            z0 = Mathf.Clamp(z0, 0, res - 1);
-            w = Mathf.Clamp(w, 1, res - x0);
-            h = Mathf.Clamp(h, 1, res - z0);
-            float maxH = Mathf.Max(0.01f, Surface.terrainData.size.y);
-            float[,] region = new float[h, w]; // [z, x]
-            for (int zr = 0; zr < h; zr++)
-                for (int xr = 0; xr < w; xr++)
-                    region[zr, xr] = Mathf.Clamp01(_field.GetHeight(x0 + xr, z0 + zr) / maxH);
-            Surface.terrainData.SetHeightsDelayLOD(x0, z0, region);
-            Surface.terrainData.SyncHeightmap(); // refresh mesh LOD + collider
         }
 
         void StampTestHill()
@@ -719,10 +1064,12 @@ namespace NetworkDesigner.Terrain
 
         void OnDisable()
         {
-            // Flush any pending edits when Play stops / the object is disabled.
+            // Let any in-flight async write finish so the file isn't half-written.
+            try { _saveTask?.Wait(3000); } catch { /* ignore */ }
+            // Flush any pending edits synchronously when Play stops / disabled.
             if (Autosave && _dirtySince >= 0f)
             {
-                SaveTerrain();
+                WriteSave(BuildSnapshot(), ResolveAutosavePath(), TerrainJsonSettings);
                 _dirtySince = -1f;
             }
         }
@@ -737,33 +1084,69 @@ namespace NetworkDesigner.Terrain
 #endif
         }
 
+        // Debounced autosave entry point. The expensive part (JSON serialize +
+        // disk write) runs on a background thread so it doesn't hitch the frame;
+        // the snapshot (which touches Unity/field state) is built on the main
+        // thread first. Skips if a previous async write is still running — the
+        // dirty flag will re-trigger shortly, and overlapping writes are avoided.
         public void SaveTerrain()
         {
             if (_field == null) return;
+            if (_saveTask != null && !_saveTask.IsCompleted) return;
             try
             {
-                // Sparse: store only altered (non-zero) heights; zeros implied.
-                float[] heights = _field.Heights;
-                var idx = new List<int>();
-                var hs = new List<float>();
-                for (int i = 0; i < heights.Length; i++)
-                {
-                    if (Mathf.Abs(heights[i]) > 1e-4f) { idx.Add(i); hs.Add(heights[i]); }
-                }
-                TerrainSave save = new TerrainSave
-                {
-                    ColumnsX = _field.ColumnsX,
-                    RowsZ = _field.RowsZ,
-                    CellSize = _field.CellSize,
-                    Idx = idx.ToArray(),
-                    H = hs.ToArray(),
-                };
-                string json = JsonConvert.SerializeObject(save, TerrainJsonSettings);
-                System.IO.File.WriteAllText(ResolveAutosavePath(), json);
+                TerrainSave save = BuildSnapshot();
+                string path = ResolveAutosavePath();
+                JsonSerializerSettings settings = TerrainJsonSettings; // init on main thread
+                _saveTask = System.Threading.Tasks.Task.Run(() => WriteSave(save, path, settings));
+                _dirtySince = -1f; // a write is now in flight for the current state
             }
             catch (System.Exception ex)
             {
                 Debug.LogWarning($"[TerrainDesigner] Save failed: {ex.Message}");
+            }
+        }
+
+        // Snapshot the current field + trees + packs into an owned, immutable
+        // payload safe to serialize off the main thread. Main-thread only.
+        TerrainSave BuildSnapshot()
+        {
+            // Sparse: store only altered (non-zero) heights; zeros implied.
+            float[] heights = _field.Heights;
+            var idx = new List<int>();
+            var hs = new List<float>();
+            for (int i = 0; i < heights.Length; i++)
+            {
+                if (Mathf.Abs(heights[i]) > 1e-4f) { idx.Add(i); hs.Add(heights[i]); }
+            }
+            var trees = new List<PlacedTreeData>(_trees.Count);
+            foreach (PlacedTree t in _trees)
+                if (t != null && t.Data != null) trees.Add(t.Data);
+
+            return new TerrainSave
+            {
+                ColumnsX = _field.ColumnsX,
+                RowsZ = _field.RowsZ,
+                CellSize = _field.CellSize,
+                Idx = idx.ToArray(),
+                H = hs.ToArray(),
+                Trees = trees,
+                Packs = new List<TreePack>(_packs),
+            };
+        }
+
+        // Serialize + write. Thread-safe (no Unity main-thread APIs besides
+        // Debug.Log, which is itself thread-safe).
+        static void WriteSave(TerrainSave save, string path, JsonSerializerSettings settings)
+        {
+            try
+            {
+                string json = JsonConvert.SerializeObject(save, settings);
+                System.IO.File.WriteAllText(path, json);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Save write failed: {ex.Message}");
             }
         }
 
@@ -788,6 +1171,9 @@ namespace NetworkDesigner.Terrain
                         if (i >= 0 && i < f.Heights.Length) f.Heights[i] = save.H[k];
                     }
                 }
+                _pendingTrees = save.Trees; // spawned after chunks build (SpawnLoadedTrees)
+                _packs.Clear();
+                if (save.Packs != null) _packs.AddRange(save.Packs);
                 return f;
             }
             catch (System.Exception ex)
@@ -806,7 +1192,8 @@ namespace NetworkDesigner.Terrain
                     _terrainJsonSettings = new JsonSerializerSettings
                     {
                         Formatting = Formatting.Indented,
-                        Converters = new List<JsonConverter> { new Vector3JsonConverter() },
+                        Converters = new List<JsonConverter>
+                            { new Vector3JsonConverter(), new Vector2JsonConverter() },
                         NullValueHandling = NullValueHandling.Ignore,
                         MissingMemberHandling = MissingMemberHandling.Ignore,
                     };
@@ -835,6 +1222,27 @@ namespace NetworkDesigner.Terrain
                     jo["x"]?.ToObject<float>() ?? 0f,
                     jo["y"]?.ToObject<float>() ?? 0f,
                     jo["z"]?.ToObject<float>() ?? 0f);
+            }
+        }
+
+        // Vector2 as { x, y } — for PlacedTreeData.Position (tree XZ).
+        class Vector2JsonConverter : JsonConverter<Vector2>
+        {
+            public override void WriteJson(JsonWriter writer, Vector2 value, JsonSerializer serializer)
+            {
+                writer.WriteStartObject();
+                writer.WritePropertyName("x"); writer.WriteValue(value.x);
+                writer.WritePropertyName("y"); writer.WriteValue(value.y);
+                writer.WriteEndObject();
+            }
+
+            public override Vector2 ReadJson(JsonReader reader, System.Type objectType,
+                Vector2 existingValue, bool hasExistingValue, JsonSerializer serializer)
+            {
+                Newtonsoft.Json.Linq.JObject jo = Newtonsoft.Json.Linq.JObject.Load(reader);
+                return new Vector2(
+                    jo["x"]?.ToObject<float>() ?? 0f,
+                    jo["y"]?.ToObject<float>() ?? 0f);
             }
         }
     }

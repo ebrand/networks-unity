@@ -6,7 +6,9 @@
 // types) so it can be JSON-saved/loaded like the road Network later.
 
 using System;
+using System.Collections.Generic;
 using UnityEngine;
+using NetworkDesigner.Model; // PlacedTreeData
 
 namespace NetworkDesigner.Terrain
 {
@@ -81,5 +83,17 @@ namespace NetworkDesigner.Terrain
         public float CellSize;
         public int[] Idx;    // row-major indices of non-zero heights
         public float[] H;    // parallel heights for each Idx
+        public List<PlacedTreeData> Trees; // painted trees (XZ + rotation + scale + prefab)
+        public List<TreePack> Packs;       // saved tree-brush include/exclude presets
+    }
+
+    // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by
+    // prefab name) that the brush paints when this pack is selected. Persisted
+    // in TerrainSave so packs survive across Play sessions.
+    [Serializable]
+    public class TreePack
+    {
+        public string Name;
+        public List<string> Trees = new List<string>(); // included prefab names
     }
 }
