@@ -13,6 +13,7 @@
 
 using UnityEngine;
 using NetworkDesigner.Tuning;
+using NetworkDesigner.Designer; // OrbitCameraController
 
 namespace NetworkDesigner.Terrain
 {
@@ -30,7 +31,15 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Seconds of no changes before the tuning file is rewritten.")]
         public float PersistDebounceSeconds = 0.5f;
 
+        [Tooltip("Orbit camera to expose as tunables. Auto-found on Start.")]
+        public OrbitCameraController Orbit;
+
         float _dirtySinceRealtime = -1f;
+        // Previous-frame orbit snapshot — so mouse-driven camera moves (which
+        // don't flow through TrySet) still mark the tuning file dirty.
+        Vector3 _prevOrbitTarget;
+        float _prevOrbitYaw, _prevOrbitPitch, _prevOrbitDistance;
+        bool _prevOrbitInit;
 
         void OnEnable()
         {
@@ -38,6 +47,7 @@ namespace NetworkDesigner.Terrain
             Application.runInBackground = true;
             if (Terrain == null) Terrain = FindFirstObjectByType<TerrainDesigner>();
             if (Terrain == null) return;
+            if (Orbit == null) Orbit = FindFirstObjectByType<OrbitCameraController>();
             TuningRegistry.Clear();
             RegisterAll();
 
@@ -66,11 +76,39 @@ namespace NetworkDesigner.Terrain
 
         void Update()
         {
+            // Mouse-driven camera moves don't go through TrySet, so poll for
+            // drift and mark dirty (mirrors the road TuningSetup).
+            PollOrbitCameraForChanges();
+
             if (!PersistChanges) return;
             if (_dirtySinceRealtime < 0f) return;
             if (Time.realtimeSinceStartup - _dirtySinceRealtime < PersistDebounceSeconds) return;
             TuningRegistry.SaveToFile(ResolvePersistencePath());
             _dirtySinceRealtime = -1f;
+        }
+
+        void PollOrbitCameraForChanges()
+        {
+            if (Orbit == null) return;
+            if (!_prevOrbitInit)
+            {
+                _prevOrbitTarget = Orbit.Target;
+                _prevOrbitYaw = Orbit.Yaw;
+                _prevOrbitPitch = Orbit.Pitch;
+                _prevOrbitDistance = Orbit.DistanceTarget;
+                _prevOrbitInit = true;
+                return;
+            }
+            const float EPS = 0.02f;
+            if ((Orbit.Target - _prevOrbitTarget).sqrMagnitude < EPS * EPS
+                && Mathf.Abs(Orbit.Yaw - _prevOrbitYaw) < EPS
+                && Mathf.Abs(Orbit.Pitch - _prevOrbitPitch) < EPS
+                && Mathf.Abs(Orbit.DistanceTarget - _prevOrbitDistance) < EPS) return;
+            _prevOrbitTarget = Orbit.Target;
+            _prevOrbitYaw = Orbit.Yaw;
+            _prevOrbitPitch = Orbit.Pitch;
+            _prevOrbitDistance = Orbit.DistanceTarget;
+            if (_dirtySinceRealtime < 0f) _dirtySinceRealtime = Time.realtimeSinceStartup;
         }
 
         void OnTuningChanged() => _dirtySinceRealtime = Time.realtimeSinceStartup;
@@ -113,13 +151,43 @@ namespace NetworkDesigner.Terrain
 
             // --- Trees ---
             TuningRegistry.RegisterFloat("terrain.treePaintRate", "Trees", "Strength (trees/s)",
-                () => t.TreePaintRate, v => t.TreePaintRate = v, 1f, 200f);
-            TuningRegistry.RegisterString("terrain.treeFolder", "Trees", "Tree folder",
-                () => t.TreeFolder, v => t.TreeFolder = v);
+                () => t.TreeLayer.PaintRate, v => t.TreeLayer.PaintRate = v, 1f, 200f);
+            TuningRegistry.RegisterFloat("terrain.treeSpacing", "Trees", "Spacing (m)",
+                () => t.TreeLayer.Spacing, v => t.TreeLayer.Spacing = v, 1f, 30f);
+            TuningRegistry.RegisterString("terrain.treeFolder", "Trees", "Folder",
+                () => t.TreeLayer.Folder, v => t.TreeLayer.Folder = v);
 #if UNITY_EDITOR
             TuningRegistry.RegisterAction("terrain.loadTrees", "Trees", "Load trees from folder",
                 () => t.LoadTreesFromFolder());
 #endif
+
+            // --- Rocks ---
+            TuningRegistry.RegisterFloat("terrain.rockPaintRate", "Rocks", "Strength (rocks/s)",
+                () => t.RockLayer.PaintRate, v => t.RockLayer.PaintRate = v, 1f, 200f);
+            TuningRegistry.RegisterFloat("terrain.rockSpacing", "Rocks", "Spacing (m)",
+                () => t.RockLayer.Spacing, v => t.RockLayer.Spacing = v, 1f, 30f);
+            TuningRegistry.RegisterString("terrain.rockFolder", "Rocks", "Folder",
+                () => t.RockLayer.Folder, v => t.RockLayer.Folder = v);
+#if UNITY_EDITOR
+            TuningRegistry.RegisterAction("terrain.loadRocks", "Rocks", "Load rocks from folder",
+                () => t.LoadRocksFromFolder());
+#endif
+
+            // --- Linework (fence) ---
+            TuningRegistry.RegisterFloat("fence.spacing", "Fence", "Spacing (m)",
+                () => t.FenceLayer.Spacing, v => { t.FenceLayer.Spacing = v; t.RebuildFence(); }, 0.5f, 30f);
+            TuningRegistry.RegisterFloat("fence.verticalOffset", "Fence", "Vertical offset (m)",
+                () => t.FenceLayer.VerticalOffset, v => { t.FenceLayer.VerticalOffset = v; t.RebuildFence(); }, -5f, 20f);
+            TuningRegistry.RegisterFloat("fence.yawOffset", "Fence", "Yaw offset (deg)",
+                () => t.FenceLayer.YawOffset, v => { t.FenceLayer.YawOffset = v; t.RebuildFence(); }, -180f, 180f);
+            TuningRegistry.RegisterFloat("fence.scale", "Fence", "Scale",
+                () => t.FenceLayer.Scale, v => { t.FenceLayer.Scale = v; t.RebuildFence(); }, 0.1f, 10f);
+            TuningRegistry.RegisterBool("fence.conform", "Fence", "Conform to terrain",
+                () => t.FenceLayer.Conform, v => { t.FenceLayer.Conform = v; t.RebuildFence(); });
+            TuningRegistry.RegisterBool("fence.straight", "Fence", "Straight (hard corners)",
+                () => t.FenceLayer.Straight, v => { t.FenceLayer.Straight = v; t.RebuildFence(); });
+            TuningRegistry.RegisterAction("fence.clear", "Fence", "Clear fence",
+                () => t.ClearFence());
 
             // --- Brush cursor ---
             TuningRegistry.RegisterBool("terrain.showCursor", "Brush cursor", "Show ring",
@@ -154,6 +222,39 @@ namespace NetworkDesigner.Terrain
             // --- Appearance ---
             TuningRegistry.RegisterColor("terrain.color", "Appearance", "Terrain color",
                 () => t.TerrainColor, v => { t.TerrainColor = v; t.ApplyTerrainColor(); });
+
+            // --- Camera (orbit) --- mirrors the road designer's Camera group.
+            if (Orbit != null)
+            {
+                // Bind to DistanceTarget (steady-state zoom), not the animating
+                // Distance, so smoothing isn't read back as a change.
+                TuningRegistry.RegisterFloat("orbit.distance", "Camera", "Distance",
+                    () => Orbit.DistanceTarget, v => Orbit.DistanceTarget = Mathf.Min(v, Orbit.MaxDistance), 1f, 5000f);
+                TuningRegistry.RegisterFloat("orbit.maxDistance", "Camera", "Max distance",
+                    () => Orbit.MaxDistance, v => Orbit.MaxDistance = v, 100f, 10000f);
+                TuningRegistry.RegisterFloat("orbit.minDistance", "Camera", "Min distance",
+                    () => Orbit.MinDistance, v => Orbit.MinDistance = Mathf.Max(0.05f, v), 0.05f, 500f);
+                TuningRegistry.RegisterFloat("orbit.farClipPlane", "Camera", "Far clip plane (m)",
+                    () => Orbit.FarClipPlane, v => Orbit.FarClipPlane = v, 100f, 50000f);
+                TuningRegistry.RegisterFloat("orbit.pitch", "Camera", "Pitch (deg)",
+                    () => Orbit.Pitch, v => Orbit.Pitch = v, -89f, 89f);
+                TuningRegistry.RegisterFloat("orbit.yaw", "Camera", "Yaw (deg)",
+                    () => Orbit.Yaw, v => Orbit.Yaw = v, -360f, 360f);
+                TuningRegistry.RegisterVector3("orbit.target", "Camera", "Pivot target (world XYZ)",
+                    () => Orbit.Target, v => Orbit.Target = v, -10000f, 10000f);
+                TuningRegistry.RegisterFloat("orbit.keyboardPanSensitivity", "Camera", "WASD pan speed (× distance/s)",
+                    () => Orbit.KeyboardPanSensitivity, v => Orbit.KeyboardPanSensitivity = v, 0f, 10f);
+                TuningRegistry.RegisterFloat("orbit.keyboardPanShiftMultiplier", "Camera", "WASD shift-boost multiplier",
+                    () => Orbit.KeyboardPanShiftMultiplier, v => Orbit.KeyboardPanShiftMultiplier = v, 1f, 10f);
+                TuningRegistry.RegisterFloat("orbit.minPanReference", "Camera", "Min pan reference distance (m)",
+                    () => Orbit.MinPanReferenceDistance, v => Orbit.MinPanReferenceDistance = v, 0f, 500f);
+                TuningRegistry.RegisterFloat("orbit.zoomSensitivity", "Camera", "Zoom per wheel notch (× distance)",
+                    () => Orbit.ZoomSensitivity, v => Orbit.ZoomSensitivity = v, 0f, 30f);
+                TuningRegistry.RegisterFloat("orbit.zoomSmoothing", "Camera", "Zoom smoothing (1/s)",
+                    () => Orbit.ZoomSmoothing, v => Orbit.ZoomSmoothing = v, 0f, 40f);
+                TuningRegistry.RegisterFloat("orbit.minZoomReference", "Camera", "Min zoom reference distance (m)",
+                    () => Orbit.MinZoomReferenceDistance, v => Orbit.MinZoomReferenceDistance = v, 0f, 500f);
+            }
         }
     }
 }

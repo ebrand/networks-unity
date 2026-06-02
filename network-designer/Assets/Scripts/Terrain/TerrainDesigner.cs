@@ -90,24 +90,20 @@ namespace NetworkDesigner.Terrain
                  "hitches on very large grids.")]
         public bool LiveContours = true;
 
-        [Header("Tree brush")]
-        [Tooltip("Press T to toggle Tree mode: left-drag PAINTS trees in the " +
-                 "brush, right-drag ERASES them. Sculpt is disabled while on.")]
-        public bool TreeMode = false;
-        [Tooltip("Low-poly tree prefabs to scatter (one picked at random per tree).")]
-        public List<GameObject> TreePrefabs = new List<GameObject>();
-        [Tooltip("Asset folder scanned for tree prefabs by 'Load Trees From Folder' " +
-                 "(⋮ menu) — recursive, Editor only. Also auto-loaded on Start when " +
-                 "the list above is empty, so lost references self-heal. e.g. Assets/Trees")]
-        public string TreeFolder = "Assets/Trees";
-        [Tooltip("Trees painted per second while dragging.")]
-        public float TreePaintRate = 25f;
-        [Tooltip("Lattice spacing (m): trees fill a jittered grid of this cell " +
-                 "size — controls density (smaller = denser). At most one tree " +
-                 "per cell, so repainting the same spot adds nothing.")]
-        public float TreeMinSpacing = 4f;
-        [Tooltip("Random uniform scale range applied to each tree.")]
-        public Vector2 TreeScaleRange = new Vector2(1.2f, 1.95f);
+        [Header("Scatter brushes  (T = trees, R = rocks)")]
+        [Tooltip("Tree scatter layer. Press T to toggle tree mode: left-drag " +
+                 "PAINTS, right-drag ERASES. Sculpt is disabled while on.")]
+        public ScatterLayer TreeLayer = new ScatterLayer
+        { Name = "Trees", Folder = "Assets/Trees", PaintRate = 25f, Spacing = 4f, ScaleRange = new Vector2(1.2f, 1.95f) };
+        [Tooltip("Rock scatter layer. Press R to toggle rock mode (same controls).")]
+        public ScatterLayer RockLayer = new ScatterLayer
+        { Name = "Rocks", Folder = "Assets/Rocks", PaintRate = 15f, Spacing = 6f, ScaleRange = new Vector2(0.5f, 1.6f) };
+
+        [Header("Linework  (F = fence)")]
+        [Tooltip("Fence linework layer. Press F to toggle: left-click adds a node " +
+                 "and connects from the last (chain); right-click ends the chain. " +
+                 "Edges auto-curve through the nodes; the Asset renders in series.")]
+        public LineworkLayer FenceLayer = new LineworkLayer { Name = "Fence", Spacing = 3f, YawOffset = -90f };
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -144,27 +140,8 @@ namespace NetworkDesigner.Terrain
         MeshCollider[] _chunkCol;
         Material _mat;
         int _chunksX, _chunksZ;
-        GameObject _treeRoot;
-        readonly List<PlacedTree> _trees = new List<PlacedTree>();
-        // Trees live on a JITTERED LATTICE keyed by cell: at most one tree per
-        // TreeMinSpacing-sized cell, placed at a deterministic jittered point.
-        // Even spacing is structural, so painting never scans neighbours — it
-        // just fills the unoccupied cells under the brush. This dict is the
-        // occupancy + erase index; _trees stays the canonical list for save.
-        readonly Dictionary<long, PlacedTree> _treeByCell = new Dictionary<long, PlacedTree>();
-        readonly List<long> _candKey = new List<long>();   // reused paint scratch
-        readonly List<Vector2> _candPos = new List<Vector2>();
-        const float TreeJitter = 0.4f; // max per-axis jitter as a fraction of the cell (<0.5 keeps the point in-cell)
-        float _treeAccum;                         // fractional trees pending this frame
-        List<PlacedTreeData> _pendingTrees;       // loaded trees, spawned after chunks build
-        bool[] _treeEnabled;                      // which TreePrefabs the brush may use
-        string[] _treeLabels;                     // cached toggle labels (avoid per-repaint concat)
-        Vector2 _treeScroll;
-        Rect _treePanelRect;                      // palette rect (screen space) — block painting over it
-        readonly Dictionary<GameObject, Texture2D> _treeThumbs = new Dictionary<GameObject, Texture2D>();
-        readonly List<TreePack> _packs = new List<TreePack>(); // saved include/exclude presets
-        int _activePack = -1;                     // index into _packs; -1 = custom selection
-        string _newPackName = "";                 // pack-name text field buffer
+        ScatterLayer _active;      // scatter layer being painted (null = not scattering)
+        LineworkLayer _lineActive; // linework layer being drawn (null = not drawing)
         MeshFilter _cursorMf;
         MeshRenderer _cursorMr;
         Mesh _cursorMesh;
@@ -210,10 +187,13 @@ namespace NetworkDesigner.Terrain
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
 
             StripStaleHostMesh();
+            EnsureScatterDefaults();
 #if UNITY_EDITOR
-            // Self-heal lost prefab references: if the list is empty, repopulate
-            // from TreeFolder so a broken link doesn't silently disable the brush.
-            if (TreePrefabs == null || TreePrefabs.Count == 0) LoadTreesFromFolder();
+            // Self-heal lost prefab references: if a layer's list is empty,
+            // repopulate from its Folder so a broken link doesn't silently
+            // disable the brush.
+            if (TreeLayer.IsEmpty && TreeLayer.LoadFromFolder()) UnityEditor.EditorUtility.SetDirty(this);
+            if (RockLayer.IsEmpty && RockLayer.LoadFromFolder()) UnityEditor.EditorUtility.SetDirty(this);
 #endif
             EnsureField(forceRebuild: true);
 
@@ -230,7 +210,9 @@ namespace NetworkDesigner.Terrain
             }
 
             BuildAllChunks();
-            SpawnLoadedTrees(); // trees from the save (surface heights now known)
+            TreeLayer.SpawnPending(_field); // scatter from the save (heights now known)
+            RockLayer.SpawnPending(_field);
+            FenceLayer.Rebuild(_field);     // linework from the save
             RebuildContours();
 
             // Stand up scene services, sized to the actual terrain.
@@ -381,380 +363,69 @@ namespace NetworkDesigner.Terrain
                 if (all[i] != null && all[i].name == "TerrainChunks") DestroySafe(all[i]);
         }
 
-        // --- Tree brush ---
+        // --- Scatter brushes (trees, rocks) via ScatterLayer ---
 
-        void EnsureTreeRoot()
+        // The TreeLayer/RockLayer field initializers only apply to a freshly
+        // added component (Unity serialization footgun); a component saved before
+        // these fields existed deserializes them blank. Fill sane Name/Folder
+        // when unset so the brushes work without a manual component Reset.
+        void EnsureScatterDefaults()
         {
-            if (_treeRoot == null) _treeRoot = new GameObject("TerrainTrees");
+            if (TreeLayer == null) TreeLayer = new ScatterLayer();
+            if (RockLayer == null) RockLayer = new ScatterLayer();
+            if (string.IsNullOrEmpty(TreeLayer.Name) || TreeLayer.Name == "Scatter") TreeLayer.Name = "Trees";
+            if (string.IsNullOrEmpty(RockLayer.Name) || RockLayer.Name == "Scatter") RockLayer.Name = "Rocks";
+            if (string.IsNullOrEmpty(TreeLayer.Folder)) TreeLayer.Folder = "Assets/Trees";
+            if (string.IsNullOrEmpty(RockLayer.Folder)) RockLayer.Folder = "Assets/Rocks";
+            if (FenceLayer == null) FenceLayer = new LineworkLayer();
+            if (string.IsNullOrEmpty(FenceLayer.Name) || FenceLayer.Name == "Line") FenceLayer.Name = "Fence";
         }
 
-#if UNITY_EDITOR
-        // Populate TreePrefabs from every prefab under TreeFolder (recursive),
-        // sorted by name. Editor only (AssetDatabase). Run from the ⋮ menu to
-        // (re)link the list without dragging each prefab in by hand.
-        [ContextMenu("Load Trees From Folder")]
-        public void LoadTreesFromFolder()
-        {
-            string folder = (TreeFolder ?? "").TrimEnd('/');
-            if (string.IsNullOrEmpty(folder) || !UnityEditor.AssetDatabase.IsValidFolder(folder))
-            {
-                Debug.LogWarning($"[TerrainDesigner] Tree folder not found: '{folder}'");
-                return;
-            }
-            string[] guids = UnityEditor.AssetDatabase.FindAssets("t:Prefab", new[] { folder });
-            var list = new List<GameObject>(guids.Length);
-            foreach (string g in guids)
-            {
-                string path = UnityEditor.AssetDatabase.GUIDToAssetPath(g);
-                GameObject go = UnityEditor.AssetDatabase.LoadAssetAtPath<GameObject>(path);
-                // Only renderable prefabs — skips light/camera/empty demo prefabs.
-                if (go != null && go.GetComponentInChildren<Renderer>() != null) list.Add(go);
-            }
-            list.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
-
-            // Idempotent: identical set → do nothing (preserve toggles, no
-            // re-bake, no dirty). Re-clicking is then a safe no-op.
-            if (SamePrefabList(list, TreePrefabs))
-            {
-                Debug.Log($"[TerrainDesigner] Tree list unchanged ({list.Count} from '{folder}').");
-                return;
-            }
-            TreePrefabs = list;
-            _treeEnabled = null;      // list changed -> re-sync palette toggles
-            // _treeThumbs kept: surviving prefabs reuse cached thumbs; new ones bake lazily.
-            UnityEditor.EditorUtility.SetDirty(this); // persist the linked list
-            Debug.Log($"[TerrainDesigner] Loaded {list.Count} tree prefab(s) from '{folder}'.");
-        }
-
-        static bool SamePrefabList(List<GameObject> a, List<GameObject> b)
-        {
-            if (a == null || b == null || a.Count != b.Count) return false;
-            for (int i = 0; i < a.Count; i++) if (a[i] != b[i]) return false;
-            return true;
-        }
-#endif
-
-        // Keep _treeEnabled parallel to TreePrefabs; new entries default ON.
-        void SyncTreeEnabled()
-        {
-            int n = TreePrefabs != null ? TreePrefabs.Count : 0;
-            if (_treeEnabled != null && _treeEnabled.Length == n) return;
-            bool[] old = _treeEnabled;
-            _treeEnabled = new bool[n];
-            for (int i = 0; i < n; i++) _treeEnabled[i] = (old != null && i < old.Length) ? old[i] : true;
-            // Cache the toggle labels so OnGUI doesn't concat a string per row
-            // per repaint (IMGUI garbage adds up).
-            _treeLabels = new string[n];
-            for (int i = 0; i < n; i++)
-                _treeLabels[i] = TreePrefabs[i] != null ? " " + TreePrefabs[i].name : " (missing)";
-        }
-
-        void SetAllTrees(bool on)
-        {
-            SyncTreeEnabled();
-            for (int i = 0; i < _treeEnabled.Length; i++) _treeEnabled[i] = on;
-            _activePack = -1; // manual override no longer matches a pack
-        }
-
-        // --- Tree packs (named include/exclude presets) ---
-
-        // Set the brush toggles to a pack's membership (prefabs not in the pack
-        // are excluded). Unknown prefab names in the pack are simply ignored.
-        void ApplyPack(int packIdx)
-        {
-            SyncTreeEnabled();
-            if (packIdx < 0 || packIdx >= _packs.Count) { _activePack = -1; return; }
-            List<string> names = _packs[packIdx].Trees;
-            for (int i = 0; i < TreePrefabs.Count; i++)
-                if (TreePrefabs[i] != null) _treeEnabled[i] = names.Contains(TreePrefabs[i].name);
-            _activePack = packIdx;
-        }
-
-        // Snapshot the current enabled set into a (new or replaced) named pack.
-        void CreatePack(string name)
-        {
-            SyncTreeEnabled();
-            name = (name ?? "").Trim();
-            if (name.Length == 0) name = "Pack " + (_packs.Count + 1);
-            TreePack pack = new TreePack { Name = name, Trees = new List<string>() };
-            for (int i = 0; i < TreePrefabs.Count; i++)
-                if (TreePrefabs[i] != null && _treeEnabled[i]) pack.Trees.Add(TreePrefabs[i].name);
-            int existing = _packs.FindIndex(p => p != null && p.Name == name);
-            if (existing >= 0) _packs[existing] = pack; else _packs.Add(pack);
-            _activePack = _packs.IndexOf(pack);
-            _dirtySince = Time.realtimeSinceStartup; // persist via autosave
-        }
-
-        void DeletePack(int idx)
-        {
-            if (idx < 0 || idx >= _packs.Count) return;
-            _packs.RemoveAt(idx);
-            if (_activePack == idx) _activePack = -1;
-            else if (_activePack > idx) _activePack--;
-            _dirtySince = Time.realtimeSinceStartup;
-        }
-
-        // Build at most one missing tree thumbnail per call (cheap-amortized) —
-        // driven from Update while in Tree mode, NOT from OnGUI.
-        void EnsureOneTreeThumb()
-        {
-            if (TreePrefabs == null) return;
-            for (int i = 0; i < TreePrefabs.Count; i++)
-            {
-                GameObject p = TreePrefabs[i];
-                if (p != null && !_treeThumbs.ContainsKey(p))
-                {
-                    _treeThumbs[p] = RuntimeTreePreview.Generate(p, 96);
-                    return;
-                }
-            }
-        }
-
-        // Pick a random prefab among the ENABLED, non-null trees.
-        GameObject RandomTreePrefab()
-        {
-            if (TreePrefabs == null || TreePrefabs.Count == 0) return null;
-            SyncTreeEnabled();
-            int enabled = 0;
-            for (int i = 0; i < TreePrefabs.Count; i++)
-                if (TreePrefabs[i] != null && _treeEnabled[i]) enabled++;
-            if (enabled == 0) return null;
-            int pick = Random.Range(0, enabled);
-            for (int i = 0; i < TreePrefabs.Count; i++)
-                if (TreePrefabs[i] != null && _treeEnabled[i] && pick-- == 0) return TreePrefabs[i];
-            return null;
-        }
-
-        static long TreeCellKey(int cx, int cz) => ((long)cx << 32) ^ (uint)cz;
-
-        // Stable per-cell hash in [0,1). salt picks an independent stream so x
-        // and z jitter (and any future use) don't correlate.
-        static float CellHash01(int a, int b, int salt)
-        {
-            unchecked
-            {
-                uint h = (uint)(a * 73856093) ^ (uint)(b * 19349663) ^ (uint)(salt * 83492791);
-                h ^= h >> 13; h *= 0x85ebca6b; h ^= h >> 16;
-                return (h & 0xFFFFFF) / (float)0x1000000;
-            }
-        }
-
-        // The deterministic jittered point for lattice cell (cx,cz), spacing s.
-        void CellPoint(int cx, int cz, float s, out float px, out float pz)
-        {
-            px = (cx + 0.5f) * s + (CellHash01(cx, cz, 1) - 0.5f) * 2f * TreeJitter * s;
-            pz = (cz + 0.5f) * s + (CellHash01(cx, cz, 2) - 0.5f) * 2f * TreeJitter * s;
-        }
-
-        // Fill the unoccupied lattice cells under the brush. No neighbour scan:
-        // spacing is the lattice itself. Rate-limited so a big brush fills over
-        // a few frames of dragging rather than freezing on one.
-        void PaintTrees(Vector3 center, float dt)
-        {
-            if (TreePrefabs == null || TreePrefabs.Count == 0) return;
-            float s = Mathf.Max(0.5f, TreeMinSpacing);
-
-            _treeAccum += TreePaintRate * dt;
-            int budget = Mathf.FloorToInt(_treeAccum);
-            if (budget <= 0) return;
-            if (budget > 60) budget = 60; // ceiling so a long-dt hitch can't dump everything at once
-
-            float r2 = BrushRadius * BrushRadius;
-            int reach = Mathf.CeilToInt(BrushRadius / s) + 1;
-            int ccx = Mathf.FloorToInt(center.x / s);
-            int ccz = Mathf.FloorToInt(center.z / s);
-
-            _candKey.Clear();
-            _candPos.Clear();
-            for (int gz = ccz - reach; gz <= ccz + reach; gz++)
-                for (int gx = ccx - reach; gx <= ccx + reach; gx++)
-                {
-                    long key = TreeCellKey(gx, gz);
-                    if (_treeByCell.ContainsKey(key)) continue;
-                    CellPoint(gx, gz, s, out float px, out float pz);
-                    float dx = px - center.x, dz = pz - center.z;
-                    if (dx * dx + dz * dz > r2) continue;
-                    _candKey.Add(key);
-                    _candPos.Add(new Vector2(px, pz));
-                }
-            if (_candKey.Count == 0) return;
-
-            float lo = Mathf.Min(TreeScaleRange.x, TreeScaleRange.y);
-            float hi = Mathf.Max(TreeScaleRange.x, TreeScaleRange.y);
-            int place = Mathf.Min(budget, _candKey.Count);
-            // Partial Fisher–Yates: place a random subset so fill looks even,
-            // not corner-first.
-            for (int i = 0; i < place; i++)
-            {
-                int j = Random.Range(i, _candKey.Count);
-                (_candKey[i], _candKey[j]) = (_candKey[j], _candKey[i]);
-                (_candPos[i], _candPos[j]) = (_candPos[j], _candPos[i]);
-                Vector2 p = _candPos[i];
-                SpawnTree(RandomTreePrefab(), _candKey[i], p.x, p.y,
-                          Random.Range(0f, 360f), Random.Range(lo, hi));
-            }
-            _treeAccum -= place; // consume only what we actually placed
-            _dirtySince = Time.realtimeSinceStartup;
-        }
-
-        // cellKey is the lattice cell the tree occupies (CellKeyFromWorld for
-        // loaded trees). The first tree to claim a cell keeps it.
-        PlacedTree SpawnTree(GameObject prefab, long cellKey, float wx, float wz, float rotY, float scale)
-        {
-            if (prefab == null) return null;
-            EnsureTreeRoot();
-            float wy = _field != null ? _field.SampleHeight(wx, wz) : 0f;
-            GameObject go = Instantiate(prefab, new Vector3(wx, wy, wz),
-                                        Quaternion.Euler(0f, rotY, 0f), _treeRoot.transform);
-            if (scale > 0f && !Mathf.Approximately(scale, 1f)) go.transform.localScale *= scale;
-            // Trees need no physics. Strip colliders so they (a) cost nothing in
-            // the physics step and (b) can't be hit by the sculpt/cursor raycast
-            // (which accepts any MeshCollider as "terrain").
-            Collider[] cols = go.GetComponentsInChildren<Collider>();
-            for (int c = 0; c < cols.Length; c++)
-            {
-                if (Application.isPlaying) Destroy(cols[c]); else DestroyImmediate(cols[c]);
-            }
-            PlacedTree pt = go.GetComponent<PlacedTree>();
-            if (pt == null) pt = go.AddComponent<PlacedTree>();
-            pt.Data = new PlacedTreeData
-            {
-                Prefab = prefab.name,
-                Position = new Vector2(wx, wz),
-                RotationY = rotY,
-                Scale = scale,
-            };
-            _trees.Add(pt);
-            if (!_treeByCell.ContainsKey(cellKey)) _treeByCell[cellKey] = pt; // keep first on collision
-            return pt;
-        }
-
-        // Map a world XZ to its lattice cell key at the current spacing.
-        long CellKeyFromWorld(float wx, float wz)
-        {
-            float s = Mathf.Max(0.5f, TreeMinSpacing);
-            return TreeCellKey(Mathf.FloorToInt(wx / s), Mathf.FloorToInt(wz / s));
-        }
-
-        // Erase trees whose base is within the brush radius. Visits only lattice
-        // cells overlapping the brush — no full-list scan.
-        void EraseTrees(Vector3 center)
-        {
-            float s = Mathf.Max(0.5f, TreeMinSpacing);
-            float r2 = BrushRadius * BrushRadius;
-            int reach = Mathf.CeilToInt(BrushRadius / s) + 1;
-            int ccx = Mathf.FloorToInt(center.x / s);
-            int ccz = Mathf.FloorToInt(center.z / s);
-            bool any = false;
-            for (int gz = ccz - reach; gz <= ccz + reach; gz++)
-                for (int gx = ccx - reach; gx <= ccx + reach; gx++)
-                {
-                    long key = TreeCellKey(gx, gz);
-                    if (!_treeByCell.TryGetValue(key, out PlacedTree t)) continue;
-                    if (t == null) { _treeByCell.Remove(key); continue; }
-                    Vector3 p = t.transform.position;
-                    float dx = p.x - center.x, dz = p.z - center.z;
-                    if (dx * dx + dz * dz <= r2)
-                    {
-                        DestroySafe(t.gameObject);
-                        _treeByCell.Remove(key);
-                        _trees.Remove(t); // bounded: only erased trees
-                        any = true;
-                    }
-                }
-            if (any) _dirtySince = Time.realtimeSinceStartup;
-        }
-
-        // Re-instantiate trees loaded from the save (after chunks exist, so the
-        // surface heights are known). Missing prefabs are skipped.
-        void SpawnLoadedTrees()
-        {
-            if (_pendingTrees == null) return;
-            foreach (PlacedTreeData d in _pendingTrees)
-            {
-                if (d == null) continue;
-                GameObject prefab = FindTreePrefab(d.Prefab);
-                if (prefab != null)
-                    SpawnTree(prefab, CellKeyFromWorld(d.Position.x, d.Position.y),
-                              d.Position.x, d.Position.y, d.RotationY, d.Scale);
-            }
-            _pendingTrees = null;
-        }
-
-        GameObject FindTreePrefab(string name)
-        {
-            if (string.IsNullOrEmpty(name) || TreePrefabs == null) return null;
-            foreach (GameObject p in TreePrefabs)
-                if (p != null && p.name == name) return p;
-            return null;
-        }
-
-        // Cached GUILayoutOption arrays — passing GUILayout.Width(n) inline
-        // allocates a fresh options array on EVERY call; these are reused.
-        static readonly GUILayoutOption[] GlThumb = { GUILayout.Width(38), GUILayout.Height(38) };
-        static readonly GUILayoutOption[] GlRow = { GUILayout.Height(38) };
-        static readonly GUILayoutOption[] GlDel = { GUILayout.Width(24) };
-        static readonly GUILayoutOption[] GlField = { GUILayout.Width(190) };
-
-        // Tree palette (Play-mode IMGUI): a panel of every tree prefab with a
-        // thumbnail + include/exclude toggle. Only shown in Tree mode.
+        // Palette IMGUI for the active scatter layer, or a hint for linework.
         void OnGUI()
         {
-            if (!TreeMode) { _treePanelRect = new Rect(); return; }
-            SyncTreeEnabled();
-            const float w = 300f, pad = 8f;
-            _treePanelRect = new Rect(Screen.width - w - pad, pad, w, Screen.height - 2f * pad);
-            GUILayout.BeginArea(_treePanelRect, GUI.skin.box);
-            GUILayout.Label("Tree brush — include:");
-            if (TreePrefabs == null || TreePrefabs.Count == 0)
+            if (_lineActive != null)
             {
-                GUILayout.Label("Assign Tree Prefabs on the\nTerrainDesigner component.");
+                GUILayout.BeginArea(new Rect(Screen.width - 308f, 8f, 300f, 104f), GUI.skin.box);
+                GUILayout.Label(_lineActive.Name + " mode");
+                GUILayout.Label("Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
+                if (_lineActive.Asset == null)
+                    GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
                 GUILayout.EndArea();
                 return;
             }
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("All")) SetAllTrees(true);
-            if (GUILayout.Button("None")) SetAllTrees(false);
-            GUILayout.EndHorizontal();
-
-            // --- Packs ---
-            GUILayout.Space(4);
-            GUILayout.Label(_activePack >= 0 && _activePack < _packs.Count
-                ? "Packs (active: " + _packs[_activePack].Name + "):" : "Packs:");
-            for (int i = 0; i < _packs.Count; i++)
-            {
-                GUILayout.BeginHorizontal();
-                bool sel = _activePack == i;
-                bool nowSel = GUILayout.Toggle(sel, _packs[i].Name + "  (" + _packs[i].Trees.Count + ")",
-                                               GUI.skin.button);
-                if (nowSel && !sel) ApplyPack(i);
-                if (GUILayout.Button("x", GlDel)) { DeletePack(i); GUILayout.EndHorizontal(); break; }
-                GUILayout.EndHorizontal();
-            }
-            GUILayout.BeginHorizontal();
-            _newPackName = GUILayout.TextField(_newPackName, GlField);
-            if (GUILayout.Button("Save pack")) { CreatePack(_newPackName); _newPackName = ""; }
-            GUILayout.EndHorizontal();
-
-            // --- Trees ---
-            GUILayout.Space(4);
-            _treeScroll = GUILayout.BeginScrollView(_treeScroll);
-            for (int i = 0; i < TreePrefabs.Count; i++)
-            {
-                if (TreePrefabs[i] == null) continue;
-                GUILayout.BeginHorizontal();
-                _treeThumbs.TryGetValue(TreePrefabs[i], out Texture2D preview);
-                if (preview != null) GUILayout.Label(preview, GlThumb);
-                else GUILayout.Box("…", GlThumb);
-                bool before = _treeEnabled[i];
-                string label = (_treeLabels != null && i < _treeLabels.Length) ? _treeLabels[i] : "";
-                _treeEnabled[i] = GUILayout.Toggle(before, label, GlRow);
-                if (_treeEnabled[i] != before) _activePack = -1; // diverged from any pack
-                GUILayout.EndHorizontal();
-            }
-            GUILayout.EndScrollView();
-            GUILayout.EndArea();
+            if (_active == null) return;
+            if (_active.DrawPalette()) _dirtySince = Time.realtimeSinceStartup;
         }
+
+        // True when the cursor is over the active layer's palette (so paint/erase
+        // and camera zoom are suppressed there). Y is flipped: GUI rect is
+        // top-left origin, mouse is bottom-left.
+        bool MouseOverActivePanel()
+        {
+            if (_active == null || _active.PanelRect.width <= 0f) return false;
+            return _active.PanelRect.Contains(
+                new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
+        }
+
+        // Linework rebuild/clear — used by the tuning-panel actions and on edits.
+        public void RebuildFence() { FenceLayer.Rebuild(Field); }
+        [ContextMenu("Clear Fence")]
+        public void ClearFence() { FenceLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+
+#if UNITY_EDITOR
+        [ContextMenu("Load Trees From Folder")]
+        public void LoadTreesFromFolder()
+        {
+            if (TreeLayer.LoadFromFolder()) UnityEditor.EditorUtility.SetDirty(this);
+        }
+
+        [ContextMenu("Load Rocks From Folder")]
+        public void LoadRocksFromFolder()
+        {
+            if (RockLayer.LoadFromFolder()) UnityEditor.EditorUtility.SetDirty(this);
+        }
+#endif
 
         // If the (empty) scene has no SceneAmbiance, create one configured to
         // light itself — sun + soft shadows + ambient fill + URP shadow range.
@@ -795,20 +466,9 @@ namespace NetworkDesigner.Terrain
                 orbit.Distance = orbit.DistanceTarget;
                 orbit.Pitch = 45f;
             }
-            // Don't zoom the camera when scrolling over the tree palette — let
+            // Don't zoom the camera when scrolling over the active palette — let
             // its own scroll view consume the wheel instead.
-            orbit.ScrollSuppressor = MouseOverTreePanel;
-        }
-
-        // True when the cursor is inside the (Tree-mode) palette rect. The rect
-        // is reset to empty when the palette is hidden, so this is false outside
-        // Tree mode. Y is flipped: GUI rects are top-left origin, mouse is
-        // bottom-left.
-        bool MouseOverTreePanel()
-        {
-            if (!TreeMode || _treePanelRect.width <= 0f) return false;
-            return _treePanelRect.Contains(
-                new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
+            orbit.ScrollSuppressor = MouseOverActivePanel;
         }
 
         void Update()
@@ -818,11 +478,15 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha2)) Brush = BrushMode.Lower;
             else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
-            if (Input.GetKeyDown(KeyCode.T)) TreeMode = !TreeMode; // sculpt <-> trees
+            // T/R/F toggle the active mode (mutually exclusive; press the same
+            // key again to return to sculpt).
+            if (Input.GetKeyDown(KeyCode.T)) { _active = _active == TreeLayer ? null : TreeLayer; _lineActive = null; FenceLayer.HidePreview(); }
+            if (Input.GetKeyDown(KeyCode.R)) { _active = _active == RockLayer ? null : RockLayer; _lineActive = null; FenceLayer.HidePreview(); }
+            if (Input.GetKeyDown(KeyCode.F)) { _lineActive = _lineActive == FenceLayer ? null : FenceLayer; _active = null; if (_lineActive == null) FenceLayer.HidePreview(); }
             // Bake thumbnails only while NOT painting — the first render of each
-            // tree compiles its shader variant (a one-time editor stall), and we
-            // don't want that landing mid-stroke.
-            if (TreeMode && !Input.GetMouseButton(0)) EnsureOneTreeThumb();
+            // prefab compiles its shader variant (a one-time editor stall), and
+            // we don't want that landing mid-stroke.
+            if (_active != null && !Input.GetMouseButton(0)) _active.EnsureOneThumb();
 
             // Brush resize: ] bigger, [ smaller (held = continuous).
             if (Input.GetKey(KeyCode.RightBracket)) BrushRadius += BrushResizeRate * Time.deltaTime;
@@ -854,15 +518,42 @@ namespace NetworkDesigner.Terrain
 
             UpdateBrushCursor(ShowBrushCursor && overTerrain, hit.point);
 
-            // Tree mode: left-drag paints, right-drag erases; no sculpting.
-            // Don't act when the cursor is over the tree palette panel.
-            if (TreeMode)
+            // Linework mode (fence/…): click adds a node + connects from the last
+            // (chain); right-click ends the chain; Backspace undoes the last node.
+            if (_lineActive != null)
             {
-                bool overPanel = _treePanelRect.Contains(
-                    new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
-                if (!overPanel && overTerrain && Input.GetMouseButton(0)) PaintTrees(hit.point, Time.deltaTime);
-                else _treeAccum = 0f; // reset accumulation between strokes
-                if (!overPanel && overTerrain && Input.GetMouseButton(1)) EraseTrees(hit.point);
+                _lineActive.UpdatePreview(_field, hit.point, overTerrain);
+                if (overTerrain && Input.GetMouseButtonDown(0))
+                {
+                    _lineActive.AddNode(_field, hit.point);
+                    _dirtySince = Time.realtimeSinceStartup;
+                }
+                if (Input.GetMouseButtonDown(1))
+                {
+                    // Right-click near a node deletes it; otherwise ends the chain.
+                    if (overTerrain && _lineActive.DeleteNearNode(_field, hit.point, 3f))
+                        _dirtySince = Time.realtimeSinceStartup;
+                    else _lineActive.EndChain();
+                }
+                if (Input.GetKeyDown(KeyCode.Backspace))
+                {
+                    _lineActive.RemoveLastNode(_field);
+                    _dirtySince = Time.realtimeSinceStartup;
+                }
+                return;
+            }
+
+            // Scatter mode (trees/rocks): left-drag paints, right-drag erases;
+            // no sculpting. Suppressed while the cursor is over the palette.
+            if (_active != null)
+            {
+                bool overPanel = MouseOverActivePanel();
+                if (!overPanel && overTerrain && Input.GetMouseButton(0)
+                    && _active.Paint(_field, hit.point, Time.deltaTime, BrushRadius))
+                    _dirtySince = Time.realtimeSinceStartup;
+                if (!overPanel && overTerrain && Input.GetMouseButton(1)
+                    && _active.Erase(hit.point, BrushRadius))
+                    _dirtySince = Time.realtimeSinceStartup;
                 return;
             }
 
@@ -1218,7 +909,9 @@ namespace NetworkDesigner.Terrain
             // orphans) so the mesh can't lag behind the new heights or stack up.
             _chunkMesh = null; _chunkCol = null;
             BuildAllChunks();
-            ConformTreesToSurface();
+            TreeLayer.ConformToSurface(_field);
+            RockLayer.ConformToSurface(_field);
+            FenceLayer.Rebuild(_field); // re-place linework on the new surface
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
 
@@ -1292,19 +985,6 @@ namespace NetworkDesigner.Terrain
                     }
                 }
                 System.Array.Copy(tmp, src, src.Length);
-            }
-        }
-
-        // Re-seat every placed tree onto the (possibly changed) surface.
-        void ConformTreesToSurface()
-        {
-            for (int i = 0; i < _trees.Count; i++)
-            {
-                PlacedTree t = _trees[i];
-                if (t == null) continue;
-                Vector3 p = t.transform.position;
-                p.y = _field.SampleHeight(p.x, p.z);
-                t.transform.position = p;
             }
         }
 
@@ -1392,10 +1072,6 @@ namespace NetworkDesigner.Terrain
             {
                 if (Mathf.Abs(heights[i]) > 1e-4f) { idx.Add(i); hs.Add(heights[i]); }
             }
-            var trees = new List<PlacedTreeData>(_trees.Count);
-            foreach (PlacedTree t in _trees)
-                if (t != null && t.Data != null) trees.Add(t.Data);
-
             return new TerrainSave
             {
                 ColumnsX = _field.ColumnsX,
@@ -1403,8 +1079,11 @@ namespace NetworkDesigner.Terrain
                 CellSize = _field.CellSize,
                 Idx = idx.ToArray(),
                 H = hs.ToArray(),
-                Trees = trees,
-                Packs = new List<TreePack>(_packs),
+                Trees = TreeLayer.CollectData(),
+                Packs = TreeLayer.CollectPacks(),
+                Rocks = RockLayer.CollectData(),
+                RockPacks = RockLayer.CollectPacks(),
+                Fences = FenceLayer.CollectData(),
             };
         }
 
@@ -1444,9 +1123,10 @@ namespace NetworkDesigner.Terrain
                         if (i >= 0 && i < f.Heights.Length) f.Heights[i] = save.H[k];
                     }
                 }
-                _pendingTrees = save.Trees; // spawned after chunks build (SpawnLoadedTrees)
-                _packs.Clear();
-                if (save.Packs != null) _packs.AddRange(save.Packs);
+                // Stage scatter data + packs; layers SpawnPending after chunks build.
+                TreeLayer.LoadState(save.Trees, save.Packs);
+                RockLayer.LoadState(save.Rocks, save.RockPacks);
+                FenceLayer.LoadState(save.Fences); // Rebuilt after chunks
                 return f;
             }
             catch (System.Exception ex)

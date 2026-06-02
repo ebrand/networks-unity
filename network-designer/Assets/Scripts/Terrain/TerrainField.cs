@@ -85,6 +85,9 @@ namespace NetworkDesigner.Terrain
         public float[] H;    // parallel heights for each Idx
         public List<PlacedTreeData> Trees; // painted trees (XZ + rotation + scale + prefab)
         public List<TreePack> Packs;       // saved tree-brush include/exclude presets
+        public List<PlacedTreeData> Rocks; // painted rocks (same shape as Trees)
+        public List<TreePack> RockPacks;   // saved rock-brush include/exclude presets
+        public LineGraphSave Fences;       // fence linework graph (nodes + edges)
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by
