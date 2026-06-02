@@ -218,7 +218,12 @@ namespace NetworkDesigner.Terrain
         {
             if (Surface == null || GrassAlbedo == null) return;
             TerrainData td = Surface.terrainData;
-            if (td.terrainLayers == null || td.terrainLayers.Length == 0)
+            // Rebuild when there's no valid layer. Runtime-created TerrainLayers
+            // aren't saved assets, so after a recompile / reopen their refs go
+            // null — treat that (a null first entry) as "missing" and rebuild.
+            bool hasValid = td.terrainLayers != null && td.terrainLayers.Length > 0
+                            && td.terrainLayers[0] != null;
+            if (!hasValid)
             {
                 var layers = new List<TerrainLayer>
                 {
