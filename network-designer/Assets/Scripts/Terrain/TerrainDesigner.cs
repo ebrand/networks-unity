@@ -50,6 +50,10 @@ namespace NetworkDesigner.Terrain
         public float MaxBrushRadius = 500f;
         [Tooltip("Height change rate (metres/second) at the brush centre.")]
         public float BrushStrength = 20f;
+        [Tooltip("Exponent on Strength for Raise/Lower: effective rate = Strength^exp. " +
+                 "1 = linear (unchanged). >1 makes higher Strength values ramp up " +
+                 "dramatically (e.g. exp 2 turns Strength 50 into 2500 m/s).")]
+        [Range(1f, 4f)] public float BrushStrengthExponent = 1f;
         [Tooltip("0 = hard edge, 1 = soft (smoothstep) falloff to the rim.")]
         [Range(0f, 1f)] public float BrushFalloff = 0.7f;
         [Tooltip("Camera used for the sculpt raycast. Defaults to Camera.main.")]
@@ -92,6 +96,10 @@ namespace NetworkDesigner.Terrain
         public bool TreeMode = false;
         [Tooltip("Low-poly tree prefabs to scatter (one picked at random per tree).")]
         public List<GameObject> TreePrefabs = new List<GameObject>();
+        [Tooltip("Asset folder scanned for tree prefabs by 'Load Trees From Folder' " +
+                 "(⋮ menu) — recursive, Editor only. Also auto-loaded on Start when " +
+                 "the list above is empty, so lost references self-heal. e.g. Assets/Trees")]
+        public string TreeFolder = "Assets/Trees";
         [Tooltip("Trees painted per second while dragging.")]
         public float TreePaintRate = 25f;
         [Tooltip("Lattice spacing (m): trees fill a jittered grid of this cell " +
@@ -106,6 +114,19 @@ namespace NetworkDesigner.Terrain
                  "so there's something to sculpt. Does NOT re-apply on rebuild.")]
         public bool TestHill = false;
         public float TestHillHeight = 80f;
+
+        [Header("Heightmap import (context-menu 'Import Heightmap')")]
+        [Tooltip("Grayscale heightmap file. Relative paths resolve to the project " +
+                 "root in the Editor (persistentDataPath in a build). Any size — it's " +
+                 "bilinear-sampled to the grid. Black = 0, white = Max height. " +
+                 "REPLACES the current heights. Run in Play mode.")]
+        public string HeightmapPath = "terrain1.png";
+        [Tooltip("Metres of elevation that pure white (1.0) maps to; black maps to 0.")]
+        public float HeightmapMaxHeight = 250f;
+        [Tooltip("Box-blur passes applied after import. Softens the 8-bit terracing " +
+                 "(staircase steps on slopes) and single-pixel spikes. 0 = raw; " +
+                 "2-4 looks natural; high values flatten real detail.")]
+        [Range(0, 12)] public int HeightmapSmoothPasses = 3;
 
         [Header("Autosave (terrain persistence across Play stop/start)")]
         public bool Autosave = true;
@@ -188,6 +209,12 @@ namespace NetworkDesigner.Terrain
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
 
+            StripStaleHostMesh();
+#if UNITY_EDITOR
+            // Self-heal lost prefab references: if the list is empty, repopulate
+            // from TreeFolder so a broken link doesn't silently disable the brush.
+            if (TreePrefabs == null || TreePrefabs.Count == 0) LoadTreesFromFolder();
+#endif
             EnsureField(forceRebuild: true);
 
             // Adopt a saved heightfield only if it matches the current grid.
@@ -222,6 +249,24 @@ namespace NetworkDesigner.Terrain
             setup.Terrain = this;
         }
 
+        // The terrain renders via child "TerrainChunks" objects, so a
+        // MeshRenderer/Filter on THIS GameObject is a frozen baked mesh from the
+        // old single-mesh era — it masks the live chunks and never updates.
+        // Strip it so what you see is always the current heightfield.
+        void StripStaleHostMesh()
+        {
+            MeshRenderer mr = GetComponent<MeshRenderer>();
+            if (mr != null) { mr.enabled = false; DestroyComp(mr); }
+            MeshFilter mf = GetComponent<MeshFilter>();
+            if (mf != null) DestroyComp(mf);
+        }
+
+        static void DestroyComp(Component c)
+        {
+            if (c == null) return;
+            if (Application.isPlaying) Destroy(c); else DestroyImmediate(c);
+        }
+
         // --- Chunked flat-shaded mesh ---
 
         void EnsureMaterial()
@@ -252,7 +297,7 @@ namespace NetworkDesigner.Terrain
                             || _chunkMesh.Length != n || _chunksX != chunksX;
             if (recreate)
             {
-                if (_chunkRoot != null) DestroySafe(_chunkRoot);
+                DestroyAllChunkRoots(); // tracked root + any orphans from edit-mode/reload
                 _chunkRoot = new GameObject("TerrainChunks");
                 _chunksX = _chunksZ = chunksX;
                 _chunkMesh = new Mesh[n];
@@ -324,12 +369,70 @@ namespace NetworkDesigner.Terrain
             else DestroyImmediate(go);
         }
 
+        // Destroy the tracked chunk root AND any orphaned "TerrainChunks" objects.
+        // _chunkRoot isn't serialized, so an edit-mode build or domain reload
+        // leaves prior roots with no live reference — they stack up and mask the
+        // newest terrain. Sweep them all by name before building a fresh one.
+        void DestroyAllChunkRoots()
+        {
+            _chunkRoot = null;
+            GameObject[] all = FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (int i = 0; i < all.Length; i++)
+                if (all[i] != null && all[i].name == "TerrainChunks") DestroySafe(all[i]);
+        }
+
         // --- Tree brush ---
 
         void EnsureTreeRoot()
         {
             if (_treeRoot == null) _treeRoot = new GameObject("TerrainTrees");
         }
+
+#if UNITY_EDITOR
+        // Populate TreePrefabs from every prefab under TreeFolder (recursive),
+        // sorted by name. Editor only (AssetDatabase). Run from the ⋮ menu to
+        // (re)link the list without dragging each prefab in by hand.
+        [ContextMenu("Load Trees From Folder")]
+        public void LoadTreesFromFolder()
+        {
+            string folder = (TreeFolder ?? "").TrimEnd('/');
+            if (string.IsNullOrEmpty(folder) || !UnityEditor.AssetDatabase.IsValidFolder(folder))
+            {
+                Debug.LogWarning($"[TerrainDesigner] Tree folder not found: '{folder}'");
+                return;
+            }
+            string[] guids = UnityEditor.AssetDatabase.FindAssets("t:Prefab", new[] { folder });
+            var list = new List<GameObject>(guids.Length);
+            foreach (string g in guids)
+            {
+                string path = UnityEditor.AssetDatabase.GUIDToAssetPath(g);
+                GameObject go = UnityEditor.AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                // Only renderable prefabs — skips light/camera/empty demo prefabs.
+                if (go != null && go.GetComponentInChildren<Renderer>() != null) list.Add(go);
+            }
+            list.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
+
+            // Idempotent: identical set → do nothing (preserve toggles, no
+            // re-bake, no dirty). Re-clicking is then a safe no-op.
+            if (SamePrefabList(list, TreePrefabs))
+            {
+                Debug.Log($"[TerrainDesigner] Tree list unchanged ({list.Count} from '{folder}').");
+                return;
+            }
+            TreePrefabs = list;
+            _treeEnabled = null;      // list changed -> re-sync palette toggles
+            // _treeThumbs kept: surviving prefabs reuse cached thumbs; new ones bake lazily.
+            UnityEditor.EditorUtility.SetDirty(this); // persist the linked list
+            Debug.Log($"[TerrainDesigner] Loaded {list.Count} tree prefab(s) from '{folder}'.");
+        }
+
+        static bool SamePrefabList(List<GameObject> a, List<GameObject> b)
+        {
+            if (a == null || b == null || a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+#endif
 
         // Keep _treeEnabled parallel to TreePrefabs; new entries default ON.
         void SyncTreeEnabled()
@@ -940,6 +1043,11 @@ namespace NetworkDesigner.Terrain
             int cz0 = Mathf.RoundToInt(fz);
             int rad = Mathf.Max(1, Mathf.CeilToInt(BrushRadius / cs));
 
+            // Effective Raise/Lower rate = Strength^exp. exp is floored at 1 so a
+            // stale/zero serialized value can't collapse it to a constant 1 m/s.
+            float exp = Mathf.Max(1f, BrushStrengthExponent);
+            float effStrength = Mathf.Pow(Mathf.Max(0f, BrushStrength), exp);
+
             for (int dz = -rad; dz <= rad; dz++)
             {
                 for (int dx = -rad; dx <= rad; dx++)
@@ -962,10 +1070,10 @@ namespace NetworkDesigner.Terrain
                     switch (Brush)
                     {
                         case BrushMode.Raise:
-                            h += BrushStrength * dt * w;
+                            h += effStrength * dt * w;
                             break;
                         case BrushMode.Lower:
-                            h -= BrushStrength * dt * w;
+                            h -= effStrength * dt * w;
                             break;
                         case BrushMode.Flatten:
                             h = Mathf.Lerp(h, _flattenTarget, Mathf.Clamp01(dt * 4f * w));
@@ -1039,6 +1147,171 @@ namespace NetworkDesigner.Terrain
             BuildAllChunks();
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
+        }
+
+        // Bake a grayscale heightmap into the current field (REPLACES all
+        // heights), then rebuild + conform trees. Read via File+LoadImage so the
+        // source needn't be a Read/Write-Enabled asset (or even under Assets/).
+        // Bilinear-sampled, so any image size maps onto the grid.
+        [ContextMenu("Import Heightmap")]
+        public void ImportHeightmap()
+        {
+            if (_field == null) EnsureField(forceRebuild: true);
+            string path = ResolveHeightmapPath();
+            if (!System.IO.File.Exists(path))
+            {
+                Debug.LogWarning($"[TerrainDesigner] Heightmap not found: {path}");
+                return;
+            }
+            Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            bool decoded;
+            try { decoded = tex.LoadImage(System.IO.File.ReadAllBytes(path)); }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Heightmap read failed: {ex.Message}");
+                DestroyTex(tex);
+                return;
+            }
+            if (!decoded)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Heightmap decode failed: {path}");
+                DestroyTex(tex);
+                return;
+            }
+
+            int iw = tex.width, ih = tex.height;
+            Color[] px = tex.GetPixels();
+            DestroyTex(tex); // px is a managed copy; safe to free the texture now
+            if (px == null || iw < 1 || ih < 1 || px.Length < iw * ih)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Heightmap pixel read mismatch: " +
+                                 $"{iw}x{ih}, {(px == null ? 0 : px.Length)} px.");
+                return;
+            }
+
+            // Rebuild the field at the CONFIGURED resolution (TerrainSizeMeters /
+            // CellSize) before writing. A stale/corrupt _field is what produced
+            // both the earlier IndexOutOfRange and the wrong 64x64 grid — don't
+            // trust its dims; re-derive them.
+            EnsureField(forceRebuild: true);
+            int cx = _field.ColumnsX, rz = _field.RowsZ;
+            if (_field.Heights == null || _field.Heights.Length != cx * rz)
+            {
+                Debug.LogWarning($"[TerrainDesigner] Field still inconsistent " +
+                                 $"({cx}x{rz} vs {(_field.Heights == null ? 0 : _field.Heights.Length)} heights); rebuilding.");
+                _field = new TerrainField(cx, rz, _field.CellSize, _field.Origin);
+                cx = _field.ColumnsX; rz = _field.RowsZ;
+            }
+
+            for (int z = 0; z < rz; z++)
+            {
+                float v = rz > 1 ? (float)z / (rz - 1) : 0f;
+                for (int x = 0; x < cx; x++)
+                {
+                    float u = cx > 1 ? (float)x / (cx - 1) : 0f;
+                    _field.SetHeight(x, z, SampleBilinearGray(px, iw, ih, u, v) * HeightmapMaxHeight);
+                }
+            }
+            SmoothHeights(HeightmapSmoothPasses);
+
+            // Force the recreate path (which sweeps ALL chunk roots, including
+            // orphans) so the mesh can't lag behind the new heights or stack up.
+            _chunkMesh = null; _chunkCol = null;
+            BuildAllChunks();
+            ConformTreesToSurface();
+            RebuildContours();
+            _dirtySince = Time.realtimeSinceStartup;
+
+            float minH = float.MaxValue, maxH = float.MinValue;
+            float[] hh = _field.Heights;
+            for (int i = 0; i < hh.Length; i++) { if (hh[i] < minH) minH = hh[i]; if (hh[i] > maxH) maxH = hh[i]; }
+            Debug.Log($"[TerrainDesigner] Imported {iw}x{ih} → grid {cx}x{rz}, white={HeightmapMaxHeight} m, " +
+                      $"{HeightmapSmoothPasses} smooth pass(es); actual height range {minH:F1}..{maxH:F1} m.");
+        }
+
+        // Resolve to a FULLY NORMALIZED absolute path (Mono's File.Exists won't
+        // reliably resolve an embedded ".."). Searches: project folder, repo
+        // root (one up), then Assets/ — returns the first that exists, else the
+        // primary candidate (so the warning shows a clean path).
+        string ResolveHeightmapPath()
+        {
+            if (System.IO.Path.IsPathRooted(HeightmapPath))
+                return System.IO.Path.GetFullPath(HeightmapPath);
+#if UNITY_EDITOR
+            string baseDir = System.IO.Path.Combine(Application.dataPath, "..");
+#else
+            string baseDir = Application.persistentDataPath;
+#endif
+            string[] candidates =
+            {
+                System.IO.Path.GetFullPath(System.IO.Path.Combine(baseDir, HeightmapPath)),
+                System.IO.Path.GetFullPath(System.IO.Path.Combine(baseDir, "..", HeightmapPath)),
+                System.IO.Path.GetFullPath(System.IO.Path.Combine(Application.dataPath, HeightmapPath)),
+            };
+            foreach (string c in candidates)
+                if (System.IO.File.Exists(c)) return c;
+            return candidates[0];
+        }
+
+        // Bilinear gray sample (uses the red channel; grayscale has r=g=b) at
+        // normalized (u,v) over a w×h pixel buffer.
+        static float SampleBilinearGray(Color[] px, int w, int h, float u, float v)
+        {
+            float fx = Mathf.Clamp01(u) * (w - 1);
+            float fy = Mathf.Clamp01(v) * (h - 1);
+            int x0 = Mathf.FloorToInt(fx), y0 = Mathf.FloorToInt(fy);
+            int x1 = Mathf.Min(x0 + 1, w - 1), y1 = Mathf.Min(y0 + 1, h - 1);
+            float tx = fx - x0, ty = fy - y0;
+            float g00 = px[y0 * w + x0].r, g10 = px[y0 * w + x1].r;
+            float g01 = px[y1 * w + x0].r, g11 = px[y1 * w + x1].r;
+            return Mathf.Lerp(Mathf.Lerp(g00, g10, tx), Mathf.Lerp(g01, g11, tx), ty);
+        }
+
+        // In-place box blur of the height grid (self + 4 neighbours per pass).
+        // Edge cells average only their existing neighbours.
+        void SmoothHeights(int passes)
+        {
+            if (passes <= 0 || _field == null) return;
+            int cx = _field.ColumnsX, rz = _field.RowsZ;
+            float[] src = _field.Heights;
+            float[] tmp = new float[src.Length];
+            for (int p = 0; p < passes; p++)
+            {
+                for (int z = 0; z < rz; z++)
+                {
+                    for (int x = 0; x < cx; x++)
+                    {
+                        int i = z * cx + x;
+                        float sum = src[i];
+                        int n = 1;
+                        if (x > 0)      { sum += src[i - 1];  n++; }
+                        if (x < cx - 1) { sum += src[i + 1];  n++; }
+                        if (z > 0)      { sum += src[i - cx]; n++; }
+                        if (z < rz - 1) { sum += src[i + cx]; n++; }
+                        tmp[i] = sum / n;
+                    }
+                }
+                System.Array.Copy(tmp, src, src.Length);
+            }
+        }
+
+        // Re-seat every placed tree onto the (possibly changed) surface.
+        void ConformTreesToSurface()
+        {
+            for (int i = 0; i < _trees.Count; i++)
+            {
+                PlacedTree t = _trees[i];
+                if (t == null) continue;
+                Vector3 p = t.transform.position;
+                p.y = _field.SampleHeight(p.x, p.z);
+                t.transform.position = p;
+            }
+        }
+
+        static void DestroyTex(Texture2D tex)
+        {
+            if (tex == null) return;
+            if (Application.isPlaying) Destroy(tex); else DestroyImmediate(tex);
         }
 
         void StampTestHill()

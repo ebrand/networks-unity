@@ -150,6 +150,36 @@ namespace NetworkDesigner.Tuning
             });
         }
 
+        public static void RegisterString(string key, string category, string label,
+            Func<string> get, Action<string> set)
+        {
+            Add(new Entry
+            {
+                Key = key,
+                Type = "string",
+                Category = category,
+                Label = label ?? key,
+                Get = () => get(),
+                Set = v => set(v?.ToString() ?? ""),
+            });
+        }
+
+        // A fire-and-forget button. The client sends a normal "set" (value
+        // ignored) and the registered Action runs on the main thread. Excluded
+        // from persistence so loading the file never re-triggers it.
+        public static void RegisterAction(string key, string category, string label, Action run)
+        {
+            Add(new Entry
+            {
+                Key = key,
+                Type = "action",
+                Category = category,
+                Label = label ?? key,
+                Get = () => false,
+                Set = _ => run(),
+            });
+        }
+
         // Registers a RoadProfile-typed setting. The wire form is the
         // same JSON shape the React tool exports (camelCase, AB/BA stored
         // under "ab"/"ba", etc.) so a Road from the React side drops
@@ -268,6 +298,7 @@ namespace NetworkDesigner.Tuning
                 for (int i = 0; i < _orderedKeys.Count; i++)
                 {
                     Entry e = _orderedKeys[i];
+                    if (e.Type == "action") continue; // never persist/trigger buttons
                     dict[e.Key] = e.Get();
                 }
                 string json = JsonConvert.SerializeObject(dict, Formatting.Indented);
@@ -294,7 +325,8 @@ namespace NetworkDesigner.Tuning
                 JObject obj = JObject.Parse(json);
                 foreach (KeyValuePair<string, JToken> kv in obj)
                 {
-                    if (!_entries.ContainsKey(kv.Key)) continue;
+                    if (!_entries.TryGetValue(kv.Key, out Entry en)) continue;
+                    if (en.Type == "action") continue; // don't fire buttons on load
                     object val = kv.Value?.ToObject<object>();
                     if (TrySet(kv.Key, val, out _)) applied++;
                 }

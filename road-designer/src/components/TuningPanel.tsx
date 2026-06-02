@@ -229,6 +229,10 @@ function EntryControl({
       return <Vector3Control entry={entry} onChange={onChange} />;
     case "profile":
       return <ProfileControl entry={entry} onChange={onChange} />;
+    case "string":
+      return <StringControl entry={entry} onChange={onChange} />;
+    case "action":
+      return <ActionControl entry={entry} onChange={onChange} />;
     default:
       return (
         <Text size="xs" c="dimmed">
@@ -334,6 +338,57 @@ function BoolControl({
       checked={checked}
       onChange={(ev) => onChange(entry.key, ev.currentTarget.checked)}
     />
+  );
+}
+
+// Free-text value. Commits on blur / Enter (not every keystroke) so the
+// socket isn't spammed and the caret doesn't fight server acks.
+function StringControl({
+  entry,
+  onChange,
+}: {
+  entry: TuningEntry;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  const serverValue = typeof entry.value === "string" ? entry.value : "";
+  const [draft, setDraft] = useState(serverValue);
+  // Re-sync if the server value changes while not focused.
+  const [focused, setFocused] = useState(false);
+  if (!focused && draft !== serverValue) setDraft(serverValue);
+  const commit = () => {
+    if (draft !== serverValue) onChange(entry.key, draft);
+  };
+  return (
+    <TextInput
+      label={entry.label}
+      size="xs"
+      value={draft}
+      onChange={(ev) => setDraft(ev.currentTarget.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false);
+        commit();
+      }}
+      onKeyDown={(ev) => {
+        if (ev.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
+// A button. Click sends a normal "set" (value ignored server-side); the
+// registered Unity Action runs.
+function ActionControl({
+  entry,
+  onChange,
+}: {
+  entry: TuningEntry;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  return (
+    <Button size="xs" variant="light" onClick={() => onChange(entry.key, true)}>
+      {entry.label}
+    </Button>
   );
 }
 

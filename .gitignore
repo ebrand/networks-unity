@@ -45,6 +45,7 @@ network-designer/crashlytics-build.properties
 network-designer/NetworkAutosave.json
 network-designer/TerrainAutosave.json
 network-designer/TuningOverrides.json
+network-designer/TerrainTuningOverrides.json
 
 # Mono/Unity crash dumps
 mono_crash.*
@@ -54,6 +55,19 @@ network-designer/Assets/BrokenVector/
 network-designer/Assets/BrokenVector.meta
 network-designer/Assets/YughuesFreeRockMaterials/
 network-designer/Assets/YughuesFreeRockMaterials.meta
+# Reorganized local asset folders (third-party packs moved here — keep local)
+network-designer/Assets/Trees/
+network-designer/Assets/Trees.meta
+network-designer/Assets/Vehicles/
+network-designer/Assets/Vehicles.meta
+network-designer/Assets/Signs/
+network-designer/Assets/Signs.meta
+network-designer/Assets/Textures/
+network-designer/Assets/Textures.meta
+network-designer/Assets/TerrainLayer.terrainlayer
+network-designer/Assets/TerrainLayer.terrainlayer.meta
+# Heightmap input image (kept local)
+network-designer/terrain1.png
 
 # Common stray .meta files for ignored dirs (Unity emits these)
 network-designer/[Ll]ibrary.meta

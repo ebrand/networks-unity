@@ -1,6 +1,13 @@
 // Shape of messages exchanged with Unity's TuningServer over WebSocket.
 
-export type TuningType = "float" | "color" | "bool" | "vector3" | "profile";
+export type TuningType =
+  | "float"
+  | "color"
+  | "bool"
+  | "vector3"
+  | "profile"
+  | "string"
+  | "action";
 
 export type TuningEntry = {
   key: string;
