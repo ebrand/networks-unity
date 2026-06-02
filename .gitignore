@@ -49,6 +49,12 @@ network-designer/TuningOverrides.json
 # Mono/Unity crash dumps
 mono_crash.*
 
+# Third-party asset packs — kept LOCAL, not committed (personal-use only)
+network-designer/Assets/BrokenVector/
+network-designer/Assets/BrokenVector.meta
+network-designer/Assets/YughuesFreeRockMaterials/
+network-designer/Assets/YughuesFreeRockMaterials.meta
+
 # Common stray .meta files for ignored dirs (Unity emits these)
 network-designer/[Ll]ibrary.meta
 network-designer/[Tt]emp.meta
