@@ -88,6 +88,7 @@ namespace NetworkDesigner.Terrain
         public List<PlacedTreeData> Rocks; // painted rocks (same shape as Trees)
         public List<TreePack> RockPacks;   // saved rock-brush include/exclude presets
         public LineGraphSave Fences;       // fence linework graph (nodes + edges)
+        public LineGraphSave PowerLines;   // power-line linework graph
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by

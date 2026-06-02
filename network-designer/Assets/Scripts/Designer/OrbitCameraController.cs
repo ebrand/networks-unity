@@ -57,6 +57,10 @@ namespace NetworkDesigner.Designer
         public float ZoomSmoothing = 10f;
         [Tooltip("Floor (m) for the Distance value used in ZOOM step math. Zoom step scales with Distance (each wheel notch = ZoomSensitivity × Distance) — close zoom otherwise shrinks the step exponentially, making it hard to zoom in further or escape back out. Below this floor, zoom step acts as if you were at MinZoomReferenceDistance. Doesn't change MinDistance / MaxDistance limits.")]
         public float MinZoomReferenceDistance = 10f;
+        [Tooltip("When zooming, recenter the pivot toward the world point under the " +
+                 "cursor so zoom goes where you point and the pivot stays in front " +
+                 "(terrain-style navigation). Off = classic fixed-pivot zoom.")]
+        public bool ZoomToCursor = false;
         [Tooltip("WASD pan speed, in (meters per second) per (meter of Distance). " +
                  "Scales with Distance so panning feels the same regardless of " +
                  "zoom level — e.g. 1.5 means holding W moves Target forward by " +
@@ -177,12 +181,44 @@ namespace NetworkDesigner.Designer
                 // reference at MinZoomReferenceDistance so close zoom
                 // doesn't decay to imperceptible notches and trap the
                 // user near MinDistance.
+                float oldTarget = _distanceTarget;
                 float zoomRef = Mathf.Max(_distanceTarget, MinZoomReferenceDistance);
                 _distanceTarget -= scroll * ZoomSensitivity * zoomRef;
                 _distanceTarget = Mathf.Clamp(_distanceTarget, MinDistance, MaxDistance);
+
+                // Zoom-to-cursor: drift the pivot toward the point under the
+                // cursor as we zoom in (and back out on zoom-out), so zoom goes
+                // where you point and the pivot stays in front of you.
+                if (ZoomToCursor && oldTarget > 1e-3f && TryCursorWorldPoint(out Vector3 p))
+                {
+                    float t = Mathf.Clamp(1f - _distanceTarget / oldTarget, -0.9f, 0.9f);
+                    Target = Vector3.LerpUnclamped(Target, p, t);
+                }
             }
 
             HandleKeyboardPan();
+        }
+
+        // World point under the mouse: terrain (any collider) if hit, else the
+        // horizontal plane through the current Target.
+        bool TryCursorWorldPoint(out Vector3 point)
+        {
+            point = Target;
+            Camera cam = GetComponent<Camera>();
+            if (cam == null) return false;
+            Ray ray = cam.ScreenPointToRay(Input.mousePosition);
+            if (Physics.Raycast(ray, out RaycastHit hit, FarClipPlane))
+            {
+                point = hit.point;
+                return true;
+            }
+            Plane plane = new Plane(Vector3.up, new Vector3(0f, Target.y, 0f));
+            if (plane.Raycast(ray, out float d) && d > 0f)
+            {
+                point = ray.GetPoint(d);
+                return true;
+            }
+            return false;
         }
 
         // WASD pan in camera-relative ground-plane coordinates. W/S

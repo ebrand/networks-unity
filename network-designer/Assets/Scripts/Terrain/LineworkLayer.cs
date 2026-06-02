@@ -36,6 +36,10 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Straight edges with hard corners (recommended). Off = auto-smoothed " +
                  "bezier curves through the nodes.")]
         public bool Straight = true;
+        [Tooltip("Optional: parent placed instances under this Transform instead of an " +
+                 "auto-created root. Point it at a PoleChain that carries a cable " +
+                 "generator (e.g. ElectricCables) and the poles you place auto-connect.")]
+        public Transform ParentOverride;
 
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
@@ -69,6 +73,15 @@ namespace NetworkDesigner.Terrain
             for (int i = 0; i < all.Length; i++)
                 if (all[i] != null && all[i].name == RootName) DestroySafe(all[i]);
             _root = new GameObject(RootName);
+        }
+
+        // Where placed instances are parented: the override (e.g. a PoleChain) if
+        // set, else the layer's own auto-managed root.
+        Transform ParentTransform()
+        {
+            if (ParentOverride != null) return ParentOverride;
+            EnsureRoot();
+            return _root.transform;
         }
 
         // ---- editing ----
@@ -106,29 +119,44 @@ namespace NetworkDesigner.Terrain
 
         public void Rebuild(TerrainField field)
         {
-            EnsureRoot();
-            for (int i = 0; i < _instances.Count; i++) DestroySafe(_instances[i]);
-            _instances.Clear();
-            if (Asset == null || Graph.Edges.Count == 0) return;
-
-            float s = Mathf.Max(0.25f, Spacing);
-            var postedNodes = new HashSet<int>();
-            foreach (LineEdge e in Graph.Edges)
+            // With a parent override (cable generator), destroy IMMEDIATELY so the
+            // generator doesn't see the old + new poles together when we poke it
+            // this frame. Plain fences can use deferred destroy.
+            bool immediate = ParentOverride != null;
+            for (int i = 0; i < _instances.Count; i++)
             {
-                Vector2 p0, p1, p2, p3;
-                if (Straight)
-                {
-                    // Straight bezier (control points on the line) → hard corners.
-                    p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B];
-                    Vector2 d = p3 - p0;
-                    p1 = p0 + d / 3f; p2 = p0 + d * (2f / 3f);
-                }
-                else
-                {
-                    Graph.EdgeControls(e, out p0, out p1, out p2, out p3);
-                }
-                PlaceAlongEdge(field, e, p0, p1, p2, p3, s, postedNodes);
+                GameObject g = _instances[i];
+                if (g == null) continue;
+                if (immediate) UnityEngine.Object.DestroyImmediate(g);
+                else DestroySafe(g);
             }
+            _instances.Clear();
+            if (Asset != null && Graph.Edges.Count > 0)
+            {
+                float s = Mathf.Max(0.25f, Spacing);
+                var postedNodes = new HashSet<int>();
+                foreach (LineEdge e in Graph.Edges)
+                {
+                    Vector2 p0, p1, p2, p3;
+                    if (Straight)
+                    {
+                        // Straight bezier (control points on the line) → hard corners.
+                        p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B];
+                        Vector2 d = p3 - p0;
+                        p1 = p0 + d / 3f; p2 = p0 + d * (2f / 3f);
+                    }
+                    else
+                    {
+                        Graph.EdgeControls(e, out p0, out p1, out p2, out p3);
+                    }
+                    PlaceAlongEdge(field, e, p0, p1, p2, p3, s, postedNodes);
+                }
+            }
+            // If parented under an external chain (e.g. a cable generator), poke
+            // it to regenerate — its own auto-rebuild is edit-mode only, so
+            // runtime-placed poles wouldn't cable otherwise. No hard dependency.
+            if (ParentOverride != null)
+                ParentOverride.SendMessage("RebuildCables", SendMessageOptions.DontRequireReceiver);
         }
 
         // Resample the edge's bezier by arc length, emitting an instance every
@@ -173,12 +201,11 @@ namespace NetworkDesigner.Terrain
 
         void Spawn(TerrainField field, Vector2 xz, Vector2 tangent)
         {
-            EnsureRoot();
             float y = (Conform && field != null ? field.SampleHeight(xz.x, xz.y) : 0f) + VerticalOffset;
             float yaw = (tangent.sqrMagnitude > 1e-6f
                 ? Mathf.Atan2(tangent.x, tangent.y) * Mathf.Rad2Deg : 0f) + YawOffset;
             GameObject go = UnityEngine.Object.Instantiate(Asset, new Vector3(xz.x, y, xz.y),
-                Quaternion.Euler(0f, yaw, 0f), _root.transform);
+                Quaternion.Euler(0f, yaw, 0f), ParentTransform());
             if (Scale > 0f && !Mathf.Approximately(Scale, 1f)) go.transform.localScale *= Scale;
             Collider[] cols = go.GetComponentsInChildren<Collider>();
             for (int c = 0; c < cols.Length; c++) DestroySafe(cols[c]);

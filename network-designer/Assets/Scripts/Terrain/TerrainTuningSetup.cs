@@ -31,15 +31,10 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Seconds of no changes before the tuning file is rewritten.")]
         public float PersistDebounceSeconds = 0.5f;
 
-        [Tooltip("Orbit camera to expose as tunables. Auto-found on Start.")]
-        public OrbitCameraController Orbit;
+        [Tooltip("Fly camera to expose as tunables. Auto-found on Start.")]
+        public FlyCameraController Fly;
 
         float _dirtySinceRealtime = -1f;
-        // Previous-frame orbit snapshot — so mouse-driven camera moves (which
-        // don't flow through TrySet) still mark the tuning file dirty.
-        Vector3 _prevOrbitTarget;
-        float _prevOrbitYaw, _prevOrbitPitch, _prevOrbitDistance;
-        bool _prevOrbitInit;
 
         void OnEnable()
         {
@@ -47,7 +42,7 @@ namespace NetworkDesigner.Terrain
             Application.runInBackground = true;
             if (Terrain == null) Terrain = FindFirstObjectByType<TerrainDesigner>();
             if (Terrain == null) return;
-            if (Orbit == null) Orbit = FindFirstObjectByType<OrbitCameraController>();
+            if (Fly == null) Fly = FindFirstObjectByType<FlyCameraController>();
             TuningRegistry.Clear();
             RegisterAll();
 
@@ -76,39 +71,14 @@ namespace NetworkDesigner.Terrain
 
         void Update()
         {
-            // Mouse-driven camera moves don't go through TrySet, so poll for
-            // drift and mark dirty (mirrors the road TuningSetup).
-            PollOrbitCameraForChanges();
-
+            // Debounced save of changed tunables. (Fly-camera POSE isn't persisted
+            // on purpose — it re-frames on the terrain each Play, so you can't get
+            // stuck in a bad saved viewpoint. Fly settings below do persist.)
             if (!PersistChanges) return;
             if (_dirtySinceRealtime < 0f) return;
             if (Time.realtimeSinceStartup - _dirtySinceRealtime < PersistDebounceSeconds) return;
             TuningRegistry.SaveToFile(ResolvePersistencePath());
             _dirtySinceRealtime = -1f;
-        }
-
-        void PollOrbitCameraForChanges()
-        {
-            if (Orbit == null) return;
-            if (!_prevOrbitInit)
-            {
-                _prevOrbitTarget = Orbit.Target;
-                _prevOrbitYaw = Orbit.Yaw;
-                _prevOrbitPitch = Orbit.Pitch;
-                _prevOrbitDistance = Orbit.DistanceTarget;
-                _prevOrbitInit = true;
-                return;
-            }
-            const float EPS = 0.02f;
-            if ((Orbit.Target - _prevOrbitTarget).sqrMagnitude < EPS * EPS
-                && Mathf.Abs(Orbit.Yaw - _prevOrbitYaw) < EPS
-                && Mathf.Abs(Orbit.Pitch - _prevOrbitPitch) < EPS
-                && Mathf.Abs(Orbit.DistanceTarget - _prevOrbitDistance) < EPS) return;
-            _prevOrbitTarget = Orbit.Target;
-            _prevOrbitYaw = Orbit.Yaw;
-            _prevOrbitPitch = Orbit.Pitch;
-            _prevOrbitDistance = Orbit.DistanceTarget;
-            if (_dirtySinceRealtime < 0f) _dirtySinceRealtime = Time.realtimeSinceStartup;
         }
 
         void OnTuningChanged() => _dirtySinceRealtime = Time.realtimeSinceStartup;
@@ -189,6 +159,22 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("fence.clear", "Fence", "Clear fence",
                 () => t.ClearFence());
 
+            // --- Linework (power line) ---
+            TuningRegistry.RegisterFloat("power.spacing", "Power line", "Pole spacing (m)",
+                () => t.PowerLineLayer.Spacing, v => { t.PowerLineLayer.Spacing = v; t.RebuildPowerLine(); }, 2f, 80f);
+            TuningRegistry.RegisterFloat("power.verticalOffset", "Power line", "Vertical offset (m)",
+                () => t.PowerLineLayer.VerticalOffset, v => { t.PowerLineLayer.VerticalOffset = v; t.RebuildPowerLine(); }, -5f, 20f);
+            TuningRegistry.RegisterFloat("power.yawOffset", "Power line", "Yaw offset (deg)",
+                () => t.PowerLineLayer.YawOffset, v => { t.PowerLineLayer.YawOffset = v; t.RebuildPowerLine(); }, -180f, 180f);
+            TuningRegistry.RegisterFloat("power.scale", "Power line", "Scale",
+                () => t.PowerLineLayer.Scale, v => { t.PowerLineLayer.Scale = v; t.RebuildPowerLine(); }, 0.1f, 10f);
+            TuningRegistry.RegisterBool("power.conform", "Power line", "Conform to terrain",
+                () => t.PowerLineLayer.Conform, v => { t.PowerLineLayer.Conform = v; t.RebuildPowerLine(); });
+            TuningRegistry.RegisterBool("power.straight", "Power line", "Straight (hard corners)",
+                () => t.PowerLineLayer.Straight, v => { t.PowerLineLayer.Straight = v; t.RebuildPowerLine(); });
+            TuningRegistry.RegisterAction("power.clear", "Power line", "Clear power line",
+                () => t.ClearPowerLine());
+
             // --- Brush cursor ---
             TuningRegistry.RegisterBool("terrain.showCursor", "Brush cursor", "Show ring",
                 () => t.ShowBrushCursor, v => t.ShowBrushCursor = v);
@@ -223,38 +209,42 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterColor("terrain.color", "Appearance", "Terrain color",
                 () => t.TerrainColor, v => { t.TerrainColor = v; t.ApplyTerrainColor(); });
 
-            // --- Camera (orbit) --- mirrors the road designer's Camera group.
-            if (Orbit != null)
+            // --- Camera (free-fly) ---
+            if (Fly != null)
             {
-                // Bind to DistanceTarget (steady-state zoom), not the animating
-                // Distance, so smoothing isn't read back as a change.
-                TuningRegistry.RegisterFloat("orbit.distance", "Camera", "Distance",
-                    () => Orbit.DistanceTarget, v => Orbit.DistanceTarget = Mathf.Min(v, Orbit.MaxDistance), 1f, 5000f);
-                TuningRegistry.RegisterFloat("orbit.maxDistance", "Camera", "Max distance",
-                    () => Orbit.MaxDistance, v => Orbit.MaxDistance = v, 100f, 10000f);
-                TuningRegistry.RegisterFloat("orbit.minDistance", "Camera", "Min distance",
-                    () => Orbit.MinDistance, v => Orbit.MinDistance = Mathf.Max(0.05f, v), 0.05f, 500f);
-                TuningRegistry.RegisterFloat("orbit.farClipPlane", "Camera", "Far clip plane (m)",
-                    () => Orbit.FarClipPlane, v => Orbit.FarClipPlane = v, 100f, 50000f);
-                TuningRegistry.RegisterFloat("orbit.pitch", "Camera", "Pitch (deg)",
-                    () => Orbit.Pitch, v => Orbit.Pitch = v, -89f, 89f);
-                TuningRegistry.RegisterFloat("orbit.yaw", "Camera", "Yaw (deg)",
-                    () => Orbit.Yaw, v => Orbit.Yaw = v, -360f, 360f);
-                TuningRegistry.RegisterVector3("orbit.target", "Camera", "Pivot target (world XYZ)",
-                    () => Orbit.Target, v => Orbit.Target = v, -10000f, 10000f);
-                TuningRegistry.RegisterFloat("orbit.keyboardPanSensitivity", "Camera", "WASD pan speed (× distance/s)",
-                    () => Orbit.KeyboardPanSensitivity, v => Orbit.KeyboardPanSensitivity = v, 0f, 10f);
-                TuningRegistry.RegisterFloat("orbit.keyboardPanShiftMultiplier", "Camera", "WASD shift-boost multiplier",
-                    () => Orbit.KeyboardPanShiftMultiplier, v => Orbit.KeyboardPanShiftMultiplier = v, 1f, 10f);
-                TuningRegistry.RegisterFloat("orbit.minPanReference", "Camera", "Min pan reference distance (m)",
-                    () => Orbit.MinPanReferenceDistance, v => Orbit.MinPanReferenceDistance = v, 0f, 500f);
-                TuningRegistry.RegisterFloat("orbit.zoomSensitivity", "Camera", "Zoom per wheel notch (× distance)",
-                    () => Orbit.ZoomSensitivity, v => Orbit.ZoomSensitivity = v, 0f, 30f);
-                TuningRegistry.RegisterFloat("orbit.zoomSmoothing", "Camera", "Zoom smoothing (1/s)",
-                    () => Orbit.ZoomSmoothing, v => Orbit.ZoomSmoothing = v, 0f, 40f);
-                TuningRegistry.RegisterFloat("orbit.minZoomReference", "Camera", "Min zoom reference distance (m)",
-                    () => Orbit.MinZoomReferenceDistance, v => Orbit.MinZoomReferenceDistance = v, 0f, 500f);
+                TuningRegistry.RegisterFloat("fly.moveSpeed", "Camera", "Move speed (m/s)",
+                    () => Fly.MoveSpeed, v => Fly.MoveSpeed = v, 5f, 1000f);
+                TuningRegistry.RegisterFloat("fly.zoomStep", "Camera", "Zoom step (m/notch)",
+                    () => Fly.ZoomStep, v => Fly.ZoomStep = v, 5f, 500f);
+                TuningRegistry.RegisterFloat("fly.fastMultiplier", "Camera", "Shift fast multiplier",
+                    () => Fly.FastMultiplier, v => Fly.FastMultiplier = v, 1f, 20f);
+                TuningRegistry.RegisterFloat("fly.lookSensitivity", "Camera", "Look sensitivity",
+                    () => Fly.LookSensitivity, v => Fly.LookSensitivity = v, 0.2f, 10f);
+                TuningRegistry.RegisterFloat("fly.smoothing", "Camera", "Look smoothing (higher = snappier)",
+                    () => Fly.Smoothing, v => Fly.Smoothing = v, 0f, 30f);
+                TuningRegistry.RegisterFloat("fly.zoomSmoothing", "Camera", "Zoom smoothing (higher = snappier)",
+                    () => Fly.ZoomSmoothing, v => Fly.ZoomSmoothing = v, 0f, 30f);
+                TuningRegistry.RegisterFloat("fly.fov", "Camera", "Field of view (deg)",
+                    () => Fly.FieldOfView, v => Fly.FieldOfView = v, 30f, 90f);
+                TuningRegistry.RegisterFloat("fly.moveDamping", "Camera", "Move damping (lower = more drift)",
+                    () => Fly.MoveDamping, v => Fly.MoveDamping = v, 0.5f, 30f);
+                TuningRegistry.RegisterFloat("fly.speedAltRef", "Camera", "Full-speed altitude (m)",
+                    () => Fly.SpeedAltitudeReference, v => Fly.SpeedAltitudeReference = v, 10f, 1000f);
+                TuningRegistry.RegisterFloat("fly.minSpeedFactor", "Camera", "Min speed factor (low altitude)",
+                    () => Fly.MinSpeedFactor, v => Fly.MinSpeedFactor = v, 0.05f, 1f);
+                TuningRegistry.RegisterFloat("fly.maxAltitude", "Camera", "Max altitude (m)",
+                    () => Fly.MaxAltitude, v => Fly.MaxAltitude = v, 50f, 5000f);
+                TuningRegistry.RegisterFloat("fly.minClearance", "Camera", "Min height above ground (m)",
+                    () => Fly.MinClearance, v => Fly.MinClearance = v, 0.5f, 100f);
+                TuningRegistry.RegisterFloat("fly.farClipPlane", "Camera", "Far clip plane (m)",
+                    () => Fly.FarClipPlane, v => Fly.FarClipPlane = v, 100f, 50000f);
+                TuningRegistry.RegisterAction("camera.reset", "Camera", "Reset camera (frame terrain)",
+                    () => Terrain.ResetCamera());
             }
+
+            // Render scale — fill-rate lever for full-screen / high-DPI lag.
+            TuningRegistry.RegisterFloat("quality.renderScale", "Camera", "Render scale (lower = faster)",
+                () => t.RenderScaleValue, v => t.RenderScaleValue = v, 0.4f, 1.5f);
         }
     }
 }

@@ -99,11 +99,15 @@ namespace NetworkDesigner.Terrain
         public ScatterLayer RockLayer = new ScatterLayer
         { Name = "Rocks", Folder = "Assets/Rocks", PaintRate = 15f, Spacing = 6f, ScaleRange = new Vector2(0.5f, 1.6f) };
 
-        [Header("Linework  (F = fence)")]
+        [Header("Linework  (F = fence, P = power line)")]
         [Tooltip("Fence linework layer. Press F to toggle: left-click adds a node " +
                  "and connects from the last (chain); right-click ends the chain. " +
                  "Edges auto-curve through the nodes; the Asset renders in series.")]
         public LineworkLayer FenceLayer = new LineworkLayer { Name = "Fence", Spacing = 3f, YawOffset = -90f };
+        [Tooltip("Power-line layer (P). Assign a socketed POLE prefab as Asset and set " +
+                 "ParentOverride to a PoleChain that carries a cable generator — the " +
+                 "placed poles then auto-connect with cables. Use a wide Spacing (span).")]
+        public LineworkLayer PowerLineLayer = new LineworkLayer { Name = "PowerLine", Spacing = 35f };
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -213,6 +217,7 @@ namespace NetworkDesigner.Terrain
             TreeLayer.SpawnPending(_field); // scatter from the save (heights now known)
             RockLayer.SpawnPending(_field);
             FenceLayer.Rebuild(_field);     // linework from the save
+            PowerLineLayer.Rebuild(_field);
             RebuildContours();
 
             // Stand up scene services, sized to the actual terrain.
@@ -379,6 +384,8 @@ namespace NetworkDesigner.Terrain
             if (string.IsNullOrEmpty(RockLayer.Folder)) RockLayer.Folder = "Assets/Rocks";
             if (FenceLayer == null) FenceLayer = new LineworkLayer();
             if (string.IsNullOrEmpty(FenceLayer.Name) || FenceLayer.Name == "Line") FenceLayer.Name = "Fence";
+            if (PowerLineLayer == null) PowerLineLayer = new LineworkLayer();
+            if (string.IsNullOrEmpty(PowerLineLayer.Name) || PowerLineLayer.Name == "Line") PowerLineLayer.Name = "PowerLine";
         }
 
         // Palette IMGUI for the active scatter layer, or a hint for linework.
@@ -412,6 +419,14 @@ namespace NetworkDesigner.Terrain
         public void RebuildFence() { FenceLayer.Rebuild(Field); }
         [ContextMenu("Clear Fence")]
         public void ClearFence() { FenceLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+        public void RebuildPowerLine() { PowerLineLayer.Rebuild(Field); }
+        [ContextMenu("Clear Power Line")]
+        public void ClearPowerLine() { PowerLineLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+
+        // Mode switching (mutually exclusive; same key again returns to sculpt).
+        void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; HideLinePreviews(); }
+        void SetLineMode(LineworkLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; HideLinePreviews(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); }
 
 #if UNITY_EDITOR
         [ContextMenu("Load Trees From Folder")]
@@ -455,20 +470,57 @@ namespace NetworkDesigner.Terrain
             }
             PickCamera = cam; // sculpt raycast uses the same camera
 
-            OrbitCameraController orbit = cam.GetComponent<OrbitCameraController>();
-            if (orbit == null)
+            // Free-fly camera for roaming (the orbit camera fought zooming over a
+            // large terrain). Remove any stray orbit controller from a prior setup.
+            OrbitCameraController stray = cam.GetComponent<OrbitCameraController>();
+            if (stray != null) { if (Application.isPlaying) Destroy(stray); else DestroyImmediate(stray); }
+
+            FlyCameraController fly = cam.GetComponent<FlyCameraController>();
+            bool fresh = fly == null;
+            if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
+            fly.ScrollSuppressor = MouseOverActivePanel;
+            fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
+            if (fresh) FrameFly(fly);
+        }
+
+        float WorldGroundHeight(Vector3 p) => _field != null ? _field.SampleHeight(p.x, p.z) : 0f;
+
+        // URP render scale — the biggest lever for fill-rate-bound (high-res /
+        // full-screen) rendering. Set at runtime on the pipeline asset (in-memory,
+        // no asset-file churn). 1 = native; <1 renders fewer pixels and upscales.
+        public float RenderScaleValue
+        {
+            get
             {
-                orbit = cam.gameObject.AddComponent<OrbitCameraController>();
-                orbit.Target = transform.position; // terrain centre
-                float span = Mathf.Max((Mathf.Max(2, ColumnsX) - 1) * CellSize,
-                                       (Mathf.Max(2, RowsZ) - 1) * CellSize);
-                orbit.DistanceTarget = span * 1.2f; // frame the whole footprint
-                orbit.Distance = orbit.DistanceTarget;
-                orbit.Pitch = 45f;
+                var a = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                        as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
+                return a != null ? a.renderScale : 1f;
             }
-            // Don't zoom the camera when scrolling over the active palette — let
-            // its own scroll view consume the wheel instead.
-            orbit.ScrollSuppressor = MouseOverActivePanel;
+            set
+            {
+                var a = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                        as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
+                if (a != null) a.renderScale = Mathf.Clamp(value, 0.3f, 2f);
+            }
+        }
+
+        void FrameFly(FlyCameraController fly)
+        {
+            if (fly == null) return;
+            float span = Mathf.Max((Mathf.Max(2, ColumnsX) - 1) * CellSize,
+                                   (Mathf.Max(2, RowsZ) - 1) * CellSize);
+            fly.Frame(transform.position, span);
+        }
+
+        // Drop the fly camera back to a sensible vantage over the terrain — escape
+        // hatch if you've roamed off into space.
+        [ContextMenu("Reset Camera")]
+        public void ResetCamera()
+        {
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            FlyCameraController fly = cam != null ? cam.GetComponent<FlyCameraController>() : null;
+            if (fly == null) fly = FindFirstObjectByType<FlyCameraController>();
+            FrameFly(fly);
         }
 
         void Update()
@@ -480,9 +532,10 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
             // T/R/F toggle the active mode (mutually exclusive; press the same
             // key again to return to sculpt).
-            if (Input.GetKeyDown(KeyCode.T)) { _active = _active == TreeLayer ? null : TreeLayer; _lineActive = null; FenceLayer.HidePreview(); }
-            if (Input.GetKeyDown(KeyCode.R)) { _active = _active == RockLayer ? null : RockLayer; _lineActive = null; FenceLayer.HidePreview(); }
-            if (Input.GetKeyDown(KeyCode.F)) { _lineActive = _lineActive == FenceLayer ? null : FenceLayer; _active = null; if (_lineActive == null) FenceLayer.HidePreview(); }
+            if (Input.GetKeyDown(KeyCode.T)) SetScatterMode(TreeLayer);
+            if (Input.GetKeyDown(KeyCode.R)) SetScatterMode(RockLayer);
+            if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
+            if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             // Bake thumbnails only while NOT painting — the first render of each
             // prefab compiles its shader variant (a one-time editor stall), and
             // we don't want that landing mid-stroke.
@@ -912,6 +965,7 @@ namespace NetworkDesigner.Terrain
             TreeLayer.ConformToSurface(_field);
             RockLayer.ConformToSurface(_field);
             FenceLayer.Rebuild(_field); // re-place linework on the new surface
+            PowerLineLayer.Rebuild(_field);
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
 
@@ -1022,7 +1076,7 @@ namespace NetworkDesigner.Terrain
             // Flush any pending edits synchronously when Play stops / disabled.
             if (Autosave && _dirtySince >= 0f)
             {
-                WriteSave(BuildSnapshot(), ResolveAutosavePath(), TerrainJsonSettings);
+                WriteSave(BuildSnapshot(), ResolveAutosavePath());
                 _dirtySince = -1f;
             }
         }
@@ -1050,8 +1104,7 @@ namespace NetworkDesigner.Terrain
             {
                 TerrainSave save = BuildSnapshot();
                 string path = ResolveAutosavePath();
-                JsonSerializerSettings settings = TerrainJsonSettings; // init on main thread
-                _saveTask = System.Threading.Tasks.Task.Run(() => WriteSave(save, path, settings));
+                _saveTask = System.Threading.Tasks.Task.Run(() => WriteSave(save, path));
                 _dirtySince = -1f; // a write is now in flight for the current state
             }
             catch (System.Exception ex)
@@ -1084,22 +1137,91 @@ namespace NetworkDesigner.Terrain
                 Rocks = RockLayer.CollectData(),
                 RockPacks = RockLayer.CollectPacks(),
                 Fences = FenceLayer.CollectData(),
+                PowerLines = PowerLineLayer.CollectData(),
             };
         }
 
-        // Serialize + write. Thread-safe (no Unity main-thread APIs besides
-        // Debug.Log, which is itself thread-safe).
-        static void WriteSave(TerrainSave save, string path, JsonSerializerSettings settings)
+        const int SaveMagic = 0x54524E33; // "TRN3"
+
+        // BINARY serialize + write — primitives straight to a byte buffer, so a
+        // dense (heightmap-imported) terrain doesn't allocate megabytes of JSON
+        // strings and trip a stop-the-world GC mid-frame. Thread-safe.
+        static void WriteSave(TerrainSave save, string path)
         {
             try
             {
-                string json = JsonConvert.SerializeObject(save, settings);
-                System.IO.File.WriteAllText(path, json);
+                int n = (save.Idx != null && save.H != null)
+                    ? Mathf.Min(save.Idx.Length, save.H.Length) : 0;
+                int cap = 64 + n * 8
+                          + TreeBytes(save.Trees) + TreeBytes(save.Rocks)
+                          + GraphBytes(save.Fences) + GraphBytes(save.PowerLines) + 256;
+                using var ms = new System.IO.MemoryStream(cap);
+                using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
+                {
+                    w.Write(SaveMagic);
+                    w.Write(1); // version
+                    w.Write(save.ColumnsX);
+                    w.Write(save.RowsZ);
+                    w.Write(save.CellSize);
+                    w.Write(n);
+                    for (int i = 0; i < n; i++) w.Write(save.Idx[i]);
+                    for (int i = 0; i < n; i++) w.Write(save.H[i]);
+                    WriteTrees(w, save.Trees);
+                    WritePacks(w, save.Packs);
+                    WriteTrees(w, save.Rocks);
+                    WritePacks(w, save.RockPacks);
+                    WriteGraph(w, save.Fences);
+                    WriteGraph(w, save.PowerLines);
+                }
+                System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
             catch (System.Exception ex)
             {
                 Debug.LogWarning($"[TerrainDesigner] Save write failed: {ex.Message}");
             }
+        }
+
+        static int TreeBytes(List<PlacedTreeData> t) => (t?.Count ?? 0) * 40 + 8;
+        static int GraphBytes(LineGraphSave g) =>
+            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 8) + 16;
+
+        static void WriteTrees(System.IO.BinaryWriter w, List<PlacedTreeData> list)
+        {
+            int c = list?.Count ?? 0;
+            w.Write(c);
+            for (int i = 0; i < c; i++)
+            {
+                PlacedTreeData d = list[i];
+                w.Write(d?.Prefab ?? "");
+                w.Write(d != null ? d.Position.x : 0f);
+                w.Write(d != null ? d.Position.y : 0f);
+                w.Write(d != null ? d.RotationY : 0f);
+                w.Write(d != null ? d.Scale : 1f);
+            }
+        }
+
+        static void WritePacks(System.IO.BinaryWriter w, List<TreePack> packs)
+        {
+            int c = packs?.Count ?? 0;
+            w.Write(c);
+            for (int i = 0; i < c; i++)
+            {
+                TreePack p = packs[i];
+                w.Write(p?.Name ?? "");
+                int m = p?.Trees?.Count ?? 0;
+                w.Write(m);
+                for (int j = 0; j < m; j++) w.Write(p.Trees[j] ?? "");
+            }
+        }
+
+        static void WriteGraph(System.IO.BinaryWriter w, LineGraphSave g)
+        {
+            int nn = g?.Nodes?.Count ?? 0;
+            w.Write(nn);
+            for (int i = 0; i < nn; i++) { w.Write(g.Nodes[i].x); w.Write(g.Nodes[i].y); }
+            int ne = g?.Edges?.Count ?? 0;
+            w.Write(ne);
+            for (int i = 0; i < ne; i++) { w.Write(g.Edges[i].A); w.Write(g.Edges[i].B); }
         }
 
         TerrainField TryLoadTerrain()
@@ -1108,8 +1230,19 @@ namespace NetworkDesigner.Terrain
             {
                 string path = ResolveAutosavePath();
                 if (!System.IO.File.Exists(path)) return null;
-                TerrainSave save = JsonConvert.DeserializeObject<TerrainSave>(
-                    System.IO.File.ReadAllText(path), TerrainJsonSettings);
+                byte[] bytes = System.IO.File.ReadAllBytes(path);
+                TerrainSave save = ReadSaveBinary(bytes);
+                if (save == null)
+                {
+                    // Migrate an old JSON autosave: read it once (slow path is fine
+                    // on a one-time load) — it re-saves as binary thereafter.
+                    try
+                    {
+                        save = JsonConvert.DeserializeObject<TerrainSave>(
+                            System.Text.Encoding.UTF8.GetString(bytes), TerrainJsonSettings);
+                    }
+                    catch { save = null; }
+                }
                 if (save == null || save.ColumnsX < 2 || save.RowsZ < 2) return null;
 
                 float cs = save.CellSize > 0f ? save.CellSize : 1f;
@@ -1127,6 +1260,7 @@ namespace NetworkDesigner.Terrain
                 TreeLayer.LoadState(save.Trees, save.Packs);
                 RockLayer.LoadState(save.Rocks, save.RockPacks);
                 FenceLayer.LoadState(save.Fences); // Rebuilt after chunks
+                PowerLineLayer.LoadState(save.PowerLines);
                 return f;
             }
             catch (System.Exception ex)
@@ -1134,6 +1268,78 @@ namespace NetworkDesigner.Terrain
                 Debug.LogWarning($"[TerrainDesigner] Load failed: {ex.Message} — starting fresh.");
                 return null;
             }
+        }
+
+        // Parse the binary save. Returns null if the bytes aren't our format
+        // (e.g. an old JSON autosave) — caller then starts fresh.
+        static TerrainSave ReadSaveBinary(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 8) return null;
+            try
+            {
+                using var ms = new System.IO.MemoryStream(bytes);
+                using var r = new System.IO.BinaryReader(ms, System.Text.Encoding.UTF8);
+                if (r.ReadInt32() != SaveMagic) return null;
+                r.ReadInt32(); // version
+                var s = new TerrainSave
+                {
+                    ColumnsX = r.ReadInt32(),
+                    RowsZ = r.ReadInt32(),
+                    CellSize = r.ReadSingle(),
+                };
+                int n = r.ReadInt32();
+                s.Idx = new int[n];
+                for (int i = 0; i < n; i++) s.Idx[i] = r.ReadInt32();
+                s.H = new float[n];
+                for (int i = 0; i < n; i++) s.H[i] = r.ReadSingle();
+                s.Trees = ReadTrees(r);
+                s.Packs = ReadPacks(r);
+                s.Rocks = ReadTrees(r);
+                s.RockPacks = ReadPacks(r);
+                s.Fences = ReadGraph(r);
+                s.PowerLines = ReadGraph(r);
+                return s;
+            }
+            catch { return null; }
+        }
+
+        static List<PlacedTreeData> ReadTrees(System.IO.BinaryReader r)
+        {
+            int c = r.ReadInt32();
+            var list = new List<PlacedTreeData>(c);
+            for (int i = 0; i < c; i++)
+                list.Add(new PlacedTreeData
+                {
+                    Prefab = r.ReadString(),
+                    Position = new Vector2(r.ReadSingle(), r.ReadSingle()),
+                    RotationY = r.ReadSingle(),
+                    Scale = r.ReadSingle(),
+                });
+            return list;
+        }
+
+        static List<TreePack> ReadPacks(System.IO.BinaryReader r)
+        {
+            int c = r.ReadInt32();
+            var list = new List<TreePack>(c);
+            for (int i = 0; i < c; i++)
+            {
+                var p = new TreePack { Name = r.ReadString(), Trees = new List<string>() };
+                int m = r.ReadInt32();
+                for (int j = 0; j < m; j++) p.Trees.Add(r.ReadString());
+                list.Add(p);
+            }
+            return list;
+        }
+
+        static LineGraphSave ReadGraph(System.IO.BinaryReader r)
+        {
+            var g = new LineGraphSave { Nodes = new List<Vector2>(), Edges = new List<LineEdge>() };
+            int nn = r.ReadInt32();
+            for (int i = 0; i < nn; i++) g.Nodes.Add(new Vector2(r.ReadSingle(), r.ReadSingle()));
+            int ne = r.ReadInt32();
+            for (int i = 0; i < ne; i++) g.Edges.Add(new LineEdge(r.ReadInt32(), r.ReadInt32()));
+            return g;
         }
 
         static JsonSerializerSettings _terrainJsonSettings;
