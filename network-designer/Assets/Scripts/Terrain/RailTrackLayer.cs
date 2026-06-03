@@ -461,6 +461,51 @@ namespace NetworkDesigner.Terrain
             return Mathf.Atan2(Mathf.Abs(NodeBedY(field, b) - NodeBedY(field, a)), run) * Mathf.Rad2Deg;
         }
 
+        // Sample the track and collect points the terrain carve should trench down
+        // to grade — (x, bedTopY, z). Includes BOTH the open-cut approaches (below
+        // grade but not tunnel-deep) AND a short notch into each tunnel mouth, so
+        // both portals open up even when one side drops off steeply (no approach).
+        public void CollectOpenCuts(TerrainField field, float tunnelBury, List<Vector3> outXZBed)
+        {
+            const float mouthNotch = 9f; // how far into the bore the mouth is dug open
+            foreach (LineEdge e in Graph.Edges)
+            {
+                Vector2 q0 = Graph.Nodes[e.A], q3 = Graph.Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = q3 - q0; q1 = q0 + d / 3f; q2 = q0 + d * (2f / 3f); }
+                float yA = NodeBedY(field, q0), yB = NodeBedY(field, q3);
+                float chord = Vector2.Distance(q0, q3);
+                int n = Mathf.Max(2, Mathf.CeilToInt(chord / 3f));
+                float step = chord / n;
+                int notch = Mathf.Max(1, Mathf.CeilToInt(mouthNotch / Mathf.Max(0.5f, step)));
+
+                var xzA = new Vector2[n + 1];
+                var bedA = new float[n + 1];
+                var tun = new bool[n + 1];
+                var openCut = new bool[n + 1];
+                for (int i = 0; i <= n; i++)
+                {
+                    float u = i / (float)n;
+                    xzA[i] = LineGraph.Bezier(q0, q1, q2, q3, u);
+                    bedA[i] = Mathf.Lerp(yA, yB, u);
+                    float bury = GroundY(field, xzA[i]) - bedA[i];
+                    tun[i] = bury >= tunnelBury;
+                    openCut[i] = bury > 0.3f && bury < tunnelBury;
+                }
+                for (int i = 0; i <= n; i++)
+                {
+                    bool emit = openCut[i];
+                    if (!emit && tun[i]) // a tunnel sample within `notch` of a mouth?
+                        for (int k = -notch; k <= notch && !emit; k++)
+                        {
+                            int j = i + k;
+                            if (j >= 0 && j <= n && !tun[j]) emit = true;
+                        }
+                    if (emit) outXZBed.Add(new Vector3(xzA[i].x, bedA[i], xzA[i].y));
+                }
+            }
+        }
+
         const int SubSteps = 32;            // bezier samples for the arc-length table
         const float RailSegment = 1.5f;     // target rail box length along the curve
         static readonly Vector2[] _pts = new Vector2[SubSteps + 1];

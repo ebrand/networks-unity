@@ -62,6 +62,14 @@ namespace NetworkDesigner.Terrain
                  "Uses the grid spacing whether or not the grid is shown.")]
         public bool SnapToGrid = false;
 
+        [Header("Rail cut carving (Carve Rail Approaches)")]
+        [Tooltip("Half-width of the flat cut floor (m). Wider = more dug out.")]
+        public float CutFloorHalfWidth = 4f;
+        [Tooltip("Extra depth carved below the rail bed (m).")]
+        public float CutDepthBelowBed = 0.5f;
+        [Tooltip("Cut-wall rise per metre out (lower = wider, gentler cut).")]
+        public float CutBatter = 0.6f;
+
         [Header("Water")]
         [Tooltip("Show a flat water surface; terrain below the water level reads as submerged.")]
         public bool ShowWater = true;
@@ -607,6 +615,61 @@ namespace NetworkDesigner.Terrain
         }
         [ContextMenu("Clear Rail")]
         public void ClearRail() { RailLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+
+        // Cut open trenches in the terrain along rail sections that run below grade
+        // (the tunnel approaches), down to the track bed with sloped batter walls,
+        // so the cut leads to the portal instead of the track stabbing into the
+        // hill. DESTRUCTIVE: permanently lowers the heightfield (no auto-undo, and
+        // it won't fill back if you later move the track).
+        [ContextMenu("Carve Rail Approaches")]
+        public void CarveRailApproaches()
+        {
+            if (_field == null) EnsureField(forceRebuild: true);
+            if (_field == null) return;
+            float clearance = Mathf.Max(2f, RailLayer.TunnelClearance);
+            float tunnelBury = clearance + Mathf.Max(0f, RailLayer.TunnelMinCover);
+            var cuts = new List<Vector3>();
+            RailLayer.CollectOpenCuts(_field, tunnelBury, cuts);
+            if (cuts.Count == 0) return;
+
+            float cs = _field.CellSize;
+            Vector3 o = _field.Origin;
+            float cutHalf = Mathf.Max(0.5f, CutFloorHalfWidth);
+            float batterRise = Mathf.Max(0.1f, CutBatter);
+            float depthBelow = Mathf.Max(0f, CutDepthBelowBed);
+            float reach = cutHalf + (tunnelBury + depthBelow) / batterRise;
+            float[] H = _field.Heights;
+
+            foreach (Vector3 c in cuts)
+            {
+                float sx = c.x, sz = c.z, floorY = c.y - depthBelow; // dig to bed (minus a bit)
+                int x0 = Mathf.Clamp(Mathf.FloorToInt((sx - reach - o.x) / cs), 0, _field.ColumnsX - 1);
+                int x1 = Mathf.Clamp(Mathf.CeilToInt((sx + reach - o.x) / cs), 0, _field.ColumnsX - 1);
+                int z0 = Mathf.Clamp(Mathf.FloorToInt((sz - reach - o.z) / cs), 0, _field.RowsZ - 1);
+                int z1 = Mathf.Clamp(Mathf.CeilToInt((sz + reach - o.z) / cs), 0, _field.RowsZ - 1);
+                for (int vz = z0; vz <= z1; vz++)
+                    for (int vx = x0; vx <= x1; vx++)
+                    {
+                        float dx = o.x + vx * cs - sx, dz = o.z + vz * cs - sz;
+                        float d = Mathf.Sqrt(dx * dx + dz * dz);
+                        if (d > reach) continue;
+                        float targetRel = (floorY + Mathf.Max(0f, d - cutHalf) * batterRise) - o.y;
+                        int idx = _field.Index(vx, vz);
+                        if (H[idx] > targetRel) H[idx] = targetRel; // lower only (carve)
+                    }
+            }
+
+            // Rebuild the mesh + re-conform everything to the carved surface.
+            BuildAllChunks();
+            TreeLayer.ConformToSurface(_field);
+            RockLayer.ConformToSurface(_field);
+            FenceLayer.Rebuild(_field);
+            PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
+            RebuildContours();
+            ApplyWater();
+            _dirtySince = Time.realtimeSinceStartup;
+        }
 
         // Mode switching (mutually exclusive; same key again returns to sculpt).
         void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; HideLinePreviews(); }
