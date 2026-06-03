@@ -118,5 +118,14 @@ namespace NetworkDesigner.Terrain
     {
         public string Name;
         public List<string> Trees = new List<string>(); // included prefab names
+        // Brush settings captured with the pack (restored when it's applied).
+        // HasParams=false for legacy packs saved before params existed -> applying
+        // them leaves the current brush settings alone.
+        public bool HasParams;
+        public float PaintRate = 25f;
+        public float Spacing = 4f;
+        public float MaxSlopeDeg = 35f;
+        public bool AvoidWater = true;
+        public float WaterlineMargin = 1f;
     }
 }

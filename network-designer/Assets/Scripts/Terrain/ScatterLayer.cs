@@ -62,6 +62,8 @@ namespace NetworkDesigner.Terrain
         Vector2 _scroll;
         Rect _panelRect;
         readonly Dictionary<GameObject, Texture> _thumbs = new Dictionary<GameObject, Texture>();
+        readonly Dictionary<GameObject, Texture> _bigThumbs = new Dictionary<GameObject, Texture>(); // hi-res, for the modal
+        GameObject _previewModal; // prefab shown enlarged in the modal (null = closed)
         readonly List<TreePack> _packs = new List<TreePack>();
         int _activePack = -1;
         string _newPackName = "";
@@ -112,10 +114,35 @@ namespace NetworkDesigner.Terrain
         {
             SyncEnabled();
             if (idx < 0 || idx >= _packs.Count) { _activePack = -1; return; }
-            List<string> names = _packs[idx].Trees;
+            TreePack pack = _packs[idx];
+            List<string> names = pack.Trees;
             for (int i = 0; i < Prefabs.Count; i++)
                 if (Prefabs[i] != null) _enabled[i] = names.Contains(Prefabs[i].name);
+            // Restore the pack's saved brush settings (legacy packs leave them alone).
+            if (pack.HasParams)
+            {
+                PaintRate = pack.PaintRate;
+                Spacing = pack.Spacing;
+                MaxSlopeDeg = pack.MaxSlopeDeg;
+                AvoidWater = pack.AvoidWater;
+                WaterlineMargin = pack.WaterlineMargin;
+            }
             _activePack = idx;
+        }
+
+        // Fill a pack's members from the current include toggles + capture the
+        // current brush settings.
+        void FillPack(TreePack pack)
+        {
+            pack.Trees = new List<string>();
+            for (int i = 0; i < Prefabs.Count; i++)
+                if (Prefabs[i] != null && _enabled[i]) pack.Trees.Add(Prefabs[i].name);
+            pack.HasParams = true;
+            pack.PaintRate = PaintRate;
+            pack.Spacing = Spacing;
+            pack.MaxSlopeDeg = MaxSlopeDeg;
+            pack.AvoidWater = AvoidWater;
+            pack.WaterlineMargin = WaterlineMargin;
         }
 
         // Returns true if a pack was added/replaced (so the host can mark dirty).
@@ -124,13 +151,37 @@ namespace NetworkDesigner.Terrain
             SyncEnabled();
             name = (name ?? "").Trim();
             if (name.Length == 0) name = "Pack " + (_packs.Count + 1);
-            TreePack pack = new TreePack { Name = name, Trees = new List<string>() };
-            for (int i = 0; i < Prefabs.Count; i++)
-                if (Prefabs[i] != null && _enabled[i]) pack.Trees.Add(Prefabs[i].name);
+            TreePack pack = new TreePack { Name = name };
+            FillPack(pack);
             int existing = _packs.FindIndex(p => p != null && p.Name == name);
             if (existing >= 0) _packs[existing] = pack; else _packs.Add(pack);
             _activePack = _packs.IndexOf(pack);
             return true;
+        }
+
+        // Overwrite an existing pack's members + brush settings from the current
+        // state — for adding/removing meshes (or re-tuning) without re-typing a name.
+        bool UpdatePack(int idx)
+        {
+            SyncEnabled();
+            if (idx < 0 || idx >= _packs.Count || _packs[idx] == null) return false;
+            FillPack(_packs[idx]);
+            _activePack = idx;
+            return true;
+        }
+
+        // True if the current include toggles no longer match the pack's saved
+        // members (drives the "*" modified marker).
+        bool PackDiffersFromCurrent(int idx)
+        {
+            if (idx < 0 || idx >= _packs.Count || _packs[idx] == null) return false;
+            List<string> names = _packs[idx].Trees;
+            for (int i = 0; i < Prefabs.Count; i++)
+            {
+                if (Prefabs[i] == null) continue;
+                if (_enabled[i] != names.Contains(Prefabs[i].name)) return true;
+            }
+            return false;
         }
 
         bool DeletePack(int idx)
@@ -140,6 +191,15 @@ namespace NetworkDesigner.Terrain
             if (_activePack == idx) _activePack = -1;
             else if (_activePack > idx) _activePack--;
             return true;
+        }
+
+        // Bake the hi-res modal preview for the clicked prefab (driven from Update,
+        // NOT OnGUI — rendering a preview touches the GPU). Caches the result
+        // (incl. null) so it bakes once.
+        public void EnsureModalThumb()
+        {
+            if (_previewModal == null || _bigThumbs.ContainsKey(_previewModal)) return;
+            _bigThumbs[_previewModal] = RuntimeTreePreview.Generate(_previewModal, 512);
         }
 
         // Bake at most one missing thumbnail per call (driven from Update, NOT OnGUI).
@@ -455,6 +515,7 @@ namespace NetworkDesigner.Terrain
         static readonly GUILayoutOption[] GlThumb = { GUILayout.Width(38), GUILayout.Height(38) };
         static readonly GUILayoutOption[] GlRow = { GUILayout.Height(38) };
         static readonly GUILayoutOption[] GlDel = { GUILayout.Width(24) };
+        static readonly GUILayoutOption[] GlUpd = { GUILayout.Width(40) };
         static readonly GUILayoutOption[] GlField = { GUILayout.Width(190) };
 
         // Draw the right-side palette panel. `slot` shifts the panel left so two
@@ -490,15 +551,24 @@ namespace NetworkDesigner.Terrain
             {
                 GUILayout.BeginHorizontal();
                 bool sel = _activePack == i;
-                bool nowSel = GUILayout.Toggle(sel, _packs[i].Name + "  (" + _packs[i].Trees.Count + ")",
+                // "*" marks a pack whose saved members differ from the current toggles.
+                string tag = (sel && PackDiffersFromCurrent(i)) ? " *" : "";
+                bool nowSel = GUILayout.Toggle(sel, _packs[i].Name + "  (" + _packs[i].Trees.Count + ")" + tag,
                                                GUI.skin.button);
                 if (nowSel && !sel) ApplyPack(i);
+                // "Upd" overwrites this pack with the current selection + brush settings.
+                if (GUILayout.Button("Upd", GlUpd)) { dirty |= UpdatePack(i); }
                 if (GUILayout.Button("x", GlDel)) { dirty |= DeletePack(i); GUILayout.EndHorizontal(); break; }
                 GUILayout.EndHorizontal();
             }
+            // Update the active pack in place (add/remove meshes + re-save brush
+            // settings) without re-typing its name.
+            if (_activePack >= 0 && _activePack < _packs.Count
+                && GUILayout.Button("Update '" + _packs[_activePack].Name + "' (members + brush settings)"))
+                dirty |= UpdatePack(_activePack);
             GUILayout.BeginHorizontal();
             _newPackName = GUILayout.TextField(_newPackName, GlField);
-            if (GUILayout.Button("Save pack")) { dirty |= CreatePack(_newPackName); _newPackName = ""; }
+            if (GUILayout.Button("Save new pack")) { dirty |= CreatePack(_newPackName); _newPackName = ""; }
             GUILayout.EndHorizontal();
 
             GUILayout.Space(4);
@@ -508,17 +578,48 @@ namespace NetworkDesigner.Terrain
                 if (Prefabs[i] == null) continue;
                 GUILayout.BeginHorizontal();
                 _thumbs.TryGetValue(Prefabs[i], out Texture preview);
-                if (preview != null) GUILayout.Label(preview, GlThumb);
-                else GUILayout.Box("…", GlThumb);
+                // Click the thumbnail to open a large preview modal.
+                if (preview != null) { if (GUILayout.Button(preview, GlThumb)) _previewModal = Prefabs[i]; }
+                else if (GUILayout.Button("…", GlThumb)) _previewModal = Prefabs[i];
                 bool before = _enabled[i];
                 string label = (_labels != null && i < _labels.Length) ? _labels[i] : "";
                 _enabled[i] = GUILayout.Toggle(before, label, GlRow);
-                if (_enabled[i] != before) _activePack = -1;
+                // Keep the active pack selected while editing — the "*" + Update
+                // button let you commit the add/remove back to the pack.
                 GUILayout.EndHorizontal();
             }
             GUILayout.EndScrollView();
             GUILayout.EndArea();
+
+            if (_previewModal != null) DrawPreviewModal(vw, vh);
             return dirty;
+        }
+
+        // Full-screen dimmed modal with a large preview of the clicked prefab.
+        // Click the Close button or anywhere outside the panel to dismiss.
+        void DrawPreviewModal(float vw, float vh)
+        {
+            Event e = Event.current;
+            Color prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.6f);
+            GUI.DrawTexture(new Rect(0f, 0f, vw, vh), Texture2D.whiteTexture);
+            GUI.color = prev;
+
+            float ps = Mathf.Clamp(Mathf.Min(vw, vh) - 140f, 96f, 512f);
+            Rect box = new Rect((vw - (ps + 32f)) * 0.5f, (vh - (ps + 96f)) * 0.5f, ps + 32f, ps + 96f);
+            GUI.Box(box, GUIContent.none);
+            GUILayout.BeginArea(new Rect(box.x + 8f, box.y + 6f, box.width - 16f, box.height - 12f));
+            GUILayout.Label(_previewModal != null ? _previewModal.name : "");
+            Rect imgRect = GUILayoutUtility.GetRect(ps, ps);
+            if (_bigThumbs.TryGetValue(_previewModal, out Texture big) && big != null)
+                GUI.DrawTexture(imgRect, big, ScaleMode.ScaleToFit);
+            else
+                GUI.Box(imgRect, _bigThumbs.ContainsKey(_previewModal) ? "Preview unavailable" : "Rendering…");
+            if (GUILayout.Button("Close")) _previewModal = null;
+            GUILayout.EndArea();
+
+            // Click outside the panel closes it.
+            if (e.type == EventType.MouseDown && !box.Contains(e.mousePosition)) { _previewModal = null; e.Use(); }
         }
     }
 }

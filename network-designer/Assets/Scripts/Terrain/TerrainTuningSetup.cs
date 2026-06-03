@@ -138,9 +138,21 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.flattenStrength", "Brush", "Flatten strength",
                 () => t.FlattenStrength, v => t.FlattenStrength = v, 0.5f, 60f,
                 description: "How hard Flatten (brush 4) pulls terrain to the target height. Higher = snappier. In Flatten mode, right-click to sample a target height (eyedropper), then left-click/drag to make everything that height.");
+            TuningRegistry.RegisterBool("terrain.liveConform", "Brush", "Live re-settle scatter",
+                () => t.LiveConform, v => t.LiveConform = v,
+                description: "Re-settle trees/rocks/fences onto the surface every sculpt frame, not just on stroke-end. On = smoothest, but re-conforms ALL items each frame — turn off on a heavily-populated map if it hitches. (They always re-settle when the stroke ends regardless.)");
             TuningRegistry.RegisterFloat("terrain.slopeMaxGrade", "Brush", "Slope warn grade (%)",
                 () => t.SlopeMaxGradePct, v => t.SlopeMaxGradePct = v, 0.5f, 30f,
                 description: "Slope tool (brush 5): the live grade readout turns red above this %. Just a warning — it doesn't block the slope. Slope tool: click A (start elev), move (corridor + grade preview, snaps to nearby rail's 'straight'), click B (end elev) to grade the strip.");
+            TuningRegistry.RegisterBool("terrain.slopeSnapRail", "Brush", "Slope: snap to rail",
+                () => !t.SlopeDisableRailSnap, v => t.SlopeDisableRailSnap = !v,
+                description: "Slope tool (5): snap the slope endpoints + 'straight' guide to nearby rail (ends first, then edges), centring the slope path on the track. Off = free placement, no rail guide.");
+            TuningRegistry.RegisterFloat("terrain.slopeRailDetect", "Brush", "Slope rail-detect radius (m)",
+                () => t.SlopeGuideDetectRadius, v => t.SlopeGuideDetectRadius = v, 0f, 200f,
+                description: "Slope tool (5): if point A lands within this of rail track, the track's heading becomes the 'straight' guide (panel shows 'Aligned to rail'). Bigger = easier to catch the track. 0 = off.");
+            TuningRegistry.RegisterFloat("terrain.slopeRailSnap", "Brush", "Slope rail-snap radius (m)",
+                () => t.SlopeGuideSnapRadius, v => t.SlopeGuideSnapRadius = v, 0f, 50f,
+                description: "Slope tool (5): the end point snaps onto the rail 'straight' guide when within this perpendicular distance. Bigger = grabbier.");
             TuningRegistry.RegisterFloat("terrain.brushResizeRate", "Brush", "Resize rate (m/s)",
                 () => t.BrushResizeRate, v => t.BrushResizeRate = v, 1f, 100f,
                 description: "How fast the radius changes while you hold [ or ].");

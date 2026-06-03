@@ -291,6 +291,20 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        // Like TrySnapToTrack (node first, then edge, within TrackSnapRadius) but with
+        // NO chain-anchor exclusion — for callers that aren't building a chain (e.g.
+        // the terrain slope tool snapping its endpoints onto rail ends/edges).
+        public bool TrySnapToTrackPoint(Vector2 p, out Vector2 snapped)
+        {
+            snapped = p;
+            float r = Mathf.Max(0f, TrackSnapRadius);
+            if (r <= 0f || Graph == null) return false;
+            int n = Graph.NearestNode(p, r);
+            if (n >= 0) { snapped = Graph.Nodes[n]; return true; }
+            if (Graph.NearestPointOnEdge(p, r, out _, out _, out Vector2 pt)) { snapped = pt; return true; }
+            return false;
+        }
+
         // The node to end a segment on: an existing nearby node, a new junction
         // split into an existing track (so a line can merge mid-span), or a new node.
         int NearestOrNew(Vector2 p)
