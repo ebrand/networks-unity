@@ -192,6 +192,10 @@ namespace NetworkDesigner.Terrain
                 () => t.RailLayer.VerticalOffset, v => { t.RailLayer.VerticalOffset = v; t.RebuildRail(); }, -2f, 5f);
             TuningRegistry.RegisterBool("rail.conform", "Rail", "Conform to terrain",
                 () => t.RailLayer.Conform, v => { t.RailLayer.Conform = v; t.RebuildRail(); });
+            TuningRegistry.RegisterBool("rail.straight", "Rail", "Straight tool (vs curve tool)",
+                () => t.RailLayer.Straight, v => { t.RailLayer.Straight = v; t.RebuildRail(); });
+            TuningRegistry.RegisterFloat("rail.curveLever", "Rail", "Curve lever (arc width)",
+                () => t.RailLayer.CurveLever, v => { t.RailLayer.CurveLever = v; t.RebuildRail(); }, 0.1f, 0.95f);
             TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
                 () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); });
             TuningRegistry.RegisterColor("rail.tieColor", "Rail", "Tie color",
@@ -240,6 +244,20 @@ namespace NetworkDesigner.Terrain
                 () => t.SlopeFullDeg, v => { t.SlopeFullDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f);
             TuningRegistry.RegisterFloat("terrain.rockTexScale", "Appearance", "Rock texture scale",
                 () => t.RockTextureScale, v => { t.RockTextureScale = v; t.ApplyTerrainMaterial(); }, 0.01f, 1f);
+
+            // --- World grid ---
+            TuningRegistry.RegisterBool("terrain.gridOn", "Grid", "Show grid (G)",
+                () => t.GridEnabled, v => { t.GridEnabled = v; t.ApplyTerrainMaterial(); });
+            TuningRegistry.RegisterFloat("terrain.gridSpacing", "Grid", "Spacing (m)",
+                () => t.GridSpacing, v => { t.GridSpacing = v; t.ApplyTerrainMaterial(); }, 1f, 50f);
+            TuningRegistry.RegisterFloat("terrain.gridMajor", "Grid", "Major every N",
+                () => t.GridMajorEvery, v => { t.GridMajorEvery = v; t.ApplyTerrainMaterial(); }, 1f, 20f);
+            TuningRegistry.RegisterFloat("terrain.gridStrength", "Grid", "Strength",
+                () => t.GridStrength, v => { t.GridStrength = v; t.ApplyTerrainMaterial(); }, 0f, 1f);
+            TuningRegistry.RegisterFloat("terrain.gridWidth", "Grid", "Line width (px)",
+                () => t.GridLineWidth, v => { t.GridLineWidth = v; t.ApplyTerrainMaterial(); }, 0.5f, 4f);
+            TuningRegistry.RegisterColor("terrain.gridColor", "Grid", "Color",
+                () => t.GridColor, v => { t.GridColor = v; t.ApplyTerrainMaterial(); });
 
             // --- Interface ---
             TuningRegistry.RegisterFloat("terrain.uiScale", "Interface", "UI scale (in-game panels)",

@@ -25,6 +25,13 @@ Shader "NetworkDesigner/TerrainSlope"
         _SlopeFull  ("Rock Slope Full (deg)", Range(0, 90)) = 45
         _Smoothness ("Smoothness", Range(0, 1)) = 0
         _Metallic   ("Metallic", Range(0, 1)) = 0
+
+        // World-space grid overlay (painted on the surface -> drapes perfectly).
+        _GridColor      ("Grid Color", Color) = (0.14, 0.15, 0.17, 1)
+        _GridSpacing    ("Grid Spacing (m)", Float) = 5
+        _GridMajorEvery ("Grid Major Every N", Float) = 10
+        _GridStrength   ("Grid Strength (0 = off)", Range(0, 1)) = 0
+        _GridLineWidth  ("Grid Line Width (px)", Float) = 1
     }
 
     SubShader
@@ -62,6 +69,11 @@ Shader "NetworkDesigner/TerrainSlope"
                 float  _SlopeFull;
                 float  _Smoothness;
                 float  _Metallic;
+                float4 _GridColor;
+                float  _GridSpacing;
+                float  _GridMajorEvery;
+                float  _GridStrength;
+                float  _GridLineWidth;
             CBUFFER_END
 
             TEXTURE2D(_RockTex);
@@ -104,6 +116,17 @@ Shader "NetworkDesigner/TerrainSlope"
                 return cx * bw.x + cy * bw.y + cz * bw.z;
             }
 
+            // Constant-pixel-width grid line coverage at a world-XZ position for a
+            // given spacing. fwidth keeps the line ~`width` pixels wide at any
+            // distance/zoom, so it stays crisp instead of aliasing away.
+            float GridCoverage(float2 wxz, float spacing, float width)
+            {
+                float2 c = wxz / max(spacing, 0.01);
+                float2 d = fwidth(c);
+                float2 g = abs(frac(c - 0.5) - 0.5) / max(d * max(width, 0.01), 1e-5);
+                return 1.0 - min(min(g.x, g.y), 1.0);
+            }
+
             half4 frag(Varyings IN) : SV_Target
             {
                 float3 nrm = normalize(IN.normalWS);
@@ -114,6 +137,18 @@ Shader "NetworkDesigner/TerrainSlope"
                 float3 rock = _RockColor.rgb;
                 if (_UseRockTex > 0.5) rock *= TriplanarRock(IN.positionWS, nrm);
                 float3 albedo = lerp(_GrassColor.rgb, rock, t);
+
+                // World grid overlay (drapes — it's shaded on the surface). Minor
+                // lines at _GridSpacing, brighter major lines every Nth.
+                if (_GridStrength > 0.0)
+                {
+                    float minor = GridCoverage(IN.positionWS.xz, _GridSpacing, _GridLineWidth);
+                    float major = GridCoverage(IN.positionWS.xz,
+                                               _GridSpacing * max(_GridMajorEvery, 1.0),
+                                               _GridLineWidth * 1.4);
+                    float g = max(minor * 0.55, major);
+                    albedo = lerp(albedo, _GridColor.rgb, saturate(g) * _GridStrength);
+                }
 
                 InputData inputData = (InputData)0;
                 inputData.positionWS = IN.positionWS;

@@ -18,6 +18,11 @@ namespace NetworkDesigner.Terrain
     {
         public int A;
         public int B;
+        // Explicit cubic-bezier controls (world XZ), set by the curve tool. When
+        // HasCurve is false the edge is straight, or auto-smoothed via EdgeControls.
+        public bool HasCurve;
+        public Vector2 ControlA;
+        public Vector2 ControlB;
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }
@@ -88,6 +93,7 @@ namespace NetworkDesigner.Terrain
         {
             p0 = Nodes[e.A];
             p3 = Nodes[e.B];
+            if (e.HasCurve) { p1 = e.ControlA; p2 = e.ControlB; return; } // explicit (curve tool)
             int prevA = OtherNeighbor(e.A, e.B);
             int nextB = OtherNeighbor(e.B, e.A);
             Vector2 prev = prevA >= 0 ? Nodes[prevA] : p0 - (p3 - p0);

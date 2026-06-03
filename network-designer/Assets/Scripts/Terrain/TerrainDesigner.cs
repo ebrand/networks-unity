@@ -46,6 +46,19 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Rock texture tiling (1/world-units). Lower = larger features.")]
         public float RockTextureScale = 0.12f;
 
+        [Header("World grid overlay")]
+        [Tooltip("Paint a world grid on the terrain surface (G toggles). Drapes perfectly — " +
+                 "it's shaded on the surface, so it follows relief and never needs rebuilding.")]
+        public bool GridEnabled = false;
+        [Tooltip("Minor grid line spacing (m). 5 matches the cell size.")]
+        public float GridSpacing = 5f;
+        [Tooltip("Draw a brighter major line every N minor lines (e.g. 10 = every 50 m).")]
+        public float GridMajorEvery = 10f;
+        public Color GridColor = new Color(0.14f, 0.15f, 0.17f, 1f);
+        [Range(0f, 1f)] public float GridStrength = 0.5f;
+        [Tooltip("Grid line width in pixels (constant on screen at any distance).")]
+        public float GridLineWidth = 1f;
+
         // Vertex counts, derived from TerrainSizeMeters / CellSize in EnsureField.
         [HideInInspector] public int ColumnsX = 401;
         [HideInInspector] public int RowsZ = 401;
@@ -297,6 +310,11 @@ namespace NetworkDesigner.Terrain
                 _mat.SetFloat("_RockTexScale", RockTextureScale);
                 _mat.SetFloat("_UseRockTex", RockTexture != null ? 1f : 0f);
                 if (RockTexture != null) _mat.SetTexture("_RockTex", RockTexture);
+                _mat.SetColor("_GridColor", GridColor);
+                _mat.SetFloat("_GridSpacing", Mathf.Max(0.5f, GridSpacing));
+                _mat.SetFloat("_GridMajorEvery", Mathf.Max(1f, GridMajorEvery));
+                _mat.SetFloat("_GridStrength", GridEnabled ? GridStrength : 0f);
+                _mat.SetFloat("_GridLineWidth", Mathf.Max(0.1f, GridLineWidth));
             }
             else _mat.color = TerrainColor; // matte fallback
         }
@@ -602,6 +620,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
+            if (Input.GetKeyDown(KeyCode.G)) { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
             // Bake thumbnails only while NOT painting — the first render of each
             // prefab compiles its shader variant (a one-time editor stall), and
             // we don't want that landing mid-stroke.
@@ -1228,7 +1247,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(2); // version (2 added Rails graph at the end)
+                    w.Write(3); // version (3 added per-edge bezier controls to graphs)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -1253,7 +1272,7 @@ namespace NetworkDesigner.Terrain
 
         static int TreeBytes(List<PlacedTreeData> t) => (t?.Count ?? 0) * 40 + 8;
         static int GraphBytes(LineGraphSave g) =>
-            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 8) + 16;
+            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 28) + 16;
 
         static void WriteTrees(System.IO.BinaryWriter w, List<PlacedTreeData> list)
         {
@@ -1291,7 +1310,14 @@ namespace NetworkDesigner.Terrain
             for (int i = 0; i < nn; i++) { w.Write(g.Nodes[i].x); w.Write(g.Nodes[i].y); }
             int ne = g?.Edges?.Count ?? 0;
             w.Write(ne);
-            for (int i = 0; i < ne; i++) { w.Write(g.Edges[i].A); w.Write(g.Edges[i].B); }
+            for (int i = 0; i < ne; i++)
+            {
+                LineEdge e = g.Edges[i];
+                w.Write(e.A); w.Write(e.B);
+                w.Write(e.HasCurve);                       // save format v3+
+                w.Write(e.ControlA.x); w.Write(e.ControlA.y);
+                w.Write(e.ControlB.x); w.Write(e.ControlB.y);
+            }
         }
 
         TerrainField TryLoadTerrain()
@@ -1367,9 +1393,9 @@ namespace NetworkDesigner.Terrain
                 s.Packs = ReadPacks(r);
                 s.Rocks = ReadTrees(r);
                 s.RockPacks = ReadPacks(r);
-                s.Fences = ReadGraph(r);
-                s.PowerLines = ReadGraph(r);
-                if (version >= 2) s.Rails = ReadGraph(r); // older saves have no rails
+                s.Fences = ReadGraph(r, version);
+                s.PowerLines = ReadGraph(r, version);
+                if (version >= 2) s.Rails = ReadGraph(r, version); // older saves have no rails
                 return s;
             }
             catch { return null; }
@@ -1404,13 +1430,23 @@ namespace NetworkDesigner.Terrain
             return list;
         }
 
-        static LineGraphSave ReadGraph(System.IO.BinaryReader r)
+        static LineGraphSave ReadGraph(System.IO.BinaryReader r, int version)
         {
             var g = new LineGraphSave { Nodes = new List<Vector2>(), Edges = new List<LineEdge>() };
             int nn = r.ReadInt32();
             for (int i = 0; i < nn; i++) g.Nodes.Add(new Vector2(r.ReadSingle(), r.ReadSingle()));
             int ne = r.ReadInt32();
-            for (int i = 0; i < ne; i++) g.Edges.Add(new LineEdge(r.ReadInt32(), r.ReadInt32()));
+            for (int i = 0; i < ne; i++)
+            {
+                var e = new LineEdge(r.ReadInt32(), r.ReadInt32());
+                if (version >= 3) // curve controls added in v3
+                {
+                    e.HasCurve = r.ReadBoolean();
+                    e.ControlA = new Vector2(r.ReadSingle(), r.ReadSingle());
+                    e.ControlB = new Vector2(r.ReadSingle(), r.ReadSingle());
+                }
+                g.Edges.Add(e);
+            }
             return g;
         }
 
