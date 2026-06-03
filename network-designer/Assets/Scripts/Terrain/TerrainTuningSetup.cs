@@ -130,7 +130,14 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.treeSpacing", "Trees", "Spacing (m)",
                 () => t.TreeLayer.Spacing, v => t.TreeLayer.Spacing = v, 1f, 30f);
             TuningRegistry.RegisterFloat("terrain.treeMaxSlope", "Trees", "Max slope (deg, 90 = off)",
-                () => t.TreeLayer.MaxSlopeDeg, v => t.TreeLayer.MaxSlopeDeg = v, 0f, 90f);
+                () => t.TreeLayer.MaxSlopeDeg, v => t.TreeLayer.MaxSlopeDeg = v, 0f, 90f,
+                description: "Don't place trees on terrain steeper than this. 90 = no slope limit.");
+            TuningRegistry.RegisterBool("terrain.treeAvoidWater", "Trees", "Avoid water",
+                () => t.TreeLayer.AvoidWater, v => t.TreeLayer.AvoidWater = v,
+                description: "Don't place trees on terrain below the water surface, and cull trees the water rises over.");
+            TuningRegistry.RegisterFloat("terrain.treeWaterMargin", "Trees", "Waterline margin (m)",
+                () => t.TreeLayer.WaterlineMargin, v => t.TreeLayer.WaterlineMargin = v, 0f, 20f,
+                description: "Metres of shoreline ABOVE the waterline to also keep clear of trees (a beach strip).");
             TuningRegistry.RegisterString("terrain.treeFolder", "Trees", "Folder",
                 () => t.TreeLayer.Folder, v => t.TreeLayer.Folder = v);
 #if UNITY_EDITOR
@@ -144,7 +151,14 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.rockSpacing", "Rocks", "Spacing (m)",
                 () => t.RockLayer.Spacing, v => t.RockLayer.Spacing = v, 1f, 30f);
             TuningRegistry.RegisterFloat("terrain.rockMaxSlope", "Rocks", "Max slope (deg, 90 = off)",
-                () => t.RockLayer.MaxSlopeDeg, v => t.RockLayer.MaxSlopeDeg = v, 0f, 90f);
+                () => t.RockLayer.MaxSlopeDeg, v => t.RockLayer.MaxSlopeDeg = v, 0f, 90f,
+                description: "Don't place rocks on terrain steeper than this. 90 = no slope limit.");
+            TuningRegistry.RegisterBool("terrain.rockAvoidWater", "Rocks", "Avoid water",
+                () => t.RockLayer.AvoidWater, v => t.RockLayer.AvoidWater = v,
+                description: "Don't place rocks on terrain below the water surface, and cull rocks the water rises over.");
+            TuningRegistry.RegisterFloat("terrain.rockWaterMargin", "Rocks", "Waterline margin (m)",
+                () => t.RockLayer.WaterlineMargin, v => t.RockLayer.WaterlineMargin = v, 0f, 20f,
+                description: "Metres of shoreline ABOVE the waterline to also keep clear of rocks.");
             TuningRegistry.RegisterString("terrain.rockFolder", "Rocks", "Folder",
                 () => t.RockLayer.Folder, v => t.RockLayer.Folder = v);
 #if UNITY_EDITOR

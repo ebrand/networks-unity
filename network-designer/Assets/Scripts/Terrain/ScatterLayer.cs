@@ -39,6 +39,10 @@ namespace NetworkDesigner.Terrain
         public Vector2 ScaleRange = new Vector2(1f, 1.5f);
         [Tooltip("Don't place on terrain steeper than this (degrees, 0 = flat). 90 = no limit.")]
         public float MaxSlopeDeg = 35f;
+        [Tooltip("Don't place on terrain below the water surface (underwater).")]
+        public bool AvoidWater = true;
+        [Tooltip("Keep this many metres of shoreline above the water clear of items too.")]
+        public float WaterlineMargin = 1f;
 
         const float Jitter = 0.4f; // max per-axis jitter as a fraction of the cell (<0.5 keeps it in-cell)
 
@@ -197,7 +201,8 @@ namespace NetworkDesigner.Terrain
 
         // Fill unoccupied lattice cells under the brush. Returns true if anything
         // was placed (host marks dirty). No neighbour scan; rate-limited.
-        public bool Paint(TerrainField field, Vector3 center, float dt, float brushRadius)
+        public bool Paint(TerrainField field, Vector3 center, float dt, float brushRadius,
+            float waterLevel = float.NegativeInfinity)
         {
             if (field == null || Prefabs == null || Prefabs.Count == 0) return false;
             float s = Mathf.Max(0.5f, Spacing);
@@ -224,6 +229,8 @@ namespace NetworkDesigner.Terrain
                     if (dx * dx + dz * dz > r2) continue;
                     // Skip faces steeper than the limit (>= 89 deg = no limit).
                     if (MaxSlopeDeg < 89f && field.SampleSlopeDegrees(px, pz) > MaxSlopeDeg) continue;
+                    // Skip cells below the water surface (+ shoreline margin).
+                    if (AvoidWater && field.SampleHeight(px, pz) < waterLevel + WaterlineMargin) continue;
                     _candKey.Add(key);
                     _candPos.Add(new Vector2(px, pz));
                 }
@@ -305,6 +312,34 @@ namespace NetworkDesigner.Terrain
                     }
                     if (bucket.Count == 0) _byCell.Remove(key);
                 }
+            return any;
+        }
+
+        // Remove placed items sitting below (waterLevel + WaterlineMargin) — e.g.
+        // after the water level rises over them. No-op when AvoidWater is off.
+        // Returns true if anything was culled.
+        public bool CullBelow(float waterLevel)
+        {
+            if (!AvoidWater) return false;
+            float threshold = waterLevel + WaterlineMargin;
+            bool any = false;
+            var emptyKeys = new List<long>();
+            foreach (KeyValuePair<long, List<PlacedTree>> kv in _byCell)
+            {
+                List<PlacedTree> bucket = kv.Value;
+                for (int i = bucket.Count - 1; i >= 0; i--)
+                {
+                    PlacedTree t = bucket[i];
+                    if (t == null) { bucket.RemoveAt(i); continue; }
+                    if (t.transform.position.y >= threshold) continue;
+                    DestroySafe(t.gameObject);
+                    bucket.RemoveAt(i);
+                    _placed.Remove(t);
+                    any = true;
+                }
+                if (bucket.Count == 0) emptyKeys.Add(kv.Key);
+            }
+            for (int i = 0; i < emptyKeys.Count; i++) _byCell.Remove(emptyKeys[i]);
             return any;
         }
 

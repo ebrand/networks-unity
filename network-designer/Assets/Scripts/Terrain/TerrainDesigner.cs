@@ -367,6 +367,9 @@ namespace NetworkDesigner.Terrain
                 _waterMat.color = WaterColor;
                 if (_waterMat.HasProperty("_Smoothness")) _waterMat.SetFloat("_Smoothness", WaterSmoothness);
             }
+            // Cull scatter that the (possibly risen) water now covers.
+            TreeLayer?.CullBelow(WaterLevel);
+            RockLayer?.CullBelow(WaterLevel);
         }
 
         void EnsureWater()
@@ -865,7 +868,8 @@ namespace NetworkDesigner.Terrain
             {
                 bool overPanel = MouseOverActivePanel();
                 if (!overPanel && overTerrain && Input.GetMouseButton(0)
-                    && _active.Paint(_field, hit.point, Time.deltaTime, BrushRadius))
+                    && _active.Paint(_field, hit.point, Time.deltaTime, BrushRadius,
+                                     ShowWater ? WaterLevel : float.NegativeInfinity))
                     _dirtySince = Time.realtimeSinceStartup;
                 if (!overPanel && overTerrain && Input.GetMouseButton(1)
                     && _active.Erase(hit.point, BrushRadius))
