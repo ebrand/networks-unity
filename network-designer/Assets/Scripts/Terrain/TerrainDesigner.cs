@@ -58,6 +58,9 @@ namespace NetworkDesigner.Terrain
         [Range(0f, 1f)] public float GridStrength = 0.5f;
         [Tooltip("Grid line width in pixels (constant on screen at any distance).")]
         public float GridLineWidth = 1f;
+        [Tooltip("Snap line/rail/fence node placement to grid intersections (Shift+G). " +
+                 "Uses the grid spacing whether or not the grid is shown.")]
+        public bool SnapToGrid = false;
 
         // Vertex counts, derived from TerrainSizeMeters / CellSize in EnsureField.
         [HideInInspector] public int ColumnsX = 401;
@@ -322,6 +325,16 @@ namespace NetworkDesigner.Terrain
         // Back-compat name still referenced by the color tunable.
         public void ApplyTerrainColor() => ApplyTerrainMaterial();
 
+        // Round a world point to the nearest grid intersection (same world-aligned
+        // lattice the grid shader draws), when snap-to-grid is on. Y is left as-is
+        // (the line layers re-derive height from the terrain). Off = unchanged.
+        Vector3 ApplyGridSnap(Vector3 p)
+        {
+            if (!SnapToGrid) return p;
+            float s = Mathf.Max(0.5f, GridSpacing);
+            return new Vector3(Mathf.Round(p.x / s) * s, p.y, Mathf.Round(p.z / s) * s);
+        }
+
         int ChunkSide => Mathf.Clamp(ChunkCells, 8, 100);
 
         // Build (or rebuild) all chunk meshes from the field. Recreates the
@@ -447,6 +460,10 @@ namespace NetworkDesigner.Terrain
             if (string.IsNullOrEmpty(PowerLineLayer.Name) || PowerLineLayer.Name == "Line") PowerLineLayer.Name = "PowerLine";
             if (RailLayer == null) RailLayer = new RailTrackLayer();
             if (string.IsNullOrEmpty(RailLayer.Name)) RailLayer.Name = "Rail";
+            // New fields on the serialized layer can deserialize as 0 (Unity
+            // footgun); 0 lateral-g would blow the required radius up ~100x.
+            if (RailLayer.MaxLateralG <= 0f) RailLayer.MaxLateralG = 0.15f;
+            if (RailLayer.SpeedLimitKmh <= 0f) RailLayer.SpeedLimitKmh = 40f;
         }
 
         // Global IMGUI scale so panels/text don't shrink to nothing at high
@@ -471,11 +488,22 @@ namespace NetworkDesigner.Terrain
         {
             if (_lineActive != null)
             {
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, 104f), GUI.skin.box);
+                bool rail = _lineActive is RailTrackLayer;
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 150f : 104f), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
-                GUILayout.Label("Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
+                GUILayout.Label(rail
+                    ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
+                    : "Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
                 if (_lineActive is LineworkLayer lw && lw.Asset == null)
                     GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
+                if (_lineActive is RailTrackLayer rt)
+                {
+                    GUILayout.Label($"Speed {rt.SpeedLimitKmh:0} km/h  →  min radius {rt.MinRadiusForSpeed:0} m");
+                    if (rt.LastPreviewRadius < float.PositiveInfinity)
+                        GUILayout.Label(rt.LastPreviewTooTight
+                            ? $"Curve {rt.LastPreviewRadius:0} m — TOO TIGHT (lower speed or widen)"
+                            : $"Curve radius {rt.LastPreviewRadius:0} m — ok");
+                }
                 GUILayout.EndArea();
                 return;
             }
@@ -620,7 +648,12 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
-            if (Input.GetKeyDown(KeyCode.G)) { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
+            if (Input.GetKeyDown(KeyCode.G))
+            {
+                bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                if (shift) SnapToGrid = !SnapToGrid;            // Shift+G: snap toggle
+                else { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); } // G: grid toggle
+            }
             // Bake thumbnails only while NOT painting — the first render of each
             // prefab compiles its shader variant (a one-time editor stall), and
             // we don't want that landing mid-stroke.
@@ -660,10 +693,18 @@ namespace NetworkDesigner.Terrain
             // (chain); right-click ends the chain; Backspace undoes the last node.
             if (_lineActive != null)
             {
-                _lineActive.UpdatePreview(_field, hit.point, overTerrain);
+                // Rail: hold Shift = curve mode (else straight). Set before preview
+                // and click so both reflect the modifier this frame.
+                if (_lineActive is RailTrackLayer railMod)
+                    railMod.CurveModifier = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+
+                // Snap node placement to grid intersections when enabled (the
+                // preview shows the snapped point too). Deletes use the raw hit.
+                Vector3 place = ApplyGridSnap(hit.point);
+                _lineActive.UpdatePreview(_field, place, overTerrain);
                 if (overTerrain && Input.GetMouseButtonDown(0))
                 {
-                    _lineActive.AddNode(_field, hit.point);
+                    _lineActive.AddNode(_field, place);
                     _dirtySince = Time.realtimeSinceStartup;
                 }
                 if (Input.GetMouseButtonDown(1))
@@ -1247,7 +1288,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(3); // version (3 added per-edge bezier controls to graphs)
+                    w.Write(4); // version (4 added per-edge SpeedLimit to graphs)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -1272,7 +1313,7 @@ namespace NetworkDesigner.Terrain
 
         static int TreeBytes(List<PlacedTreeData> t) => (t?.Count ?? 0) * 40 + 8;
         static int GraphBytes(LineGraphSave g) =>
-            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 28) + 16;
+            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 32) + 16;
 
         static void WriteTrees(System.IO.BinaryWriter w, List<PlacedTreeData> list)
         {
@@ -1317,6 +1358,7 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.HasCurve);                       // save format v3+
                 w.Write(e.ControlA.x); w.Write(e.ControlA.y);
                 w.Write(e.ControlB.x); w.Write(e.ControlB.y);
+                w.Write(e.SpeedLimit);                     // v4+
             }
         }
 
@@ -1445,6 +1487,7 @@ namespace NetworkDesigner.Terrain
                     e.ControlA = new Vector2(r.ReadSingle(), r.ReadSingle());
                     e.ControlB = new Vector2(r.ReadSingle(), r.ReadSingle());
                 }
+                if (version >= 4) e.SpeedLimit = r.ReadSingle(); // section speed
                 g.Edges.Add(e);
             }
             return g;

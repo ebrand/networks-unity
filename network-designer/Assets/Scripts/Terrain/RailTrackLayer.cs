@@ -38,13 +38,28 @@ namespace NetworkDesigner.Terrain
         public float VerticalOffset = 0.02f;
         [Tooltip("Conform the track to the terrain surface (sampled along the curve).")]
         public bool Conform = true;
-        [Tooltip("Drawing tool. ON = straight tool: each click chains a straight " +
-                 "segment. OFF = curve tool: click start, click a guide corner, " +
-                 "click end — an explicit bezier is laid through the corner.")]
-        public bool Straight = false;
-        [Tooltip("Curve tool: how far the bezier controls sit from each node toward " +
-                 "the guide corner (0 = sharp through corner, 1 = wide arc).")]
+        [Tooltip("Curve mode (held-Shift): how far the bezier controls sit from each " +
+                 "node toward the guide corner (0 = sharp through corner, 1 = wide arc).")]
         [Range(0.1f, 0.95f)] public float CurveLever = 0.55f;
+        [Tooltip("Design speed (km/h) for sections laid now. Sets the minimum curve " +
+                 "radius — tighter curves are refused (preview turns red). Lower it " +
+                 "to lay tighter curves.")]
+        public float SpeedLimitKmh = 40f;
+        [Tooltip("Max comfortable lateral acceleration in g (with cant). Higher = " +
+                 "tighter curves allowed for a given speed. Real rail ~0.1; raise it " +
+                 "for game-scaled tighter curves.")]
+        [Range(0.05f, 0.5f)] public float MaxLateralG = 0.15f;
+
+        // Minimum curve radius (m) for the current design speed: R = v^2 / (g*a),
+        // v in m/s, a the lateral-accel limit. Quadratic in speed, as for real rail.
+        public float MinRadiusForSpeed
+        {
+            get { float v = SpeedLimitKmh / 3.6f; return v * v / (9.81f * Mathf.Max(0.01f, MaxLateralG)); }
+        }
+        // Last previewed curve's tightest radius + whether it violated the minimum
+        // (read by the on-screen hint; updated each frame while a corner is armed).
+        [System.NonSerialized] public float LastPreviewRadius = float.PositiveInfinity;
+        [System.NonSerialized] public bool LastPreviewTooTight;
         public Color RailColor = new Color(0.28f, 0.28f, 0.30f);
         public Color TieColor = new Color(0.32f, 0.22f, 0.14f);
 
@@ -54,10 +69,11 @@ namespace NetworkDesigner.Terrain
         Mesh _railMesh, _tieMesh;
         Material _railMat, _tieMat;
         int _chainTail = -1;          // current anchor node (start of next segment)
-        // Curve-tool click state machine: start (anchor) -> corner guide -> end.
-        enum RailStage { NeedStart, NeedCorner, NeedEnd }
-        RailStage _stage = RailStage.NeedStart;
-        Vector2 _corner;              // the guide corner placed by click 2
+        // Straight by default; while CurveModifier (Shift) is held, a click drops a
+        // guide corner and the next click ends a curve through it.
+        [System.NonSerialized] public bool CurveModifier;
+        bool _cornerPending;          // a guide corner has been placed, awaiting the end click
+        Vector2 _corner;              // the pending guide corner
         readonly List<Vector3> _rv = new List<Vector3>();
         readonly List<int> _rt = new List<int>();
         readonly List<Vector3> _tv = new List<Vector3>();
@@ -82,79 +98,121 @@ namespace NetworkDesigner.Terrain
             if (Application.isPlaying) UnityEngine.Object.Destroy(o); else UnityEngine.Object.DestroyImmediate(o);
         }
 
-        // ---- editing (identical chain UX to the linework layers) ----
+        // ---- editing ----
 
-        // One click. Straight tool: chain a straight segment. Curve tool: advance
-        // the start -> corner -> end state machine, committing a bezier on click 3
-        // and re-anchoring at the end so curves chain segment to segment.
+        // One click. Straight by default: chains a straight segment from the anchor.
+        // Hold Shift (CurveModifier): the click drops a guide corner; the following
+        // click ends a bezier curve through it. The anchor carries over either way,
+        // so straight and curved segments mix freely in one chain.
         public void AddNode(TerrainField field, Vector3 hit)
         {
             Vector2 p = new Vector2(hit.x, hit.z);
 
-            if (Straight)
+            // First click of a chain just sets the anchor.
+            if (_chainTail < 0)
             {
-                int idx = Graph.AddNode(p);
-                if (_chainTail >= 0) Graph.AddEdge(_chainTail, idx); // straight (no curve)
-                _chainTail = idx;
+                _chainTail = Graph.AddNode(p);
+                _cornerPending = false;
+                return;
+            }
+
+            // A corner is armed: this click is the endpoint -> commit the curve,
+            // unless it would be tighter than the speed's minimum radius (refused;
+            // the corner stays armed so you can pick a wider endpoint).
+            if (_cornerPending)
+            {
+                Vector2 start = Graph.Nodes[_chainTail];
+                CurveControls(start, p, _corner, out Vector2 c1, out Vector2 c2);
+                if (MinCurveRadius(start, c1, c2, p) < MinRadiusForSpeed) return;
+                int end = Graph.AddNode(p);
+                AddCurvedEdge(_chainTail, end, _corner);
+                _chainTail = end;
+                _cornerPending = false;
                 Rebuild(field);
                 return;
             }
 
-            switch (_stage)
+            // Anchor present, no corner armed:
+            if (CurveModifier)
             {
-                case RailStage.NeedStart:
-                    if (_chainTail < 0) _chainTail = Graph.AddNode(p);
-                    _stage = RailStage.NeedCorner;
-                    break;
-                case RailStage.NeedCorner:
-                    _corner = p;                 // guide corner (not a node)
-                    _stage = RailStage.NeedEnd;
-                    break;
-                case RailStage.NeedEnd:
-                    int end = Graph.AddNode(p);
-                    AddCurvedEdge(_chainTail, end, _corner);
-                    _chainTail = end;            // chain: end becomes next start
-                    _stage = RailStage.NeedCorner;
-                    Rebuild(field);
-                    break;
+                _corner = p;            // Shift held -> this click arms the guide corner
+                _cornerPending = true;
+                return;
             }
+            int idx = Graph.AddNode(p); // plain click -> straight segment
+            Graph.AddEdge(_chainTail, idx);
+            TagEdge(_chainTail, idx);
+            _chainTail = idx;
+            Rebuild(field);
+        }
+
+        // Bezier controls for a curve from a to b bending toward corner.
+        void CurveControls(Vector2 a, Vector2 b, Vector2 corner, out Vector2 c1, out Vector2 c2)
+        {
+            float f = Mathf.Clamp(CurveLever, 0.1f, 0.95f);
+            c1 = Vector2.Lerp(a, corner, f);
+            c2 = Vector2.Lerp(b, corner, f);
         }
 
         // Connect a..b and tag it with bezier controls leaning toward the corner.
         void AddCurvedEdge(int a, int b, Vector2 corner)
         {
             Graph.AddEdge(a, b);
-            LineEdge e = null;
-            foreach (LineEdge le in Graph.Edges)
-                if ((le.A == a && le.B == b) || (le.A == b && le.B == a)) { e = le; break; }
+            LineEdge e = FindEdge(a, b);
             if (e == null) return;
-            float f = Mathf.Clamp(CurveLever, 0.1f, 0.95f);
+            CurveControls(Graph.Nodes[e.A], Graph.Nodes[e.B], corner, out Vector2 c1, out Vector2 c2);
             e.HasCurve = true;
-            e.ControlA = Vector2.Lerp(Graph.Nodes[e.A], corner, f);
-            e.ControlB = Vector2.Lerp(Graph.Nodes[e.B], corner, f);
+            e.ControlA = c1; e.ControlB = c2;
+            e.SpeedLimit = SpeedLimitKmh;
         }
 
-        public void EndChain() { _chainTail = -1; _stage = RailStage.NeedStart; }
+        void TagEdge(int a, int b) { var e = FindEdge(a, b); if (e != null) e.SpeedLimit = SpeedLimitKmh; }
+
+        LineEdge FindEdge(int a, int b)
+        {
+            foreach (LineEdge e in Graph.Edges)
+                if ((e.A == a && e.B == b) || (e.A == b && e.B == a)) return e;
+            return null;
+        }
+
+        // Tightest radius (m) along a cubic bezier, via 3-point circumradius over
+        // samples. Returns +inf for a straight line.
+        static float MinCurveRadius(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            const int N = 24;
+            float minR = float.PositiveInfinity;
+            Vector2 a = LineGraph.Bezier(p0, p1, p2, p3, 0f);
+            Vector2 b = LineGraph.Bezier(p0, p1, p2, p3, 1f / N);
+            for (int i = 2; i <= N; i++)
+            {
+                Vector2 c = LineGraph.Bezier(p0, p1, p2, p3, i / (float)N);
+                float ab = Vector2.Distance(a, b), bc = Vector2.Distance(b, c), ca = Vector2.Distance(c, a);
+                float area2 = Mathf.Abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+                if (area2 > 1e-6f) minR = Mathf.Min(minR, ab * bc * ca / (2f * area2));
+                a = b; b = c;
+            }
+            return minR;
+        }
+
+        public void EndChain() { _chainTail = -1; _cornerPending = false; }
 
         public void ClearAll(TerrainField field)
         {
             Graph.Clear();
             _chainTail = -1;
-            _stage = RailStage.NeedStart;
+            _cornerPending = false;
             Rebuild(field);
         }
 
         public void RemoveLastNode(TerrainField field)
         {
-            // Mid-curve: backspace first discards the un-committed guide corner.
-            if (!Straight && _stage == RailStage.NeedEnd) { _stage = RailStage.NeedCorner; return; }
+            // Backspace first cancels an armed (un-committed) guide corner.
+            if (_cornerPending) { _cornerPending = false; return; }
             int last = Graph.Nodes.Count - 1;
             if (last < 0) return;
             Graph.Edges.RemoveAll(e => e.A == last || e.B == last);
             Graph.Nodes.RemoveAt(last);
             if (_chainTail >= Graph.Nodes.Count) _chainTail = -1;
-            _stage = _chainTail < 0 ? RailStage.NeedStart
-                                    : (Straight ? RailStage.NeedStart : RailStage.NeedCorner);
             Rebuild(field);
         }
 
@@ -164,7 +222,7 @@ namespace NetworkDesigner.Terrain
             if (n < 0) return false;
             Graph.RemoveNode(n);
             if (_chainTail == n) _chainTail = -1; else if (_chainTail > n) _chainTail--;
-            if (_chainTail < 0) _stage = RailStage.NeedStart;
+            _cornerPending = false;
             Rebuild(field);
             return true;
         }
@@ -379,25 +437,36 @@ namespace NetworkDesigner.Terrain
             bool haveStart = _chainTail >= 0 && _chainTail < Graph.Nodes.Count;
             Vector2 start = haveStart ? Graph.Nodes[_chainTail] : Vector2.zero;
 
-            if (Straight)
+            LastPreviewRadius = float.PositiveInfinity;
+            LastPreviewTooTight = false;
+
+            if (haveStart && _cornerPending)
             {
-                // Straight tool: dashed gauge (centreline + both rails) to the cursor.
-                if (haveStart) DrawDashedGauge(field, start, cur, lift);
-            }
-            else if (haveStart && _stage == RailStage.NeedCorner)
-            {
-                // Cursor is the prospective guide corner: a single construction line.
-                EmitDashed(field, start, cur, Vector2.zero, lift);
-            }
-            else if (haveStart && _stage == RailStage.NeedEnd)
-            {
-                // Construction legs start->corner->cursor + the live curve it makes.
+                // Corner armed: legs start->corner->cursor + the live curve it makes.
+                // Check the curve's tightest radius against the speed's minimum and
+                // flag/recolour when it's too sharp to lay.
                 EmitDashed(field, start, _corner, Vector2.zero, lift);
                 EmitDashed(field, _corner, cur, Vector2.zero, lift);
-                float f = Mathf.Clamp(CurveLever, 0.1f, 0.95f);
-                DrawBezierPreview(field, start, Vector2.Lerp(start, _corner, f),
-                                  Vector2.Lerp(cur, _corner, f), cur, lift);
+                CurveControls(start, cur, _corner, out Vector2 c1, out Vector2 c2);
+                LastPreviewRadius = MinCurveRadius(start, c1, c2, cur);
+                LastPreviewTooTight = LastPreviewRadius < MinRadiusForSpeed;
+                DrawBezierPreview(field, start, c1, c2, cur, lift);
             }
+            else if (haveStart && CurveModifier)
+            {
+                // Shift held, no corner yet: cursor is the prospective guide corner.
+                EmitDashed(field, start, cur, Vector2.zero, lift);
+            }
+            else if (haveStart)
+            {
+                // Straight (default): dashed gauge (centreline + both rails) to cursor.
+                DrawDashedGauge(field, start, cur, lift);
+            }
+
+            // Red while a too-tight curve is armed, normal otherwise.
+            if (_pvMat != null)
+                _pvMat.color = LastPreviewTooTight ? new Color(1f, 0.25f, 0.2f, 1f)
+                                                   : new Color(1f, 0.8f, 0.3f, 1f);
 
             _pvMesh.Clear();
             _pvMesh.SetVertices(_pvVerts);

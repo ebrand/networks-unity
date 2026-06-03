@@ -192,10 +192,12 @@ namespace NetworkDesigner.Terrain
                 () => t.RailLayer.VerticalOffset, v => { t.RailLayer.VerticalOffset = v; t.RebuildRail(); }, -2f, 5f);
             TuningRegistry.RegisterBool("rail.conform", "Rail", "Conform to terrain",
                 () => t.RailLayer.Conform, v => { t.RailLayer.Conform = v; t.RebuildRail(); });
-            TuningRegistry.RegisterBool("rail.straight", "Rail", "Straight tool (vs curve tool)",
-                () => t.RailLayer.Straight, v => { t.RailLayer.Straight = v; t.RebuildRail(); });
             TuningRegistry.RegisterFloat("rail.curveLever", "Rail", "Curve lever (arc width)",
                 () => t.RailLayer.CurveLever, v => { t.RailLayer.CurveLever = v; t.RebuildRail(); }, 0.1f, 0.95f);
+            TuningRegistry.RegisterFloat("rail.speedLimit", "Rail", "Speed limit (km/h)",
+                () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f);
+            TuningRegistry.RegisterFloat("rail.maxLatG", "Rail", "Max lateral g (curve tightness)",
+                () => t.RailLayer.MaxLateralG, v => t.RailLayer.MaxLateralG = v, 0.05f, 0.5f);
             TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
                 () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); });
             TuningRegistry.RegisterColor("rail.tieColor", "Rail", "Tie color",
@@ -258,6 +260,8 @@ namespace NetworkDesigner.Terrain
                 () => t.GridLineWidth, v => { t.GridLineWidth = v; t.ApplyTerrainMaterial(); }, 0.5f, 4f);
             TuningRegistry.RegisterColor("terrain.gridColor", "Grid", "Color",
                 () => t.GridColor, v => { t.GridColor = v; t.ApplyTerrainMaterial(); });
+            TuningRegistry.RegisterBool("terrain.gridSnap", "Grid", "Snap nodes to grid (Shift+G)",
+                () => t.SnapToGrid, v => t.SnapToGrid = v);
 
             // --- Interface ---
             TuningRegistry.RegisterFloat("terrain.uiScale", "Interface", "UI scale (in-game panels)",

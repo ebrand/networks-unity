@@ -23,6 +23,7 @@ namespace NetworkDesigner.Terrain
         public bool HasCurve;
         public Vector2 ControlA;
         public Vector2 ControlB;
+        public float SpeedLimit;   // km/h the section was laid at (0 = unset)
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }
