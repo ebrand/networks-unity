@@ -335,6 +335,7 @@ namespace NetworkDesigner.Terrain
                 RotationY = rotY,
                 Scale = scale,
             };
+            pt.Cell = cellKey;
             _placed.Add(pt);
             if (!_byCell.TryGetValue(cellKey, out List<PlacedTree> bucket))
                 _byCell[cellKey] = bucket = new List<PlacedTree>();
@@ -345,34 +346,36 @@ namespace NetworkDesigner.Terrain
         // Erase items within the brush. Visits only overlapping lattice cells.
         public bool Erase(Vector3 center, float brushRadius)
         {
-            float s = Mathf.Max(0.5f, Spacing);
+            // Scan the full placed list (not just current-spacing buckets) so the
+            // brush removes ANY item in range — including ones placed under a
+            // different pack's spacing, which live in differently-keyed buckets.
             float r2 = brushRadius * brushRadius;
-            int reach = Mathf.CeilToInt(brushRadius / s) + 1;
-            int ccx = Mathf.FloorToInt(center.x / s);
-            int ccz = Mathf.FloorToInt(center.z / s);
             bool any = false;
-            for (int gz = ccz - reach; gz <= ccz + reach; gz++)
-                for (int gx = ccx - reach; gx <= ccx + reach; gx++)
+            for (int i = _placed.Count - 1; i >= 0; i--)
+            {
+                PlacedTree t = _placed[i];
+                if (t == null) { _placed.RemoveAt(i); continue; }
+                Vector3 p = t.transform.position;
+                float dx = p.x - center.x, dz = p.z - center.z;
+                if (dx * dx + dz * dz <= r2)
                 {
-                    long key = CellKey(gx, gz);
-                    if (!_byCell.TryGetValue(key, out List<PlacedTree> bucket)) continue;
-                    for (int i = bucket.Count - 1; i >= 0; i--)
-                    {
-                        PlacedTree t = bucket[i];
-                        if (t == null) { bucket.RemoveAt(i); continue; }
-                        Vector3 p = t.transform.position;
-                        float dx = p.x - center.x, dz = p.z - center.z;
-                        if (dx * dx + dz * dz <= r2)
-                        {
-                            DestroySafe(t.gameObject);
-                            bucket.RemoveAt(i);
-                            _placed.Remove(t);
-                            any = true;
-                        }
-                    }
-                    if (bucket.Count == 0) _byCell.Remove(key);
+                    RemoveFromCell(t);
+                    DestroySafe(t.gameObject);
+                    _placed.RemoveAt(i);
+                    any = true;
                 }
+            }
             return any;
+        }
+
+        // Drop a tree from its (placement-time) spatial-hash bucket.
+        void RemoveFromCell(PlacedTree t)
+        {
+            if (t != null && _byCell.TryGetValue(t.Cell, out List<PlacedTree> bucket))
+            {
+                bucket.Remove(t);
+                if (bucket.Count == 0) _byCell.Remove(t.Cell);
+            }
         }
 
         // Remove placed items sitting below (waterLevel + WaterlineMargin) — e.g.

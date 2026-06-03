@@ -1026,12 +1026,13 @@ namespace NetworkDesigner.Terrain
 
             if (_field == null) return;
 
-            // A camera move counts as a change so the debounced autosave captures the
-            // new vantage (terrain edits aren't the only thing worth persisting). The
-            // debounce coalesces continuous flying into one save when you stop.
-            if (Autosave && TryGetCameraPose(out Vector3 cp, out float cy, out float cpi))
+            // Sample the camera pose every frame so it can still be saved at teardown
+            // (when the live camera may be gone). A move also marks dirty so the
+            // debounced autosave captures the new vantage (not just terrain edits);
+            // the debounce coalesces continuous flying into one save when you stop.
+            if (TryGetCameraPose(out Vector3 cp, out float cy, out float cpi))
             {
-                if (_haveLastCam && ((cp - _lastCamPos).sqrMagnitude > 1e-4f
+                if (Autosave && _haveLastCam && ((cp - _lastCamPos).sqrMagnitude > 1e-4f
                     || Mathf.Abs(Mathf.DeltaAngle(cy, _lastCamYaw)) > 0.05f
                     || Mathf.Abs(cpi - _lastCamPitch) > 0.05f))
                     _dirtySince = Time.realtimeSinceStartup;
@@ -1960,13 +1961,24 @@ namespace NetworkDesigner.Terrain
         // autosave. False if there's no fly camera to read.
         bool TryGetCameraPose(out Vector3 pos, out float yaw, out float pitch)
         {
-            pos = Vector3.zero; yaw = 0f; pitch = 0f;
             FlyCameraController fly = ResolveFly();
-            if (fly == null) return false;
-            pos = fly.transform.position;
-            yaw = fly.Yaw;
-            pitch = fly.Pitch;
-            return true;
+            if (fly != null)
+            {
+                pos = fly.transform.position;
+                yaw = fly.Yaw;
+                pitch = fly.Pitch;
+                return true;
+            }
+            // Live camera gone (e.g. OnDisable at Play-stop tears it down before us)
+            // — fall back to the pose sampled each frame during play, so the final
+            // flush still saves a valid camera instead of clobbering it with zeros.
+            if (_haveLastCam)
+            {
+                pos = _lastCamPos; yaw = _lastCamYaw; pitch = _lastCamPitch;
+                return true;
+            }
+            pos = Vector3.zero; yaw = 0f; pitch = 0f;
+            return false;
         }
 
         // Restore a saved pose onto the fly camera (and its look state, so it

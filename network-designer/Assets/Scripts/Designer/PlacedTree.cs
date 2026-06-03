@@ -16,5 +16,9 @@ namespace NetworkDesigner.Designer
         // The model entry this scene tree corresponds to, so right-click
         // removal can drop it from Network.Trees (and trigger autosave).
         public PlacedTreeData Data;
+        // The spatial-hash cell this item was bucketed under at placement time
+        // (depends on the spacing in effect then), so it can be removed from the
+        // right bucket regardless of the current brush spacing.
+        public long Cell;
     }
 }
