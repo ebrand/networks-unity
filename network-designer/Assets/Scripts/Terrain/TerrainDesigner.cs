@@ -9,7 +9,7 @@
 // Single lit color for now; height/slope vertex-color bands are a follow-up.
 //
 // Sculpting runs in Play mode: hold left mouse over the terrain and drag.
-// Brush: 1=Raise 2=Lower 3=Smooth 4=Flatten; [ / ] resize the brush.
+// Brush: 1=Raise 2=Lower 3=Smooth 4=Flatten 5=Slope; [ / ] resize the brush.
 //
 // (Replaced an earlier Unity-Terrain heightmap renderer; we went low-poly,
 // which is coarse enough that a custom flat-shaded mesh is the right tool.)
@@ -24,7 +24,7 @@ namespace NetworkDesigner.Terrain
 {
     public class TerrainDesigner : MonoBehaviour
     {
-        public enum BrushMode { Raise, Lower, Smooth, Flatten }
+        public enum BrushMode { Raise, Lower, Smooth, Flatten, Slope }
 
         [Header("Terrain (low-poly chunked mesh)")]
         [Tooltip("Terrain width/length in metres (square).")]
@@ -69,6 +69,10 @@ namespace NetworkDesigner.Terrain
         public float CutDepthBelowBed = 0.5f;
         [Tooltip("Cut-wall rise per metre out (lower = wider, gentler cut).")]
         public float CutBatter = 0.6f;
+        [Tooltip("Smoothing passes applied to the carved cut after digging (rounds the " +
+                 "coarse-grid wall steps). The floor under the track is re-clamped so it " +
+                 "can't re-bury the rails. 0 = off.")]
+        public int CutSmoothPasses = 2;
 
         [Header("Water")]
         [Tooltip("Show a flat water surface; terrain below the water level reads as submerged.")]
@@ -99,6 +103,12 @@ namespace NetworkDesigner.Terrain
         [Range(1f, 4f)] public float BrushStrengthExponent = 1f;
         [Tooltip("0 = hard edge, 1 = soft (smoothstep) falloff to the rim.")]
         [Range(0f, 1f)] public float BrushFalloff = 0.7f;
+        [Tooltip("Flatten convergence rate — how fast Flatten (4) pulls terrain to the " +
+                 "target height. Higher = snappier / stronger.")]
+        public float FlattenStrength = 10f;
+        [Tooltip("Slope tool (5): grade % above which the live readout warns red — like " +
+                 "the rail tool's grade limit. Does NOT block the slope; just flags it.")]
+        public float SlopeMaxGradePct = 6f;
         [Tooltip("Camera used for the sculpt raycast. Defaults to Camera.main.")]
         public Camera PickCamera;
 
@@ -185,6 +195,11 @@ namespace NetworkDesigner.Terrain
         TerrainField _field;
         float _dirtySince = -1f; // realtime when last edited; -1 = clean
         System.Threading.Tasks.Task _saveTask; // in-flight async autosave (serialize+write off-thread)
+        // Camera pose staged from the autosave; applied in Start once the fly
+        // camera exists (it's created after the load).
+        bool _havePendingCam;
+        Vector3 _pendingCamPos;
+        float _pendingCamYaw, _pendingCamPitch;
         GameObject _chunkRoot;
         Mesh[] _chunkMesh;
         MeshCollider[] _chunkCol;
@@ -204,7 +219,20 @@ namespace NetworkDesigner.Terrain
         Mesh _contourMesh;
         Material _contourMat;
         bool _hasFlattenTarget;
-        float _flattenTarget; // height offset (field space) captured on mouse-down
+        float _flattenTarget; // height (field space): captured on mouse-down, or picked via right-click
+        bool _flattenTargetPicked; // true once right-click sampled a height to flatten TO
+        // Slope tool (brush 5): two-click ramp. A captured on the first click; the
+        // corridor between A and the (optionally guide-snapped) end is graded on B.
+        bool _slopeArmed;
+        Vector3 _slopeA;          // world point A
+        float _slopeElevA;        // field-space height captured at A
+        bool _slopeHasGuide;      // A landed near rail -> _slopeGuideDir is the "straight"
+        Vector2 _slopeGuideDir;   // network heading (XZ, unit) through A
+        Vector3 _slopeEnd;        // this frame's end point (guide-snapped), world
+        bool _slopeEndValid;
+        float _slopeGradePct;     // live grade % for the readout
+        const float SlopeGuideDetectRadius = 30f; // find rail within this of A
+        const float SlopeGuideSnapRadius = 6f;     // snap cursor onto the guide (perp)
 
         public TerrainField Field => _field;
 
@@ -247,15 +275,25 @@ namespace NetworkDesigner.Terrain
 #endif
             EnsureField(forceRebuild: true);
 
-            // Adopt a saved heightfield only if it matches the current grid.
+            // Restore the autosaved work. The save is the source of truth: runtime
+            // map-size changes (resize controls) don't persist to the scene, so the
+            // serialized TerrainSizeMeters/CellSize can be stale and SMALLER than the
+            // saved grid. Adopt the saved grid wholesale (re-centered on this object)
+            // and reconcile the configured size to it — never discard the heightfield
+            // over a size mismatch, or the terrain reloads flat (reading as "missing"
+            // under the water plane, with every tree water-culled).
             if (Autosave)
             {
                 TerrainField loaded = TryLoadTerrain();
-                if (loaded != null && loaded.ColumnsX == _field.ColumnsX
-                                   && loaded.RowsZ == _field.RowsZ)
+                if (loaded != null)
                 {
-                    loaded.Origin = _field.Origin;
+                    float half = (loaded.ColumnsX - 1) * loaded.CellSize * 0.5f;
+                    loaded.Origin = transform.position - new Vector3(half, 0f, half);
                     _field = loaded;
+                    CellSize = _field.CellSize;
+                    TerrainSizeMeters = (_field.ColumnsX - 1) * _field.CellSize;
+                    ColumnsX = _field.ColumnsX;
+                    RowsZ = _field.RowsZ;
                 }
             }
 
@@ -272,6 +310,10 @@ namespace NetworkDesigner.Terrain
             if (AutoLighting) EnsureAmbiance();
             if (AutoCameraControl) EnsureCameraControl();
             if (AutoTuning) EnsureTuning();
+
+            // Restore the saved camera pose, after the fly camera exists (it would
+            // otherwise sit at the framed default EnsureCameraControl picked).
+            if (_havePendingCam) { ApplyCameraPose(_pendingCamPos, _pendingCamYaw, _pendingCamPitch); _havePendingCam = false; }
         }
 
         // Stand up the live-tuning endpoint (TuningServer + registration) if
@@ -408,6 +450,27 @@ namespace NetworkDesigner.Terrain
             return new Vector3(Mathf.Round(p.x / s) * s, p.y, Mathf.Round(p.z / s) * s);
         }
 
+        // The cursor point the active tool will actually use, so the brush ring can
+        // be drawn there too. Rail: existing track > alignment guide > grid. Other
+        // line layers: grid. Slope tool (armed): the guide-snapped end. Scatter and
+        // plain sculpt don't snap (returns the raw hit). Off-terrain: unchanged.
+        Vector3 SnapCursor(Vector3 raw, bool overTerrain)
+        {
+            if (!overTerrain) return raw;
+            if (_lineActive != null)
+            {
+                Vector2 flat = new Vector2(raw.x, raw.z);
+                if (_lineActive is RailTrackLayer rl)
+                {
+                    if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
+                    if (rl.TrySnapToExtension(flat, out Vector2 ep)) return new Vector3(ep.x, raw.y, ep.y);
+                }
+                return ApplyGridSnap(raw);
+            }
+            if (Brush == BrushMode.Slope && _slopeArmed && _slopeEndValid) return _slopeEnd;
+            return raw;
+        }
+
         int ChunkSide => Mathf.Clamp(ChunkCells, 8, 100);
 
         // Build (or rebuild) all chunk meshes from the field. Recreates the
@@ -539,6 +602,10 @@ namespace NetworkDesigner.Terrain
             if (RailLayer.SpeedLimitKmh <= 0f) RailLayer.SpeedLimitKmh = 40f;
             if (RailLayer.MaxGradeDeg <= 0f) RailLayer.MaxGradeDeg = 5f; // 0 would block all track
             if (RailLayer.BridgeAboveFill <= 0f) RailLayer.BridgeAboveFill = 6f; // 0 = everything a bridge
+            // Fields added recently: a stale 0-deserialize hides the alignment guide
+            // (zero length) / collapses the grade-scan step. Restore sane defaults.
+            if (RailLayer.ExtensionGuideLength <= 0f) RailLayer.ExtensionGuideLength = 120f;
+            if (RailLayer.GradeSampleStep <= 0f) RailLayer.GradeSampleStep = 10f;
         }
 
         // Global IMGUI scale so panels/text don't shrink to nothing at high
@@ -552,7 +619,8 @@ namespace NetworkDesigner.Terrain
         // Palette IMGUI for the active scatter layer, or a hint for linework.
         void OnGUI()
         {
-            if (_lineActive == null && _active == null) return;
+            bool slope = Brush == BrushMode.Slope && _lineActive == null && _active == null;
+            if (_lineActive == null && _active == null && !slope) return;
             Matrix4x4 prev = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
             DrawPanels();
@@ -564,7 +632,7 @@ namespace NetworkDesigner.Terrain
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 188f : 104f), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : 104f), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -578,15 +646,43 @@ namespace NetworkDesigner.Terrain
                         GUILayout.Label(rt.LastPreviewTooTight
                             ? $"Curve {rt.LastPreviewRadius:0} m — TOO TIGHT (lower speed or widen)"
                             : $"Curve radius {rt.LastPreviewRadius:0} m — ok");
-                    GUILayout.Label(rt.LastPreviewTooSteep
-                        ? $"Grade {rt.LastPreviewGradeDeg:0.0}° — TOO STEEP (max {rt.MaxGradeDeg:0.0}°)"
-                        : $"Grade {rt.LastPreviewGradeDeg:0.0}° / max {rt.MaxGradeDeg:0.0}°");
+                    GUILayout.Label($"Steepest section {rt.LastPreviewGradeDeg:0.0}° / max {rt.MaxGradeDeg:0.0}°");
+                    if (rt.OverrideGrade)
+                    {
+                        float g = rt.LastPreviewEndpointGradeDeg;
+                        float pct = Mathf.Tan(g * Mathf.Deg2Rad) * 100f;
+                        GUILayout.Label($"OVERRIDE ON (B) — full edge at true\ngrade A→B {g:0.0}° ({pct:0.0}%); deep fills → bridges.");
+                    }
+                    else if (rt.LastPreviewTruncated)
+                        GUILayout.Label($"Buildable {rt.LastPreviewBuildableLen:0} m of {rt.LastPreviewTotalLen:0} m —\nrest (red) is over grade. B = build anyway.");
+                    else
+                        GUILayout.Label("Grade OK — full edge buildable. (B = override)");
                 }
                 GUILayout.EndArea();
                 return;
             }
-            if (_active == null) return;
-            if (_active.DrawPalette()) _dirtySince = Time.realtimeSinceStartup;
+            if (_active != null) { if (_active.DrawPalette()) _dirtySince = Time.realtimeSinceStartup; return; }
+
+            // Slope tool (brush 5) readout — no other panel is up in sculpt mode.
+            if (Brush == BrushMode.Slope)
+            {
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, 132f), GUI.skin.box);
+                GUILayout.Label("Slope tool (5)");
+                if (!_slopeArmed)
+                    GUILayout.Label("Left-click point A (start elevation).\nNear rail? It snaps to the track 'straight'.");
+                else if (_slopeEndValid)
+                {
+                    float g = Mathf.Abs(_slopeGradePct);
+                    GUILayout.Label(g > SlopeMaxGradePct
+                        ? $"Grade {_slopeGradePct:0.0}% — OVER {SlopeMaxGradePct:0.0}%"
+                        : $"Grade {_slopeGradePct:0.0}% / warn {SlopeMaxGradePct:0.0}%");
+                    GUILayout.Label(_slopeHasGuide ? "Aligned to rail 'straight'." : "Free direction.");
+                    GUILayout.Label("Left-click point B to grade. Right-click cancels.");
+                }
+                else
+                    GUILayout.Label("Move over terrain to set point B.");
+                GUILayout.EndArea();
+            }
         }
 
         // True when the cursor is over the active layer's palette (so paint/erase
@@ -638,11 +734,16 @@ namespace NetworkDesigner.Terrain
 
             float cs = _field.CellSize;
             Vector3 o = _field.Origin;
-            float cutHalf = Mathf.Max(0.5f, CutFloorHalfWidth);
+            // Flat floor at least one cell wide, so the grid vertices straddling
+            // the track always get lowered (otherwise a coarse grid leaves the
+            // bilinear terrain draped over the rails).
+            float cutHalf = Mathf.Max(cs, Mathf.Max(0.5f, CutFloorHalfWidth));
             float batterRise = Mathf.Max(0.1f, CutBatter);
             float depthBelow = Mathf.Max(0f, CutDepthBelowBed);
             float reach = cutHalf + (tunnelBury + depthBelow) / batterRise;
             float[] H = _field.Heights;
+            var affected = new HashSet<int>();                 // all cells in the cut region (smooth these)
+            var floorClamp = new Dictionary<int, float>();     // flat-floor cells -> their floor (keep low)
 
             foreach (Vector3 c in cuts)
             {
@@ -660,8 +761,17 @@ namespace NetworkDesigner.Terrain
                         float targetRel = (floorY + Mathf.Max(0f, d - cutHalf) * batterRise) - o.y;
                         int idx = _field.Index(vx, vz);
                         if (H[idx] > targetRel) H[idx] = targetRel; // lower only (carve)
+                        affected.Add(idx);
+                        if (d <= cutHalf) // flat floor cell — remember its level so smoothing can't lift it
+                        {
+                            float floorRel = floorY - o.y;
+                            if (!floorClamp.TryGetValue(idx, out float prev) || floorRel < prev)
+                                floorClamp[idx] = floorRel;
+                        }
                     }
             }
+
+            SmoothCutRegion(H, affected, floorClamp);
 
             // Rebuild the mesh + re-conform everything to the carved surface.
             BuildAllChunks();
@@ -673,6 +783,46 @@ namespace NetworkDesigner.Terrain
             RebuildContours();
             ApplyWater();
             _dirtySince = Time.realtimeSinceStartup;
+        }
+
+        // Box-blur the carved cells (CutSmoothPasses) to round the coarse-grid wall
+        // steps, writing ONLY affected cells (untouched terrain is read but never
+        // modified, so the cut blends into its surroundings at the edge). The flat
+        // floor under the track is re-clamped after, so smoothing can't lift the
+        // ground back over the rails.
+        void SmoothCutRegion(float[] H, HashSet<int> affected, Dictionary<int, float> floorClamp)
+        {
+            if (CutSmoothPasses <= 0 || affected.Count == 0) return;
+            int cols = _field.ColumnsX, rows = _field.RowsZ;
+            var cells = new List<int>(affected);
+            for (int pass = 0; pass < CutSmoothPasses; pass++)
+            {
+                var before = new Dictionary<int, float>(cells.Count);
+                foreach (int idx in cells) before[idx] = H[idx];
+                foreach (int idx in cells)
+                {
+                    int vx = idx % cols, vz = idx / cols;
+                    float sum = before[idx]; int cnt = 1;
+                    AccumNeighbor(vx - 1, vz, cols, rows, before, H, ref sum, ref cnt);
+                    AccumNeighbor(vx + 1, vz, cols, rows, before, H, ref sum, ref cnt);
+                    AccumNeighbor(vx, vz - 1, cols, rows, before, H, ref sum, ref cnt);
+                    AccumNeighbor(vx, vz + 1, cols, rows, before, H, ref sum, ref cnt);
+                    H[idx] = sum / cnt;
+                }
+            }
+            foreach (KeyValuePair<int, float> kv in floorClamp) // keep the floor low (no re-burying)
+                if (H[kv.Key] > kv.Value) H[kv.Key] = kv.Value;
+        }
+
+        // Neighbour height for the cut smoother: pre-pass value if it's an affected
+        // cell, else the current (untouched) terrain. Out-of-range neighbours skip.
+        static void AccumNeighbor(int nx, int nz, int cols, int rows,
+            Dictionary<int, float> before, float[] H, ref float sum, ref int cnt)
+        {
+            if (nx < 0 || nz < 0 || nx >= cols || nz >= rows) return;
+            int n = nz * cols + nx;
+            sum += before.TryGetValue(n, out float bv) ? bv : H[n];
+            cnt++;
         }
 
         // Mode switching (mutually exclusive; same key again returns to sculpt).
@@ -782,6 +932,7 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha2)) Brush = BrushMode.Lower;
             else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
+            else if (Input.GetKeyDown(KeyCode.Alpha5)) Brush = BrushMode.Slope;
             // T/R/F toggle the active mode (mutually exclusive; press the same
             // key again to return to sculpt).
             if (Input.GetKeyDown(KeyCode.T)) SetScatterMode(TreeLayer);
@@ -795,6 +946,10 @@ namespace NetworkDesigner.Terrain
                 if (shift) SnapToGrid = !SnapToGrid;            // Shift+G: snap toggle
                 else { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); } // G: grid toggle
             }
+            // B (in rail mode): toggle grade override — build across whatever terrain
+            // the edge crosses instead of truncating at the grade limit.
+            if (Input.GetKeyDown(KeyCode.B) && _lineActive is RailTrackLayer)
+                RailLayer.OverrideGrade = !RailLayer.OverrideGrade;
             // Bake thumbnails only while NOT painting — the first render of each
             // prefab compiles its shader variant (a one-time editor stall), and
             // we don't want that landing mid-stroke.
@@ -814,7 +969,14 @@ namespace NetworkDesigner.Terrain
                 SaveTerrain(); // clears _dirtySince only if a write actually starts
             }
 
-            if (Input.GetMouseButtonDown(0)) _hasFlattenTarget = false;
+            // A picked (right-click) flatten height persists across strokes; only
+            // the auto-sample-at-stroke-start mode re-captures per left-click.
+            if (Input.GetMouseButtonDown(0) && !_flattenTargetPicked) _hasFlattenTarget = false;
+            // A picked target only makes sense in Flatten mode — drop it otherwise.
+            if (Brush != BrushMode.Flatten) _flattenTargetPicked = false;
+            // Slope arming is only valid while the Slope brush is the active tool.
+            if (Brush != BrushMode.Slope || _active != null || _lineActive != null)
+            { _slopeArmed = false; _slopeHasGuide = false; }
 
             // One hover raycast per frame (against the TerrainCollider), shared
             // by the brush cursor and the sculpt itself.
@@ -828,7 +990,31 @@ namespace NetworkDesigner.Terrain
                               && hit.collider is MeshCollider;
             }
 
-            UpdateBrushCursor(ShowBrushCursor && overTerrain, hit.point);
+            // Slope tool: while armed, resolve this frame's end point (snapped to the
+            // network "straight" guide when near it) and the live grade — BEFORE the
+            // cursor/corridor overlay draws so it reflects the snap.
+            _slopeEndValid = false;
+            if (_slopeArmed && Brush == BrushMode.Slope && overTerrain)
+            {
+                Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
+                Vector2 c2 = new Vector2(hit.point.x, hit.point.z);
+                if (_slopeHasGuide)
+                {
+                    Vector2 proj = a2 + _slopeGuideDir * Vector2.Dot(c2 - a2, _slopeGuideDir);
+                    if ((c2 - proj).sqrMagnitude <= SlopeGuideSnapRadius * SlopeGuideSnapRadius) c2 = proj;
+                }
+                _slopeEnd = new Vector3(c2.x, hit.point.y, c2.y);
+                _slopeEndValid = true;
+                GridFromWorld(_slopeEnd, out float sex, out float sez);
+                float run = Vector2.Distance(a2, c2);
+                _slopeGradePct = run > 1e-3f ? (HeightAtGrid(sex, sez) - _slopeElevA) / run * 100f : 0f;
+            }
+
+            // Resolve the snapped cursor for the active tool ONCE, so the brush ring
+            // sits exactly where placement will land (track / extension / grid / slope
+            // guide). Scatter & plain sculpt don't snap.
+            Vector3 cursorVis = SnapCursor(hit.point, overTerrain);
+            UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.
@@ -839,9 +1025,9 @@ namespace NetworkDesigner.Terrain
                 if (_lineActive is RailTrackLayer railMod)
                     railMod.CurveModifier = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
 
-                // Snap node placement to grid intersections when enabled (the
-                // preview shows the snapped point too). Deletes use the raw hit.
-                Vector3 place = ApplyGridSnap(hit.point);
+                // The snapped placement point (same one the ring shows). Deletes use
+                // the raw hit so you can remove a node you're not snapping to.
+                Vector3 place = cursorVis;
                 _lineActive.UpdatePreview(_field, place, overTerrain);
                 if (overTerrain && Input.GetMouseButtonDown(0))
                 {
@@ -876,6 +1062,52 @@ namespace NetworkDesigner.Terrain
                     && _active.Erase(hit.point, BrushRadius))
                     _dirtySince = Time.realtimeSinceStartup;
                 return;
+            }
+
+            // Slope tool: two-click ramp. Click A (capture start elevation), move
+            // (corridor + live grade preview, snapping to the rail "straight"), click
+            // B (capture end elevation) -> grade the corridor linearly between them.
+            // Right-click cancels the armed point.
+            if (Brush == BrushMode.Slope)
+            {
+                if (overTerrain && Input.GetMouseButtonDown(0))
+                {
+                    if (!_slopeArmed)
+                    {
+                        GridFromWorld(hit.point, out float ax, out float az);
+                        _slopeA = hit.point;
+                        _slopeElevA = HeightAtGrid(ax, az);
+                        _slopeArmed = true;
+                        // Network-aware: if A is near rail track, adopt the track's
+                        // heading there as the "straight" guide to align the slope to.
+                        Vector2 a2 = new Vector2(hit.point.x, hit.point.z);
+                        _slopeHasGuide = RailLayer != null
+                            && RailLayer.TryTrackHeadingNear(a2, SlopeGuideDetectRadius, out _slopeGuideDir, out _);
+                    }
+                    else if (_slopeEndValid)
+                    {
+                        GridFromWorld(_slopeEnd, out float ex, out float ez);
+                        ApplySlope(_slopeA, _slopeEnd, _slopeElevA, HeightAtGrid(ex, ez));
+                        _slopeArmed = false; _slopeHasGuide = false;
+                        _dirtySince = Time.realtimeSinceStartup;
+                        RebuildContours();
+                    }
+                }
+                if (Input.GetMouseButtonDown(1)) { _slopeArmed = false; _slopeHasGuide = false; }
+                return;
+            }
+
+            // Flatten mode: right-click samples a target height (the eyedropper).
+            // The pick persists, so a following left-click/drag makes everything
+            // under the brush that exact height — instead of the height the stroke
+            // happened to start on.
+            if (Brush == BrushMode.Flatten && overTerrain && Input.GetMouseButtonDown(1))
+            {
+                GridFromWorld(hit.point, out float pfx, out float pfz);
+                _flattenTarget = HeightAtGrid(pfx, pfz);
+                _flattenTargetPicked = true;
+                _hasFlattenTarget = true;
+                Debug.Log($"[TerrainDesigner] Flatten height picked: {_field.Origin.y + _flattenTarget:0.0} m");
             }
 
             // Refresh contours when a stroke ends (cheap path); live rebuild
@@ -957,11 +1189,72 @@ namespace NetworkDesigner.Terrain
             for (int i = 0; i < n; i++)
                 EmitCursorSegment(_ring[i], _ring[(i + 1) % n], dash, BrushCursorDashGap);
 
+            // Slope tool: append the corridor edges + the network "straight" guide.
+            if (_slopeArmed && Brush == BrushMode.Slope && _active == null && _lineActive == null)
+                AppendSlopeOverlay();
+
             _cursorMesh.Clear();
             _cursorMesh.SetVertices(_cursorVerts);
             _cursorMesh.SetIndices(_cursorIdx, MeshTopology.Lines, 0);
             _cursorMesh.RecalculateBounds();
             _cursorMf.sharedMesh = _cursorMesh;
+        }
+
+        // The slope tool's overlay (appended into the cursor line mesh): two dashed
+        // corridor edges at ±BrushRadius from the A→end axis, a small ring at A, and
+        // — when A snapped to the rail network — the dashed "straight" guide line.
+        void AppendSlopeOverlay()
+        {
+            Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
+            Vector2 e2 = _slopeEndValid ? new Vector2(_slopeEnd.x, _slopeEnd.z) : a2;
+            float dash = BrushCursorDashLength, gap = BrushCursorDashGap;
+            if (_slopeHasGuide)
+            {
+                const float gl = 150f; // guide length each way through A
+                EmitDrapedDashed(a2 - _slopeGuideDir * gl, a2 + _slopeGuideDir * gl, dash, gap);
+            }
+            Vector2 axis = e2 - a2;
+            if (axis.sqrMagnitude > 1e-4f)
+            {
+                Vector2 dir = axis.normalized;
+                Vector2 perp = new Vector2(-dir.y, dir.x) * BrushRadius;
+                EmitDrapedDashed(a2 + perp, e2 + perp, dash, gap);
+                EmitDrapedDashed(a2 - perp, e2 - perp, dash, gap);
+            }
+            AppendRing(a2, 0.9f); // start marker
+        }
+
+        // A draped, dashed line between two XZ points (sampled to the terrain).
+        void EmitDrapedDashed(Vector2 a2, Vector2 b2, float dash, float gap)
+        {
+            float len = Vector2.Distance(a2, b2);
+            if (len < 1e-3f) return;
+            Vector2 dir = (b2 - a2) / len;
+            float period = (dash > 0f ? dash : 1f) + Mathf.Max(0f, gap);
+            for (float pos = 0f; pos < len; pos += period)
+            {
+                float e0 = pos, e1 = Mathf.Min(pos + (dash > 0f ? dash : 1f), len);
+                Vector2 p0 = a2 + dir * e0, p1 = a2 + dir * e1;
+                int s = _cursorVerts.Count;
+                _cursorVerts.Add(new Vector3(p0.x, _field.SampleHeight(p0.x, p0.y) + BrushCursorLift, p0.y));
+                _cursorVerts.Add(new Vector3(p1.x, _field.SampleHeight(p1.x, p1.y) + BrushCursorLift, p1.y));
+                _cursorIdx.Add(s); _cursorIdx.Add(s + 1);
+            }
+        }
+
+        // A small draped ring marker (solid) at an XZ centre.
+        void AppendRing(Vector2 c, float r)
+        {
+            const int n = 16;
+            Vector3 prev = default;
+            for (int i = 0; i <= n; i++)
+            {
+                float ang = i / (float)n * Mathf.PI * 2f;
+                float wx = c.x + Mathf.Cos(ang) * r, wz = c.y + Mathf.Sin(ang) * r;
+                Vector3 cur = new Vector3(wx, _field.SampleHeight(wx, wz) + BrushCursorLift, wz);
+                if (i > 0) { int s = _cursorVerts.Count; _cursorVerts.Add(prev); _cursorVerts.Add(cur); _cursorIdx.Add(s); _cursorIdx.Add(s + 1); }
+                prev = cur;
+            }
         }
 
         // Like TerrainContourBuilder.EmitSegment: one line a->b, or dash/gap
@@ -1088,7 +1381,7 @@ namespace NetworkDesigner.Terrain
                             h -= effStrength * dt * w;
                             break;
                         case BrushMode.Flatten:
-                            h = Mathf.Lerp(h, _flattenTarget, Mathf.Clamp01(dt * 4f * w));
+                            h = Mathf.Lerp(h, _flattenTarget, Mathf.Clamp01(dt * Mathf.Max(0.1f, FlattenStrength) * w));
                             break;
                         case BrushMode.Smooth:
                             h = Mathf.Lerp(h, NeighborAverage(x, z), Mathf.Clamp01(dt * 4f * w));
@@ -1097,6 +1390,55 @@ namespace NetworkDesigner.Terrain
                     _field.SetHeight(x, z, h);
                 }
             }
+        }
+
+        // Slope tool: grade the corridor between A and B (width = brush diameter) to
+        // a linear ramp from elevA to elevB. Flat across the corridor (it IS the
+        // ramp bed), feathering to the existing terrain only near the side edges
+        // (BrushFalloff controls how wide that feather is). The ends meet the terrain
+        // cleanly because elevA/elevB were sampled there.
+        void ApplySlope(Vector3 aWorld, Vector3 bWorld, float elevA, float elevB)
+        {
+            if (_field == null) return;
+            float cs = _field.CellSize;
+            Vector2 a = new Vector2(aWorld.x, aWorld.z);
+            Vector2 b = new Vector2(bWorld.x, bWorld.z);
+            Vector2 axis = b - a;
+            float L = axis.magnitude;
+            if (L < 1e-3f) return;
+            Vector2 dir = axis / L;
+            Vector2 perpDir = new Vector2(-dir.y, dir.x);
+            float halfW = Mathf.Max(cs, BrushRadius);
+            float feather = Mathf.Clamp01(BrushFalloff);
+            float inner = 1f - feather; // fraction of half-width held at full strength
+
+            GridFromWorld(aWorld, out float afx, out float afz);
+            GridFromWorld(bWorld, out float bfx, out float bfz);
+            int pad = Mathf.CeilToInt(halfW / cs) + 1;
+            int minX = Mathf.FloorToInt(Mathf.Min(afx, bfx)) - pad;
+            int maxX = Mathf.CeilToInt(Mathf.Max(afx, bfx)) + pad;
+            int minZ = Mathf.FloorToInt(Mathf.Min(afz, bfz)) - pad;
+            int maxZ = Mathf.CeilToInt(Mathf.Max(afz, bfz)) + pad;
+
+            for (int z = minZ; z <= maxZ; z++)
+            {
+                for (int x = minX; x <= maxX; x++)
+                {
+                    if (!_field.InRange(x, z)) continue;
+                    Vector2 rel = new Vector2(_field.Origin.x + x * cs, _field.Origin.z + z * cs) - a;
+                    float along = Vector2.Dot(rel, dir);
+                    if (along < 0f || along > L) continue;             // only between A and B
+                    float perp = Mathf.Abs(Vector2.Dot(rel, perpDir));
+                    if (perp > halfW) continue;                        // outside the corridor
+                    float target = Mathf.Lerp(elevA, elevB, along / L);
+                    float tEdge = halfW > 0f ? perp / halfW : 0f;
+                    float w = tEdge <= inner ? 1f
+                        : 1f - Mathf.SmoothStep(0f, 1f, (tEdge - inner) / Mathf.Max(1e-3f, feather));
+                    float h = _field.GetHeight(x, z);
+                    _field.SetHeight(x, z, Mathf.Lerp(h, target, w));
+                }
+            }
+            RebuildChunkRegion(minX, minZ, (maxX - minX) + 1, (maxZ - minZ) + 1);
         }
 
         // Average of the in-range 4-neighbours (falls back to self at edges).
@@ -1373,8 +1715,10 @@ namespace NetworkDesigner.Terrain
         {
             // Let any in-flight async write finish so the file isn't half-written.
             try { _saveTask?.Wait(3000); } catch { /* ignore */ }
-            // Flush any pending edits synchronously when Play stops / disabled.
-            if (Autosave && _dirtySince >= 0f)
+            // Flush synchronously when Play stops / disabled. Always write (not just
+            // when edits are pending) so a camera-only move this session — which
+            // doesn't mark the terrain dirty — still persists its pose.
+            if (Autosave && _field != null)
             {
                 WriteSave(BuildSnapshot(), ResolveAutosavePath());
                 _dirtySince = -1f;
@@ -1413,6 +1757,49 @@ namespace NetworkDesigner.Terrain
             }
         }
 
+        // Manual Save button: force an immediate SYNCHRONOUS write, ignoring the
+        // dirty flag and any in-flight async write, so it always captures the
+        // current state right now (used when Autosave is off, for testing).
+        [ContextMenu("Save Now")]
+        public void SaveNow()
+        {
+            if (_field == null) return;
+            try { _saveTask?.Wait(2000); } catch { /* ignore */ }
+            WriteSave(BuildSnapshot(), ResolveAutosavePath());
+            _dirtySince = -1f;
+            Debug.Log($"[TerrainDesigner] Saved → {ResolveAutosavePath()}");
+        }
+
+        // Manual Load button: reload everything from the save file, live. Clears
+        // the current scatter first so trees/rocks don't duplicate, adopts the
+        // saved grid, and rebuilds chunks + layers + water + camera.
+        [ContextMenu("Load Now")]
+        public void LoadNow()
+        {
+            TerrainField loaded = TryLoadTerrain();
+            if (loaded == null) { Debug.LogWarning("[TerrainDesigner] Nothing to load."); return; }
+            TreeLayer.ClearAll();
+            RockLayer.ClearAll();
+            float half = (loaded.ColumnsX - 1) * loaded.CellSize * 0.5f;
+            loaded.Origin = transform.position - new Vector3(half, 0f, half);
+            _field = loaded;
+            CellSize = _field.CellSize;
+            TerrainSizeMeters = (_field.ColumnsX - 1) * _field.CellSize;
+            ColumnsX = _field.ColumnsX; RowsZ = _field.RowsZ;
+            _chunkMesh = null; _chunkCol = null; // grid may have changed -> recreate chunks
+            BuildAllChunks();
+            TreeLayer.SpawnPending(_field);
+            RockLayer.SpawnPending(_field);
+            FenceLayer.Rebuild(_field);
+            PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
+            RebuildContours();
+            ApplyWater();
+            if (_havePendingCam) { ApplyCameraPose(_pendingCamPos, _pendingCamYaw, _pendingCamPitch); _havePendingCam = false; }
+            _dirtySince = -1f;
+            Debug.Log("[TerrainDesigner] Loaded.");
+        }
+
         // Snapshot the current field + trees + packs into an owned, immutable
         // payload safe to serialize off the main thread. Main-thread only.
         TerrainSave BuildSnapshot()
@@ -1425,6 +1812,7 @@ namespace NetworkDesigner.Terrain
             {
                 if (Mathf.Abs(heights[i]) > 1e-4f) { idx.Add(i); hs.Add(heights[i]); }
             }
+            bool haveCam = TryGetCameraPose(out Vector3 camPos, out float camYaw, out float camPitch);
             return new TerrainSave
             {
                 ColumnsX = _field.ColumnsX,
@@ -1439,7 +1827,43 @@ namespace NetworkDesigner.Terrain
                 Fences = FenceLayer.CollectData(),
                 PowerLines = PowerLineLayer.CollectData(),
                 Rails = RailLayer.CollectData(),
+                HasCamera = haveCam,
+                CamPos = camPos,
+                CamYaw = camYaw,
+                CamPitch = camPitch,
             };
+        }
+
+        // The current fly-camera pose (world position + its look yaw/pitch), for
+        // autosave. False if there's no fly camera to read.
+        bool TryGetCameraPose(out Vector3 pos, out float yaw, out float pitch)
+        {
+            pos = Vector3.zero; yaw = 0f; pitch = 0f;
+            FlyCameraController fly = ResolveFly();
+            if (fly == null) return false;
+            pos = fly.transform.position;
+            yaw = fly.Yaw;
+            pitch = fly.Pitch;
+            return true;
+        }
+
+        // Restore a saved pose onto the fly camera (and its look state, so it
+        // doesn't ease back to a framed default).
+        void ApplyCameraPose(Vector3 pos, float yaw, float pitch)
+        {
+            FlyCameraController fly = ResolveFly();
+            if (fly == null) return;
+            fly.transform.position = pos;
+            fly.Yaw = yaw;
+            fly.Pitch = pitch;
+            fly.transform.rotation = Quaternion.Euler(pitch, yaw, 0f);
+        }
+
+        FlyCameraController ResolveFly()
+        {
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            FlyCameraController fly = cam != null ? cam.GetComponent<FlyCameraController>() : null;
+            return fly != null ? fly : FindFirstObjectByType<FlyCameraController>();
         }
 
         const int SaveMagic = 0x54524E33; // "TRN3"
@@ -1461,7 +1885,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(4); // version (4 added per-edge SpeedLimit to graphs)
+                    w.Write(5); // version (5 added the fly-camera pose at the end)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -1475,6 +1899,9 @@ namespace NetworkDesigner.Terrain
                     WriteGraph(w, save.Fences);
                     WriteGraph(w, save.PowerLines);
                     WriteGraph(w, save.Rails);
+                    w.Write(save.HasCamera);                // v5+
+                    w.Write(save.CamPos.x); w.Write(save.CamPos.y); w.Write(save.CamPos.z);
+                    w.Write(save.CamYaw); w.Write(save.CamPitch);
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -1573,6 +2000,11 @@ namespace NetworkDesigner.Terrain
                 FenceLayer.LoadState(save.Fences); // Rebuilt after chunks
                 PowerLineLayer.LoadState(save.PowerLines);
                 RailLayer.LoadState(save.Rails);
+                // Stage the camera pose; applied in Start once the fly camera exists.
+                _havePendingCam = save.HasCamera;
+                _pendingCamPos = save.CamPos;
+                _pendingCamYaw = save.CamYaw;
+                _pendingCamPitch = save.CamPitch;
                 return f;
             }
             catch (System.Exception ex)
@@ -1611,6 +2043,14 @@ namespace NetworkDesigner.Terrain
                 s.Fences = ReadGraph(r, version);
                 s.PowerLines = ReadGraph(r, version);
                 if (version >= 2) s.Rails = ReadGraph(r, version); // older saves have no rails
+                if (version >= 5) // fly-camera pose added in v5
+                {
+                    s.HasCamera = r.ReadBoolean();
+                    s.CamPos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                    s.CamYaw = r.ReadSingle();
+                    s.CamPitch = r.ReadSingle();
+                }
+                else s.HasCamera = false;
                 return s;
             }
             catch { return null; }

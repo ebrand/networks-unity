@@ -104,6 +104,10 @@ namespace NetworkDesigner.Terrain
         public LineGraphSave Fences;       // fence linework graph (nodes + edges)
         public LineGraphSave PowerLines;   // power-line linework graph
         public LineGraphSave Rails;        // rail-track graph (procedural rails + ties)
+        public bool HasCamera;             // v5+: a saved fly-camera pose follows
+        public Vector3 CamPos;             // camera world position
+        public float CamYaw;               // fly-camera yaw / pitch (its look state)
+        public float CamPitch;
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by

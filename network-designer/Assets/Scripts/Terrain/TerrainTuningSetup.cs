@@ -111,6 +111,17 @@ namespace NetworkDesigner.Terrain
                 () => t.RebuildTerrain(),
                 description: "Rebuild at the current size/cell size. WIPES the heightfield to flat (re-import a heightmap after). A large map can stall while building — watch the load.");
 
+            // --- Autosave / manual persistence ---
+            TuningRegistry.RegisterBool("terrain.autosave", "Autosave", "Autosave enabled",
+                () => t.Autosave, v => t.Autosave = v,
+                description: "On: terrain/trees/rail/camera are saved automatically (debounced after edits, and on Play-stop) and reloaded on Play. Off: nothing auto-saves or auto-loads — use the Save/Load buttons manually (handy for testing).");
+            TuningRegistry.RegisterAction("terrain.save", "Autosave", "Save now",
+                () => t.SaveNow(),
+                description: "Write the current terrain/trees/rail/camera to the autosave file immediately (synchronous). Works whether or not autosave is enabled.");
+            TuningRegistry.RegisterAction("terrain.load", "Autosave", "Load now",
+                () => t.LoadNow(),
+                description: "Reload everything from the autosave file, live — clears current trees/rocks first so they don't duplicate, then rebuilds terrain, layers, water and camera. Also moves the camera to the saved view.");
+
             // --- Brush ---
             TuningRegistry.RegisterFloat("terrain.brushRadius", "Brush", "Radius (m)",
                 () => t.BrushRadius, v => t.BrushRadius = v, 0.5f, 200f,
@@ -124,6 +135,12 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.brushFalloff", "Brush", "Falloff",
                 () => t.BrushFalloff, v => t.BrushFalloff = v, 0f, 1f,
                 description: "Edge softness of the brush. 0 = hard flat disc; 1 = smooth feathered edge.");
+            TuningRegistry.RegisterFloat("terrain.flattenStrength", "Brush", "Flatten strength",
+                () => t.FlattenStrength, v => t.FlattenStrength = v, 0.5f, 60f,
+                description: "How hard Flatten (brush 4) pulls terrain to the target height. Higher = snappier. In Flatten mode, right-click to sample a target height (eyedropper), then left-click/drag to make everything that height.");
+            TuningRegistry.RegisterFloat("terrain.slopeMaxGrade", "Brush", "Slope warn grade (%)",
+                () => t.SlopeMaxGradePct, v => t.SlopeMaxGradePct = v, 0.5f, 30f,
+                description: "Slope tool (brush 5): the live grade readout turns red above this %. Just a warning — it doesn't block the slope. Slope tool: click A (start elev), move (corridor + grade preview, snaps to nearby rail's 'straight'), click B (end elev) to grade the strip.");
             TuningRegistry.RegisterFloat("terrain.brushResizeRate", "Brush", "Resize rate (m/s)",
                 () => t.BrushResizeRate, v => t.BrushResizeRate = v, 1f, 100f,
                 description: "How fast the radius changes while you hold [ or ].");
@@ -251,7 +268,19 @@ namespace NetworkDesigner.Terrain
                 description: "Comfort/cant limit. Higher = tighter curves allowed at a given speed (smaller min radius). Real rail ~0.1; raise for game-scaled curves.");
             TuningRegistry.RegisterFloat("rail.maxGrade", "Rail", "Max grade (deg)",
                 () => t.RailLayer.MaxGradeDeg, v => t.RailLayer.MaxGradeDeg = v, 0.5f, 15f,
-                description: "Steepest average slope (start to end) a section may have. Steeper sections are refused. 5 deg ~ 8.7%.");
+                description: "Steepest grade any section may have. The terrain is sampled every 'Grade sample step' m along an edge; the edge is buildable up to the first section over this, then truncated there (the rest shows red). 5 deg ~ 8.7%.");
+            TuningRegistry.RegisterFloat("rail.gradeStep", "Rail", "Grade sample step (m)",
+                () => t.RailLayer.GradeSampleStep, v => t.RailLayer.GradeSampleStep = v, 1f, 50f,
+                description: "Spacing at which the terrain elevation is sampled along an edge to check the per-section grade — the 'every N metres' resolution. Smaller = finer (catches short steep bumps), larger = smoother.");
+            TuningRegistry.RegisterBool("rail.overrideGrade", "Rail", "Override grade (bridge anyway)",
+                () => t.RailLayer.OverrideGrade, v => t.RailLayer.OverrideGrade = v,
+                description: "Ignore the grade limit and DON'T truncate: build the whole edge across whatever terrain it crosses (deep fills become bridges automatically). For 'the terrain's whacked, span it anyway'. Hotkey B in rail mode.");
+            TuningRegistry.RegisterFloat("rail.trackSnap", "Rail", "Track snap radius (m)",
+                () => t.RailLayer.TrackSnapRadius, v => t.RailLayer.TrackSnapRadius = v, 0f, 25f,
+                description: "Snap radius for connecting to EXISTING track: a click within this of a node or rail edge is pulled exactly onto it (overrides grid snap) so it reliably joins the network. 0 = grid snap only.");
+            TuningRegistry.RegisterFloat("rail.guideLength", "Rail", "Alignment guide length (m)",
+                () => t.RailLayer.ExtensionGuideLength, v => t.RailLayer.ExtensionGuideLength = v, 0f, 600f,
+                description: "Length of the dashed straight-ahead alignment guide drawn out of the chain tail. Also bounds how far ahead the extension snap reaches. 0 = no guide / no extension snap.");
             TuningRegistry.RegisterFloat("rail.ballastHeight", "Rail", "Ballast height (m)",
                 () => t.RailLayer.BallastHeight, v => { t.RailLayer.BallastHeight = v; t.RebuildRail(); }, 0f, 1.5f,
                 description: "Height of the raised gravel bed the ties sit on. 0 = no ballast.");
@@ -318,6 +347,9 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.cutBatter", "Rail", "Cut wall steepness",
                 () => t.CutBatter, v => t.CutBatter = v, 0.3f, 2f,
                 description: "Carve action: cut-wall rise per metre out. Lower = wider, gentler cut; higher = steeper, narrower (keeps more rock over a tunnel).");
+            TuningRegistry.RegisterFloat("rail.cutSmooth", "Rail", "Cut smoothing passes",
+                () => t.CutSmoothPasses, v => t.CutSmoothPasses = Mathf.RoundToInt(v), 0f, 6f, 1f,
+                description: "Carve action: smoothing passes that round the coarse cut walls afterward. The floor under the track is protected, so it won't re-bury the rails. 0 = off.");
             TuningRegistry.RegisterAction("rail.carve", "Rail", "Carve approaches (destructive)",
                 () => t.CarveRailApproaches(),
                 description: "DESTRUCTIVE: permanently lowers the terrain into open cuts along below-grade track + notches tunnel mouths open. No undo; re-press to dig further (additive).");
@@ -388,6 +420,10 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterColor("water.color", "Water", "Color",
                 () => t.WaterColor, v => { t.WaterColor = v; t.ApplyWater(); },
                 description: "Water colour. Its alpha controls transparency (lower = see the bed through it).");
+            TuningRegistry.RegisterFloat("water.alpha", "Water", "Alpha (transparency)",
+                () => t.WaterColor.a,
+                v => { Color c = t.WaterColor; c.a = v; t.WaterColor = c; t.ApplyWater(); }, 0.05f, 1f,
+                description: "Water transparency — lower = clearer (see the bed through it), 1 = opaque. (Same as the colour's alpha channel; min 0.05 so it isn't reset by the 0-alpha guard.)");
             TuningRegistry.RegisterFloat("water.smoothness", "Water", "Smoothness",
                 () => t.WaterSmoothness, v => { t.WaterSmoothness = v; t.ApplyWater(); }, 0f, 1f,
                 description: "Surface gloss — higher gives more of a reflective sheen.");

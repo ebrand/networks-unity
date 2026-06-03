@@ -60,11 +60,27 @@ namespace NetworkDesigner.Terrain
         // (read by the on-screen hint; updated each frame while a corner is armed).
         [System.NonSerialized] public float LastPreviewRadius = float.PositiveInfinity;
         [System.NonSerialized] public bool LastPreviewTooTight;
-        [Tooltip("Max average grade (degrees) from a section's start to end. Steeper " +
-                 "sections are refused (preview turns red).")]
+        [Tooltip("Max grade (degrees) any section may have. The terrain is sampled " +
+                 "every GradeSampleStep metres along an edge; the edge is buildable " +
+                 "up to the first section that exceeds this, and is truncated there " +
+                 "on click (the rest shows red). 5 deg ~ 8.7%.")]
         public float MaxGradeDeg = 5f;
-        [System.NonSerialized] public float LastPreviewGradeDeg;
+        [Tooltip("Spacing (m) at which the terrain elevation is sampled along an edge " +
+                 "to check the per-section grade — the 'every N metres' resolution.")]
+        public float GradeSampleStep = 10f;
+        [Tooltip("Override: ignore the grade limit and DON'T truncate — build the " +
+                 "whole edge across whatever terrain it crosses (deep fills become " +
+                 "bridges automatically). For 'the terrain's whacked, span it anyway'. " +
+                 "Toggle with B in rail mode.")]
+        public bool OverrideGrade = false;
+        [System.NonSerialized] public float LastPreviewGradeDeg;        // steepest sampled section
+        [System.NonSerialized] public float LastPreviewEndpointGradeDeg; // true grade A->B (the constant build grade)
         [System.NonSerialized] public bool LastPreviewTooSteep;
+        // Last preview's buildable arc length vs total, and whether it would be
+        // truncated — drives the on-screen hint and the red un-buildable tail.
+        [System.NonSerialized] public float LastPreviewBuildableLen;
+        [System.NonSerialized] public float LastPreviewTotalLen;
+        [System.NonSerialized] public bool LastPreviewTruncated;
         public Color RailColor = new Color(0.28f, 0.28f, 0.30f);
         public Color TieColor = new Color(0.32f, 0.22f, 0.14f);
         [Tooltip("Height of the ballast bed the ties sit on (m). 0 = no ballast.")]
@@ -151,9 +167,11 @@ namespace NetworkDesigner.Terrain
         MeshFilter _pvMf;
         MeshRenderer _pvMr;
         Mesh _pvMesh;
-        Material _pvMat;
+        Material _pvMat;       // buildable part (amber; red when curve too tight)
+        Material _pvMatRed;    // un-buildable / over-grade tail (always red)
         readonly List<Vector3> _pvVerts = new List<Vector3>();
-        readonly List<int> _pvIdx = new List<int>();
+        readonly List<int> _pvIdx = new List<int>();      // submesh 0 (buildable)
+        readonly List<int> _pvIdxRed = new List<int>();   // submesh 1 (over-grade tail)
 
         public LineGraph Graph => _graph ??= new LineGraph();
         string ITerrainLineLayer.LayerName => Name;
@@ -194,15 +212,25 @@ namespace NetworkDesigner.Terrain
 
             // A corner is armed: this click is the endpoint -> commit the curve,
             // unless it would be tighter than the speed's minimum radius (refused;
-            // the corner stays armed so you can pick a wider endpoint).
+            // the corner stays armed so you can pick a wider endpoint). The curve
+            // is truncated at the first section the terrain takes over-grade
+            // (unless override is on), via a de Casteljau split.
             if (_cornerPending)
             {
                 Vector2 start = Graph.Nodes[_chainTail];
-                if (GradeDegrees(field, start, p) > MaxGradeDeg) return;  // too steep
                 CurveControls(start, p, _corner, out Vector2 c1, out Vector2 c2);
-                if (MinCurveRadius(start, c1, c2, p) < MinRadiusForSpeed) return;
-                int end = NearestOrNew(p);          // join to an existing node if clicked on one
-                AddCurvedEdge(_chainTail, end, _corner);
+                if (MinCurveRadius(start, c1, c2, p) < MinRadiusForSpeed) return; // too tight
+                Vector2 endPt = p, cc1 = c1, cc2 = c2;
+                if (!OverrideGrade && ScanBuildable(field, start, c1, c2, p,
+                        out float bl, out float bt, out _, out _) && bt < 0.999f)
+                {
+                    if (bl < 1e-2f) return;  // first section already over-grade — refuse
+                    SubdivideFirst(start, c1, c2, p, bt, out cc1, out cc2, out endPt);
+                }
+                int end = NearestOrNew(endPt);
+                Graph.AddEdge(_chainTail, end);
+                LineEdge ce = FindEdge(_chainTail, end);
+                if (ce != null) { ce.HasCurve = true; ce.ControlA = cc1; ce.ControlB = cc2; ce.SpeedLimit = SpeedLimitKmh; }
                 _chainTail = end;
                 _cornerPending = false;
                 Rebuild(field);
@@ -216,9 +244,19 @@ namespace NetworkDesigner.Terrain
                 _cornerPending = true;
                 return;
             }
-            // plain click -> straight segment (refused if too steep)
-            if (GradeDegrees(field, Graph.Nodes[_chainTail], p) > MaxGradeDeg) return;
-            int idx = NearestOrNew(p);              // join to an existing node if clicked on one
+            // plain click -> straight segment, truncated at the first section the
+            // terrain takes over-grade (unless override is on).
+            Vector2 s = Graph.Nodes[_chainTail];
+            Vector2 dchord = p - s;
+            Vector2 sc1 = s + dchord / 3f, sc2 = s + dchord * (2f / 3f);
+            Vector2 endS = p;
+            if (!OverrideGrade && ScanBuildable(field, s, sc1, sc2, p,
+                    out float sbl, out float sbt, out _, out _) && sbt < 0.999f)
+            {
+                if (sbl < 1e-2f) return;  // first section already over-grade — refuse
+                endS = LineGraph.Bezier(s, sc1, sc2, p, sbt); // == lerp(s,p,sbt) for a straight
+            }
+            int idx = NearestOrNew(endS);           // join to an existing node if clicked on one
             Graph.AddEdge(_chainTail, idx);
             TagEdge(_chainTail, idx);
             _chainTail = idx;
@@ -226,6 +264,32 @@ namespace NetworkDesigner.Terrain
         }
 
         const float NodePickRadius = 5f; // click within this of a node to pick it up / join
+
+        [Tooltip("Snap radius (m) for connecting to EXISTING track. A click within " +
+                 "this of a node or rail edge is pulled exactly onto it, so it reliably " +
+                 "joins the network — this overrides grid snap. 0 = off (grid snap only).")]
+        public float TrackSnapRadius = 8f;
+
+        // Pull a candidate XZ onto the nearest existing node or rail edge within
+        // TrackSnapRadius so clicks reliably connect to the network. Excludes the
+        // active chain anchor (a segment can't connect to its own start). Beats grid
+        // snap. Returns false (point unchanged) if nothing is in range.
+        public bool TrySnapToTrack(Vector2 p, out Vector2 snapped)
+        {
+            snapped = p;
+            float r = Mathf.Max(0f, TrackSnapRadius);
+            if (r <= 0f || Graph == null) return false;
+            int best = -1; float bestSq = r * r;
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                if (i == _chainTail) continue;
+                float d = (Graph.Nodes[i] - p).sqrMagnitude;
+                if (d <= bestSq) { bestSq = d; best = i; }
+            }
+            if (best >= 0) { snapped = Graph.Nodes[best]; return true; }
+            if (Graph.NearestPointOnEdge(p, r, out _, out _, out Vector2 pt)) { snapped = pt; return true; }
+            return false;
+        }
 
         // The node to end a segment on: an existing nearby node, a new junction
         // split into an existing track (so a line can merge mid-span), or a new node.
@@ -459,6 +523,68 @@ namespace NetworkDesigner.Terrain
             float run = Vector2.Distance(a, b);
             if (run < 1e-3f) return 90f;
             return Mathf.Atan2(Mathf.Abs(NodeBedY(field, b) - NodeBedY(field, a)), run) * Mathf.Rad2Deg;
+        }
+
+        // Walk an edge (its bezier) sampling the TERRAIN every GradeSampleStep
+        // metres and checking each section's grade — like a real alignment that
+        // conforms to the ground. Returns how far you can build before a section
+        // exceeds MaxGradeDeg: the buildable arc length, the curve parameter there
+        // (for truncating the bezier), the total arc length, and the steepest
+        // section grade seen. Result == true means a section was over the limit
+        // (so buildable < total — truncate there, then mitigate / bridge across).
+        public bool ScanBuildable(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
+            out float buildableLen, out float buildableT, out float totalLen, out float worstGradeDeg)
+        {
+            float step = Mathf.Max(1f, GradeSampleStep);
+            // Fine resolution so each sub-step is well under one grade section,
+            // even on a curve (control-polygon length over-estimates the arc).
+            float chord = Vector2.Distance(q0, q3);
+            float poly = Vector2.Distance(q0, q1) + Vector2.Distance(q1, q2) + Vector2.Distance(q2, q3);
+            float approx = Mathf.Max(chord, (chord + poly) * 0.5f);
+            int fine = Mathf.Clamp(Mathf.CeilToInt(approx / Mathf.Min(step * 0.25f, 3f)), 32, 4000);
+
+            Vector2 prev = q0;
+            float arc = 0f, segRun = 0f, segStartArc = 0f, segStartT = 0f;
+            float segStartY = GroundY(field, q0);
+            buildableLen = 0f; buildableT = 0f; worstGradeDeg = 0f;
+            bool blocked = false;
+            for (int i = 1; i <= fine; i++)
+            {
+                float t = i / (float)fine;
+                Vector2 cur = LineGraph.Bezier(q0, q1, q2, q3, t);
+                float d = Vector2.Distance(prev, cur);
+                arc += d; segRun += d;
+                prev = cur;
+                if (segRun >= step || i == fine)
+                {
+                    float curY = GroundY(field, cur);
+                    float gradeDeg = Mathf.Atan2(Mathf.Abs(curY - segStartY), Mathf.Max(1e-3f, segRun)) * Mathf.Rad2Deg;
+                    if (gradeDeg > worstGradeDeg) worstGradeDeg = gradeDeg;
+                    if (!blocked)
+                    {
+                        if (gradeDeg > MaxGradeDeg) { blocked = true; buildableLen = segStartArc; buildableT = segStartT; }
+                        else { buildableLen = arc; buildableT = t; }
+                    }
+                    segStartArc = arc; segStartT = t; segStartY = curY; segRun = 0f;
+                }
+            }
+            totalLen = arc;
+            if (!blocked) { buildableLen = totalLen; buildableT = 1f; }
+            return blocked;
+        }
+
+        // de Casteljau: the first portion [0,t] of a cubic bezier, as a cubic of
+        // its own — new end point + the two control points (matching SplitEdge).
+        static void SubdivideFirst(Vector2 p0, Vector2 q1, Vector2 q2, Vector2 p3, float t,
+            out Vector2 c1, out Vector2 c2, out Vector2 end)
+        {
+            Vector2 a = Vector2.Lerp(p0, q1, t);
+            Vector2 b = Vector2.Lerp(q1, q2, t);
+            Vector2 c = Vector2.Lerp(q2, p3, t);
+            Vector2 ab = Vector2.Lerp(a, b, t);
+            Vector2 bc = Vector2.Lerp(b, c, t);
+            end = Vector2.Lerp(ab, bc, t);
+            c1 = a; c2 = ab;
         }
 
         // Sample the track and collect points the terrain carve should trench down
@@ -792,7 +918,10 @@ namespace NetworkDesigner.Terrain
 
         // ---- placement preview ----
 
-        const float ExtensionGuideLength = 120f; // length of the straight-ahead guide
+        [Tooltip("Length (m) of the straight-ahead alignment guide — the dashed " +
+                 "collinear extension drawn out of the chain tail. Also bounds how " +
+                 "far ahead the extension snap reaches.")]
+        public float ExtensionGuideLength = 120f;
 
         // Heading that continues straight out of the chain tail's incoming edge
         // (i.e. a 180° / collinear continuation). False when the tail has no edge.
@@ -818,6 +947,50 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        [Tooltip("Snap radius (m) to the straight-ahead alignment guide (the dashed " +
+                 "collinear extension of the incoming track). A cursor within this of " +
+                 "that line locks onto it so the next segment continues dead straight. " +
+                 "0 = off.")]
+        public float ExtensionSnapRadius = 4f;
+
+        // Snap a cursor XZ onto the straight-ahead alignment guide — the collinear
+        // extension of the incoming edge — when within ExtensionSnapRadius of that
+        // ray, so the next segment continues dead straight. Only ahead of the tail
+        // and out to the guide's drawn length. False if there's no incoming heading
+        // or the cursor is too far off the line.
+        public bool TrySnapToExtension(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            float r = Mathf.Max(0f, ExtensionSnapRadius);
+            if (r <= 0f || !IncomingDirection(out Vector2 dir)) return false;
+            Vector2 origin = Graph.Nodes[_chainTail];
+            float along = Vector2.Dot(cursor - origin, dir);
+            if (along <= 0f || along > ExtensionGuideLength) return false; // behind tail / past guide
+            Vector2 proj = origin + dir * along; // foot of the perpendicular on the ray
+            if ((cursor - proj).sqrMagnitude > r * r) return false;
+            snapped = proj;
+            return true;
+        }
+
+        // Heading (unit XZ) of the nearest rail edge within maxDist of p, plus the
+        // point on that edge. For the terrain slope tool's network-aware "straight"
+        // guide. False if no edge is in range.
+        public bool TryTrackHeadingNear(Vector2 p, float maxDist, out Vector2 dir, out Vector2 at)
+        {
+            dir = Vector2.zero; at = p;
+            if (Graph == null || !Graph.NearestPointOnEdge(p, maxDist, out int ei, out float t, out Vector2 pt))
+                return false;
+            LineEdge e = Graph.Edges[ei];
+            Vector2 p0 = Graph.Nodes[e.A], p3 = Graph.Nodes[e.B], q1, q2;
+            if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+            else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
+            Vector2 tan = LineGraph.BezierTangent(p0, q1, q2, p3, t);
+            if (tan.sqrMagnitude < 1e-6f) tan = p3 - p0;
+            if (tan.sqrMagnitude < 1e-6f) return false;
+            dir = tan.normalized; at = pt;
+            return true;
+        }
+
         public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; }
 
         public void UpdatePreview(TerrainField field, Vector3 cursor, bool show)
@@ -827,6 +1000,7 @@ namespace NetworkDesigner.Terrain
             if (!show) return;
             _pvVerts.Clear();
             _pvIdx.Clear();
+            _pvIdxRed.Clear();
             const float lift = 0.15f;
 
             DrawPuck(field, cursor, lift);
@@ -837,15 +1011,21 @@ namespace NetworkDesigner.Terrain
             LastPreviewRadius = float.PositiveInfinity;
             LastPreviewTooTight = false;
             LastPreviewGradeDeg = 0f;
+            LastPreviewEndpointGradeDeg = 0f;
             LastPreviewTooSteep = false;
+            LastPreviewTruncated = false;
+            LastPreviewBuildableLen = 0f;
+            LastPreviewTotalLen = 0f;
 
             if (haveStart)
             {
-                // Preview the rails at the CONSTANT grade they'll be built at
-                // (start elevation -> cursor elevation), and flag too-steep grade.
+                // Bed elevations at the endpoints (the constant grade the rails
+                // would be drawn at). The terrain profile in between drives the
+                // buildable length / red tail (PreviewScan).
                 float yA = NodeBedY(field, start), yB = NodeBedY(field, cur);
-                LastPreviewGradeDeg = GradeDegrees(field, start, cur);
-                LastPreviewTooSteep = LastPreviewGradeDeg > MaxGradeDeg;
+                // True grade A->B = the constant grade the section is actually
+                // built at (what override mode commits to across the whole edge).
+                LastPreviewEndpointGradeDeg = GradeDegrees(field, start, cur);
 
                 // Alignment guide: a dashed extension continuing the incoming
                 // segment's heading, so the next stretch can be laid collinear (180°).
@@ -859,7 +1039,8 @@ namespace NetworkDesigner.Terrain
                     CurveControls(start, cur, _corner, out Vector2 c1, out Vector2 c2);
                     LastPreviewRadius = MinCurveRadius(start, c1, c2, cur);
                     LastPreviewTooTight = LastPreviewRadius < MinRadiusForSpeed;
-                    DrawGradedRails(start, c1, c2, cur, yA, yB, lift);
+                    float bLen = PreviewScan(field, start, c1, c2, cur);
+                    DrawGradedRails(start, c1, c2, cur, yA, yB, lift, bLen);
                 }
                 else if (CurveModifier)
                 {
@@ -868,18 +1049,23 @@ namespace NetworkDesigner.Terrain
                 else
                 {
                     Vector2 dd = cur - start; // straight: chord controls
-                    DrawGradedRails(start, start + dd / 3f, start + dd * (2f / 3f), cur, yA, yB, lift);
+                    Vector2 c1 = start + dd / 3f, c2 = start + dd * (2f / 3f);
+                    float bLen = PreviewScan(field, start, c1, c2, cur);
+                    DrawGradedRails(start, c1, c2, cur, yA, yB, lift, bLen);
                 }
             }
 
-            // Red while a too-tight or too-steep section is pending.
+            // Buildable submesh: red only when the curve is too tight (a whole-edge
+            // problem); otherwise amber. The over-grade tail (submesh 1) is always red.
             if (_pvMat != null)
-                _pvMat.color = (LastPreviewTooTight || LastPreviewTooSteep)
+                _pvMat.color = LastPreviewTooTight
                     ? new Color(1f, 0.25f, 0.2f, 1f) : new Color(1f, 0.8f, 0.3f, 1f);
 
             _pvMesh.Clear();
             _pvMesh.SetVertices(_pvVerts);
+            _pvMesh.subMeshCount = 2;
             _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0);
+            _pvMesh.SetIndices(_pvIdxRed, MeshTopology.Lines, 1);
             _pvMesh.RecalculateBounds();
         }
 
@@ -901,16 +1087,22 @@ namespace NetworkDesigner.Terrain
         }
 
         // Preview of the centreline + both rails at a CONSTANT grade (yA -> yB),
-        // matching how the section will actually be built.
-        void DrawGradedRails(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float yA, float yB, float lift)
+        // matching how the section will actually be built. Any part beyond
+        // buildableLen (arc distance) is drawn red — the over-grade tail that
+        // gets truncated on click (pass +inf to colour the whole edge buildable).
+        void DrawGradedRails(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float yA, float yB, float lift, float buildableLen)
         {
             const int N = 24;
             float halfG = Gauge * 0.5f;
             Vector3 pc = default, pl = default, pr = default;
+            Vector2 prevXz = p0;
+            float arc = 0f;
             for (int i = 0; i <= N; i++)
             {
                 float u = i / (float)N;
                 Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
+                if (i > 0) arc += Vector2.Distance(prevXz, xz);
+                prevXz = xz;
                 Vector2 t = LineGraph.BezierTangent(p0, p1, p2, p3, u);
                 Vector2 perp = t.sqrMagnitude > 1e-6f
                     ? new Vector2(-t.y, t.x).normalized * halfG : Vector2.zero;
@@ -918,9 +1110,34 @@ namespace NetworkDesigner.Terrain
                 Vector3 c = new Vector3(xz.x, y, xz.y);
                 Vector3 l = new Vector3(xz.x + perp.x, y, xz.y + perp.y);
                 Vector3 r = new Vector3(xz.x - perp.x, y, xz.y - perp.y);
-                if (i > 0) { AddSeg(pc, c); AddSeg(pl, l); AddSeg(pr, r); }
+                if (i > 0)
+                {
+                    bool red = arc > buildableLen;   // segment ends past the buildable point
+                    AddSeg(pc, c, red); AddSeg(pl, l, red); AddSeg(pr, r, red);
+                }
                 pc = c; pl = l; pr = r;
             }
+        }
+
+        // Scan the pending edge's terrain profile, update the grade/buildable
+        // preview hint fields, and return the buildable arc length to colour the
+        // rails with (+inf = whole edge buildable, e.g. when override is on).
+        float PreviewScan(TerrainField field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            bool blocked = ScanBuildable(field, p0, p1, p2, p3,
+                out float bl, out float bt, out float tot, out float worst);
+            LastPreviewGradeDeg = worst;
+            LastPreviewBuildableLen = bl;
+            LastPreviewTotalLen = tot;
+            if (OverrideGrade)
+            {
+                LastPreviewTruncated = false;
+                LastPreviewTooSteep = false;
+                return float.PositiveInfinity;   // span it all; fills become bridges
+            }
+            LastPreviewTruncated = blocked;
+            LastPreviewTooSteep = blocked;
+            return blocked ? bl : float.PositiveInfinity;
         }
 
         void EmitDashed(TerrainField field, Vector2 a, Vector2 b, Vector2 offset, float lift)
@@ -945,11 +1162,15 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        void AddSeg(Vector3 a, Vector3 b)
+        void AddSeg(Vector3 a, Vector3 b) => AddSeg(a, b, false);
+
+        // red = route into submesh 1 (the over-grade / un-buildable tail).
+        void AddSeg(Vector3 a, Vector3 b, bool red)
         {
             int s = _pvVerts.Count;
             _pvVerts.Add(a); _pvVerts.Add(b);
-            _pvIdx.Add(s); _pvIdx.Add(s + 1);
+            List<int> idx = red ? _pvIdxRed : _pvIdx;
+            idx.Add(s); idx.Add(s + 1);
         }
 
         void EnsurePreview()
@@ -964,10 +1185,15 @@ namespace NetworkDesigner.Terrain
             _pvMf.sharedMesh = _pvMesh;
             Shader sh = Shader.Find("NetworkDesigner/CursorOverlay");
             Color col = new Color(1f, 0.8f, 0.3f, 1f);
+            Color red = new Color(1f, 0.25f, 0.2f, 1f);
             _pvMat = sh != null
                 ? new Material(sh) { name = "RailPreviewMat", color = col }
                 : NetworkDesigner.PipelineMaterials.CreateUnlitColor(col, "RailPreviewMat");
-            _pvMr.sharedMaterial = _pvMat;
+            _pvMatRed = sh != null
+                ? new Material(sh) { name = "RailPreviewMatRed", color = red }
+                : NetworkDesigner.PipelineMaterials.CreateUnlitColor(red, "RailPreviewMatRed");
+            // Submesh 0 = buildable (amber), submesh 1 = over-grade tail (red).
+            _pvMr.sharedMaterials = new[] { _pvMat, _pvMatRed };
         }
 
         // ---- save / load (the graph; geometry regenerates on load) ----
