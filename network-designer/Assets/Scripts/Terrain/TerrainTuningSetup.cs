@@ -281,6 +281,16 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.rockTexScale", "Appearance", "Rock texture scale",
                 () => t.RockTextureScale, v => { t.RockTextureScale = v; t.ApplyTerrainMaterial(); }, 0.01f, 1f);
 
+            // --- Water ---
+            TuningRegistry.RegisterBool("water.on", "Water", "Show water",
+                () => t.ShowWater, v => { t.ShowWater = v; t.ApplyWater(); });
+            TuningRegistry.RegisterFloat("water.level", "Water", "Level (m)",
+                () => t.WaterLevel, v => { t.WaterLevel = v; t.ApplyWater(); }, -50f, 300f);
+            TuningRegistry.RegisterColor("water.color", "Water", "Color",
+                () => t.WaterColor, v => { t.WaterColor = v; t.ApplyWater(); });
+            TuningRegistry.RegisterFloat("water.smoothness", "Water", "Smoothness",
+                () => t.WaterSmoothness, v => { t.WaterSmoothness = v; t.ApplyWater(); }, 0f, 1f);
+
             // --- World grid ---
             TuningRegistry.RegisterBool("terrain.gridOn", "Grid", "Show grid (G)",
                 () => t.GridEnabled, v => { t.GridEnabled = v; t.ApplyTerrainMaterial(); });

@@ -62,6 +62,15 @@ namespace NetworkDesigner.Terrain
                  "Uses the grid spacing whether or not the grid is shown.")]
         public bool SnapToGrid = false;
 
+        [Header("Water")]
+        [Tooltip("Show a flat water surface; terrain below the water level reads as submerged.")]
+        public bool ShowWater = true;
+        [Tooltip("World height (Y) of the water surface. Raise it to flood low ground.")]
+        public float WaterLevel = 5f;
+        [Tooltip("Water colour (alpha < 1 = see-through to the bed below).")]
+        public Color WaterColor = new Color(0.20f, 0.45f, 0.55f, 0.65f);
+        [Range(0f, 1f)] public float WaterSmoothness = 0.7f;
+
         // Vertex counts, derived from TerrainSizeMeters / CellSize in EnsureField.
         [HideInInspector] public int ColumnsX = 401;
         [HideInInspector] public int RowsZ = 401;
@@ -249,6 +258,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
             RebuildContours();
+            ApplyWater();
 
             // Stand up scene services, sized to the actual terrain.
             if (AutoLighting) EnsureAmbiance();
@@ -324,6 +334,57 @@ namespace NetworkDesigner.Terrain
 
         // Back-compat name still referenced by the color tunable.
         public void ApplyTerrainColor() => ApplyTerrainMaterial();
+
+        GameObject _waterGo;
+        Material _waterMat;
+
+        // Flat water plane at WaterLevel covering the terrain footprint. Terrain
+        // above the level occludes it; below, the (transparent) water shows. Live.
+        public void ApplyWater()
+        {
+            if (WaterColor.a <= 0.02f) WaterColor = new Color(0.20f, 0.45f, 0.55f, 0.65f); // guard a 0-alpha deserialize
+            if (!ShowWater)
+            {
+                if (_waterGo != null) _waterGo.SetActive(false);
+                return;
+            }
+            EnsureWater();
+            _waterGo.SetActive(true);
+            float w = _field != null ? _field.WidthX : TerrainSizeMeters;
+            float l = _field != null ? _field.LengthZ : TerrainSizeMeters;
+            Vector3 o = _field != null ? _field.Origin : Vector3.zero;
+            _waterGo.transform.position = new Vector3(o.x + w * 0.5f, WaterLevel, o.z + l * 0.5f);
+            if (_waterMat != null)
+            {
+                _waterMat.color = WaterColor;
+                if (_waterMat.HasProperty("_Smoothness")) _waterMat.SetFloat("_Smoothness", WaterSmoothness);
+            }
+        }
+
+        void EnsureWater()
+        {
+            if (_waterGo != null) return;
+            _waterGo = new GameObject("TerrainWater");
+            var mf = _waterGo.AddComponent<MeshFilter>();
+            var mr = _waterGo.AddComponent<MeshRenderer>();
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            float w = _field != null ? _field.WidthX : TerrainSizeMeters;
+            float l = _field != null ? _field.LengthZ : TerrainSizeMeters;
+            float hw = w * 0.5f + 50f, hl = l * 0.5f + 50f; // overscan a little past the edges
+            var mesh = new Mesh { name = "WaterMesh" };
+            mesh.SetVertices(new List<Vector3>
+            {
+                new Vector3(-hw, 0f, -hl), new Vector3(-hw, 0f, hl),
+                new Vector3(hw, 0f, hl), new Vector3(hw, 0f, -hl),
+            });
+            mesh.SetNormals(new List<Vector3> { Vector3.up, Vector3.up, Vector3.up, Vector3.up });
+            mesh.SetTriangles(new int[] { 0, 1, 2, 0, 2, 3 }, 0);
+            mesh.RecalculateBounds();
+            mf.sharedMesh = mesh;
+            _waterMat = PipelineMaterials.CreateLitTransparent(WaterColor, WaterSmoothness, "WaterMat");
+            mr.sharedMaterial = _waterMat;
+        }
 
         // Round a world point to the nearest grid intersection (same world-aligned
         // lattice the grid shader draws), when snap-to-grid is on. Y is left as-is
@@ -542,7 +603,7 @@ namespace NetworkDesigner.Terrain
         // live in play mode — object-slot changes don't go through the tunables.
         void OnValidate()
         {
-            if (Application.isPlaying && _field != null) RailLayer.Rebuild(_field);
+            if (Application.isPlaying && _field != null) { RailLayer.Rebuild(_field); ApplyWater(); }
         }
         [ContextMenu("Clear Rail")]
         public void ClearRail() { RailLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
