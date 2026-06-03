@@ -1137,6 +1137,26 @@ namespace NetworkDesigner.Terrain
             CellSize = _field.CellSize;
         }
 
+        // Rebuild the terrain at the current TerrainSizeMeters / CellSize / ChunkCells
+        // — for experimenting with map size live. WIPES the heightfield to flat
+        // (re-import a heightmap after). Big sizes can stall while building.
+        [ContextMenu("Rebuild Terrain (resize)")]
+        public void RebuildTerrain()
+        {
+            EnsureField(forceRebuild: true);     // new grid (flat) when the size/cell changed
+            _chunkMesh = null; _chunkCol = null; // force full recreate + sweep old chunks
+            BuildAllChunks();
+            TreeLayer.ConformToSurface(_field);
+            RockLayer.ConformToSurface(_field);
+            FenceLayer.Rebuild(_field);
+            PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
+            RebuildContours();
+            ApplyWater();
+            ResetCamera();
+            _dirtySince = Time.realtimeSinceStartup;
+        }
+
         // Full reset: new flat field (+ optional test hill) and rebuild.
         [ContextMenu("Reset Terrain")]
         public void ResetTerrain()
@@ -1156,9 +1176,20 @@ namespace NetworkDesigner.Terrain
             if (_field == null) EnsureField(forceRebuild: true);
             System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
             BuildAllChunks();
+            TreeLayer.ConformToSurface(_field);   // re-settle everything onto the flat ground
+            RockLayer.ConformToSurface(_field);
+            FenceLayer.Rebuild(_field);
+            PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
             RebuildContours();
+            ApplyWater();
             _dirtySince = Time.realtimeSinceStartup;
         }
+
+        [ContextMenu("Remove All Trees")]
+        public void RemoveAllTrees() { TreeLayer.ClearAll(); _dirtySince = Time.realtimeSinceStartup; }
+        [ContextMenu("Remove All Rocks")]
+        public void RemoveAllRocks() { RockLayer.ClearAll(); _dirtySince = Time.realtimeSinceStartup; }
 
         // Bake a grayscale heightmap into the current field (REPLACES all
         // heights), then rebuild + conform trees. Read via File+LoadImage so the

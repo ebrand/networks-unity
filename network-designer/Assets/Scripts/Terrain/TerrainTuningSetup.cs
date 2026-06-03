@@ -97,6 +97,20 @@ namespace NetworkDesigner.Terrain
         {
             TerrainDesigner t = Terrain;
 
+            // --- Terrain size (rebuild to apply) ---
+            TuningRegistry.RegisterFloat("terrain.sizeMeters", "Terrain", "Map size (m, square)",
+                () => t.TerrainSizeMeters, v => t.TerrainSizeMeters = v, 200f, 20000f,
+                description: "Map width/length. Applies on 'Rebuild terrain'. Grid = size / cell size; a big map needs a bigger cell size or the vert/chunk count explodes.");
+            TuningRegistry.RegisterFloat("terrain.cellSize", "Terrain", "Cell size (m)",
+                () => t.CellSize, v => t.CellSize = v, 2f, 50f,
+                description: "Metres between grid vertices (facet size). Smaller = finer but far more verts/chunks. Applies on 'Rebuild terrain'. 10 m is a good balance for a 10 km map.");
+            TuningRegistry.RegisterFloat("terrain.chunkCells", "Terrain", "Chunk cells/side",
+                () => t.ChunkCells, v => t.ChunkCells = Mathf.RoundToInt(v), 16f, 100f, 1f,
+                description: "Cells per chunk mesh (8-100). Bigger = fewer chunks/draw-calls + colliders, but heavier per-chunk meshes (keep cells^2 * 6 under 65k). Applies on rebuild.");
+            TuningRegistry.RegisterAction("terrain.rebuild", "Terrain", "Rebuild terrain (resize)",
+                () => t.RebuildTerrain(),
+                description: "Rebuild at the current size/cell size. WIPES the heightfield to flat (re-import a heightmap after). A large map can stall while building — watch the load.");
+
             // --- Brush ---
             TuningRegistry.RegisterFloat("terrain.brushRadius", "Brush", "Radius (m)",
                 () => t.BrushRadius, v => t.BrushRadius = v, 0.5f, 200f,
@@ -123,6 +137,9 @@ namespace NetworkDesigner.Terrain
                 () => t.HeightmapSmoothPasses, v => t.HeightmapSmoothPasses = Mathf.RoundToInt(v), 0f, 12f, 1f);
             TuningRegistry.RegisterAction("terrain.importHeightmap", "Heightmap", "Load heightmap",
                 () => t.ImportHeightmap());
+            TuningRegistry.RegisterAction("terrain.flatten", "Heightmap", "Flatten terrain",
+                () => t.FlattenTerrain(),
+                description: "Reset the whole heightfield to flat (keeps the current map size) and re-settle scatter/lines/rail onto it.");
 
             // --- Trees ---
             TuningRegistry.RegisterFloat("terrain.treePaintRate", "Trees", "Strength (trees/s)",
@@ -140,6 +157,9 @@ namespace NetworkDesigner.Terrain
                 description: "Metres of shoreline ABOVE the waterline to also keep clear of trees (a beach strip).");
             TuningRegistry.RegisterString("terrain.treeFolder", "Trees", "Folder",
                 () => t.TreeLayer.Folder, v => t.TreeLayer.Folder = v);
+            TuningRegistry.RegisterAction("terrain.removeTrees", "Trees", "Remove all trees",
+                () => t.RemoveAllTrees(),
+                description: "Delete every placed tree.");
 #if UNITY_EDITOR
             TuningRegistry.RegisterAction("terrain.loadTrees", "Trees", "Load trees from folder",
                 () => t.LoadTreesFromFolder());
@@ -161,6 +181,9 @@ namespace NetworkDesigner.Terrain
                 description: "Metres of shoreline ABOVE the waterline to also keep clear of rocks.");
             TuningRegistry.RegisterString("terrain.rockFolder", "Rocks", "Folder",
                 () => t.RockLayer.Folder, v => t.RockLayer.Folder = v);
+            TuningRegistry.RegisterAction("terrain.removeRocks", "Rocks", "Remove all rocks",
+                () => t.RemoveAllRocks(),
+                description: "Delete every placed rock.");
 #if UNITY_EDITOR
             TuningRegistry.RegisterAction("terrain.loadRocks", "Rocks", "Load rocks from folder",
                 () => t.LoadRocksFromFolder());

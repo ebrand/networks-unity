@@ -343,6 +343,15 @@ namespace NetworkDesigner.Terrain
             return any;
         }
 
+        // Destroy every placed item in this layer.
+        public void ClearAll()
+        {
+            for (int i = 0; i < _placed.Count; i++)
+                if (_placed[i] != null) DestroySafe(_placed[i].gameObject);
+            _placed.Clear();
+            _byCell.Clear();
+        }
+
         // ---- save / load / conform ----
 
         public List<PlacedTreeData> CollectData()
