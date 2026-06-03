@@ -345,6 +345,8 @@ namespace NetworkDesigner.Terrain
 
         GameObject _waterGo;
         Material _waterMat;
+        Mesh _waterMesh;
+        readonly List<Vector3> _waterVerts = new List<Vector3>();
 
         // Flat water plane at WaterLevel covering the terrain footprint. Terrain
         // above the level occludes it; below, the (transparent) water shows. Live.
@@ -362,6 +364,16 @@ namespace NetworkDesigner.Terrain
             float l = _field != null ? _field.LengthZ : TerrainSizeMeters;
             Vector3 o = _field != null ? _field.Origin : Vector3.zero;
             _waterGo.transform.position = new Vector3(o.x + w * 0.5f, WaterLevel, o.z + l * 0.5f);
+            // (Re)size the quad to the current terrain — the map may have grown.
+            float hw = w * 0.5f + 50f, hl = l * 0.5f + 50f; // overscan a little past the edges
+            _waterVerts.Clear();
+            _waterVerts.Add(new Vector3(-hw, 0f, -hl)); _waterVerts.Add(new Vector3(-hw, 0f, hl));
+            _waterVerts.Add(new Vector3(hw, 0f, hl)); _waterVerts.Add(new Vector3(hw, 0f, -hl));
+            _waterMesh.Clear();
+            _waterMesh.SetVertices(_waterVerts);
+            _waterMesh.SetNormals(new List<Vector3> { Vector3.up, Vector3.up, Vector3.up, Vector3.up });
+            _waterMesh.SetTriangles(new int[] { 0, 1, 2, 0, 2, 3 }, 0);
+            _waterMesh.RecalculateBounds();
             if (_waterMat != null)
             {
                 _waterMat.color = WaterColor;
@@ -380,19 +392,8 @@ namespace NetworkDesigner.Terrain
             var mr = _waterGo.AddComponent<MeshRenderer>();
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows = false;
-            float w = _field != null ? _field.WidthX : TerrainSizeMeters;
-            float l = _field != null ? _field.LengthZ : TerrainSizeMeters;
-            float hw = w * 0.5f + 50f, hl = l * 0.5f + 50f; // overscan a little past the edges
-            var mesh = new Mesh { name = "WaterMesh" };
-            mesh.SetVertices(new List<Vector3>
-            {
-                new Vector3(-hw, 0f, -hl), new Vector3(-hw, 0f, hl),
-                new Vector3(hw, 0f, hl), new Vector3(hw, 0f, -hl),
-            });
-            mesh.SetNormals(new List<Vector3> { Vector3.up, Vector3.up, Vector3.up, Vector3.up });
-            mesh.SetTriangles(new int[] { 0, 1, 2, 0, 2, 3 }, 0);
-            mesh.RecalculateBounds();
-            mf.sharedMesh = mesh;
+            _waterMesh = new Mesh { name = "WaterMesh" }; // sized in ApplyWater
+            mf.sharedMesh = _waterMesh;
             _waterMat = PipelineMaterials.CreateLitTransparent(WaterColor, WaterSmoothness, "WaterMat");
             mr.sharedMaterial = _waterMat;
         }
