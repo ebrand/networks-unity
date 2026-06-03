@@ -179,6 +179,26 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("power.clear", "Power line", "Clear power line",
                 () => t.ClearPowerLine());
 
+            // --- Rail track ---
+            TuningRegistry.RegisterFloat("rail.gauge", "Rail", "Gauge (m)",
+                () => t.RailLayer.Gauge, v => { t.RailLayer.Gauge = v; t.RebuildRail(); }, 0.5f, 5f);
+            TuningRegistry.RegisterFloat("rail.tieSpacing", "Rail", "Tie spacing (m)",
+                () => t.RailLayer.TieSpacing, v => { t.RailLayer.TieSpacing = v; t.RebuildRail(); }, 0.2f, 5f);
+            TuningRegistry.RegisterFloat("rail.tieLength", "Rail", "Tie length (m)",
+                () => t.RailLayer.TieLength, v => { t.RailLayer.TieLength = v; t.RebuildRail(); }, 0.5f, 6f);
+            TuningRegistry.RegisterFloat("rail.railHeight", "Rail", "Rail height (m)",
+                () => t.RailLayer.RailHeight, v => { t.RailLayer.RailHeight = v; t.RebuildRail(); }, 0.02f, 1f);
+            TuningRegistry.RegisterFloat("rail.verticalOffset", "Rail", "Vertical offset (m)",
+                () => t.RailLayer.VerticalOffset, v => { t.RailLayer.VerticalOffset = v; t.RebuildRail(); }, -2f, 5f);
+            TuningRegistry.RegisterBool("rail.conform", "Rail", "Conform to terrain",
+                () => t.RailLayer.Conform, v => { t.RailLayer.Conform = v; t.RebuildRail(); });
+            TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
+                () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); });
+            TuningRegistry.RegisterColor("rail.tieColor", "Rail", "Tie color",
+                () => t.RailLayer.TieColor, v => { t.RailLayer.TieColor = v; t.RebuildRail(); });
+            TuningRegistry.RegisterAction("rail.clear", "Rail", "Clear rail",
+                () => t.ClearRail());
+
             // --- Brush cursor ---
             TuningRegistry.RegisterBool("terrain.showCursor", "Brush cursor", "Show ring",
                 () => t.ShowBrushCursor, v => t.ShowBrushCursor = v);

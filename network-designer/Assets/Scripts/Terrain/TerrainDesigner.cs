@@ -118,6 +118,9 @@ namespace NetworkDesigner.Terrain
                  "ParentOverride to a PoleChain that carries a cable generator — the " +
                  "placed poles then auto-connect with cables. Use a wide Spacing (span).")]
         public LineworkLayer PowerLineLayer = new LineworkLayer { Name = "PowerLine", Spacing = 35f };
+        [Tooltip("Rail-track layer (L). Procedural rails + ties generated along each " +
+                 "edge — drawn like a fence; gauge/tie-spacing under the Rail tunables.")]
+        public RailTrackLayer RailLayer = new RailTrackLayer { Name = "Rail" };
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -155,7 +158,7 @@ namespace NetworkDesigner.Terrain
         Material _mat;
         int _chunksX, _chunksZ;
         ScatterLayer _active;      // scatter layer being painted (null = not scattering)
-        LineworkLayer _lineActive; // linework layer being drawn (null = not drawing)
+        ITerrainLineLayer _lineActive; // line layer being drawn (null = not drawing)
         MeshFilter _cursorMf;
         MeshRenderer _cursorMr;
         Mesh _cursorMesh;
@@ -228,6 +231,7 @@ namespace NetworkDesigner.Terrain
             RockLayer.SpawnPending(_field);
             FenceLayer.Rebuild(_field);     // linework from the save
             PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
             RebuildContours();
 
             // Stand up scene services, sized to the actual terrain.
@@ -423,6 +427,8 @@ namespace NetworkDesigner.Terrain
             if (string.IsNullOrEmpty(FenceLayer.Name) || FenceLayer.Name == "Line") FenceLayer.Name = "Fence";
             if (PowerLineLayer == null) PowerLineLayer = new LineworkLayer();
             if (string.IsNullOrEmpty(PowerLineLayer.Name) || PowerLineLayer.Name == "Line") PowerLineLayer.Name = "PowerLine";
+            if (RailLayer == null) RailLayer = new RailTrackLayer();
+            if (string.IsNullOrEmpty(RailLayer.Name)) RailLayer.Name = "Rail";
         }
 
         // Global IMGUI scale so panels/text don't shrink to nothing at high
@@ -448,9 +454,9 @@ namespace NetworkDesigner.Terrain
             if (_lineActive != null)
             {
                 GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, 104f), GUI.skin.box);
-                GUILayout.Label(_lineActive.Name + " mode");
+                GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label("Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
-                if (_lineActive.Asset == null)
+                if (_lineActive is LineworkLayer lw && lw.Asset == null)
                     GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
                 GUILayout.EndArea();
                 return;
@@ -478,11 +484,14 @@ namespace NetworkDesigner.Terrain
         public void RebuildPowerLine() { PowerLineLayer.Rebuild(Field); }
         [ContextMenu("Clear Power Line")]
         public void ClearPowerLine() { PowerLineLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+        public void RebuildRail() { RailLayer.Rebuild(Field); }
+        [ContextMenu("Clear Rail")]
+        public void ClearRail() { RailLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
 
         // Mode switching (mutually exclusive; same key again returns to sculpt).
         void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; HideLinePreviews(); }
-        void SetLineMode(LineworkLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; HideLinePreviews(); }
-        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); }
+        void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; HideLinePreviews(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); }
 
 #if UNITY_EDITOR
         [ContextMenu("Load Trees From Folder")]
@@ -592,6 +601,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.R)) SetScatterMode(RockLayer);
             if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
+            if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
             // Bake thumbnails only while NOT painting — the first render of each
             // prefab compiles its shader variant (a one-time editor stall), and
             // we don't want that landing mid-stroke.
@@ -1022,6 +1032,7 @@ namespace NetworkDesigner.Terrain
             RockLayer.ConformToSurface(_field);
             FenceLayer.Rebuild(_field); // re-place linework on the new surface
             PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
 
@@ -1194,6 +1205,7 @@ namespace NetworkDesigner.Terrain
                 RockPacks = RockLayer.CollectPacks(),
                 Fences = FenceLayer.CollectData(),
                 PowerLines = PowerLineLayer.CollectData(),
+                Rails = RailLayer.CollectData(),
             };
         }
 
@@ -1210,12 +1222,13 @@ namespace NetworkDesigner.Terrain
                     ? Mathf.Min(save.Idx.Length, save.H.Length) : 0;
                 int cap = 64 + n * 8
                           + TreeBytes(save.Trees) + TreeBytes(save.Rocks)
-                          + GraphBytes(save.Fences) + GraphBytes(save.PowerLines) + 256;
+                          + GraphBytes(save.Fences) + GraphBytes(save.PowerLines)
+                          + GraphBytes(save.Rails) + 256;
                 using var ms = new System.IO.MemoryStream(cap);
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(1); // version
+                    w.Write(2); // version (2 added Rails graph at the end)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -1228,6 +1241,7 @@ namespace NetworkDesigner.Terrain
                     WritePacks(w, save.RockPacks);
                     WriteGraph(w, save.Fences);
                     WriteGraph(w, save.PowerLines);
+                    WriteGraph(w, save.Rails);
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -1317,6 +1331,7 @@ namespace NetworkDesigner.Terrain
                 RockLayer.LoadState(save.Rocks, save.RockPacks);
                 FenceLayer.LoadState(save.Fences); // Rebuilt after chunks
                 PowerLineLayer.LoadState(save.PowerLines);
+                RailLayer.LoadState(save.Rails);
                 return f;
             }
             catch (System.Exception ex)
@@ -1336,7 +1351,7 @@ namespace NetworkDesigner.Terrain
                 using var ms = new System.IO.MemoryStream(bytes);
                 using var r = new System.IO.BinaryReader(ms, System.Text.Encoding.UTF8);
                 if (r.ReadInt32() != SaveMagic) return null;
-                r.ReadInt32(); // version
+                int version = r.ReadInt32();
                 var s = new TerrainSave
                 {
                     ColumnsX = r.ReadInt32(),
@@ -1354,6 +1369,7 @@ namespace NetworkDesigner.Terrain
                 s.RockPacks = ReadPacks(r);
                 s.Fences = ReadGraph(r);
                 s.PowerLines = ReadGraph(r);
+                if (version >= 2) s.Rails = ReadGraph(r); // older saves have no rails
                 return s;
             }
             catch { return null; }

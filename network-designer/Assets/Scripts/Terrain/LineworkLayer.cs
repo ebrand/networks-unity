@@ -16,10 +16,11 @@ using UnityEngine;
 namespace NetworkDesigner.Terrain
 {
     [Serializable]
-    public class LineworkLayer
+    public class LineworkLayer : ITerrainLineLayer
     {
         [Tooltip("Display name + GameObject root name + hotkey label (e.g. Fence).")]
         public string Name = "Line";
+        string ITerrainLineLayer.LayerName => Name;
         [Tooltip("Prefab rendered in series along each edge (e.g. a fence section).")]
         public GameObject Asset;
         [Tooltip("Metres between instances along the curve (posts also placed at every node).")]
