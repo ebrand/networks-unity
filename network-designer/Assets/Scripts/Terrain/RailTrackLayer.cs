@@ -102,6 +102,9 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Keep generating procedural piers (grounded to terrain) under the " +
                  "prefab deck. Turn off if the prefab carries its own piers.")]
         public bool ProceduralPiers = true;
+        [Tooltip("Highlight (red) any track not connected to the main network, so a " +
+                 "stranded stretch is obvious.")]
+        public bool HighlightDisconnected = true;
 
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
@@ -123,6 +126,18 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _sv = new List<Vector3>(); // walls + bridge (concrete)
         readonly List<int> _st = new List<int>();
         readonly List<GameObject> _bridgeInstances = new List<GameObject>();
+
+        // Navigable graph (adjacency + A* routing) the train system rides on,
+        // rebuilt from the track each Rebuild. Runtime-only.
+        [System.NonSerialized] public RailNetwork Network;
+        // Disconnected-track highlight overlay.
+        GameObject _netGo;
+        MeshFilter _netMf;
+        MeshRenderer _netMr;
+        Mesh _netMesh;
+        Material _netMat;
+        readonly List<Vector3> _nv = new List<Vector3>();
+        readonly List<int> _ni = new List<int>();
 
         // Placement preview (ghost puck + dashed pending centreline + rail edges).
         GameObject _pvGo;
@@ -348,6 +363,65 @@ namespace NetworkDesigner.Terrain
             if (_tieMat != null) _tieMat.color = TieColor;
             if (_ballastMat != null) _ballastMat.color = BallastColor;
             if (_structMat != null) _structMat.color = StructureColor;
+
+            // Refresh the navigable graph + the disconnected-track highlight.
+            (Network ??= new RailNetwork()).Build(Graph);
+            BuildNetworkOverlay(field);
+        }
+
+        // Red overlay along any edge whose component isn't the largest (the "main"
+        // network) — so a stranded stretch that isn't truly connected stands out.
+        void BuildNetworkOverlay(TerrainField field)
+        {
+            EnsureNetOverlay();
+            _nv.Clear(); _ni.Clear();
+            if (HighlightDisconnected && Graph.Edges.Count > 0)
+            {
+                int[] label = Network.ComponentLabels(out int count);
+                if (count > 1)
+                {
+                    int main = Network.LargestComponent(label, count);
+                    foreach (LineEdge e in Graph.Edges)
+                    {
+                        if (e.A < 0 || e.A >= label.Length || label[e.A] == main) continue;
+                        Vector2 p0 = Graph.Nodes[e.A], p3 = Graph.Nodes[e.B], q1, q2;
+                        if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                        else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
+                        const int N = 16;
+                        Vector3 prev = default;
+                        for (int i = 0; i <= N; i++)
+                        {
+                            Vector2 xz = LineGraph.Bezier(p0, q1, q2, p3, i / (float)N);
+                            Vector3 c = new Vector3(xz.x, (field != null ? field.SampleHeight(xz.x, xz.y) : 0f) + 0.5f, xz.y);
+                            if (i > 0) { _ni.Add(_nv.Count); _ni.Add(_nv.Count + 1); _nv.Add(prev); _nv.Add(c); }
+                            prev = c;
+                        }
+                    }
+                }
+            }
+            _netMr.enabled = _nv.Count > 0;
+            _netMesh.Clear();
+            _netMesh.SetVertices(_nv);
+            _netMesh.SetIndices(_ni, MeshTopology.Lines, 0);
+            _netMesh.RecalculateBounds();
+        }
+
+        void EnsureNetOverlay()
+        {
+            if (_netMf != null) return;
+            _netGo = new GameObject(RootName + "_Network");
+            _netGo.transform.SetParent(_root != null ? _root.transform : null, worldPositionStays: false);
+            _netMf = _netGo.AddComponent<MeshFilter>();
+            _netMr = _netGo.AddComponent<MeshRenderer>();
+            _netMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _netMr.receiveShadows = false;
+            _netMesh = new Mesh { name = "RailNetMesh" };
+            _netMf.sharedMesh = _netMesh;
+            Shader sh = Shader.Find("NetworkDesigner/CursorOverlay");
+            Color col = new Color(1f, 0.2f, 0.2f, 1f);
+            _netMat = sh != null ? new Material(sh) { name = "RailNetMat", color = col }
+                                 : NetworkDesigner.PipelineMaterials.CreateUnlitColor(col, "RailNetMat");
+            _netMr.sharedMaterial = _netMat;
         }
 
         static void Apply(Mesh m, List<Vector3> v, List<int> t)

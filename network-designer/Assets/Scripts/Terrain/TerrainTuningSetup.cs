@@ -230,6 +230,8 @@ namespace NetworkDesigner.Terrain
                 () => t.RailLayer.BridgeScale, v => { t.RailLayer.BridgeScale = v; t.RebuildRail(); }, 0.1f, 10f);
             TuningRegistry.RegisterBool("rail.proceduralPiers", "Rail", "Procedural piers under prefab",
                 () => t.RailLayer.ProceduralPiers, v => { t.RailLayer.ProceduralPiers = v; t.RebuildRail(); });
+            TuningRegistry.RegisterBool("rail.highlightDisconnected", "Rail", "Highlight disconnected track",
+                () => t.RailLayer.HighlightDisconnected, v => { t.RailLayer.HighlightDisconnected = v; t.RebuildRail(); });
             TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
                 () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); });
             TuningRegistry.RegisterColor("rail.tieColor", "Rail", "Tie color",
