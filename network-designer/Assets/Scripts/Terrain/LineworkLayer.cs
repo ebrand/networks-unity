@@ -55,6 +55,7 @@ namespace NetworkDesigner.Terrain
         Material _pvMat;
         readonly List<Vector3> _pvVerts = new List<Vector3>();
         readonly List<int> _pvIdx = new List<int>();
+        const float GhostPostHeight = 5f; // height of the preview "post" ticks
 
         public LineGraph Graph => _graph ??= new LineGraph();
         string RootName => "TerrainLine_" + Name;
@@ -252,13 +253,25 @@ namespace NetworkDesigner.Terrain
                 prev = cur;
             }
 
-            // Dashed pending edge from the chain tail to the cursor.
+            // Dashed pending edge from the chain tail to the cursor, plus a
+            // vertical "ghost post" tick at each placement-spacing interval so you
+            // can preview where the instances will land and how dense they'll be.
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count)
             {
                 Vector2 t = Graph.Nodes[_chainTail];
+                Vector2 c2 = new Vector2(cursor.x, cursor.z);
                 Vector3 a = Conformed(field, t.x, t.y, lift);
-                Vector3 b = Conformed(field, cursor.x, cursor.z, lift);
+                Vector3 b = Conformed(field, c2.x, c2.y, lift);
                 EmitDashed(field, a, b, 1.0f, 0.6f, lift);
+
+                float s = Mathf.Max(0.25f, Spacing);
+                float len = Vector2.Distance(t, c2);
+                for (float d = 0f; d <= len + 1e-3f; d += s)
+                {
+                    Vector2 pp = Vector2.Lerp(t, c2, len > 1e-4f ? d / len : 0f);
+                    Vector3 baseP = Conformed(field, pp.x, pp.y, lift);
+                    AddSeg(baseP, baseP + Vector3.up * GhostPostHeight);
+                }
             }
 
             _pvMesh.Clear();

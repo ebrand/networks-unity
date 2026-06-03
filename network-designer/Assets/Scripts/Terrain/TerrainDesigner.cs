@@ -33,8 +33,18 @@ namespace NetworkDesigner.Terrain
         public float CellSize = 5f;
         [Tooltip("Cells per chunk side. Chunks rebuild independently on sculpt; keep <= ~100.")]
         public int ChunkCells = 50;
-        [Tooltip("Flat terrain color (single lit color for now; height/slope vertex-color bands later).")]
+        [Tooltip("Flat terrain color — the 'grass' band, used on flat/gentle faces.")]
         public Color TerrainColor = new Color(0.40f, 0.5f, 0.30f);
+        [Tooltip("Color blended onto steep faces (the 'rock' band). Live; no rebuild.")]
+        public Color RockColor = new Color(0.42f, 0.40f, 0.38f);
+        [Tooltip("Slope angle (deg) where rock starts blending in. 0 = flat, 90 = vertical.")]
+        public float SlopeStartDeg = 26f;
+        [Tooltip("Slope angle (deg) at which a face is fully rock.")]
+        public float SlopeFullDeg = 45f;
+        [Tooltip("Optional low-poly rock texture, sampled triplanar (needs no UVs). Null = flat rock color.")]
+        public Texture2D RockTexture;
+        [Tooltip("Rock texture tiling (1/world-units). Lower = larger features.")]
+        public float RockTextureScale = 0.12f;
 
         // Vertex counts, derived from TerrainSizeMeters / CellSize in EnsureField.
         [HideInInspector] public int ColumnsX = 401;
@@ -258,15 +268,37 @@ namespace NetworkDesigner.Terrain
 
         void EnsureMaterial()
         {
-            if (_mat == null) _mat = PipelineMaterials.CreateLitMatte(TerrainColor, "TerrainMat");
-            else _mat.color = TerrainColor;
+            if (_mat == null)
+            {
+                Shader sh = Shader.Find("NetworkDesigner/TerrainSlope");
+                // Slope-blend shader if present; otherwise fall back to the flat
+                // matte material so the terrain is never invisible/magenta.
+                _mat = sh != null ? new Material(sh) { name = "TerrainSlopeMat" }
+                                  : PipelineMaterials.CreateLitMatte(TerrainColor, "TerrainMat");
+            }
+            ApplyTerrainMaterial();
         }
 
-        // Live color tweak from the tuning panel — no mesh rebuild needed.
-        public void ApplyTerrainColor()
+        // Live material tweak from the tuning panel — no mesh rebuild needed
+        // (the slope blend is computed in-shader from the per-face normal).
+        public void ApplyTerrainMaterial()
         {
-            if (_mat != null) _mat.color = TerrainColor;
+            if (_mat == null) return;
+            if (_mat.HasProperty("_RockColor")) // slope shader
+            {
+                _mat.SetColor("_GrassColor", TerrainColor);
+                _mat.SetColor("_RockColor", RockColor);
+                _mat.SetFloat("_SlopeStart", SlopeStartDeg);
+                _mat.SetFloat("_SlopeFull", SlopeFullDeg);
+                _mat.SetFloat("_RockTexScale", RockTextureScale);
+                _mat.SetFloat("_UseRockTex", RockTexture != null ? 1f : 0f);
+                if (RockTexture != null) _mat.SetTexture("_RockTex", RockTexture);
+            }
+            else _mat.color = TerrainColor; // matte fallback
         }
+
+        // Back-compat name still referenced by the color tunable.
+        public void ApplyTerrainColor() => ApplyTerrainMaterial();
 
         int ChunkSide => Mathf.Clamp(ChunkCells, 8, 100);
 
@@ -382,18 +414,40 @@ namespace NetworkDesigner.Terrain
             if (string.IsNullOrEmpty(RockLayer.Name) || RockLayer.Name == "Scatter") RockLayer.Name = "Rocks";
             if (string.IsNullOrEmpty(TreeLayer.Folder)) TreeLayer.Folder = "Assets/Trees";
             if (string.IsNullOrEmpty(RockLayer.Folder)) RockLayer.Folder = "Assets/Rocks";
+            // New field on the serialized layer: components saved before it
+            // existed deserialize MaxSlopeDeg as 0, which would block ALL
+            // placement (nothing is flatter than 0 deg). Treat <=0 as "unset".
+            if (TreeLayer.MaxSlopeDeg <= 0f) TreeLayer.MaxSlopeDeg = 35f;
+            if (RockLayer.MaxSlopeDeg <= 0f) RockLayer.MaxSlopeDeg = 35f;
             if (FenceLayer == null) FenceLayer = new LineworkLayer();
             if (string.IsNullOrEmpty(FenceLayer.Name) || FenceLayer.Name == "Line") FenceLayer.Name = "Fence";
             if (PowerLineLayer == null) PowerLineLayer = new LineworkLayer();
             if (string.IsNullOrEmpty(PowerLineLayer.Name) || PowerLineLayer.Name == "Line") PowerLineLayer.Name = "PowerLine";
         }
 
+        // Global IMGUI scale so panels/text don't shrink to nothing at high
+        // resolution / high-DPI. Applied via GUI.matrix; all panel layout uses
+        // the "virtual" screen (Vw/Vh) so right-anchored panels stay flush and
+        // MouseOverActivePanel converts the mouse back into the same space.
+        public static float UiScale = 1.5f;
+        static float Vw => Screen.width / Mathf.Max(0.25f, UiScale);
+        static float Vh => Screen.height / Mathf.Max(0.25f, UiScale);
+
         // Palette IMGUI for the active scatter layer, or a hint for linework.
         void OnGUI()
         {
+            if (_lineActive == null && _active == null) return;
+            Matrix4x4 prev = GUI.matrix;
+            GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
+            DrawPanels();
+            GUI.matrix = prev;
+        }
+
+        void DrawPanels()
+        {
             if (_lineActive != null)
             {
-                GUILayout.BeginArea(new Rect(Screen.width - 308f, 8f, 300f, 104f), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, 104f), GUI.skin.box);
                 GUILayout.Label(_lineActive.Name + " mode");
                 GUILayout.Label("Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
                 if (_lineActive.Asset == null)
@@ -406,13 +460,15 @@ namespace NetworkDesigner.Terrain
         }
 
         // True when the cursor is over the active layer's palette (so paint/erase
-        // and camera zoom are suppressed there). Y is flipped: GUI rect is
-        // top-left origin, mouse is bottom-left.
+        // and camera zoom are suppressed there). Y is flipped (GUI rect is
+        // top-left origin, mouse is bottom-left) and divided by UiScale because
+        // PanelRect is stored in the unscaled virtual-screen space.
         bool MouseOverActivePanel()
         {
             if (_active == null || _active.PanelRect.width <= 0f) return false;
-            return _active.PanelRect.Contains(
-                new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y));
+            float s = Mathf.Max(0.25f, UiScale);
+            Vector2 m = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y) / s;
+            return _active.PanelRect.Contains(m);
         }
 
         // Linework rebuild/clear — used by the tuning-panel actions and on edits.

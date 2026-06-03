@@ -62,6 +62,20 @@ namespace NetworkDesigner.Terrain
             return Origin.y + Mathf.Lerp(h0, h1, tz);
         }
 
+        // Terrain steepness (degrees) at a world XZ: the angle of the surface
+        // normal from straight up, via central-difference of the height field.
+        // Matches the slope the TerrainSlope shader blends rock on. 0 = flat.
+        public float SampleSlopeDegrees(float worldX, float worldZ)
+        {
+            float d = CellSize;
+            float dhdx = (SampleHeight(worldX + d, worldZ) - SampleHeight(worldX - d, worldZ)) / (2f * d);
+            float dhdz = (SampleHeight(worldX, worldZ + d) - SampleHeight(worldX, worldZ - d)) / (2f * d);
+            // Surface normal = (-dh/dx, 1, -dh/dz) before normalising; its Y
+            // component over its length gives cos(slope).
+            float invLen = 1f / Mathf.Sqrt(dhdx * dhdx + dhdz * dhdz + 1f);
+            return Mathf.Acos(Mathf.Clamp01(invLen)) * Mathf.Rad2Deg;
+        }
+
         // Nearest grid vertex (clamped) to a world XZ — handy for sculpt
         // brushes that work in grid space.
         public void WorldToNearestVertex(float worldX, float worldZ, out int x, out int z)

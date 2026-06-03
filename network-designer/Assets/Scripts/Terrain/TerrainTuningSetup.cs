@@ -124,6 +124,8 @@ namespace NetworkDesigner.Terrain
                 () => t.TreeLayer.PaintRate, v => t.TreeLayer.PaintRate = v, 1f, 200f);
             TuningRegistry.RegisterFloat("terrain.treeSpacing", "Trees", "Spacing (m)",
                 () => t.TreeLayer.Spacing, v => t.TreeLayer.Spacing = v, 1f, 30f);
+            TuningRegistry.RegisterFloat("terrain.treeMaxSlope", "Trees", "Max slope (deg, 90 = off)",
+                () => t.TreeLayer.MaxSlopeDeg, v => t.TreeLayer.MaxSlopeDeg = v, 0f, 90f);
             TuningRegistry.RegisterString("terrain.treeFolder", "Trees", "Folder",
                 () => t.TreeLayer.Folder, v => t.TreeLayer.Folder = v);
 #if UNITY_EDITOR
@@ -136,6 +138,8 @@ namespace NetworkDesigner.Terrain
                 () => t.RockLayer.PaintRate, v => t.RockLayer.PaintRate = v, 1f, 200f);
             TuningRegistry.RegisterFloat("terrain.rockSpacing", "Rocks", "Spacing (m)",
                 () => t.RockLayer.Spacing, v => t.RockLayer.Spacing = v, 1f, 30f);
+            TuningRegistry.RegisterFloat("terrain.rockMaxSlope", "Rocks", "Max slope (deg, 90 = off)",
+                () => t.RockLayer.MaxSlopeDeg, v => t.RockLayer.MaxSlopeDeg = v, 0f, 90f);
             TuningRegistry.RegisterString("terrain.rockFolder", "Rocks", "Folder",
                 () => t.RockLayer.Folder, v => t.RockLayer.Folder = v);
 #if UNITY_EDITOR
@@ -206,8 +210,20 @@ namespace NetworkDesigner.Terrain
                 () => t.ContourDashGap, v => { t.ContourDashGap = v; t.RebuildContours(); }, 0.25f, 20f);
 
             // --- Appearance ---
-            TuningRegistry.RegisterColor("terrain.color", "Appearance", "Terrain color",
-                () => t.TerrainColor, v => { t.TerrainColor = v; t.ApplyTerrainColor(); });
+            TuningRegistry.RegisterColor("terrain.color", "Appearance", "Grass color (flat)",
+                () => t.TerrainColor, v => { t.TerrainColor = v; t.ApplyTerrainMaterial(); });
+            TuningRegistry.RegisterColor("terrain.rockColor", "Appearance", "Rock color (steep)",
+                () => t.RockColor, v => { t.RockColor = v; t.ApplyTerrainMaterial(); });
+            TuningRegistry.RegisterFloat("terrain.slopeStart", "Appearance", "Rock slope start (deg)",
+                () => t.SlopeStartDeg, v => { t.SlopeStartDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f);
+            TuningRegistry.RegisterFloat("terrain.slopeFull", "Appearance", "Rock slope full (deg)",
+                () => t.SlopeFullDeg, v => { t.SlopeFullDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f);
+            TuningRegistry.RegisterFloat("terrain.rockTexScale", "Appearance", "Rock texture scale",
+                () => t.RockTextureScale, v => { t.RockTextureScale = v; t.ApplyTerrainMaterial(); }, 0.01f, 1f);
+
+            // --- Interface ---
+            TuningRegistry.RegisterFloat("terrain.uiScale", "Interface", "UI scale (in-game panels)",
+                () => TerrainDesigner.UiScale, v => TerrainDesigner.UiScale = v, 0.75f, 3f);
 
             // --- Camera (free-fly) ---
             if (Fly != null)

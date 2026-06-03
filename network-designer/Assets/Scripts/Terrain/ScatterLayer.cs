@@ -37,6 +37,8 @@ namespace NetworkDesigner.Terrain
         public float Spacing = 4f;
         [Tooltip("Random uniform scale range applied to each item.")]
         public Vector2 ScaleRange = new Vector2(1f, 1.5f);
+        [Tooltip("Don't place on terrain steeper than this (degrees, 0 = flat). 90 = no limit.")]
+        public float MaxSlopeDeg = 35f;
 
         const float Jitter = 0.4f; // max per-axis jitter as a fraction of the cell (<0.5 keeps it in-cell)
 
@@ -220,6 +222,8 @@ namespace NetworkDesigner.Terrain
                     CellPoint(gx, gz, s, out float px, out float pz);
                     float dx = px - center.x, dz = pz - center.z;
                     if (dx * dx + dz * dz > r2) continue;
+                    // Skip faces steeper than the limit (>= 89 deg = no limit).
+                    if (MaxSlopeDeg < 89f && field.SampleSlopeDegrees(px, pz) > MaxSlopeDeg) continue;
                     _candKey.Add(key);
                     _candPos.Add(new Vector2(px, pz));
                 }
@@ -417,7 +421,11 @@ namespace NetworkDesigner.Terrain
             SyncEnabled();
             bool dirty = false;
             const float w = 300f, pad = 8f;
-            _panelRect = new Rect(Screen.width - (w + pad) * (slot + 1), pad, w, Screen.height - 2f * pad);
+            // Lay out in the same virtual-screen space TerrainDesigner scales the
+            // GUI by, so the panel stays flush to the right edge under UiScale.
+            float s = Mathf.Max(0.25f, TerrainDesigner.UiScale);
+            float vw = Screen.width / s, vh = Screen.height / s;
+            _panelRect = new Rect(vw - (w + pad) * (slot + 1), pad, w, vh - 2f * pad);
             GUILayout.BeginArea(_panelRect, GUI.skin.box);
             GUILayout.Label($"{Name} brush — include:");
             if (Prefabs == null || Prefabs.Count == 0)
