@@ -24,6 +24,7 @@ import {
   Title,
   Button,
   ScrollArea,
+  Tooltip,
 } from "@mantine/core";
 import type { TuningEntry } from "../tuning/types";
 import { useTuningSocket } from "../tuning/useTuningSocket";
@@ -266,7 +267,9 @@ function FloatControl({
   return (
     <Box>
       <Group justify="space-between" gap="xs" mb={4}>
-        <Text size="sm">{entry.label}</Text>
+        <Text size="sm">
+          <TipLabel text={entry.label} tip={entry.description} />
+        </Text>
         <Text size="xs" c="dimmed" ff="monospace">
           {value.toFixed(stepDecimals(step))}
         </Text>
@@ -305,6 +308,27 @@ function stepDecimals(step: number): number {
   return 3;
 }
 
+// A label that shows its description as a hover tooltip (dotted underline as
+// the affordance). Falls back to plain text when there's no description.
+function TipLabel({ text, tip }: { text: string; tip?: string }) {
+  if (!tip) return <>{text}</>;
+  return (
+    <Tooltip
+      label={tip}
+      multiline
+      w={280}
+      withArrow
+      position="top-start"
+      openDelay={250}
+      events={{ hover: true, focus: true, touch: true }}
+    >
+      <span style={{ borderBottom: "1px dotted currentColor", cursor: "help" }}>
+        {text}
+      </span>
+    </Tooltip>
+  );
+}
+
 function ColorControl({
   entry,
   onChange,
@@ -315,7 +339,7 @@ function ColorControl({
   const value = typeof entry.value === "string" ? entry.value : "#888888";
   return (
     <ColorInput
-      label={entry.label}
+      label={<TipLabel text={entry.label} tip={entry.description} />}
       value={value}
       onChange={(v) => onChange(entry.key, v)}
       format="hex"
@@ -334,7 +358,7 @@ function BoolControl({
   const checked = Boolean(entry.value);
   return (
     <Switch
-      label={entry.label}
+      label={<TipLabel text={entry.label} tip={entry.description} />}
       checked={checked}
       onChange={(ev) => onChange(entry.key, ev.currentTarget.checked)}
     />
@@ -360,7 +384,7 @@ function StringControl({
   };
   return (
     <TextInput
-      label={entry.label}
+      label={<TipLabel text={entry.label} tip={entry.description} />}
       size="xs"
       value={draft}
       onChange={(ev) => setDraft(ev.currentTarget.value)}
@@ -385,10 +409,17 @@ function ActionControl({
   entry: TuningEntry;
   onChange: (key: string, value: unknown) => void;
 }) {
-  return (
+  const btn = (
     <Button size="xs" variant="light" onClick={() => onChange(entry.key, true)}>
       {entry.label}
     </Button>
+  );
+  return entry.description ? (
+    <Tooltip label={entry.description} multiline w={280} withArrow position="top-start" openDelay={250}>
+      {btn}
+    </Tooltip>
+  ) : (
+    btn
   );
 }
 
@@ -412,7 +443,7 @@ function Vector3Control({
   return (
     <Box>
       <Text size="sm" mb={4}>
-        {entry.label}
+        <TipLabel text={entry.label} tip={entry.description} />
       </Text>
       <Stack gap={4}>
         {labels.map((lab, i) => (

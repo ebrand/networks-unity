@@ -99,15 +99,20 @@ namespace NetworkDesigner.Terrain
 
             // --- Brush ---
             TuningRegistry.RegisterFloat("terrain.brushRadius", "Brush", "Radius (m)",
-                () => t.BrushRadius, v => t.BrushRadius = v, 0.5f, 200f);
+                () => t.BrushRadius, v => t.BrushRadius = v, 0.5f, 200f,
+                description: "Sculpt brush size. Resize live with [ and ] while sculpting.");
             TuningRegistry.RegisterFloat("terrain.brushStrength", "Brush", "Strength (m/s)",
-                () => t.BrushStrength, v => t.BrushStrength = v, 0f, 300f);
+                () => t.BrushStrength, v => t.BrushStrength = v, 0f, 300f,
+                description: "How fast the brush raises/lowers terrain while held (metres per second).");
             TuningRegistry.RegisterFloat("terrain.brushStrengthExp", "Brush", "Strength exponent",
-                () => t.BrushStrengthExponent, v => t.BrushStrengthExponent = v, 1f, 4f);
+                () => t.BrushStrengthExponent, v => t.BrushStrengthExponent = v, 1f, 4f,
+                description: "Amplifies strength non-linearly — higher makes 'stronger' much stronger (exponential response).");
             TuningRegistry.RegisterFloat("terrain.brushFalloff", "Brush", "Falloff",
-                () => t.BrushFalloff, v => t.BrushFalloff = v, 0f, 1f);
+                () => t.BrushFalloff, v => t.BrushFalloff = v, 0f, 1f,
+                description: "Edge softness of the brush. 0 = hard flat disc; 1 = smooth feathered edge.");
             TuningRegistry.RegisterFloat("terrain.brushResizeRate", "Brush", "Resize rate (m/s)",
-                () => t.BrushResizeRate, v => t.BrushResizeRate = v, 1f, 100f);
+                () => t.BrushResizeRate, v => t.BrushResizeRate = v, 1f, 100f,
+                description: "How fast the radius changes while you hold [ or ].");
 
             // --- Heightmap import ---
             TuningRegistry.RegisterString("terrain.heightmapPath", "Heightmap", "File",
@@ -181,69 +186,113 @@ namespace NetworkDesigner.Terrain
 
             // --- Rail track ---
             TuningRegistry.RegisterFloat("rail.gauge", "Rail", "Gauge (m)",
-                () => t.RailLayer.Gauge, v => { t.RailLayer.Gauge = v; t.RebuildRail(); }, 0.5f, 5f);
+                () => t.RailLayer.Gauge, v => { t.RailLayer.Gauge = v; t.RebuildRail(); }, 0.5f, 5f,
+                description: "Distance between the two rail centres. Real standard gauge is 1.435 m.");
             TuningRegistry.RegisterFloat("rail.tieSpacing", "Rail", "Tie spacing (m)",
-                () => t.RailLayer.TieSpacing, v => { t.RailLayer.TieSpacing = v; t.RebuildRail(); }, 0.2f, 5f);
+                () => t.RailLayer.TieSpacing, v => { t.RailLayer.TieSpacing = v; t.RebuildRail(); }, 0.2f, 5f,
+                description: "Gap between sleepers (ties) along the track. Smaller = more, denser ties.");
             TuningRegistry.RegisterFloat("rail.tieLength", "Rail", "Tie length (m)",
-                () => t.RailLayer.TieLength, v => { t.RailLayer.TieLength = v; t.RebuildRail(); }, 0.5f, 6f);
+                () => t.RailLayer.TieLength, v => { t.RailLayer.TieLength = v; t.RebuildRail(); }, 0.5f, 6f,
+                description: "How far each tie extends across the track (should exceed the gauge). Also sizes the ballast/bore width.");
             TuningRegistry.RegisterFloat("rail.railHeight", "Rail", "Rail height (m)",
-                () => t.RailLayer.RailHeight, v => { t.RailLayer.RailHeight = v; t.RebuildRail(); }, 0.02f, 1f);
+                () => t.RailLayer.RailHeight, v => { t.RailLayer.RailHeight = v; t.RebuildRail(); }, 0.02f, 1f,
+                description: "Height of the rail standing above the ties.");
             TuningRegistry.RegisterFloat("rail.verticalOffset", "Rail", "Vertical offset (m)",
-                () => t.RailLayer.VerticalOffset, v => { t.RailLayer.VerticalOffset = v; t.RebuildRail(); }, -2f, 5f);
+                () => t.RailLayer.VerticalOffset, v => { t.RailLayer.VerticalOffset = v; t.RebuildRail(); }, -2f, 5f,
+                description: "Raises/lowers the whole track relative to the terrain.");
             TuningRegistry.RegisterBool("rail.conform", "Rail", "Conform to terrain",
-                () => t.RailLayer.Conform, v => { t.RailLayer.Conform = v; t.RebuildRail(); });
+                () => t.RailLayer.Conform, v => { t.RailLayer.Conform = v; t.RebuildRail(); },
+                description: "On: node elevations follow the ground (then each segment runs a constant grade between them). Off: flat track at the vertical offset.");
             TuningRegistry.RegisterFloat("rail.curveLever", "Rail", "Curve lever (arc width)",
-                () => t.RailLayer.CurveLever, v => { t.RailLayer.CurveLever = v; t.RebuildRail(); }, 0.1f, 0.95f);
+                () => t.RailLayer.CurveLever, v => { t.RailLayer.CurveLever = v; t.RebuildRail(); }, 0.1f, 0.95f,
+                description: "Curve-tool shape: how far the bezier controls lean toward the guide corner. Low = sharp through the corner, high = a wide arc.");
             TuningRegistry.RegisterFloat("rail.speedLimit", "Rail", "Speed limit (km/h)",
-                () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f);
+                () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f,
+                description: "Design speed for sections laid now. Sets the minimum curve radius (R = v^2/(g*a)); tighter curves are refused. Lower it to lay tighter curves.");
             TuningRegistry.RegisterFloat("rail.maxLatG", "Rail", "Max lateral g (curve tightness)",
-                () => t.RailLayer.MaxLateralG, v => t.RailLayer.MaxLateralG = v, 0.05f, 0.5f);
+                () => t.RailLayer.MaxLateralG, v => t.RailLayer.MaxLateralG = v, 0.05f, 0.5f,
+                description: "Comfort/cant limit. Higher = tighter curves allowed at a given speed (smaller min radius). Real rail ~0.1; raise for game-scaled curves.");
             TuningRegistry.RegisterFloat("rail.maxGrade", "Rail", "Max grade (deg)",
-                () => t.RailLayer.MaxGradeDeg, v => t.RailLayer.MaxGradeDeg = v, 0.5f, 15f);
+                () => t.RailLayer.MaxGradeDeg, v => t.RailLayer.MaxGradeDeg = v, 0.5f, 15f,
+                description: "Steepest average slope (start to end) a section may have. Steeper sections are refused. 5 deg ~ 8.7%.");
             TuningRegistry.RegisterFloat("rail.ballastHeight", "Rail", "Ballast height (m)",
-                () => t.RailLayer.BallastHeight, v => { t.RailLayer.BallastHeight = v; t.RebuildRail(); }, 0f, 1.5f);
+                () => t.RailLayer.BallastHeight, v => { t.RailLayer.BallastHeight = v; t.RebuildRail(); }, 0f, 1.5f,
+                description: "Height of the raised gravel bed the ties sit on. 0 = no ballast.");
             TuningRegistry.RegisterFloat("rail.ballastShoulder", "Rail", "Ballast shoulder (m)",
-                () => t.RailLayer.BallastShoulder, v => { t.RailLayer.BallastShoulder = v; t.RebuildRail(); }, 0f, 2f);
+                () => t.RailLayer.BallastShoulder, v => { t.RailLayer.BallastShoulder = v; t.RebuildRail(); }, 0f, 2f,
+                description: "Extra ballast width beyond the tie ends on each side (the gravel shoulder).");
             TuningRegistry.RegisterFloat("rail.ballastSlope", "Rail", "Ballast shoulder slope",
-                () => t.RailLayer.BallastSlope, v => { t.RailLayer.BallastSlope = v; t.RebuildRail(); }, 0f, 4f);
+                () => t.RailLayer.BallastSlope, v => { t.RailLayer.BallastSlope = v; t.RebuildRail(); }, 0f, 4f,
+                description: "How far the ballast base flares out per unit of fill height (the embankment batter).");
             TuningRegistry.RegisterColor("rail.ballastColor", "Rail", "Ballast color",
-                () => t.RailLayer.BallastColor, v => { t.RailLayer.BallastColor = v; t.RebuildRail(); });
+                () => t.RailLayer.BallastColor, v => { t.RailLayer.BallastColor = v; t.RebuildRail(); },
+                description: "Colour of the gravel ballast bed.");
             TuningRegistry.RegisterFloat("rail.embankMaxDrop", "Rail", "Gravel cap drop -> wall (m)",
-                () => t.RailLayer.EmbankmentMaxDrop, v => { t.RailLayer.EmbankmentMaxDrop = v; t.RebuildRail(); }, 0.1f, 4f);
+                () => t.RailLayer.EmbankmentMaxDrop, v => { t.RailLayer.EmbankmentMaxDrop = v; t.RebuildRail(); }, 0.1f, 4f,
+                description: "On a fill, the gravel shoulder slopes down at most this much; below it a vertical retaining wall drops to the ground.");
             TuningRegistry.RegisterFloat("rail.bridgeAbove", "Rail", "Bridge above fill (m)",
-                () => t.RailLayer.BridgeAboveFill, v => { t.RailLayer.BridgeAboveFill = v; t.RebuildRail(); }, 1f, 40f);
+                () => t.RailLayer.BridgeAboveFill, v => { t.RailLayer.BridgeAboveFill = v; t.RebuildRail(); }, 1f, 40f,
+                description: "Fill height above which a section is carried on a BRIDGE (deck + piers) instead of a wall/embankment.");
             TuningRegistry.RegisterFloat("rail.deckDepth", "Rail", "Bridge deck depth (m)",
-                () => t.RailLayer.DeckDepth, v => { t.RailLayer.DeckDepth = v; t.RebuildRail(); }, 0.2f, 3f);
+                () => t.RailLayer.DeckDepth, v => { t.RailLayer.DeckDepth = v; t.RebuildRail(); }, 0.2f, 3f,
+                description: "Thickness of the procedural bridge deck girder.");
             TuningRegistry.RegisterFloat("rail.pierSpacing", "Rail", "Bridge pier spacing (m)",
-                () => t.RailLayer.PierSpacing, v => { t.RailLayer.PierSpacing = v; t.RebuildRail(); }, 4f, 60f);
+                () => t.RailLayer.PierSpacing, v => { t.RailLayer.PierSpacing = v; t.RebuildRail(); }, 4f, 60f,
+                description: "Distance between bridge support piers.");
             TuningRegistry.RegisterFloat("rail.pierWidth", "Rail", "Bridge pier width (m)",
-                () => t.RailLayer.PierWidth, v => { t.RailLayer.PierWidth = v; t.RebuildRail(); }, 0.3f, 4f);
+                () => t.RailLayer.PierWidth, v => { t.RailLayer.PierWidth = v; t.RebuildRail(); }, 0.3f, 4f,
+                description: "Square cross-section size of each bridge pier.");
             TuningRegistry.RegisterColor("rail.structColor", "Rail", "Structure color (wall/bridge)",
-                () => t.RailLayer.StructureColor, v => { t.RailLayer.StructureColor = v; t.RebuildRail(); });
+                () => t.RailLayer.StructureColor, v => { t.RailLayer.StructureColor = v; t.RebuildRail(); },
+                description: "Concrete colour for retaining walls, the bridge deck/piers, and tunnel liners/portals.");
             TuningRegistry.RegisterFloat("rail.bridgeSpan", "Rail", "Bridge prefab span (m)",
-                () => t.RailLayer.BridgeSpan, v => { t.RailLayer.BridgeSpan = v; t.RebuildRail(); }, 2f, 60f);
+                () => t.RailLayer.BridgeSpan, v => { t.RailLayer.BridgeSpan = v; t.RebuildRail(); }, 2f, 60f,
+                description: "If a Bridge Prefab is assigned, it's placed every this-many metres along the span. Set to the prefab's real length so pieces butt together.");
             TuningRegistry.RegisterFloat("rail.bridgeYaw", "Rail", "Bridge prefab yaw (deg)",
-                () => t.RailLayer.BridgeYawOffset, v => { t.RailLayer.BridgeYawOffset = v; t.RebuildRail(); }, -180f, 180f);
+                () => t.RailLayer.BridgeYawOffset, v => { t.RailLayer.BridgeYawOffset = v; t.RebuildRail(); }, -180f, 180f,
+                description: "Rotation added to each bridge prefab instance, to align it to the track if it doesn't face +Z.");
             TuningRegistry.RegisterFloat("rail.bridgeVOffset", "Rail", "Bridge prefab vertical offset (m)",
-                () => t.RailLayer.BridgeVerticalOffset, v => { t.RailLayer.BridgeVerticalOffset = v; t.RebuildRail(); }, -10f, 10f);
+                () => t.RailLayer.BridgeVerticalOffset, v => { t.RailLayer.BridgeVerticalOffset = v; t.RebuildRail(); }, -10f, 10f,
+                description: "Raises/lowers the bridge prefab to line its deck up under the rails.");
             TuningRegistry.RegisterFloat("rail.bridgeScale", "Rail", "Bridge prefab scale",
-                () => t.RailLayer.BridgeScale, v => { t.RailLayer.BridgeScale = v; t.RebuildRail(); }, 0.1f, 10f);
+                () => t.RailLayer.BridgeScale, v => { t.RailLayer.BridgeScale = v; t.RebuildRail(); }, 0.1f, 10f,
+                description: "Uniform scale applied to each bridge prefab instance.");
             TuningRegistry.RegisterBool("rail.proceduralPiers", "Rail", "Procedural piers under prefab",
-                () => t.RailLayer.ProceduralPiers, v => { t.RailLayer.ProceduralPiers = v; t.RebuildRail(); });
+                () => t.RailLayer.ProceduralPiers, v => { t.RailLayer.ProceduralPiers = v; t.RebuildRail(); },
+                description: "Keep generating terrain-grounded piers under a bridge prefab (so the supports reach the real ground). Turn off if the prefab has its own piers.");
             TuningRegistry.RegisterBool("rail.highlightDisconnected", "Rail", "Highlight disconnected track",
-                () => t.RailLayer.HighlightDisconnected, v => { t.RailLayer.HighlightDisconnected = v; t.RebuildRail(); });
+                () => t.RailLayer.HighlightDisconnected, v => { t.RailLayer.HighlightDisconnected = v; t.RebuildRail(); },
+                description: "Draw any track NOT connected to the main network in red, so a stranded stretch is obvious.");
             TuningRegistry.RegisterFloat("rail.tunnelClearance", "Rail", "Tunnel bore height (m)",
-                () => t.RailLayer.TunnelClearance, v => { t.RailLayer.TunnelClearance = v; t.RebuildRail(); }, 3f, 12f);
+                () => t.RailLayer.TunnelClearance, v => { t.RailLayer.TunnelClearance = v; t.RebuildRail(); }, 3f, 12f,
+                description: "Height of the tunnel bore above the track bed. Also sets how deep the track must be to count as a tunnel.");
             TuningRegistry.RegisterFloat("rail.tunnelMargin", "Rail", "Tunnel bore margin (m)",
-                () => t.RailLayer.TunnelMargin, v => { t.RailLayer.TunnelMargin = v; t.RebuildRail(); }, 0f, 3f);
+                () => t.RailLayer.TunnelMargin, v => { t.RailLayer.TunnelMargin = v; t.RebuildRail(); }, 0f, 3f,
+                description: "Extra tunnel bore width beyond the tie ends on each side.");
             TuningRegistry.RegisterFloat("rail.tunnelCover", "Rail", "Tunnel min cover (m)",
-                () => t.RailLayer.TunnelMinCover, v => { t.RailLayer.TunnelMinCover = v; t.RebuildRail(); }, 0f, 10f);
+                () => t.RailLayer.TunnelMinCover, v => { t.RailLayer.TunnelMinCover = v; t.RebuildRail(); }, 0f, 10f,
+                description: "Rock required above the bore crown before a tunnel forms. Track buried deeper than (bore height + this) gets a liner + portals.");
+            TuningRegistry.RegisterFloat("rail.cutWidth", "Rail", "Cut floor half-width (m)",
+                () => t.CutFloorHalfWidth, v => t.CutFloorHalfWidth = v, 1f, 15f,
+                description: "Carve action: half-width of the flat cut floor. Wider = more terrain dug out. Applied when you press Carve.");
+            TuningRegistry.RegisterFloat("rail.cutDepth", "Rail", "Cut depth below bed (m)",
+                () => t.CutDepthBelowBed, v => t.CutDepthBelowBed = v, 0f, 5f,
+                description: "Carve action: how far below the rail bed the cut floor is dug, so the track sits proud in the trench.");
+            TuningRegistry.RegisterFloat("rail.cutBatter", "Rail", "Cut wall steepness",
+                () => t.CutBatter, v => t.CutBatter = v, 0.3f, 2f,
+                description: "Carve action: cut-wall rise per metre out. Lower = wider, gentler cut; higher = steeper, narrower (keeps more rock over a tunnel).");
+            TuningRegistry.RegisterAction("rail.carve", "Rail", "Carve approaches (destructive)",
+                () => t.CarveRailApproaches(),
+                description: "DESTRUCTIVE: permanently lowers the terrain into open cuts along below-grade track + notches tunnel mouths open. No undo; re-press to dig further (additive).");
             TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
-                () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); });
+                () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); },
+                description: "Colour of the metal rails.");
             TuningRegistry.RegisterColor("rail.tieColor", "Rail", "Tie color",
-                () => t.RailLayer.TieColor, v => { t.RailLayer.TieColor = v; t.RebuildRail(); });
+                () => t.RailLayer.TieColor, v => { t.RailLayer.TieColor = v; t.RebuildRail(); },
+                description: "Colour of the wooden sleepers (ties).");
             TuningRegistry.RegisterAction("rail.clear", "Rail", "Clear rail",
-                () => t.ClearRail());
+                () => t.ClearRail(),
+                description: "Delete the entire rail network (all nodes and edges).");
 
             // --- Brush cursor ---
             TuningRegistry.RegisterBool("terrain.showCursor", "Brush cursor", "Show ring",
@@ -277,45 +326,62 @@ namespace NetworkDesigner.Terrain
 
             // --- Appearance ---
             TuningRegistry.RegisterColor("terrain.color", "Appearance", "Grass color (flat)",
-                () => t.TerrainColor, v => { t.TerrainColor = v; t.ApplyTerrainMaterial(); });
+                () => t.TerrainColor, v => { t.TerrainColor = v; t.ApplyTerrainMaterial(); },
+                description: "Colour used on flat/gentle terrain (the 'grass' band).");
             TuningRegistry.RegisterColor("terrain.rockColor", "Appearance", "Rock color (steep)",
-                () => t.RockColor, v => { t.RockColor = v; t.ApplyTerrainMaterial(); });
+                () => t.RockColor, v => { t.RockColor = v; t.ApplyTerrainMaterial(); },
+                description: "Colour blended onto steep faces (the 'rock' band).");
             TuningRegistry.RegisterFloat("terrain.slopeStart", "Appearance", "Rock slope start (deg)",
-                () => t.SlopeStartDeg, v => { t.SlopeStartDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f);
+                () => t.SlopeStartDeg, v => { t.SlopeStartDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f,
+                description: "Slope angle where rock starts blending in (0 = flat, 90 = vertical cliff).");
             TuningRegistry.RegisterFloat("terrain.slopeFull", "Appearance", "Rock slope full (deg)",
-                () => t.SlopeFullDeg, v => { t.SlopeFullDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f);
+                () => t.SlopeFullDeg, v => { t.SlopeFullDeg = v; t.ApplyTerrainMaterial(); }, 0f, 90f,
+                description: "Slope angle at which a face is fully rock. Tune with the tree/rock 'Max slope' to match.");
             TuningRegistry.RegisterFloat("terrain.rockTexScale", "Appearance", "Rock texture scale",
-                () => t.RockTextureScale, v => { t.RockTextureScale = v; t.ApplyTerrainMaterial(); }, 0.01f, 1f);
+                () => t.RockTextureScale, v => { t.RockTextureScale = v; t.ApplyTerrainMaterial(); }, 0.01f, 1f,
+                description: "Tiling of the optional triplanar rock texture (lower = larger features). Only visible if a Rock Texture is assigned.");
 
             // --- Water ---
             TuningRegistry.RegisterBool("water.on", "Water", "Show water",
-                () => t.ShowWater, v => { t.ShowWater = v; t.ApplyWater(); });
+                () => t.ShowWater, v => { t.ShowWater = v; t.ApplyWater(); },
+                description: "Show a flat water surface across the map; terrain below the level reads as submerged.");
             TuningRegistry.RegisterFloat("water.level", "Water", "Level (m)",
-                () => t.WaterLevel, v => { t.WaterLevel = v; t.ApplyWater(); }, -50f, 300f);
+                () => t.WaterLevel, v => { t.WaterLevel = v; t.ApplyWater(); }, -50f, 300f,
+                description: "World height of the water surface. Raise it to flood low ground / fill a gorge.");
             TuningRegistry.RegisterColor("water.color", "Water", "Color",
-                () => t.WaterColor, v => { t.WaterColor = v; t.ApplyWater(); });
+                () => t.WaterColor, v => { t.WaterColor = v; t.ApplyWater(); },
+                description: "Water colour. Its alpha controls transparency (lower = see the bed through it).");
             TuningRegistry.RegisterFloat("water.smoothness", "Water", "Smoothness",
-                () => t.WaterSmoothness, v => { t.WaterSmoothness = v; t.ApplyWater(); }, 0f, 1f);
+                () => t.WaterSmoothness, v => { t.WaterSmoothness = v; t.ApplyWater(); }, 0f, 1f,
+                description: "Surface gloss — higher gives more of a reflective sheen.");
 
             // --- World grid ---
             TuningRegistry.RegisterBool("terrain.gridOn", "Grid", "Show grid (G)",
-                () => t.GridEnabled, v => { t.GridEnabled = v; t.ApplyTerrainMaterial(); });
+                () => t.GridEnabled, v => { t.GridEnabled = v; t.ApplyTerrainMaterial(); },
+                description: "Paint a world grid on the terrain surface (it drapes over relief). Hotkey: G.");
             TuningRegistry.RegisterFloat("terrain.gridSpacing", "Grid", "Spacing (m)",
-                () => t.GridSpacing, v => { t.GridSpacing = v; t.ApplyTerrainMaterial(); }, 1f, 50f);
+                () => t.GridSpacing, v => { t.GridSpacing = v; t.ApplyTerrainMaterial(); }, 1f, 50f,
+                description: "Distance between minor grid lines. 5 matches the terrain cell size.");
             TuningRegistry.RegisterFloat("terrain.gridMajor", "Grid", "Major every N",
-                () => t.GridMajorEvery, v => { t.GridMajorEvery = v; t.ApplyTerrainMaterial(); }, 1f, 20f);
+                () => t.GridMajorEvery, v => { t.GridMajorEvery = v; t.ApplyTerrainMaterial(); }, 1f, 20f,
+                description: "Draw a brighter major line every N minor lines (e.g. 10 = a bold line every 50 m).");
             TuningRegistry.RegisterFloat("terrain.gridStrength", "Grid", "Strength",
-                () => t.GridStrength, v => { t.GridStrength = v; t.ApplyTerrainMaterial(); }, 0f, 1f);
+                () => t.GridStrength, v => { t.GridStrength = v; t.ApplyTerrainMaterial(); }, 0f, 1f,
+                description: "Grid line opacity (0 = invisible).");
             TuningRegistry.RegisterFloat("terrain.gridWidth", "Grid", "Line width (px)",
-                () => t.GridLineWidth, v => { t.GridLineWidth = v; t.ApplyTerrainMaterial(); }, 0.5f, 4f);
+                () => t.GridLineWidth, v => { t.GridLineWidth = v; t.ApplyTerrainMaterial(); }, 0.5f, 4f,
+                description: "Grid line thickness in screen pixels (constant at any distance).");
             TuningRegistry.RegisterColor("terrain.gridColor", "Grid", "Color",
-                () => t.GridColor, v => { t.GridColor = v; t.ApplyTerrainMaterial(); });
+                () => t.GridColor, v => { t.GridColor = v; t.ApplyTerrainMaterial(); },
+                description: "Grid line colour.");
             TuningRegistry.RegisterBool("terrain.gridSnap", "Grid", "Snap nodes to grid (Shift+G)",
-                () => t.SnapToGrid, v => t.SnapToGrid = v);
+                () => t.SnapToGrid, v => t.SnapToGrid = v,
+                description: "Snap rail/fence/power node placement to grid intersections. Works whether or not the grid is shown. Hotkey: Shift+G.");
 
             // --- Interface ---
             TuningRegistry.RegisterFloat("terrain.uiScale", "Interface", "UI scale (in-game panels)",
-                () => TerrainDesigner.UiScale, v => TerrainDesigner.UiScale = v, 0.75f, 3f);
+                () => TerrainDesigner.UiScale, v => TerrainDesigner.UiScale = v, 0.75f, 3f,
+                description: "Scale of the in-game IMGUI panels (palettes, mode hints), so they don't shrink at high resolution.");
 
             // --- Camera (free-fly) ---
             if (Fly != null)

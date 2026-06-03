@@ -13,6 +13,7 @@ export type TuningEntry = {
   key: string;
   type: TuningType;
   label: string;
+  description?: string;
   category: string;
   value: unknown;
   meta: Record<string, unknown>;

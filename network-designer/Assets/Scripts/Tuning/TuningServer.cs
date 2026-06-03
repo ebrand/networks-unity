@@ -163,6 +163,7 @@ namespace NetworkDesigner.Tuning
                     key = e.Key,
                     type = e.Type,
                     label = e.Label,
+                    description = e.Description,
                     category = e.Category,
                     value = e.Get(),
                     meta = e.Meta,

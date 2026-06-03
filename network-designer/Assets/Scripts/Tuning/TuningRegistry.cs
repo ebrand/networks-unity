@@ -53,6 +53,7 @@ namespace NetworkDesigner.Tuning
             public string Type;        // "float" | "color" | "bool" | "vector3"
             public string Category;    // grouping hint for UI
             public string Label;       // display label (defaults to Key)
+            public string Description = ""; // tooltip text shown in the panel
             public Func<object> Get;
             public Action<object> Set;
             public Dictionary<string, object> Meta = new Dictionary<string, object>();
@@ -103,7 +104,7 @@ namespace NetworkDesigner.Tuning
 
         public static void RegisterFloat(string key, string category, string label,
             Func<float> get, Action<float> set,
-            float min, float max, float step = 0f)
+            float min, float max, float step = 0f, string description = null)
         {
             Add(new Entry
             {
@@ -111,6 +112,7 @@ namespace NetworkDesigner.Tuning
                 Type = "float",
                 Category = category,
                 Label = label ?? key,
+                Description = description ?? "",
                 Get = () => get(),
                 Set = v => set(ToFloat(v)),
                 Meta =
@@ -123,7 +125,7 @@ namespace NetworkDesigner.Tuning
         }
 
         public static void RegisterColor(string key, string category, string label,
-            Func<Color> get, Action<Color> set)
+            Func<Color> get, Action<Color> set, string description = null)
         {
             Add(new Entry
             {
@@ -131,13 +133,14 @@ namespace NetworkDesigner.Tuning
                 Type = "color",
                 Category = category,
                 Label = label ?? key,
+                Description = description ?? "",
                 Get = () => ColorToHex(get()),
                 Set = v => set(HexToColor(v as string)),
             });
         }
 
         public static void RegisterBool(string key, string category, string label,
-            Func<bool> get, Action<bool> set)
+            Func<bool> get, Action<bool> set, string description = null)
         {
             Add(new Entry
             {
@@ -145,13 +148,14 @@ namespace NetworkDesigner.Tuning
                 Type = "bool",
                 Category = category,
                 Label = label ?? key,
+                Description = description ?? "",
                 Get = () => get(),
                 Set = v => set(Convert.ToBoolean(v)),
             });
         }
 
         public static void RegisterString(string key, string category, string label,
-            Func<string> get, Action<string> set)
+            Func<string> get, Action<string> set, string description = null)
         {
             Add(new Entry
             {
@@ -159,6 +163,7 @@ namespace NetworkDesigner.Tuning
                 Type = "string",
                 Category = category,
                 Label = label ?? key,
+                Description = description ?? "",
                 Get = () => get(),
                 Set = v => set(v?.ToString() ?? ""),
             });
@@ -167,7 +172,8 @@ namespace NetworkDesigner.Tuning
         // A fire-and-forget button. The client sends a normal "set" (value
         // ignored) and the registered Action runs on the main thread. Excluded
         // from persistence so loading the file never re-triggers it.
-        public static void RegisterAction(string key, string category, string label, Action run)
+        public static void RegisterAction(string key, string category, string label, Action run,
+            string description = null)
         {
             Add(new Entry
             {
@@ -175,6 +181,7 @@ namespace NetworkDesigner.Tuning
                 Type = "action",
                 Category = category,
                 Label = label ?? key,
+                Description = description ?? "",
                 Get = () => false,
                 Set = _ => run(),
             });
@@ -240,7 +247,7 @@ namespace NetworkDesigner.Tuning
 
         public static void RegisterVector3(string key, string category, string label,
             Func<Vector3> get, Action<Vector3> set,
-            float min, float max, float step = 0f)
+            float min, float max, float step = 0f, string description = null)
         {
             Add(new Entry
             {
@@ -248,6 +255,7 @@ namespace NetworkDesigner.Tuning
                 Type = "vector3",
                 Category = category,
                 Label = label ?? key,
+                Description = description ?? "",
                 Get = () =>
                 {
                     Vector3 vv = get();
