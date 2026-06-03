@@ -102,6 +102,13 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Keep generating procedural piers (grounded to terrain) under the " +
                  "prefab deck. Turn off if the prefab carries its own piers.")]
         public bool ProceduralPiers = true;
+        [Tooltip("Track buried deeper than (TunnelClearance + this rock cover) is bored " +
+                 "as a TUNNEL — a concrete liner + portal frames (m).")]
+        public float TunnelMinCover = 1.5f;
+        [Tooltip("Tunnel bore height above the track bed (m).")]
+        public float TunnelClearance = 6f;
+        [Tooltip("Tunnel bore half-width beyond the tie ends (m).")]
+        public float TunnelMargin = 0.6f;
         [Tooltip("Highlight (red) any track not connected to the main network, so a " +
                  "stranded stretch is obvious.")]
         public bool HighlightDisconnected = true;
@@ -494,6 +501,9 @@ namespace NetworkDesigner.Terrain
             int pierStep = Mathf.Max(1, Mathf.RoundToInt(Mathf.Max(1f, PierSpacing) / (len / segs)));
             bool prefabDeck = BridgePrefab != null;
             int spanStep = Mathf.Max(1, Mathf.RoundToInt(Mathf.Max(1f, BridgeSpan) / (len / segs)));
+            float tHalf = TieLength * 0.5f + Mathf.Max(0f, TunnelMargin);  // tunnel bore half-width
+            float clearance = Mathf.Max(2f, TunnelClearance);
+            float tunnelBury = clearance + Mathf.Max(0f, TunnelMinCover);  // bed must be this far under ground
 
             Vector3 prevL = default, prevR = default;
             Vector3 pTL = default, pTR = default;       // bed-top edges
@@ -501,6 +511,9 @@ namespace NetworkDesigner.Terrain
             Vector3 pWbL = default, pWbR = default;     // wall bases (ground)
             float pToeY = 0f; Vector3 pCtr = default;   // prev centreline (deck)
             bool pBridge = false;
+            // Tunnel bore cross-section (prev): floor L/R, ceiling L/R.
+            bool pTunnel = false;
+            Vector3 pFL = default, pFR = default, pCL = default, pCR = default;
             for (int i = 0; i <= segs; i++)
             {
                 GradedSample(field, q0, q1, q2, q3, len * i / segs, len, yA, yB, grade,
@@ -524,11 +537,33 @@ namespace NetworkDesigner.Terrain
                 Vector3 wbL = new Vector3(toeXZL.x, Mathf.Min(GroundY(field, toeXZL), toeY), toeXZL.y);
                 Vector3 wbR = new Vector3(toeXZR.x, Mathf.Min(GroundY(field, toeXZR), toeY), toeXZR.y);
 
+                // Tunnel: bed buried deeper than the bore + cover -> a bored liner.
+                bool tunnel = (groundYc - pos.y) > tunnelBury;
+                const float floorSink = 0.1f;
+                Vector3 FL = pos - right * tHalf - up * floorSink;
+                Vector3 FR = pos + right * tHalf - up * floorSink;
+                Vector3 CL = pos - right * tHalf + up * clearance;
+                Vector3 CR = pos + right * tHalf + up * clearance;
+
                 if (i > 0)
                 {
                     AddRailSeg(prevL, cL);
                     AddRailSeg(prevR, cR);
                     bool bridgeSeg = bridge || pBridge;
+
+                    if (tunnel && pTunnel)
+                    {
+                        // Inward-facing bore liner (concrete): floor, ceiling, 2 walls.
+                        Quad(_sv, _st, pFL, FL, FR, pFR);   // floor (+up)
+                        Quad(_sv, _st, pCL, pCR, CR, CL);   // ceiling (-up)
+                        Quad(_sv, _st, pFL, pCL, CL, FL);   // left wall (inward)
+                        Quad(_sv, _st, pFR, FR, CR, pCR);   // right wall (inward)
+                    }
+                    if (tunnel != pTunnel) // a mouth: frame the opening with a portal
+                    {
+                        if (tunnel) AddTunnelPortal(FL, FR, CL, CR);
+                        else AddTunnelPortal(pFL, pFR, pCL, pCR);
+                    }
                     if (bed > 1e-4f)
                     {
                         // On a prefab bridge span the prefab IS the deck, so skip the
@@ -576,6 +611,7 @@ namespace NetworkDesigner.Terrain
                 prevL = cL; prevR = cR;
                 pTL = TL; pTR = TR; pToeL = toeL; pToeR = toeR; pWbL = wbL; pWbR = wbR;
                 pToeY = toeY; pCtr = pos; pBridge = bridge;
+                pTunnel = tunnel; pFL = FL; pFR = FR; pCL = CL; pCR = CR;
             }
 
             // Ties at fixed spacing, resting on the bed top.
@@ -601,6 +637,28 @@ namespace NetworkDesigner.Terrain
             right = right.sqrMagnitude < 1e-6f ? Vector3.right : right.normalized;
             Vector3 up = Vector3.Cross(fwd, right).normalized;
             AddBox(v, t, (a + b) * 0.5f - up * (height * 0.5f), fwd, right, up, l, width, height);
+        }
+
+        // Concrete portal frame around a tunnel mouth: two jambs + a lintel.
+        void AddTunnelPortal(Vector3 fl, Vector3 fr, Vector3 cl, Vector3 cr)
+        {
+            const float thick = 0.7f;
+            AddStrut(fl, cl, thick); // left jamb
+            AddStrut(fr, cr, thick); // right jamb
+            AddStrut(cl, cr, thick); // lintel
+        }
+
+        // A square-section concrete strut (box) between two points.
+        void AddStrut(Vector3 a, Vector3 b, float thick)
+        {
+            Vector3 along = b - a;
+            float l = along.magnitude;
+            if (l < 1e-4f) return;
+            Vector3 f = along / l;
+            Vector3 r = Vector3.Cross(Vector3.up, f);
+            r = r.sqrMagnitude < 1e-6f ? Vector3.right : r.normalized;
+            Vector3 u = Vector3.Cross(f, r).normalized;
+            AddBox(_sv, _st, (a + b) * 0.5f, f, r, u, l, thick, thick);
         }
 
         // Instantiate the bridge prefab at a deck point, yawed to the track.
