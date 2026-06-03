@@ -198,6 +198,38 @@ namespace NetworkDesigner.Terrain
                 () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f);
             TuningRegistry.RegisterFloat("rail.maxLatG", "Rail", "Max lateral g (curve tightness)",
                 () => t.RailLayer.MaxLateralG, v => t.RailLayer.MaxLateralG = v, 0.05f, 0.5f);
+            TuningRegistry.RegisterFloat("rail.maxGrade", "Rail", "Max grade (deg)",
+                () => t.RailLayer.MaxGradeDeg, v => t.RailLayer.MaxGradeDeg = v, 0.5f, 15f);
+            TuningRegistry.RegisterFloat("rail.ballastHeight", "Rail", "Ballast height (m)",
+                () => t.RailLayer.BallastHeight, v => { t.RailLayer.BallastHeight = v; t.RebuildRail(); }, 0f, 1.5f);
+            TuningRegistry.RegisterFloat("rail.ballastShoulder", "Rail", "Ballast shoulder (m)",
+                () => t.RailLayer.BallastShoulder, v => { t.RailLayer.BallastShoulder = v; t.RebuildRail(); }, 0f, 2f);
+            TuningRegistry.RegisterFloat("rail.ballastSlope", "Rail", "Ballast shoulder slope",
+                () => t.RailLayer.BallastSlope, v => { t.RailLayer.BallastSlope = v; t.RebuildRail(); }, 0f, 4f);
+            TuningRegistry.RegisterColor("rail.ballastColor", "Rail", "Ballast color",
+                () => t.RailLayer.BallastColor, v => { t.RailLayer.BallastColor = v; t.RebuildRail(); });
+            TuningRegistry.RegisterFloat("rail.embankMaxDrop", "Rail", "Gravel cap drop -> wall (m)",
+                () => t.RailLayer.EmbankmentMaxDrop, v => { t.RailLayer.EmbankmentMaxDrop = v; t.RebuildRail(); }, 0.1f, 4f);
+            TuningRegistry.RegisterFloat("rail.bridgeAbove", "Rail", "Bridge above fill (m)",
+                () => t.RailLayer.BridgeAboveFill, v => { t.RailLayer.BridgeAboveFill = v; t.RebuildRail(); }, 1f, 40f);
+            TuningRegistry.RegisterFloat("rail.deckDepth", "Rail", "Bridge deck depth (m)",
+                () => t.RailLayer.DeckDepth, v => { t.RailLayer.DeckDepth = v; t.RebuildRail(); }, 0.2f, 3f);
+            TuningRegistry.RegisterFloat("rail.pierSpacing", "Rail", "Bridge pier spacing (m)",
+                () => t.RailLayer.PierSpacing, v => { t.RailLayer.PierSpacing = v; t.RebuildRail(); }, 4f, 60f);
+            TuningRegistry.RegisterFloat("rail.pierWidth", "Rail", "Bridge pier width (m)",
+                () => t.RailLayer.PierWidth, v => { t.RailLayer.PierWidth = v; t.RebuildRail(); }, 0.3f, 4f);
+            TuningRegistry.RegisterColor("rail.structColor", "Rail", "Structure color (wall/bridge)",
+                () => t.RailLayer.StructureColor, v => { t.RailLayer.StructureColor = v; t.RebuildRail(); });
+            TuningRegistry.RegisterFloat("rail.bridgeSpan", "Rail", "Bridge prefab span (m)",
+                () => t.RailLayer.BridgeSpan, v => { t.RailLayer.BridgeSpan = v; t.RebuildRail(); }, 2f, 60f);
+            TuningRegistry.RegisterFloat("rail.bridgeYaw", "Rail", "Bridge prefab yaw (deg)",
+                () => t.RailLayer.BridgeYawOffset, v => { t.RailLayer.BridgeYawOffset = v; t.RebuildRail(); }, -180f, 180f);
+            TuningRegistry.RegisterFloat("rail.bridgeVOffset", "Rail", "Bridge prefab vertical offset (m)",
+                () => t.RailLayer.BridgeVerticalOffset, v => { t.RailLayer.BridgeVerticalOffset = v; t.RebuildRail(); }, -10f, 10f);
+            TuningRegistry.RegisterFloat("rail.bridgeScale", "Rail", "Bridge prefab scale",
+                () => t.RailLayer.BridgeScale, v => { t.RailLayer.BridgeScale = v; t.RebuildRail(); }, 0.1f, 10f);
+            TuningRegistry.RegisterBool("rail.proceduralPiers", "Rail", "Procedural piers under prefab",
+                () => t.RailLayer.ProceduralPiers, v => { t.RailLayer.ProceduralPiers = v; t.RebuildRail(); });
             TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
                 () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); });
             TuningRegistry.RegisterColor("rail.tieColor", "Rail", "Tie color",

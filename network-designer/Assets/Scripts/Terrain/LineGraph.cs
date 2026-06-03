@@ -75,6 +75,74 @@ namespace NetworkDesigner.Terrain
 
         public bool IsEmpty => Edges.Count == 0 && Nodes.Count == 0;
 
+        // Closest point lying ON any edge (its bezier) within maxDist, for branching
+        // off mid-track. Returns the edge, the bezier param t, and the world point.
+        public bool NearestPointOnEdge(Vector2 p, float maxDist, out int edgeIndex, out float t, out Vector2 point)
+        {
+            edgeIndex = -1; t = 0f; point = Vector2.zero;
+            float bestSq = maxDist * maxDist;
+            const int N = 24;
+            for (int ei = 0; ei < Edges.Count; ei++)
+            {
+                LineEdge e = Edges[ei];
+                Vector2 p0 = Nodes[e.A], p3 = Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
+                Vector2 prev = p0;
+                for (int i = 1; i <= N; i++)
+                {
+                    Vector2 cur = Bezier(p0, q1, q2, p3, i / (float)N);
+                    Vector2 seg = cur - prev;
+                    float len2 = seg.sqrMagnitude;
+                    float u = len2 > 1e-9f ? Mathf.Clamp01(Vector2.Dot(p - prev, seg) / len2) : 0f;
+                    Vector2 cp = prev + seg * u;
+                    float dsq = (cp - p).sqrMagnitude;
+                    if (dsq < bestSq)
+                    {
+                        bestSq = dsq; edgeIndex = ei; point = cp;
+                        t = (i - 1 + u) / N;
+                    }
+                    prev = cur;
+                }
+            }
+            return edgeIndex >= 0;
+        }
+
+        // Split an edge at bezier param t, inserting a node there and replacing the
+        // edge with its two (de Casteljau) halves. Returns the new node's index (or
+        // the existing endpoint if t is at an end — no degenerate sliver edge).
+        public int SplitEdge(int edgeIndex, float t)
+        {
+            if (edgeIndex < 0 || edgeIndex >= Edges.Count) return -1;
+            LineEdge e = Edges[edgeIndex];
+            if (t <= 0.02f) return e.A;
+            if (t >= 0.98f) return e.B;
+            int origA = e.A, origB = e.B;
+            float spd = e.SpeedLimit;
+            bool curved = e.HasCurve;
+            Vector2 p0 = Nodes[origA], p3 = Nodes[origB], q1, q2;
+            if (curved) { q1 = e.ControlA; q2 = e.ControlB; }
+            else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
+            // de Casteljau subdivision at t.
+            Vector2 a = Vector2.Lerp(p0, q1, t);
+            Vector2 b = Vector2.Lerp(q1, q2, t);
+            Vector2 c = Vector2.Lerp(q2, p3, t);
+            Vector2 ab = Vector2.Lerp(a, b, t);
+            Vector2 bc = Vector2.Lerp(b, c, t);
+            Vector2 m = Vector2.Lerp(ab, bc, t);
+            int mi = AddNode(m);
+            Edges.RemoveAt(edgeIndex);
+            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd };
+            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd };
+            if (curved)
+            {
+                e1.HasCurve = true; e1.ControlA = a; e1.ControlB = ab;
+                e2.HasCurve = true; e2.ControlA = bc; e2.ControlB = c;
+            }
+            Edges.Add(e1); Edges.Add(e2);
+            return mi;
+        }
+
         // First neighbour of `node` that isn't `exclude` (for Catmull-Rom
         // tangents). -1 if none. Junctions just pick the first — good enough.
         int OtherNeighbor(int node, int exclude)

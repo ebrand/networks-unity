@@ -464,6 +464,8 @@ namespace NetworkDesigner.Terrain
             // footgun); 0 lateral-g would blow the required radius up ~100x.
             if (RailLayer.MaxLateralG <= 0f) RailLayer.MaxLateralG = 0.15f;
             if (RailLayer.SpeedLimitKmh <= 0f) RailLayer.SpeedLimitKmh = 40f;
+            if (RailLayer.MaxGradeDeg <= 0f) RailLayer.MaxGradeDeg = 5f; // 0 would block all track
+            if (RailLayer.BridgeAboveFill <= 0f) RailLayer.BridgeAboveFill = 6f; // 0 = everything a bridge
         }
 
         // Global IMGUI scale so panels/text don't shrink to nothing at high
@@ -489,7 +491,7 @@ namespace NetworkDesigner.Terrain
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 150f : 104f), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 188f : 104f), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -503,6 +505,9 @@ namespace NetworkDesigner.Terrain
                         GUILayout.Label(rt.LastPreviewTooTight
                             ? $"Curve {rt.LastPreviewRadius:0} m — TOO TIGHT (lower speed or widen)"
                             : $"Curve radius {rt.LastPreviewRadius:0} m — ok");
+                    GUILayout.Label(rt.LastPreviewTooSteep
+                        ? $"Grade {rt.LastPreviewGradeDeg:0.0}° — TOO STEEP (max {rt.MaxGradeDeg:0.0}°)"
+                        : $"Grade {rt.LastPreviewGradeDeg:0.0}° / max {rt.MaxGradeDeg:0.0}°");
                 }
                 GUILayout.EndArea();
                 return;
@@ -530,7 +535,15 @@ namespace NetworkDesigner.Terrain
         public void RebuildPowerLine() { PowerLineLayer.Rebuild(Field); }
         [ContextMenu("Clear Power Line")]
         public void ClearPowerLine() { PowerLineLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+        [ContextMenu("Rebuild Rail")]
         public void RebuildRail() { RailLayer.Rebuild(Field); }
+
+        // Pick up Inspector edits (e.g. dragging the bridge prefab into its slot)
+        // live in play mode — object-slot changes don't go through the tunables.
+        void OnValidate()
+        {
+            if (Application.isPlaying && _field != null) RailLayer.Rebuild(_field);
+        }
         [ContextMenu("Clear Rail")]
         public void ClearRail() { RailLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
 
