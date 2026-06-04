@@ -809,6 +809,49 @@ namespace NetworkDesigner.Terrain
         }
         [ContextMenu("Clear Rail")]
         public void ClearRail() { RailLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+
+        // Diagnostic: what is actually rendering in the scene (esp. the "phantom"
+        // trees that aren't tracked by the scatter layer). Logs PlacedTree count +
+        // every non-terrain MeshRenderer with its hierarchy path and hideFlags.
+        [ContextMenu("Diagnose scene renderers")]
+        public void DiagnoseScatter()
+        {
+            // Resources.FindObjectsOfTypeAll finds HIDDEN / HideAndDontSave objects too
+            // (which FindObjectsByType misses) — that's where the phantoms live.
+            var rends = Resources.FindObjectsOfTypeAll<Renderer>();
+            var counts = new Dictionary<string, int>();
+            var sb = new System.Text.StringBuilder();
+            int shown = 0;
+            for (int i = 0; i < rends.Length; i++)
+            {
+                Renderer r = rends[i];
+                GameObject g = r.gameObject;
+                if (!g.scene.IsValid()) continue; // skip project/prefab assets
+                string type = r.GetType().Name;
+                counts[type] = counts.TryGetValue(type, out int c) ? c + 1 : 1;
+                string nm = g.name;
+                bool terrainish = nm.StartsWith("Chunk_") || nm.Contains("Contour") || nm.Contains("Rail")
+                    || nm.Contains("Plan") || nm == "TerrainWater" || nm.Contains("Pole") || nm.Contains("Ground");
+                if (terrainish || shown >= 50) continue;
+                string path = nm; Transform t = g.transform.parent;
+                while (t != null) { path = t.name + "/" + path; t = t.parent; }
+                sb.Append($"  [{type}] {path}  mat={(r.sharedMaterial != null ? r.sharedMaterial.name : "none")}  hideFlags={g.hideFlags}  scene={g.scene.name}\n");
+                shown++;
+            }
+            var summary = new System.Text.StringBuilder();
+            foreach (var kv in counts) summary.Append($"{kv.Key}={kv.Value} ");
+            // Loaded scenes + their root objects (reveals additive scenes / DontDestroyOnLoad).
+            var sc = new System.Text.StringBuilder();
+            for (int s = 0; s < UnityEngine.SceneManagement.SceneManager.sceneCount; s++)
+            {
+                var scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(s);
+                sc.Append($"  scene '{scene.name}' roots: ");
+                foreach (var root in scene.GetRootGameObjects()) sc.Append(root.name).Append(", ");
+                sc.Append('\n');
+            }
+            string terrainShader = _mat != null && _mat.shader != null ? _mat.shader.name : "(none)";
+            Debug.Log($"[Diag] Renderer totals: {summary}\nterrainShader={terrainShader}\nloaded scenes:\n{sc}Non-terrain renderers ({shown} shown):\n{sb}");
+        }
         public void RebuildPlan() { PlanLayer.Rebuild(Field); }
         public void ClearPlan() { PlanLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
 

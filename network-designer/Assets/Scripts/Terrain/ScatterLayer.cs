@@ -84,38 +84,55 @@ namespace NetworkDesigner.Terrain
         // the eraser can't see. Duplicate roots are merged into the first.
         void EnsureRoot()
         {
-            if (_root != null) return;
-            GameObject[] all = UnityEngine.Object.FindObjectsByType<GameObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None);
-            for (int i = 0; i < all.Length; i++)
+            if (_root == null)
             {
-                if (all[i] == null || all[i].name != RootName) continue;
-                if (_root == null) _root = all[i]; else DestroySafe(all[i]);
+                GameObject[] all = UnityEngine.Object.FindObjectsByType<GameObject>(
+                    FindObjectsInactive.Include, FindObjectsSortMode.None);
+                for (int i = 0; i < all.Length; i++)
+                    if (all[i] != null && all[i].name == RootName) { _root = all[i]; break; }
+                if (_root == null) _root = new GameObject(RootName);
             }
-            if (_root == null) { _root = new GameObject(RootName) { hideFlags = HideFlags.DontSave }; return; }
-            _root.hideFlags = HideFlags.DontSave;
-            ReadoptChildren();
+            ReadoptOrphans();
         }
 
-        // Rebuild tracking (_placed/_byCell) from the trees already parented under the
-        // adopted root, so post-reload survivors become erasable again. No-op when
-        // already tracked.
-        void ReadoptChildren()
+        // True if this scene item belongs to THIS layer (its prefab is in our list) —
+        // distinguishes trees from rocks (both use PlacedTree).
+        bool IsMine(PlacedTree pt)
         {
-            if (_root == null || _placed.Count > 0) return;
-            PlacedTree[] found = _root.GetComponentsInChildren<PlacedTree>(true);
-            for (int i = 0; i < found.Length; i++)
+            if (pt == null || pt.Data == null || Prefabs == null) return false;
+            for (int i = 0; i < Prefabs.Count; i++)
+                if (Prefabs[i] != null && Prefabs[i].name == pt.Data.Prefab) return true;
+            return false;
+        }
+
+        // Re-track every item of ours found ANYWHERE in the scene that isn't already
+        // tracked — survivors of a domain reload (which wipes _placed but not the
+        // GameObjects), regardless of where they're parented. Reparents them under
+        // our root and rebuilds the spatial hash. No-op once tracked.
+        void ReadoptOrphans()
+        {
+            if (_placed.Count > 0) return;
+            // Resources.FindObjectsOfTypeAll finds HIDDEN / HideFlags.DontSave
+            // instances that FindObjectsByType misses (e.g. trees spawned with
+            // DontSave by an older build, which then survive forever and can't be
+            // erased). Filter to scene objects (not prefab assets).
+            PlacedTree[] all = Resources.FindObjectsOfTypeAll<PlacedTree>();
+            int n = 0;
+            for (int i = 0; i < all.Length; i++)
             {
-                PlacedTree pt = found[i];
-                if (pt == null) continue;
-                Vector2 pos = pt.Data != null ? pt.Data.Position
-                    : new Vector2(pt.transform.position.x, pt.transform.position.z);
-                long key = CellKeyFromWorld(pos.x, pos.y);
+                PlacedTree pt = all[i];
+                if (pt == null || !pt.gameObject.scene.IsValid() || !IsMine(pt)) continue;
+                pt.gameObject.hideFlags = HideFlags.None; // strip the persistent flag
+                if (_root != null && pt.transform.parent != _root.transform)
+                    pt.transform.SetParent(_root.transform, true);
+                long key = CellKeyFromWorld(pt.Data.Position.x, pt.Data.Position.y);
                 pt.Cell = key;
                 _placed.Add(pt);
                 if (!_byCell.TryGetValue(key, out List<PlacedTree> b)) _byCell[key] = b = new List<PlacedTree>();
                 b.Add(pt);
+                n++;
             }
+            if (n > 0) Debug.Log($"[{Name}] re-adopted {n} orphaned item(s)");
         }
 
         // ---- palette enable state + packs ----
@@ -350,7 +367,6 @@ namespace NetworkDesigner.Terrain
             float wy = field != null ? field.SampleHeight(wx, wz) : 0f;
             GameObject go = UnityEngine.Object.Instantiate(prefab, new Vector3(wx, wy, wz),
                 Quaternion.Euler(0f, rotY, 0f), _root.transform);
-            go.hideFlags = HideFlags.DontSave; // runtime scatter, never serialize into the scene
             if (scale > 0f && !Mathf.Approximately(scale, 1f)) go.transform.localScale *= scale;
             // No physics: strip colliders so they cost nothing and can't be hit by
             // the sculpt/cursor raycast (which treats any MeshCollider as terrain).
@@ -437,18 +453,20 @@ namespace NetworkDesigner.Terrain
             return any;
         }
 
-        // Destroy every placed item in this layer.
+        // Destroy every item of this layer in the scene (tracked, orphaned, or
+        // hidden/DontSave). Resources.FindObjectsOfTypeAll catches the hidden ones.
         public void ClearAll()
         {
-            EnsureRoot(); // adopt any post-reload survivors so they're cleared too
-            for (int i = 0; i < _placed.Count; i++)
-                if (_placed[i] != null) DestroySafe(_placed[i].gameObject);
+            PlacedTree[] all = Resources.FindObjectsOfTypeAll<PlacedTree>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                PlacedTree pt = all[i];
+                if (pt == null || !pt.gameObject.scene.IsValid() || !IsMine(pt)) continue;
+                pt.gameObject.hideFlags = HideFlags.None;
+                DestroySafe(pt.gameObject);
+            }
             _placed.Clear();
             _byCell.Clear();
-            // Belt-and-suspenders: nuke any stragglers still parented under the root.
-            if (_root != null)
-                for (int i = _root.transform.childCount - 1; i >= 0; i--)
-                    DestroySafe(_root.transform.GetChild(i).gameObject);
         }
 
         // ---- save / load / conform ----

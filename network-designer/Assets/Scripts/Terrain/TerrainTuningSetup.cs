@@ -374,6 +374,9 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("rail.clear", "Rail", "Clear rail",
                 () => t.ClearRail(),
                 description: "Delete the entire rail network (all nodes and edges).");
+            TuningRegistry.RegisterAction("terrain.diagnose", "Autosave", "Diagnose scene renderers",
+                () => t.DiagnoseScatter(),
+                description: "Log every non-terrain mesh renderer (name/path/hideFlags/scene) — for tracking down 'phantom' objects that aren't deletable.");
 
             // --- Rail planning (survey) ---
             TuningRegistry.RegisterFloat("plan.corridorWidth", "Rail plan", "Corridor width (m)",
