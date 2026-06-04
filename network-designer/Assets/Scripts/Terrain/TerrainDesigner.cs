@@ -321,6 +321,8 @@ namespace NetworkDesigner.Terrain
                 }
             }
 
+            LoadPacks(); // standalone pack library wins over any packs from the autosave
+
             BuildAllChunks();
             TreeLayer.SpawnPending(_field); // scatter from the save (heights now known)
             RockLayer.SpawnPending(_field);
@@ -348,7 +350,6 @@ namespace NetworkDesigner.Terrain
             if (FindFirstObjectByType<TerrainTuningSetup>() != null) return;
             TerrainTuningSetup setup = new GameObject("TerrainTuning")
                 .AddComponent<TerrainTuningSetup>(); // RequireComponent adds TuningServer
-            setup.gameObject.hideFlags = HideFlags.DontSave; // runtime-only, never serialize into the scene
             setup.Terrain = this;
         }
 
@@ -455,7 +456,7 @@ namespace NetworkDesigner.Terrain
         void EnsureWater()
         {
             if (_waterGo != null) return;
-            _waterGo = new GameObject("TerrainWater") { hideFlags = HideFlags.DontSave };
+            _waterGo = MakeRuntimeRoot("TerrainWater");
             var mf = _waterGo.AddComponent<MeshFilter>();
             var mr = _waterGo.AddComponent<MeshRenderer>();
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -543,7 +544,7 @@ namespace NetworkDesigner.Terrain
             if (recreate)
             {
                 DestroyAllChunkRoots(); // tracked root + any orphans from edit-mode/reload
-                _chunkRoot = new GameObject("TerrainChunks") { hideFlags = HideFlags.DontSave };
+                _chunkRoot = new GameObject("TerrainChunks");
                 _chunksX = _chunksZ = chunksX;
                 _chunkMesh = new Mesh[n];
                 _chunkCol = new MeshCollider[n];
@@ -562,7 +563,7 @@ namespace NetworkDesigner.Terrain
         void CreateChunk(int cx, int cz, int cc)
         {
             int idx = cz * _chunksX + cx;
-            GameObject go = new GameObject($"Chunk_{cx}_{cz}") { hideFlags = HideFlags.DontSave };
+            GameObject go = new GameObject($"Chunk_{cx}_{cz}");
             go.transform.SetParent(_chunkRoot.transform, worldPositionStays: false);
             MeshFilter mf = go.AddComponent<MeshFilter>();
             MeshRenderer mr = go.AddComponent<MeshRenderer>();
@@ -614,6 +615,23 @@ namespace NetworkDesigner.Terrain
             else DestroyImmediate(go);
         }
 
+        // Create a named runtime helper object, first destroying ANY existing ones
+        // with that name — including old HideFlags.DontSave leftovers that survived a
+        // domain reload (those would otherwise pile up one-per-reload, e.g. the
+        // 'ContourLines' leak). The fresh object is NOT DontSave, so it's cleaned up
+        // normally on Play-stop. FindObjectsOfTypeAll sees DontSave/hidden objects
+        // that FindObjectsByType misses.
+        static GameObject MakeRuntimeRoot(string objName)
+        {
+            var all = Resources.FindObjectsOfTypeAll<GameObject>();
+            for (int i = 0; i < all.Length; i++)
+            {
+                GameObject g = all[i];
+                if (g != null && g.scene.IsValid() && g.name == objName) DestroySafe(g);
+            }
+            return new GameObject(objName);
+        }
+
         // Destroy the tracked chunk root AND any orphaned "TerrainChunks" objects.
         // _chunkRoot isn't serialized, so an edit-mode build or domain reload
         // leaves prior roots with no live reference — they stack up and mask the
@@ -621,9 +639,11 @@ namespace NetworkDesigner.Terrain
         void DestroyAllChunkRoots()
         {
             _chunkRoot = null;
-            GameObject[] all = FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            // FindObjectsOfTypeAll (not FindObjectsByType) so old HideFlags.DontSave
+            // roots that survived a reload are caught and don't pile up.
+            var all = Resources.FindObjectsOfTypeAll<GameObject>();
             for (int i = 0; i < all.Length; i++)
-                if (all[i] != null && all[i].name == "TerrainChunks") DestroySafe(all[i]);
+                if (all[i] != null && all[i].scene.IsValid() && all[i].name == "TerrainChunks") DestroySafe(all[i]);
         }
 
         // --- Scatter brushes (trees, rocks) via ScatterLayer ---
@@ -741,7 +761,9 @@ namespace NetworkDesigner.Terrain
                 GUILayout.EndArea();
                 return;
             }
-            if (_active != null) { if (_active.DrawPalette()) _dirtySince = Time.realtimeSinceStartup; return; }
+            // DrawPalette returns true only on a pack create/update/delete — persist
+            // the standalone packs file then (packs aren't part of the debounced save).
+            if (_active != null) { if (_active.DrawPalette()) { _dirtySince = Time.realtimeSinceStartup; SavePacks(); } return; }
 
             // Slope tool (brush 5) readout — no other panel is up in sculpt mode.
             if (Brush == BrushMode.Slope)
@@ -990,7 +1012,6 @@ namespace NetworkDesigner.Terrain
         {
             if (FindFirstObjectByType<SceneAmbiance>() != null) return;
             SceneAmbiance amb = new GameObject("SceneAmbiance").AddComponent<SceneAmbiance>();
-            amb.gameObject.hideFlags = HideFlags.DontSave; // runtime-only
             amb.CreateSunIfMissing = true;
             amb.ManageAmbient = true;
             amb.ShadowDistance = ShadowDistance;
@@ -1509,7 +1530,7 @@ namespace NetworkDesigner.Terrain
         {
             if (_cursorMf != null) return;
             // Root object at world identity — the ring verts are world-space.
-            GameObject go = new GameObject("BrushCursor") { hideFlags = HideFlags.DontSave };
+            GameObject go = MakeRuntimeRoot("BrushCursor");
             _cursorMf = go.AddComponent<MeshFilter>();
             _cursorMr = go.AddComponent<MeshRenderer>();
             _cursorMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -1548,7 +1569,7 @@ namespace NetworkDesigner.Terrain
         void EnsureContours()
         {
             if (_contourMf != null) return;
-            GameObject go = new GameObject("ContourLines") { hideFlags = HideFlags.DontSave };
+            GameObject go = MakeRuntimeRoot("ContourLines");
             go.transform.SetParent(transform, worldPositionStays: false);
             _contourMf = go.AddComponent<MeshFilter>();
             _contourMr = go.AddComponent<MeshRenderer>();
@@ -1949,6 +1970,7 @@ namespace NetworkDesigner.Terrain
                 WriteSave(BuildSnapshot(), ResolveAutosavePath());
                 _dirtySince = -1f;
             }
+            SavePacks(); // keep the standalone pack library in sync on Play-stop
         }
 
         string ResolveAutosavePath()
@@ -1959,6 +1981,44 @@ namespace NetworkDesigner.Terrain
 #else
             return System.IO.Path.Combine(Application.persistentDataPath, "TerrainAutosave.json");
 #endif
+        }
+
+        // Tree/rock packs live in their OWN file next to the autosave, so they're a
+        // reusable preset library that survives deleting/resetting the terrain.
+        string ResolvePacksPath()
+            => System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(ResolveAutosavePath())),
+                "TerrainPacks.json");
+
+        class PacksFile { public List<TreePack> TreePacks; public List<TreePack> RockPacks; }
+
+        // Write the pack presets to the standalone file (on pack edits + on save).
+        public void SavePacks()
+        {
+            try
+            {
+                var data = new PacksFile { TreePacks = TreeLayer.CollectPacks(), RockPacks = RockLayer.CollectPacks() };
+                System.IO.File.WriteAllText(ResolvePacksPath(),
+                    JsonConvert.SerializeObject(data, Formatting.Indented, TerrainJsonSettings));
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Packs save failed: {ex.Message}"); }
+        }
+
+        // Load the standalone packs file; it's authoritative over any packs that came
+        // from the terrain autosave. No-op if the file doesn't exist (back-compat).
+        void LoadPacks()
+        {
+            try
+            {
+                string path = ResolvePacksPath();
+                if (!System.IO.File.Exists(path)) return;
+                var data = JsonConvert.DeserializeObject<PacksFile>(
+                    System.IO.File.ReadAllText(path), TerrainJsonSettings);
+                if (data == null) return;
+                TreeLayer.SetPacks(data.TreePacks);
+                RockLayer.SetPacks(data.RockPacks);
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Packs load failed: {ex.Message}"); }
         }
 
         // Debounced autosave entry point. The expensive part (JSON serialize +
@@ -1992,6 +2052,7 @@ namespace NetworkDesigner.Terrain
             if (_field == null) return;
             try { _saveTask?.Wait(2000); } catch { /* ignore */ }
             WriteSave(BuildSnapshot(), ResolveAutosavePath());
+            SavePacks();
             _dirtySince = -1f;
             Debug.Log($"[TerrainDesigner] Saved → {ResolveAutosavePath()}");
         }
@@ -2013,6 +2074,7 @@ namespace NetworkDesigner.Terrain
             TerrainSizeMeters = (_field.ColumnsX - 1) * _field.CellSize;
             ColumnsX = _field.ColumnsX; RowsZ = _field.RowsZ;
             _chunkMesh = null; _chunkCol = null; // grid may have changed -> recreate chunks
+            LoadPacks(); // standalone pack library wins over autosave packs
             BuildAllChunks();
             TreeLayer.SpawnPending(_field);
             RockLayer.SpawnPending(_field);

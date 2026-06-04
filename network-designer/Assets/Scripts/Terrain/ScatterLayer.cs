@@ -481,6 +481,15 @@ namespace NetworkDesigner.Terrain
 
         public List<TreePack> CollectPacks() => new List<TreePack>(_packs);
 
+        // Replace the pack presets (e.g. from the standalone packs file, which is
+        // authoritative over the terrain autosave so packs survive a terrain reset).
+        public void SetPacks(List<TreePack> packs)
+        {
+            _packs.Clear();
+            if (packs != null) _packs.AddRange(packs);
+            _activePack = -1;
+        }
+
         // Stage loaded data + packs; SpawnPending() instantiates after chunks exist.
         public void LoadState(List<PlacedTreeData> data, List<TreePack> packs)
         {
