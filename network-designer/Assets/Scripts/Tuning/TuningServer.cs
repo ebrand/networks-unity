@@ -217,9 +217,10 @@ namespace NetworkDesigner.Tuning
             {
                 remote = client.Client?.RemoteEndPoint?.ToString() ?? "?";
                 using (client)
+                using (var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
                 using (NetworkStream stream = client.GetStream())
                 {
-                    if (!await DoHandshake(stream, ct))
+                    if (!await DoHandshake(stream, sessionCts.Token))
                     {
                         Debug.LogWarning($"[TuningServer] handshake failed with {remote}");
                         return;
@@ -229,10 +230,20 @@ namespace NetworkDesigner.Tuning
                     // Push an immediate snapshot so the React side has data.
                     _inbound.Enqueue("{\"op\":\"snapshot\"}");
 
-                    // Run reader + writer in parallel; either ending tears down the session.
-                    Task reader = Task.Run(() => ReadLoop(stream, ct));
-                    Task writer = Task.Run(() => WriteLoop(stream, ct));
+                    // Run reader + writer in parallel; either ending tears down the
+                    // session. Cancel the OTHER loop and wait for both to unwind
+                    // BEFORE the stream disposes, so neither touches a disposed
+                    // stream (the ObjectDisposedException we were seeing).
+                    Task reader = Task.Run(() => ReadLoop(stream, sessionCts.Token));
+                    Task writer = Task.Run(() => WriteLoop(stream, sessionCts.Token));
                     await Task.WhenAny(reader, writer);
+                    sessionCts.Cancel();
+                    try { await Task.WhenAll(reader, writer); } catch { /* expected on teardown */ }
+
+                    // Send a WebSocket close frame so the client disconnects cleanly
+                    // (an abrupt RST is what crashes the React side).
+                    try { await stream.WriteAsync(new byte[] { 0x88, 0x00 }, 0, 2, CancellationToken.None); }
+                    catch { /* connection already gone */ }
                 }
             }
             catch (Exception ex)
@@ -308,9 +319,17 @@ namespace NetworkDesigner.Tuning
             }
             catch (Exception ex)
             {
-                if (!ct.IsCancellationRequested) Debug.LogWarning($"[TuningServer] read loop ended: {ex.Message}");
+                if (!IsBenignDisconnect(ex, ct)) Debug.LogWarning($"[TuningServer] read loop ended: {ex.Message}");
             }
         }
+
+        // Disconnect/teardown exceptions we expect and shouldn't warn about: the
+        // session was cancelled, or the stream/socket was disposed/reset.
+        static bool IsBenignDisconnect(Exception ex, CancellationToken ct)
+            => ct.IsCancellationRequested
+               || ex is OperationCanceledException
+               || ex is ObjectDisposedException
+               || ex is System.IO.IOException;
 
         // Returns null on close/error. Skips control frames other than close.
         async Task<string> ReadTextFrame(NetworkStream stream, CancellationToken ct)
@@ -407,7 +426,7 @@ namespace NetworkDesigner.Tuning
             }
             catch (Exception ex)
             {
-                if (!ct.IsCancellationRequested) Debug.LogWarning($"[TuningServer] write loop ended: {ex.Message}");
+                if (!IsBenignDisconnect(ex, ct)) Debug.LogWarning($"[TuningServer] write loop ended: {ex.Message}");
             }
         }
 
