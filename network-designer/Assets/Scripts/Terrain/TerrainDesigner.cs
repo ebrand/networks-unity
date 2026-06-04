@@ -757,7 +757,7 @@ namespace NetworkDesigner.Terrain
             {
                 bool rail = _lineActive is RailTrackLayer;
                 bool plan = _lineActive is RailPlanLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : (plan ? 232f : 104f)), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 252f : (plan ? 256f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -781,9 +781,14 @@ namespace NetworkDesigner.Terrain
                         if (L[5] > 0.5f) GUILayout.Label($"OVER-GRADE {L[5]:0} m — needs reroute");
                         GUILayout.Label("Key: solid=at-grade, dashed=cut,\ndbl-dash=fill · cyan/purple/red=brdg/tun/over");
                     }
+                    int bs = PlanBuildableStatus();
+                    GUILayout.Label(bs < 0 ? "Draw a plan, then 'plan.buildRail'."
+                        : bs == 0 ? "Buildable ✓ — 'plan.buildRail' lays track."
+                        : $"{bs} segment(s) over grade — grade before building.");
                 }
                 if (_lineActive is RailTrackLayer rt)
                 {
+                    GUILayout.Label("Click a rail edge: insert node (chop).\nClick a node puck: branch from it.");
                     GUILayout.Label($"Speed {rt.SpeedLimitKmh:0} km/h  →  min radius {rt.MinRadiusForSpeed:0} m");
                     if (rt.LastPreviewRadius < float.PositiveInfinity)
                         GUILayout.Label(rt.LastPreviewTooTight
@@ -945,6 +950,34 @@ namespace NetworkDesigner.Terrain
         }
         public void RebuildPlan() { PlanLayer.Rebuild(Field); }
         public void ClearPlan() { PlanLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+
+        // Status of the "build rail on the plan centreline" action, surfaced in the
+        // plan panel. -1 = empty plan, 0 = buildable, >0 = that many over-grade segments.
+        public int PlanBuildableStatus()
+        {
+            if (_field == null || PlanLayer == null || PlanLayer.Graph == null
+                || PlanLayer.Graph.Edges.Count == 0) return -1;
+            PlanLayer.AllEdgesBuildable(_field, out int over);
+            return over;
+        }
+
+        // Promote the finished survey plan to real rail: build track on the plan
+        // centreline. Refuses unless the WHOLE plan is buildable (no segment over the
+        // plan's max grade) — grade the red sections first. Leaves the plan in place.
+        public void PromotePlanToRail()
+        {
+            int status = PlanBuildableStatus();
+            if (status < 0) { Debug.LogWarning("[Plan→Rail] Plan is empty — nothing to build."); return; }
+            if (status > 0)
+            {
+                Debug.LogWarning($"[Plan→Rail] {status} segment(s) exceed the plan's max grade "
+                    + $"({PlanLayer.MaxGradeDeg:0.0}°). Grade them (red) before building.");
+                return;
+            }
+            int added = RailLayer.AppendGraph(PlanLayer.Graph, RailLayer.SpeedLimitKmh, _field);
+            Debug.Log($"[Plan→Rail] Built {added} rail segment(s) on the plan centreline.");
+            _dirtySince = Time.realtimeSinceStartup;
+        }
 
         // Cut open trenches in the terrain along rail sections that run below grade
         // (the tunnel approaches), down to the track bed with sloped batter walls,
@@ -1292,6 +1325,12 @@ namespace NetworkDesigner.Terrain
             Vector3 cursorVis = SnapCursor(hit.point, overTerrain);
             UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
             UpdateSlopeFill();
+            // Node pucks: shown while rail is the active line layer; the node under the
+            // cursor highlights (an off-terrain hover = no highlight).
+            if (RailLayer != null)
+                RailLayer.UpdateNodePucks(_field,
+                    overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f),
+                    _lineActive is RailTrackLayer);
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.

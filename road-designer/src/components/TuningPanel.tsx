@@ -2,7 +2,7 @@
 // renders one control per registered entry, grouped by category.
 //
 // Controls are intentionally minimal — Mantine Slider for floats (with
-// a NumberInput for precise entry), ColorInput for colors, Switch for
+// a NumberInput for precise entry), a type-in hex field for colors, Switch for
 // bools, three sliders for vector3. Adding a new type is a matter of
 // adding a renderer below.
 
@@ -12,7 +12,7 @@ import {
   Alert,
   Badge,
   Box,
-  ColorInput,
+  ColorSwatch,
   Group,
   NumberInput,
   Select,
@@ -329,6 +329,9 @@ function TipLabel({ text, tip }: { text: string; tip?: string }) {
   );
 }
 
+// Type-in hex colour (no picker popup — that was fiddly). Accepts #RRGGBB or
+// #RRGGBBAA (alpha), with or without the leading '#'; a swatch previews it.
+// Commits on blur / Enter (not per keystroke) so the socket isn't spammed.
 function ColorControl({
   entry,
   onChange,
@@ -336,14 +339,40 @@ function ColorControl({
   entry: TuningEntry;
   onChange: (key: string, value: unknown) => void;
 }) {
-  const value = typeof entry.value === "string" ? entry.value : "#888888";
+  const serverValue = typeof entry.value === "string" ? entry.value : "#888888";
+  const [draft, setDraft] = useState(serverValue);
+  const [focused, setFocused] = useState(false);
+  // Re-sync from the server when the value changes while not focused.
+  if (!focused && draft !== serverValue) setDraft(serverValue);
+
+  const normalize = (s: string) => {
+    const h = s.trim();
+    return h && h[0] !== "#" ? "#" + h : h;
+  };
+  const norm = normalize(draft);
+  const valid = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(norm);
+  const commit = () => {
+    if (valid && norm.toLowerCase() !== serverValue.toLowerCase())
+      onChange(entry.key, norm);
+  };
   return (
-    <ColorInput
+    <TextInput
       label={<TipLabel text={entry.label} tip={entry.description} />}
-      value={value}
-      onChange={(v) => onChange(entry.key, v)}
-      format="hex"
       size="xs"
+      value={draft}
+      error={!valid && draft.length > 0 ? "Use #RRGGBB or #RRGGBBAA" : undefined}
+      leftSection={
+        <ColorSwatch color={valid ? norm : "transparent"} size={14} />
+      }
+      onChange={(ev) => setDraft(ev.currentTarget.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false);
+        commit();
+      }}
+      onKeyDown={(ev) => {
+        if (ev.key === "Enter") commit();
+      }}
     />
   );
 }

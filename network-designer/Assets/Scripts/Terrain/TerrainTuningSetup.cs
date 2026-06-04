@@ -293,6 +293,21 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.guideLength", "Rail", "Alignment guide length (m)",
                 () => t.RailLayer.ExtensionGuideLength, v => t.RailLayer.ExtensionGuideLength = v, 0f, 600f,
                 description: "Length of the dashed straight-ahead alignment guide drawn out of the chain tail. Also bounds how far ahead the extension snap reaches. 0 = no guide / no extension snap.");
+            TuningRegistry.RegisterBool("rail.showPucks", "Rail", "Show node pucks",
+                () => t.RailLayer.ShowNodePucks, v => t.RailLayer.ShowNodePucks = v,
+                description: "Show a translucent puck at each rail node while editing rail; the node under the cursor highlights. Click a rail edge to insert a node (chop a segment), or a node puck to branch from it.");
+            TuningRegistry.RegisterFloat("rail.puckSize", "Rail", "Node puck size (m)",
+                () => t.RailLayer.NodePuckSize, v => t.RailLayer.NodePuckSize = v, 0.3f, 6f,
+                description: "Radius of the translucent node pucks.");
+            TuningRegistry.RegisterFloat("rail.puckHeight", "Rail", "Node puck height (m)",
+                () => t.RailLayer.NodePuckHeight, v => t.RailLayer.NodePuckHeight = v, 0.05f, 3f,
+                description: "Height (thickness) of the 3D node pucks.");
+            TuningRegistry.RegisterColor("rail.puckColor", "Rail", "Node puck color",
+                () => t.RailLayer.NodePuckColor, v => t.RailLayer.NodePuckColor = v,
+                description: "Colour (alpha < 1 = translucent) of the rail node pucks.");
+            TuningRegistry.RegisterColor("rail.puckHoverColor", "Rail", "Node puck hover color",
+                () => t.RailLayer.NodePuckHoverColor, v => t.RailLayer.NodePuckHoverColor = v,
+                description: "Colour of the puck under the cursor (the node you'd pick / insert by).");
             TuningRegistry.RegisterFloat("rail.ballastHeight", "Rail", "Ballast height (m)",
                 () => t.RailLayer.BallastHeight, v => { t.RailLayer.BallastHeight = v; t.RebuildRail(); }, 0f, 1.5f,
                 description: "Height of the raised gravel bed the ties sit on. 0 = no ballast.");
@@ -409,6 +424,9 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("plan.clear", "Rail plan", "Clear plan",
                 () => t.ClearPlan(),
                 description: "Delete the entire survey plan (all nodes and edges).");
+            TuningRegistry.RegisterAction("plan.buildRail", "Rail plan", "Build rail on centreline",
+                () => t.PromotePlanToRail(),
+                description: "Build real rail track on the plan centreline. Only works when the ENTIRE plan is buildable (no segment over the max grade) — grade the red sections first. The plan is left in place.");
             TuningRegistry.RegisterBool("plan.analyze", "Rail plan", "Analyze (mark corridor)",
                 () => t.PlanLayer.ShowAnalysis, v => { t.PlanLayer.ShowAnalysis = v; t.RebuildPlan(); },
                 description: "Mark the corridor by what each section needs vs a grade-limited bed. Colour-blind-safe: at-grade=solid plan line, cut=dashed, fill=double-dashed; bridge=cyan, tunnel=purple, over-grade=red. Off = plain survey.");

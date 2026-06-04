@@ -375,9 +375,12 @@ namespace NetworkDesigner.Tuning
 
         public static string ColorToHex(Color c)
         {
-            // Always opaque hex for now; tuning UI doesn't need alpha yet.
+            // 6-digit when opaque, 8-digit (#RRGGBBAA) when translucent so the tuning
+            // UI can round-trip alpha (water, node pucks, …). HexToColor parses both.
             Color32 c32 = c;
-            return $"#{c32.r:X2}{c32.g:X2}{c32.b:X2}";
+            return c32.a == 255
+                ? $"#{c32.r:X2}{c32.g:X2}{c32.b:X2}"
+                : $"#{c32.r:X2}{c32.g:X2}{c32.b:X2}{c32.a:X2}";
         }
 
         public static Color HexToColor(string hex)

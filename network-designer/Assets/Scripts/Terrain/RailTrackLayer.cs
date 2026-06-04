@@ -129,6 +129,18 @@ namespace NetworkDesigner.Terrain
                  "stranded stretch is obvious.")]
         public bool HighlightDisconnected = true;
 
+        [Tooltip("Show a translucent puck at each rail node while editing rail, so nodes " +
+                 "are visible and the one under the cursor highlights.")]
+        public bool ShowNodePucks = true;
+        [Tooltip("Radius (m) of the node pucks.")]
+        public float NodePuckSize = 1.6f;
+        [Tooltip("Height (m) of the 3D node pucks (the short cylinder's thickness).")]
+        public float NodePuckHeight = 0.6f;
+        [Tooltip("Node puck colour (alpha < 1 = translucent).")]
+        public Color NodePuckColor = new Color(0.3f, 0.7f, 1f, 0.55f);
+        [Tooltip("Colour of the puck under the cursor (the node you'd pick/insert by).")]
+        public Color NodePuckHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);
+
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
         GameObject _root, _railObj, _tieObj, _ballastObj, _structObj;
@@ -162,6 +174,19 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _nv = new List<Vector3>();
         readonly List<int> _ni = new List<int>();
 
+        // Translucent 3D vertex pucks (short lit cylinders) shown at each node while
+        // editing; the one under the cursor highlights. Two submeshes (base / hover)
+        // so base + hover share one mesh with two lit materials.
+        GameObject _puckGo;
+        MeshFilter _puckMf;
+        MeshRenderer _puckMr;
+        Mesh _puckMesh;
+        Material _puckMat, _puckMatHover;
+        readonly List<Vector3> _puckV = new List<Vector3>();
+        readonly List<Vector3> _puckN = new List<Vector3>();
+        readonly List<int> _puckT0 = new List<int>();   // submesh 0: base pucks
+        readonly List<int> _puckT1 = new List<int>();   // submesh 1: hovered puck
+
         // Placement preview (ghost puck + dashed pending centreline + rail edges).
         GameObject _pvGo;
         MeshFilter _pvMf;
@@ -193,19 +218,22 @@ namespace NetworkDesigner.Terrain
         {
             Vector2 p = new Vector2(hit.x, hit.z);
 
-            // First click of a chain: resume from an existing node, or branch off an
-            // existing track mid-span (split it into a junction), else drop a fresh
-            // anchor. This is how you start a turnout off an existing line.
+            // First click of a chain: resume from an existing node (arm a chain off it),
+            // or — clicking directly ON an existing edge — insert a node there and STOP
+            // (chop the segment; the new puck can then be clicked to branch). Else drop
+            // a fresh anchor to start a new line.
             if (_chainTail < 0)
             {
                 int near = Graph.NearestNode(p, NodePickRadius);
-                if (near >= 0) _chainTail = near;
-                else if (Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _))
+                if (near >= 0) { _chainTail = near; _cornerPending = false; return; }
+                if (Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _))
                 {
-                    _chainTail = Graph.SplitEdge(ei, tt);   // branch off existing track
-                    Rebuild(field);                          // split changed the geometry
+                    Graph.SplitEdge(ei, tt);   // chop the edge — insert a node, don't arm a chain
+                    _cornerPending = false;
+                    Rebuild(field);            // split changed the geometry
+                    return;
                 }
-                else _chainTail = Graph.AddNode(p);
+                _chainTail = Graph.AddNode(p);
                 _cornerPending = false;
                 return;
             }
@@ -454,6 +482,50 @@ namespace NetworkDesigner.Terrain
             BuildNetworkOverlay(field);
         }
 
+        // Append every node/edge of `src` into this track (preserving curves), at the
+        // given speed limit, then rebuild. Used to promote a finished survey plan to
+        // real rail on its centreline. Plan nodes that sit on an existing rail node
+        // (within WeldRadius) reuse it, so a plan that started on a rail end joins the
+        // network instead of forming a disconnected stub. Returns the edges added.
+        public int AppendGraph(LineGraph src, float speedLimit, TerrainField field)
+        {
+            if (src == null || src.Edges.Count == 0) return 0;
+            const float weldR = 1.5f;
+            float weldSq = weldR * weldR;
+            float spd = speedLimit > 0f ? speedLimit : SpeedLimitKmh;
+            // Map each src node to a graph node index, reusing a coincident existing one.
+            int[] map = new int[src.Nodes.Count];
+            for (int i = 0; i < src.Nodes.Count; i++)
+            {
+                Vector2 p = src.Nodes[i];
+                int reuse = -1;
+                for (int j = 0; j < Graph.Nodes.Count; j++)
+                    if ((Graph.Nodes[j] - p).sqrMagnitude <= weldSq) { reuse = j; break; }
+                map[i] = reuse >= 0 ? reuse : Graph.AddNode(p);
+            }
+            int added = 0;
+            foreach (LineEdge e in src.Edges)
+            {
+                int a = map[e.A], b = map[e.B];
+                if (a == b) continue;
+                bool dup = false;
+                foreach (LineEdge x in Graph.Edges)
+                    if ((x.A == a && x.B == b) || (x.A == b && x.B == a)) { dup = true; break; }
+                if (dup) continue;
+                Graph.Edges.Add(new LineEdge(a, b)
+                {
+                    HasCurve = e.HasCurve,
+                    ControlA = e.ControlA,
+                    ControlB = e.ControlB,
+                    SpeedLimit = spd,
+                });
+                added++;
+            }
+            _chainTail = -1; // don't chain the next interactive click off the appended end
+            Rebuild(field);
+            return added;
+        }
+
         // Red overlay along any edge whose component isn't the largest (the "main"
         // network) — so a stranded stretch that isn't truly connected stands out.
         void BuildNetworkOverlay(TerrainField field)
@@ -507,6 +579,103 @@ namespace NetworkDesigner.Terrain
             _netMat = sh != null ? new Material(sh) { name = "RailNetMat", color = col }
                                  : NetworkDesigner.PipelineMaterials.CreateUnlitColor(col, "RailNetMat");
             _netMr.sharedMaterial = _netMat;
+        }
+
+        void EnsurePuckOverlay()
+        {
+            if (_puckMf != null) return;
+            _puckGo = new GameObject(RootName + "_Pucks") { hideFlags = HideFlags.DontSave };
+            _puckGo.transform.SetParent(_root != null ? _root.transform : null, worldPositionStays: false);
+            _puckMf = _puckGo.AddComponent<MeshFilter>();
+            _puckMr = _puckGo.AddComponent<MeshRenderer>();
+            _puckMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _puckMr.receiveShadows = false;
+            _puckMesh = new Mesh { name = "RailPuckMesh" };
+            _puckMf.sharedMesh = _puckMesh;
+            // Lit, translucent (so the 3D form shades like the road pucks). Two materials
+            // for the two submeshes (base / hover).
+            _puckMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(NodePuckColor, 0.2f, "RailPuckMat");
+            _puckMatHover = NetworkDesigner.PipelineMaterials.CreateLitTransparent(NodePuckHoverColor, 0.2f, "RailPuckHoverMat");
+            _puckMr.sharedMaterials = new[] { _puckMat, _puckMatHover };
+        }
+
+        // Rebuild the node pucks: a short 3D lit cylinder per node sitting on the
+        // terrain, the node nearest `hover` (within NodePickRadius) in the hover colour.
+        // Driven each frame by the editor while rail is the active line layer.
+        public void UpdateNodePucks(TerrainField field, Vector2 hover, bool show)
+        {
+            EnsurePuckOverlay();
+            bool on = show && ShowNodePucks;
+            _puckMr.enabled = on;
+            if (!on) return;
+            _puckV.Clear(); _puckN.Clear(); _puckT0.Clear(); _puckT1.Clear();
+            int hoverIdx = Graph != null ? Graph.NearestNode(hover, NodePickRadius) : -1;
+            float r = Mathf.Max(0.2f, NodePuckSize), h = Mathf.Max(0.05f, NodePuckHeight);
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                bool hot = i == hoverIdx;
+                EmitPuckCylinder(field, Graph.Nodes[i], hot ? r * 1.3f : r, hot ? h * 1.3f : h,
+                                 hot ? _puckT1 : _puckT0);
+            }
+            if (_puckMat != null) _puckMat.color = NodePuckColor;            // live colour tweaks
+            if (_puckMatHover != null) _puckMatHover.color = NodePuckHoverColor;
+            _puckMesh.Clear();
+            _puckMesh.indexFormat = _puckV.Count > 65000
+                ? UnityEngine.Rendering.IndexFormat.UInt32
+                : UnityEngine.Rendering.IndexFormat.UInt16;
+            _puckMesh.SetVertices(_puckV);
+            _puckMesh.SetNormals(_puckN);
+            _puckMesh.subMeshCount = 2;
+            _puckMesh.SetTriangles(_puckT0, 0);
+            _puckMesh.SetTriangles(_puckT1, 1);
+            _puckMesh.RecalculateBounds();
+        }
+
+        // A short, draped 3D cylinder (top cap + side wall) at an XZ centre, with manual
+        // outward normals (flat-shaded, low-poly). Rigid like the road pucks — both rings
+        // sit at the centre's ground height, top raised by `height`. Tris go into `tris`.
+        void EmitPuckCylinder(TerrainField field, Vector2 c, float radius, float height, List<int> tris)
+        {
+            const int N = 16; const float lift = 0.05f;
+            float baseY = (field != null ? field.SampleHeight(c.x, c.y) : 0f) + lift;
+            float topY = baseY + height;
+
+            // Top cap (normal up): fan centre + rim.
+            int capC = _puckV.Count;
+            _puckV.Add(new Vector3(c.x, topY, c.y)); _puckN.Add(Vector3.up);
+            int capRim = _puckV.Count;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                _puckV.Add(new Vector3(c.x + Mathf.Cos(a) * radius, topY, c.y + Mathf.Sin(a) * radius));
+                _puckN.Add(Vector3.up);
+            }
+            // Wound so the front face (and the +Y normal) point UP, visible from above.
+            for (int i = 0; i < N; i++) { tris.Add(capC); tris.Add(capRim + i + 1); tris.Add(capRim + i); }
+
+            // Side wall (radial normals): a top ring and a bottom ring.
+            int wTop = _puckV.Count;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                float nx = Mathf.Cos(a), nz = Mathf.Sin(a);
+                _puckV.Add(new Vector3(c.x + nx * radius, topY, c.y + nz * radius));
+                _puckN.Add(new Vector3(nx, 0f, nz));
+            }
+            int wBot = _puckV.Count;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                float nx = Mathf.Cos(a), nz = Mathf.Sin(a);
+                _puckV.Add(new Vector3(c.x + nx * radius, baseY, c.y + nz * radius));
+                _puckN.Add(new Vector3(nx, 0f, nz));
+            }
+            for (int i = 0; i < N; i++)
+            {
+                int ti = wTop + i, tj = wTop + i + 1, bi = wBot + i, bj = wBot + i + 1;
+                tris.Add(bi); tris.Add(ti); tris.Add(tj);   // outward-wound
+                tris.Add(bi); tris.Add(tj); tris.Add(bj);
+            }
         }
 
         static void Apply(Mesh m, List<Vector3> v, List<int> t)
