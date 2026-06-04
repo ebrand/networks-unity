@@ -409,6 +409,21 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("plan.clear", "Rail plan", "Clear plan",
                 () => t.ClearPlan(),
                 description: "Delete the entire survey plan (all nodes and edges).");
+            TuningRegistry.RegisterBool("plan.analyze", "Rail plan", "Analyze (colour corridor)",
+                () => t.PlanLayer.ShowAnalysis, v => { t.PlanLayer.ShowAnalysis = v; t.RebuildPlan(); },
+                description: "Colour the corridor by what each section needs vs a grade-limited bed: green=at-grade, orange=cut, tan=fill, cyan=bridge, purple=tunnel, red=over-grade. Off = plain yellow survey.");
+            TuningRegistry.RegisterFloat("plan.maxGrade", "Rail plan", "Analysis max grade (deg)",
+                () => t.PlanLayer.MaxGradeDeg, v => { t.PlanLayer.MaxGradeDeg = v; t.RebuildPlan(); }, 0.5f, 15f,
+                description: "An edge whose endpoint-to-endpoint grade exceeds this is flagged OVER-GRADE (red) — can't connect at grade; needs a reroute/switchback. 5 deg ~ 8.7%.");
+            TuningRegistry.RegisterFloat("plan.atGradeBand", "Rail plan", "At-grade band (m)",
+                () => t.PlanLayer.AtGradeBand, v => { t.PlanLayer.AtGradeBand = v; t.RebuildPlan(); }, 0f, 5f,
+                description: "Cut/fill within this much of the graded bed reads as buildable at-grade (green).");
+            TuningRegistry.RegisterFloat("plan.bridgeDepth", "Rail plan", "Bridge fill depth (m)",
+                () => t.PlanLayer.BridgeFillDepth, v => { t.PlanLayer.BridgeFillDepth = v; t.RebuildPlan(); }, 1f, 40f,
+                description: "Fill deeper than this is flagged as needing a bridge (cyan) rather than an embankment.");
+            TuningRegistry.RegisterFloat("plan.tunnelDepth", "Rail plan", "Tunnel cut depth (m)",
+                () => t.PlanLayer.TunnelCutDepth, v => { t.PlanLayer.TunnelCutDepth = v; t.RebuildPlan(); }, 1f, 40f,
+                description: "Cut deeper than this is flagged as needing a tunnel (purple) rather than an open cut.");
 
             // --- Brush cursor ---
             TuningRegistry.RegisterBool("terrain.showCursor", "Brush cursor", "Show ring",

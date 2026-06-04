@@ -725,7 +725,7 @@ namespace NetworkDesigner.Terrain
             {
                 bool rail = _lineActive is RailTrackLayer;
                 bool plan = _lineActive is RailPlanLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : (plan ? 150f : 104f)), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : (plan ? 210f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -734,10 +734,20 @@ namespace NetworkDesigner.Terrain
                     GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
                 if (_lineActive is RailPlanLayer pl)
                 {
-                    GUILayout.Label($"Survey plan — unconstrained alignment\ndraped on the terrain (no grade limit).");
                     GUILayout.Label($"Corridor {pl.CorridorWidth:0} m · {pl.Tracks} track"
-                        + (pl.Tracks >= 2 ? $" (gap {pl.TrackGap:0} m)" : ""));
-                    GUILayout.Label("Snaps to the rail end to start. Analyzer\ncomes next (Phase 2).");
+                        + (pl.Tracks >= 2 ? $" (gap {pl.TrackGap:0} m)" : "") + " · snaps to rail end");
+                    if (!pl.ShowAnalysis)
+                        GUILayout.Label("Analysis off (plain survey). Toggle\n'plan.analyze' to colour the corridor.");
+                    else if (pl.RouteLength < 1f)
+                        GUILayout.Label("Draw a route to analyze it.");
+                    else
+                    {
+                        float[] L = pl.ClassLen; float tot = Mathf.Max(1f, pl.RouteLength);
+                        GUILayout.Label($"Route {pl.RouteLength:0} m  ·  {100f * L[0] / tot:0}% at-grade");
+                        GUILayout.Label($"cut {L[1]:0} m · fill {L[2]:0} m");
+                        GUILayout.Label($"bridge {L[3]:0} m · tunnel {L[4]:0} m");
+                        if (L[5] > 0.5f) GUILayout.Label($"OVER-GRADE {L[5]:0} m — needs reroute");
+                    }
                 }
                 if (_lineActive is RailTrackLayer rt)
                 {

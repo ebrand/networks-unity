@@ -46,6 +46,40 @@ namespace NetworkDesigner.Terrain
         public float EndSnapRadius = 8f;
         public Color PlanColor = new Color(1f, 0.92f, 0.2f, 0.85f);
 
+        [Header("Analysis (Phase 2)")]
+        [Tooltip("Colour the corridor by what each section needs to build a grade-" +
+                 "limited rail: at-grade / cut / fill / bridge / tunnel / over-grade. " +
+                 "Off = plain yellow survey lines.")]
+        public bool ShowAnalysis = true;
+        [Tooltip("Max grade (deg) for the analysis. An edge whose endpoint-to-endpoint " +
+                 "grade exceeds this is flagged OVER-GRADE (red) — can't be connected " +
+                 "at grade; needs a reroute/switchback. 5 deg ~ 8.7%.")]
+        public float MaxGradeDeg = 5f;
+        [Tooltip("Cut/fill within this band (m) of the graded bed reads as buildable " +
+                 "at-grade (green).")]
+        public float AtGradeBand = 0.6f;
+        [Tooltip("Fill deeper than this (m) is flagged as needing a BRIDGE (cyan) " +
+                 "rather than an embankment.")]
+        public float BridgeFillDepth = 6f;
+        [Tooltip("Cut deeper than this (m) is flagged as needing a TUNNEL (purple) " +
+                 "rather than an open cut.")]
+        public float TunnelCutDepth = 8f;
+
+        // Section classes (also index the per-class length tallies below).
+        const int CLS_ATGRADE = 0, CLS_CUT = 1, CLS_FILL = 2, CLS_BRIDGE = 3, CLS_TUNNEL = 4, CLS_OVER = 5;
+        static readonly Color[] ClassColors =
+        {
+            new Color(0.45f, 0.9f, 0.35f, 0.95f),  // at-grade  (green)
+            new Color(1f, 0.6f, 0.15f, 0.95f),     // cut       (orange)
+            new Color(0.82f, 0.72f, 0.45f, 0.95f), // fill      (tan)
+            new Color(0.3f, 0.8f, 0.95f, 0.95f),   // bridge    (cyan)
+            new Color(0.72f, 0.45f, 0.95f, 0.95f), // tunnel    (purple)
+            new Color(1f, 0.25f, 0.2f, 0.97f),     // over-grade(red)
+        };
+        // Analysis summary (metres per class + total route length), read by the palette.
+        [System.NonSerialized] public float RouteLength;
+        [System.NonSerialized] public readonly float[] ClassLen = new float[6];
+
         [System.NonSerialized] public bool CurveModifier; // Shift held this frame
         // Extension-guide heading seeded from the rail this plan starts on, used
         // when the chain tail has no plan edge of its own yet (set by the host).
@@ -62,6 +96,7 @@ namespace NetworkDesigner.Terrain
         GameObject _go; MeshFilter _mf; MeshRenderer _mr; Mesh _mesh; Material _mat;
         readonly List<Vector3> _verts = new List<Vector3>();
         readonly List<int> _idx = new List<int>();
+        readonly List<Color32> _cols = new List<Color32>(); // per-vertex analysis colour
         GameObject _pvGo; MeshFilter _pvMf; MeshRenderer _pvMr; Mesh _pvMesh; Material _pvMat;
         readonly List<Vector3> _pvVerts = new List<Vector3>();
         readonly List<int> _pvIdx = new List<int>();
@@ -241,37 +276,121 @@ namespace NetworkDesigner.Terrain
         public void Rebuild(TerrainField field)
         {
             EnsureRender();
-            _verts.Clear(); _idx.Clear();
+            _verts.Clear(); _idx.Clear(); _cols.Clear();
+            RouteLength = 0f;
+            for (int i = 0; i < ClassLen.Length; i++) ClassLen[i] = 0f;
             if (field != null)
                 foreach (LineEdge e in Graph.Edges)
-                    EmitEdge(field, e, _verts, _idx);
+                    EmitEdge(field, e);
             _mesh.Clear();
             _mesh.SetVertices(_verts);
+            _mesh.SetColors(_cols);
             _mesh.SetIndices(_idx, MeshTopology.Lines, 0);
             _mesh.RecalculateBounds();
-            if (_mat != null) _mat.color = PlanColor;
         }
 
-        // One planned edge: the track centreline(s) (solid) + the two corridor edges
-        // (dashed), all draped onto the terrain.
-        void EmitEdge(TerrainField field, LineEdge e, List<Vector3> verts, List<int> idx)
+        // One planned edge: the track centreline(s) + the two dashed corridor edges,
+        // draped onto the terrain. With analysis on, the track line(s) are coloured by
+        // section (cut/fill/bridge/tunnel/over-grade); else everything is the plan colour.
+        void EmitEdge(TerrainField field, LineEdge e)
         {
             GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
-            if (Tracks >= 2)
-            {
-                EmitOffsetLine(field, q0, q1, q2, q3, TrackGap * 0.5f, false, verts, idx);
-                EmitOffsetLine(field, q0, q1, q2, q3, -TrackGap * 0.5f, false, verts, idx);
-            }
-            else EmitOffsetLine(field, q0, q1, q2, q3, 0f, false, verts, idx);
             float hw = Mathf.Max(0.5f, CorridorWidth * 0.5f);
-            EmitOffsetLine(field, q0, q1, q2, q3, hw, true, verts, idx);
-            EmitOffsetLine(field, q0, q1, q2, q3, -hw, true, verts, idx);
+            if (ShowAnalysis)
+            {
+                float L = ApproxArcLength(q0, q1, q2, q3);
+                float eA = field.SampleHeight(q0.x, q0.y), eB = field.SampleHeight(q3.x, q3.y);
+                float maxPct = Mathf.Tan(Mathf.Max(0.1f, MaxGradeDeg) * Mathf.Deg2Rad) * 100f;
+                bool overGrade = L > 1e-3f && Mathf.Abs(eB - eA) / L * 100f > maxPct;
+                if (Tracks >= 2)
+                {
+                    EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, TrackGap * 0.5f, true);
+                    EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, -TrackGap * 0.5f, false);
+                }
+                else EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, 0f, true);
+            }
+            else
+            {
+                Color32 c = PlanColor;
+                if (Tracks >= 2)
+                {
+                    EmitOffsetLine(field, q0, q1, q2, q3, TrackGap * 0.5f, false, c);
+                    EmitOffsetLine(field, q0, q1, q2, q3, -TrackGap * 0.5f, false, c);
+                }
+                else EmitOffsetLine(field, q0, q1, q2, q3, 0f, false, c);
+            }
+            // Corridor edges always stay the plain plan colour (dashed).
+            EmitOffsetLine(field, q0, q1, q2, q3, hw, true, PlanColor);
+            EmitOffsetLine(field, q0, q1, q2, q3, -hw, true, PlanColor);
+        }
+
+        // Approx arc length of a cubic bezier (chord averaged with the control polygon).
+        static float ApproxArcLength(Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3)
+        {
+            float chord = Vector2.Distance(q0, q3);
+            float poly = Vector2.Distance(q0, q1) + Vector2.Distance(q1, q2) + Vector2.Distance(q2, q3);
+            return Mathf.Max(chord, (chord + poly) * 0.5f);
+        }
+
+        // terrain-minus-bed delta (+ = terrain above the bed = cut; - = fill) -> class.
+        int Classify(bool overGrade, float delta)
+        {
+            if (overGrade) return CLS_OVER;
+            if (Mathf.Abs(delta) <= Mathf.Max(0f, AtGradeBand)) return CLS_ATGRADE;
+            if (delta > 0f) return delta > TunnelCutDepth ? CLS_TUNNEL : CLS_CUT;
+            return -delta > BridgeFillDepth ? CLS_BRIDGE : CLS_FILL;
+        }
+
+        // A track line offset `lateral` from the centreline, coloured per section by
+        // how the terrain deviates from the straight grade-limited bed (eA -> eB).
+        // accumulate = tally section lengths into the summary (once per edge).
+        void EmitAnalyzedTrack(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
+                               float eA, float eB, bool overGrade, float lateral, bool accumulate)
+        {
+            float chord = Vector2.Distance(q0, q3);
+            int n = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(chord, 1f) / Mathf.Max(0.5f, SampleStep)), 2, 4000);
+            Vector3 prevW = default; Vector2 prevXz = default; bool havePrev = false;
+            for (int i = 0; i <= n; i++)
+            {
+                float t = i / (float)n;
+                Vector2 c = LineGraph.Bezier(q0, q1, q2, q3, t);
+                Vector2 pt = c;
+                if (Mathf.Abs(lateral) > 1e-4f)
+                {
+                    Vector2 tan = LineGraph.BezierTangent(q0, q1, q2, q3, t);
+                    if (tan.sqrMagnitude > 1e-6f) pt = c + new Vector2(-tan.y, tan.x).normalized * lateral;
+                }
+                float ground = field.SampleHeight(pt.x, pt.y);
+                float bed = Mathf.Lerp(eA, eB, t);
+                int cls = Classify(overGrade, ground - bed);
+                Color32 col = ClassColors[cls];
+                Vector3 w = new Vector3(pt.x, ground + Lift, pt.y);
+                if (havePrev)
+                {
+                    int s = _verts.Count;
+                    _verts.Add(prevW); _verts.Add(w);
+                    _idx.Add(s); _idx.Add(s + 1);
+                    _cols.Add(col); _cols.Add(col);
+                    if (accumulate)
+                    {
+                        float segLen = Vector2.Distance(prevXz, pt);
+                        ClassLen[cls] += segLen;
+                        RouteLength += segLen;
+                    }
+                }
+                prevW = w; prevXz = pt; havePrev = true;
+            }
         }
 
         // Drape a polyline offset `lateral` metres to the side of the bezier onto the
-        // terrain. dashed = emit every other segment (corridor edges).
+        // terrain. dashed = emit every other segment (corridor edges). One uniform colour.
         void EmitOffsetLine(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
-                            float lateral, bool dashed, List<Vector3> verts, List<int> idx)
+                            float lateral, bool dashed, Color32 col)
+            => EmitOffsetLine(field, q0, q1, q2, q3, lateral, dashed, _verts, _idx, _cols, col);
+
+        void EmitOffsetLine(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
+                            float lateral, bool dashed, List<Vector3> verts, List<int> idx,
+                            List<Color32> cols = null, Color32 col = default)
         {
             float chord = Vector2.Distance(q0, q3);
             int n = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(chord, 1f) / Mathf.Max(0.5f, SampleStep)), 2, 4000);
@@ -294,6 +413,7 @@ namespace NetworkDesigner.Terrain
                     int s = verts.Count;
                     verts.Add(prev); verts.Add(w);
                     idx.Add(s); idx.Add(s + 1);
+                    if (cols != null) { cols.Add(col); cols.Add(col); }
                 }
                 prev = w; havePrev = true;
             }
@@ -309,7 +429,9 @@ namespace NetworkDesigner.Terrain
             _mr.receiveShadows = false;
             _mesh = new Mesh { name = "RailPlanMesh" };
             _mf.sharedMesh = _mesh;
-            _mat = MakeLineMat("RailPlanMat");
+            // Vertex-colour overlay so each section can be tinted by its analysis class.
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            _mat = sh != null ? new Material(sh) { name = "RailPlanMat" } : MakeLineMat("RailPlanMat");
             _mr.sharedMaterial = _mat;
         }
 
