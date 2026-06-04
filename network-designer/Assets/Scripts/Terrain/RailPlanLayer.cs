@@ -47,16 +47,17 @@ namespace NetworkDesigner.Terrain
         public Color PlanColor = new Color(1f, 0.92f, 0.2f, 0.85f);
 
         [Header("Analysis (Phase 2)")]
-        [Tooltip("Colour the corridor by what each section needs to build a grade-" +
-                 "limited rail: at-grade / cut / fill / bridge / tunnel / over-grade. " +
-                 "Off = plain yellow survey lines.")]
+        [Tooltip("Mark the corridor by what each section needs to build a grade-" +
+                 "limited rail. Colour-blind-safe encoding: at-grade = solid plan line, " +
+                 "cut = dashed, fill = double-dashed; bridge = cyan, tunnel = purple, " +
+                 "over-grade = red. Off = plain survey lines.")]
         public bool ShowAnalysis = true;
         [Tooltip("Max grade (deg) for the analysis. An edge whose endpoint-to-endpoint " +
                  "grade exceeds this is flagged OVER-GRADE (red) — can't be connected " +
                  "at grade; needs a reroute/switchback. 5 deg ~ 8.7%.")]
         public float MaxGradeDeg = 5f;
         [Tooltip("Cut/fill within this band (m) of the graded bed reads as buildable " +
-                 "at-grade (green).")]
+                 "at-grade (solid plan line).")]
         public float AtGradeBand = 0.6f;
         [Tooltip("Fill deeper than this (m) is flagged as needing a BRIDGE (cyan) " +
                  "rather than an embankment.")]
@@ -64,6 +65,13 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Cut deeper than this (m) is flagged as needing a TUNNEL (purple) " +
                  "rather than an open cut.")]
         public float TunnelCutDepth = 8f;
+        [Tooltip("Float a grade %% label over each plan segment (sampled from the CURRENT " +
+                 "terrain — reads the natural grade before earthworks, the achieved grade " +
+                 "after). Red = over the max grade.")]
+        public bool ShowGradeLabels = true;
+
+        // Per-edge grade readout (current terrain), for the floating labels.
+        public struct EdgeGrade { public Vector3 Mid; public float GradePct; public bool Over; }
 
         // Section classes (also index the per-class length tallies below).
         const int CLS_ATGRADE = 0, CLS_CUT = 1, CLS_FILL = 2, CLS_BRIDGE = 3, CLS_TUNNEL = 4, CLS_OVER = 5;
@@ -244,6 +252,151 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        // Snap onto the nearest plan edge within maxDist + its heading there — for the
+        // terrain slope tool to ride the planned alignment. False if none in range.
+        // Per-edge grade (endpoint-to-endpoint, sampled from the CURRENT terrain) with a
+        // midpoint world position to anchor a floating label. Over = exceeds MaxGradeDeg.
+        public void CollectEdgeGrades(TerrainField field, List<EdgeGrade> outList)
+        {
+            outList.Clear();
+            if (Graph == null || field == null) return;
+            float maxPct = Mathf.Tan(Mathf.Max(0.1f, MaxGradeDeg) * Mathf.Deg2Rad) * 100f;
+            foreach (LineEdge e in Graph.Edges)
+            {
+                GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
+                float L = ApproxArcLength(q0, q1, q2, q3);
+                if (L < 1e-3f) continue;
+                float eA = field.SampleHeight(q0.x, q0.y), eB = field.SampleHeight(q3.x, q3.y);
+                float pct = (eB - eA) / L * 100f;
+                Vector2 mid = LineGraph.Bezier(q0, q1, q2, q3, 0.5f);
+                float my = field.SampleHeight(mid.x, mid.y) + Lift + 1.5f;
+                outList.Add(new EdgeGrade
+                {
+                    Mid = new Vector3(mid.x, my, mid.y),
+                    GradePct = pct,
+                    Over = Mathf.Abs(pct) > maxPct,
+                });
+            }
+        }
+
+        public bool TryNearestOnPlan(Vector2 p, float maxDist, out Vector2 onPlan, out Vector2 dir)
+        {
+            onPlan = p; dir = Vector2.zero;
+            if (Graph == null || !Graph.NearestPointOnEdge(p, maxDist, out int ei, out float t, out Vector2 pt))
+                return false;
+            GetBezier(Graph.Edges[ei], out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
+            Vector2 tan = LineGraph.BezierTangent(q0, q1, q2, q3, t);
+            if (tan.sqrMagnitude < 1e-6f) tan = q3 - q0;
+            if (tan.sqrMagnitude < 1e-6f) return false;
+            onPlan = pt; dir = tan.normalized;
+            return true;
+        }
+
+        // The plan centreline (sampled XZ) between the exact points a and b project to
+        // on the plan, walking the planned curves between them. Handles A and B mid-edge
+        // on different edges: the first/last edges are clipped to the click parameters
+        // and the span between is filled with whole edges. A->B order preserved. False
+        // if either end isn't near the plan, or the two edges aren't connected.
+        public bool TryPathBetween(Vector2 a, Vector2 b, float maxDist, out List<Vector2> path)
+        {
+            path = null;
+            if (Graph == null) return false;
+            if (!Graph.NearestPointOnEdge(a, maxDist, out int eia, out float ta, out _)) return false;
+            if (!Graph.NearestPointOnEdge(b, maxDist, out int eib, out float tb, out _)) return false;
+
+            // Same edge: sample directly between the two params.
+            if (eia == eib)
+            {
+                GetBezier(Graph.Edges[eia], out Vector2 s0, out Vector2 s1, out Vector2 s2, out Vector2 s3);
+                path = SampleEdgeRange(s0, s1, s2, s3, ta, tb);
+                return path != null && path.Count >= 2;
+            }
+
+            LineEdge ea = Graph.Edges[eia], eb = Graph.Edges[eib];
+            int[] exitNode = { ea.A, ea.B };   float[] exitParam = { 0f, 1f }; // A=param0, B=param1
+            int[] entryNode = { eb.A, eb.B };  float[] entryParam = { 0f, 1f };
+
+            // Of the 4 ways to leave edge A and reach edge B, keep the fewest node hops.
+            List<int> bestNodes = null; int bestX = -1, bestN = -1, bestHops = int.MaxValue;
+            for (int xi = 0; xi < 2; xi++)
+                for (int ni = 0; ni < 2; ni++)
+                {
+                    List<int> np = BfsNodePath(exitNode[xi], entryNode[ni]);
+                    if (np != null && np.Count < bestHops) { bestHops = np.Count; bestNodes = np; bestX = xi; bestN = ni; }
+                }
+            if (bestNodes == null) return false;
+
+            var pts = new List<Vector2>();
+            // Partial of edge A: from the click param to the chosen exit node.
+            GetBezier(ea, out Vector2 a0, out Vector2 a1, out Vector2 a2, out Vector2 a3);
+            AppendRange(pts, SampleEdgeRange(a0, a1, a2, a3, ta, exitParam[bestX]));
+            // Whole intermediate edges from exit node to entry node.
+            for (int k = 0; k < bestNodes.Count - 1; k++)
+            {
+                LineEdge e = FindEdge(bestNodes[k], bestNodes[k + 1]);
+                if (e == null) return false;
+                GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
+                bool fwd = e.A == bestNodes[k];
+                AppendRange(pts, SampleEdgeRange(q0, q1, q2, q3, fwd ? 0f : 1f, fwd ? 1f : 0f));
+            }
+            // Partial of edge B: from the chosen entry node to the click param.
+            GetBezier(eb, out Vector2 b0, out Vector2 b1, out Vector2 b2, out Vector2 b3);
+            AppendRange(pts, SampleEdgeRange(b0, b1, b2, b3, entryParam[bestN], tb));
+
+            path = Dedup(pts);
+            return path.Count >= 2;
+        }
+
+        static void AppendRange(List<Vector2> dst, List<Vector2> src)
+        {
+            if (src != null) dst.AddRange(src);
+        }
+
+        // Drop consecutive near-duplicate points (shared junctions appear twice).
+        static List<Vector2> Dedup(List<Vector2> pts)
+        {
+            var outp = new List<Vector2>(pts.Count);
+            for (int i = 0; i < pts.Count; i++)
+                if (i == 0 || (pts[i] - outp[outp.Count - 1]).sqrMagnitude > 1e-6f) outp.Add(pts[i]);
+            return outp;
+        }
+
+        // Sample one bezier edge between parameters t0..t1 (A->B order preserved), XZ.
+        List<Vector2> SampleEdgeRange(Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3, float t0, float t1)
+        {
+            if (Mathf.Abs(t1 - t0) < 1e-4f) return null;
+            float span = Vector2.Distance(q0, q3) * Mathf.Abs(t1 - t0);
+            int steps = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(span, 1f) / Mathf.Max(0.5f, SampleStep)), 1, 4000);
+            var pts = new List<Vector2>(steps + 1);
+            for (int s = 0; s <= steps; s++)
+                pts.Add(LineGraph.Bezier(q0, q1, q2, q3, Mathf.Lerp(t0, t1, s / (float)steps)));
+            return pts;
+        }
+
+        // Breadth-first node path (shortest hop count) between two plan nodes.
+        List<int> BfsNodePath(int start, int goal)
+        {
+            var prev = new Dictionary<int, int> { { start, -1 } };
+            var q = new Queue<int>();
+            q.Enqueue(start);
+            while (q.Count > 0)
+            {
+                int cur = q.Dequeue();
+                if (cur == goal) break;
+                foreach (LineEdge e in Graph.Edges)
+                {
+                    int nxt = e.A == cur ? e.B : (e.B == cur ? e.A : -1);
+                    if (nxt < 0 || prev.ContainsKey(nxt)) continue;
+                    prev[nxt] = cur; q.Enqueue(nxt);
+                }
+            }
+            if (!prev.ContainsKey(goal)) return null;
+            var rev = new List<int>();
+            for (int n = goal; n != -1; n = prev[n]) rev.Add(n);
+            rev.Reverse();
+            return rev;
+        }
+
         public void RemoveLastNode(TerrainField field)
         {
             if (_cornerPending) { _cornerPending = false; return; }
@@ -332,6 +485,22 @@ namespace NetworkDesigner.Terrain
             return Mathf.Max(chord, (chord + poly) * 0.5f);
         }
 
+        // Colour-blind-friendly encoding: the three grade-relative classes share the
+        // plan colour and are told apart by DASH PATTERN (at-grade solid, cut dashed,
+        // fill double-dashed); bridge/tunnel/over-grade keep their distinct colours
+        // (cyan/purple/red), drawn solid.
+        Color32 ClassLineColor(int cls)
+            => (cls == CLS_ATGRADE || cls == CLS_CUT || cls == CLS_FILL) ? PlanColor : ClassColors[cls];
+
+        // Whether sample-segment #seg of a class is drawn — the gaps of its dash
+        // pattern are skipped. (Length tallies still count skipped segments.)
+        static bool ClassDrawsSeg(int cls, int seg)
+        {
+            if (cls == CLS_CUT) return (seg & 1) == 0;     // dashed:  ▪ ▪ ▪
+            if (cls == CLS_FILL) return (seg & 3) < 2;     // double-dashed:  ▪▪  ▪▪
+            return true;                                   // solid (at-grade + coloured classes)
+        }
+
         // terrain-minus-bed delta (+ = terrain above the bed = cut; - = fill) -> class.
         int Classify(bool overGrade, float delta)
         {
@@ -363,19 +532,22 @@ namespace NetworkDesigner.Terrain
                 float ground = field.SampleHeight(pt.x, pt.y);
                 float bed = Mathf.Lerp(eA, eB, t);
                 int cls = Classify(overGrade, ground - bed);
-                Color32 col = ClassColors[cls];
                 Vector3 w = new Vector3(pt.x, ground + Lift, pt.y);
                 if (havePrev)
                 {
-                    int s = _verts.Count;
-                    _verts.Add(prevW); _verts.Add(w);
-                    _idx.Add(s); _idx.Add(s + 1);
-                    _cols.Add(col); _cols.Add(col);
                     if (accumulate)
                     {
                         float segLen = Vector2.Distance(prevXz, pt);
                         ClassLen[cls] += segLen;
                         RouteLength += segLen;
+                    }
+                    if (ClassDrawsSeg(cls, i - 1))         // skip this dash's gap segments
+                    {
+                        Color32 col = ClassLineColor(cls);
+                        int s = _verts.Count;
+                        _verts.Add(prevW); _verts.Add(w);
+                        _idx.Add(s); _idx.Add(s + 1);
+                        _cols.Add(col); _cols.Add(col);
                     }
                 }
                 prevW = w; prevXz = pt; havePrev = true;

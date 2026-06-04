@@ -409,9 +409,12 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("plan.clear", "Rail plan", "Clear plan",
                 () => t.ClearPlan(),
                 description: "Delete the entire survey plan (all nodes and edges).");
-            TuningRegistry.RegisterBool("plan.analyze", "Rail plan", "Analyze (colour corridor)",
+            TuningRegistry.RegisterBool("plan.analyze", "Rail plan", "Analyze (mark corridor)",
                 () => t.PlanLayer.ShowAnalysis, v => { t.PlanLayer.ShowAnalysis = v; t.RebuildPlan(); },
-                description: "Colour the corridor by what each section needs vs a grade-limited bed: green=at-grade, orange=cut, tan=fill, cyan=bridge, purple=tunnel, red=over-grade. Off = plain yellow survey.");
+                description: "Mark the corridor by what each section needs vs a grade-limited bed. Colour-blind-safe: at-grade=solid plan line, cut=dashed, fill=double-dashed; bridge=cyan, tunnel=purple, over-grade=red. Off = plain survey.");
+            TuningRegistry.RegisterBool("plan.gradeLabels", "Rail plan", "Grade labels",
+                () => t.PlanLayer.ShowGradeLabels, v => t.PlanLayer.ShowGradeLabels = v,
+                description: "Float a grade-% label over each plan segment (current terrain) while editing the plan or slope-grading — reads the natural grade before earthworks, the achieved grade after. Red = over max grade.");
             TuningRegistry.RegisterFloat("plan.maxGrade", "Rail plan", "Analysis max grade (deg)",
                 () => t.PlanLayer.MaxGradeDeg, v => { t.PlanLayer.MaxGradeDeg = v; t.RebuildPlan(); }, 0.5f, 15f,
                 description: "An edge whose endpoint-to-endpoint grade exceeds this is flagged OVER-GRADE (red) — can't connect at grade; needs a reroute/switchback. 5 deg ~ 8.7%.");
@@ -430,6 +433,8 @@ namespace NetworkDesigner.Terrain
                 () => t.ShowBrushCursor, v => t.ShowBrushCursor = v);
             TuningRegistry.RegisterColor("terrain.cursorColor", "Brush cursor", "Color",
                 () => t.BrushCursorColor, v => t.BrushCursorColor = v);
+            TuningRegistry.RegisterColor("terrain.slopeFillColor", "Brush cursor", "Slope fill color",
+                () => t.SlopeFillColor, v => t.SlopeFillColor = v);
             TuningRegistry.RegisterBool("terrain.cursorDashed", "Brush cursor", "Dashed",
                 () => t.BrushCursorDashed, v => t.BrushCursorDashed = v);
             TuningRegistry.RegisterFloat("terrain.cursorDashLength", "Brush cursor", "Dash length (m)",

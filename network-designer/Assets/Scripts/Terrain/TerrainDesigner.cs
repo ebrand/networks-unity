@@ -115,6 +115,9 @@ namespace NetworkDesigner.Terrain
         [Header("Brush cursor (ring)")]
         public bool ShowBrushCursor = true;
         public Color BrushCursorColor = new Color(0.2f, 0.9f, 1f, 0.9f);
+        [Tooltip("Slope tool (5): translucent fill previewing the area that will be " +
+                 "graded (follows the plan centreline around curves when snapped).")]
+        public Color SlopeFillColor = new Color(0.3f, 0.95f, 0.35f, 0.28f);
         [Range(8, 128)] public int BrushCursorSegments = 48;
         [Tooltip("Metres the ring floats above the surface so it doesn't z-fight.")]
         public float BrushCursorLift = 0.15f;
@@ -225,6 +228,14 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _ring = new List<Vector3>();
         readonly List<Vector3> _cursorVerts = new List<Vector3>();
         readonly List<int> _cursorIdx = new List<int>();
+        // Slope tool: translucent filled ribbon previewing the area to be graded
+        // (follows the plan centreline around curves when snapped).
+        MeshFilter _slopeFillMf;
+        MeshRenderer _slopeFillMr;
+        Mesh _slopeFillMesh;
+        Material _slopeFillMat;
+        readonly List<Vector3> _fillVerts = new List<Vector3>();
+        readonly List<int> _fillIdx = new List<int>();
         MeshFilter _contourMf;
         MeshRenderer _contourMr;
         Mesh _contourMesh;
@@ -245,6 +256,8 @@ namespace NetworkDesigner.Terrain
         Vector3 _slopeEnd;        // this frame's end point (guide-snapped), world
         bool _slopeEndValid;
         float _slopeGradePct;     // live grade % for the readout
+        List<Vector2> _slopePath; // this frame's plan-centreline path A->end (null = straight)
+        readonly List<RailPlanLayer.EdgeGrade> _planGrades = new List<RailPlanLayer.EdgeGrade>();
         // Inverted so a 0/false deserialize = snapping ENABLED (preserves behavior
         // for an already-serialized scene); the tunable presents it as a positive
         // "snap to rail" toggle, default on.
@@ -506,9 +519,9 @@ namespace NetworkDesigner.Terrain
             if (Brush == BrushMode.Slope)
             {
                 if (_slopeArmed && _slopeEndValid) return _slopeEnd;   // after A: the snapped B
-                // Before A: preview where A will snap (rail end/edge), so the ring
-                // shows it ahead of the click.
-                if (TrySlopeRailSnapPoint(new Vector2(raw.x, raw.z), out Vector2 ap))
+                // Before A: preview where A will snap (plan centreline > rail end/edge),
+                // so the ring shows it ahead of the click.
+                if (TrySlopeSnap(new Vector2(raw.x, raw.z), out Vector2 ap, out _, out _))
                     return new Vector3(ap.x, raw.y, ap.y);
             }
             return raw;
@@ -524,6 +537,24 @@ namespace NetworkDesigner.Terrain
             if (SlopeDisableRailSnap || RailLayer == null) return false;
             if (RailLayer.TrySnapToTrackPoint(flat, out Vector2 sp)) { snapped = sp; return true; }
             if (RailLayer.TryTrackHeadingNear(flat, SlopeGuideDetectRadius, out _, out Vector2 onr)) { snapped = onr; return true; }
+            return false;
+        }
+
+        // Snap a slope endpoint onto the network for grading: the PLAN centreline
+        // first (ride the planned alignment), else rail. Reports the heading there and
+        // whether it landed on the plan (so the caller can size the brush to the corridor).
+        bool TrySlopeSnap(Vector2 flat, out Vector2 snapped, out Vector2 dir, out bool onPlan)
+        {
+            snapped = flat; dir = Vector2.zero; onPlan = false;
+            if (SlopeDisableRailSnap) return false;
+            if (PlanLayer != null && PlanLayer.TryNearestOnPlan(flat, SlopeGuideDetectRadius, out Vector2 pp, out Vector2 pd))
+            { snapped = pp; dir = pd; onPlan = true; return true; }
+            if (TrySlopeRailSnapPoint(flat, out Vector2 rp))
+            {
+                snapped = rp;
+                if (RailLayer != null) RailLayer.TryTrackHeadingNear(rp, SlopeGuideDetectRadius, out dir, out _);
+                return true;
+            }
             return false;
         }
 
@@ -721,11 +752,12 @@ namespace NetworkDesigner.Terrain
 
         void DrawPanels()
         {
+            DrawPlanGradeLabels();
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
                 bool plan = _lineActive is RailPlanLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : (plan ? 210f : 104f)), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : (plan ? 232f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -747,6 +779,7 @@ namespace NetworkDesigner.Terrain
                         GUILayout.Label($"cut {L[1]:0} m · fill {L[2]:0} m");
                         GUILayout.Label($"bridge {L[3]:0} m · tunnel {L[4]:0} m");
                         if (L[5] > 0.5f) GUILayout.Label($"OVER-GRADE {L[5]:0} m — needs reroute");
+                        GUILayout.Label("Key: solid=at-grade, dashed=cut,\ndbl-dash=fill · cyan/purple/red=brdg/tun/over");
                     }
                 }
                 if (_lineActive is RailTrackLayer rt)
@@ -809,6 +842,32 @@ namespace NetworkDesigner.Terrain
                 Vector2 size = GUI.skin.box.CalcSize(content);
                 GUI.Box(new Rect(m.x + 18f, m.y + 2f, size.x + 8f, size.y + 4f), content);
             }
+        }
+
+        // Float a grade-% label over each plan segment (current terrain), so you can read
+        // the natural grade before earthworks and the achieved grade after. Shown while
+        // editing the plan or using the slope tool. Red box = over the plan's max grade.
+        void DrawPlanGradeLabels()
+        {
+            if (PlanLayer == null || _field == null || _active != null || !PlanLayer.ShowGradeLabels) return;
+            if (!(Brush == BrushMode.Slope || _lineActive is RailPlanLayer)) return;
+            PlanLayer.CollectEdgeGrades(_field, _planGrades);
+            if (_planGrades.Count == 0) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            Color prevC = GUI.color;
+            foreach (var g in _planGrades)
+            {
+                Vector3 sp = cam.WorldToScreenPoint(g.Mid);
+                if (sp.z <= 0f) continue; // behind the camera
+                float mx = sp.x / s, my = (Screen.height - sp.y) / s;
+                var content = new GUIContent($"{Mathf.Abs(g.GradePct):0.0}%");
+                Vector2 size = GUI.skin.box.CalcSize(content);
+                GUI.color = g.Over ? new Color(1f, 0.45f, 0.4f, 1f) : Color.white;
+                GUI.Box(new Rect(mx - size.x * 0.5f, my - size.y * 0.5f, size.x + 6f, size.y + 2f), content);
+            }
+            GUI.color = prevC;
         }
 
         // True when the cursor is over the active layer's palette (so paint/erase
@@ -1185,32 +1244,54 @@ namespace NetworkDesigner.Terrain
             // network "straight" guide when near it) and the live grade — BEFORE the
             // cursor/corridor overlay draws so it reflects the snap.
             _slopeEndValid = false;
+            _slopePath = null;
             if (_slopeArmed && Brush == BrushMode.Slope && overTerrain)
             {
                 Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
                 Vector2 c2 = new Vector2(hit.point.x, hit.point.z);
-                // B snaps onto a rail end/edge (same as rail placement) first; else
-                // onto the "straight" guide line through A. (Both off when rail snap
-                // is disabled — _slopeHasGuide is already false then.)
-                if (!SlopeDisableRailSnap && RailLayer != null && RailLayer.TrySnapToTrackPoint(c2, out Vector2 bSnap))
+                // B snaps onto the plan centreline first (ride the planned alignment),
+                // then a rail end/edge (same as rail placement), else onto the
+                // "straight" guide line through A. (All off when rail snap is disabled —
+                // _slopeHasGuide is already false then.)
+                bool bOnPlan = false;
+                if (!SlopeDisableRailSnap && PlanLayer != null
+                    && PlanLayer.TryNearestOnPlan(c2, SlopeGuideDetectRadius, out Vector2 pSnap, out _))
+                { c2 = pSnap; bOnPlan = true; }
+                else if (!SlopeDisableRailSnap && RailLayer != null && RailLayer.TrySnapToTrackPoint(c2, out Vector2 bSnap))
                     c2 = bSnap;
                 else if (_slopeHasGuide)
                 {
                     Vector2 proj = a2 + _slopeGuideDir * Vector2.Dot(c2 - a2, _slopeGuideDir);
                     if ((c2 - proj).sqrMagnitude <= SlopeGuideSnapRadius * SlopeGuideSnapRadius) c2 = proj;
                 }
+                // On the plan: keep the brush sized to the corridor as the cursor moves.
+                if (bOnPlan && PlanLayer != null)
+                    BrushRadius = Mathf.Clamp(PlanLayer.CorridorWidth * 0.5f, 0.5f, MaxBrushRadius);
                 _slopeEnd = new Vector3(c2.x, hit.point.y, c2.y);
                 _slopeEndValid = true;
+                // The plan-centreline path A->end (when both ends sit on the connected
+                // plan). Computed once here and reused by the fill, overlay, and commit.
+                if (!SlopeDisableRailSnap && PlanLayer != null
+                    && PlanLayer.TryPathBetween(a2, c2, SlopeGuideDetectRadius, out List<Vector2> spath))
+                    _slopePath = spath;
                 GridFromWorld(_slopeEnd, out float sex, out float sez);
                 float run = Vector2.Distance(a2, c2);
                 _slopeGradePct = run > 1e-3f ? (HeightAtGrid(sex, sez) - _slopeElevA) / run * 100f : 0f;
             }
+            // Before A is placed: if the hover cursor is on the plan, size the brush to
+            // the corridor too, so the ring previews the right width ahead of the click.
+            else if (Brush == BrushMode.Slope && overTerrain && !SlopeDisableRailSnap && PlanLayer != null
+                     && _active == null && _lineActive == null
+                     && PlanLayer.TryNearestOnPlan(new Vector2(hit.point.x, hit.point.z),
+                                                   SlopeGuideDetectRadius, out _, out _))
+                BrushRadius = Mathf.Clamp(PlanLayer.CorridorWidth * 0.5f, 0.5f, MaxBrushRadius);
 
             // Resolve the snapped cursor for the active tool ONCE, so the brush ring
             // sits exactly where placement will land (track / extension / grid / slope
             // guide). Scatter & plain sculpt don't snap.
             Vector3 cursorVis = SnapCursor(hit.point, overTerrain);
             UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
+            UpdateSlopeFill();
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.
@@ -1305,23 +1386,34 @@ namespace NetworkDesigner.Terrain
                         if (!SlopeDisableRailSnap)
                         {
                             Vector2 a2 = new Vector2(hit.point.x, hit.point.z);
-                            // Snap A exactly where the pre-click cursor previewed it.
-                            if (TrySlopeRailSnapPoint(a2, out Vector2 snapA))
+                            // Snap A exactly where the pre-click cursor previewed it
+                            // (plan centreline first, then rail).
+                            if (TrySlopeSnap(a2, out Vector2 snapA, out Vector2 snapDir, out bool onPlan))
                             {
                                 _slopeA = new Vector3(snapA.x, hit.point.y, snapA.y);
                                 GridFromWorld(_slopeA, out float rax, out float raz);
                                 _slopeElevA = HeightAtGrid(rax, raz);
                                 a2 = snapA;
+                                // The "straight" guide is the heading at the snapped A.
+                                if (snapDir.sqrMagnitude > 1e-6f) { _slopeGuideDir = snapDir; _slopeHasGuide = true; }
+                                // On the plan: size the brush to the planned corridor so a
+                                // single fill/slope covers the whole pathway width.
+                                if (onPlan && PlanLayer != null)
+                                    BrushRadius = Mathf.Clamp(PlanLayer.CorridorWidth * 0.5f, 0.5f, MaxBrushRadius);
                             }
-                            // Heading for the "straight" guide at the (snapped) A.
-                            _slopeHasGuide = RailLayer != null
-                                && RailLayer.TryTrackHeadingNear(a2, SlopeGuideDetectRadius, out _slopeGuideDir, out _);
                         }
                     }
                     else if (_slopeEndValid)
                     {
                         GridFromWorld(_slopeEnd, out float ex, out float ez);
-                        ApplySlope(_slopeA, _slopeEnd, _slopeElevA, HeightAtGrid(ex, ez));
+                        float elevB = HeightAtGrid(ex, ez);
+                        // If both ends sit on the plan and the graph connects them, grade
+                        // the corridor ALONG the planned centreline (following curves);
+                        // otherwise fall back to the straight A→B corridor.
+                        if (_slopePath != null)
+                            ApplySlopeAlongPath(_slopePath, _slopeElevA, elevB, BrushRadius);
+                        else
+                            ApplySlope(_slopeA, _slopeEnd, _slopeElevA, elevB);
                         _slopeArmed = false; _slopeHasGuide = false;
                         _dirtySince = Time.realtimeSinceStartup;
                         RebuildContours();
@@ -1467,8 +1559,11 @@ namespace NetworkDesigner.Terrain
                 const float gl = 150f; // guide length each way through A
                 EmitDrapedDashed(a2 - _slopeGuideDir * gl, a2 + _slopeGuideDir * gl, dash, gap);
             }
+            // On a plan path the curved fill ribbon already shows the corridor, and a
+            // straight A->end dashed pair would cut across it — so only draw the dashed
+            // corridor edges for the straight (off-plan) case.
             Vector2 axis = e2 - a2;
-            if (axis.sqrMagnitude > 1e-4f)
+            if (_slopePath == null && axis.sqrMagnitude > 1e-4f)
             {
                 Vector2 dir = axis.normalized;
                 Vector2 perp = new Vector2(-dir.y, dir.x) * BrushRadius;
@@ -1553,6 +1648,75 @@ namespace NetworkDesigner.Terrain
                 ? new Material(sh) { name = "BrushCursorMat", color = BrushCursorColor }
                 : PipelineMaterials.CreateUnlitColor(BrushCursorColor, "BrushCursorMat");
             _cursorMr.sharedMaterial = _cursorMat;
+        }
+
+        // Slope tool: rebuild the translucent fill that previews the corridor about to
+        // be graded. While armed, it spans A -> the live (snapped) end; when both ends
+        // sit on the plan and connect, it follows the planned centreline around curves.
+        void UpdateSlopeFill()
+        {
+            bool show = _slopeArmed && _slopeEndValid && Brush == BrushMode.Slope
+                        && _active == null && _lineActive == null && ShowBrushCursor && _field != null;
+            EnsureSlopeFill();
+            _slopeFillMr.enabled = show;
+            if (!show) return;
+            if (_slopeFillMat != null) _slopeFillMat.color = SlopeFillColor;
+
+            Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
+            Vector2 e2 = new Vector2(_slopeEnd.x, _slopeEnd.z);
+            List<Vector2> path = _slopePath ?? new List<Vector2> { a2, e2 };
+            BuildSlopeRibbon(path, Mathf.Max(_field.CellSize, BrushRadius));
+        }
+
+        // Build a draped triangle ribbon of half-width `halfW` centred on `path`.
+        void BuildSlopeRibbon(List<Vector2> path, float halfW)
+        {
+            _fillVerts.Clear(); _fillIdx.Clear();
+            int n = path != null ? path.Count : 0;
+            if (n >= 2)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    Vector2 tan = i == 0 ? path[1] - path[0]
+                                : i == n - 1 ? path[n - 1] - path[n - 2]
+                                : path[i + 1] - path[i - 1];
+                    if (tan.sqrMagnitude < 1e-8f) tan = Vector2.right;
+                    tan.Normalize();
+                    Vector2 perp = new Vector2(-tan.y, tan.x) * halfW;
+                    Vector2 lft = path[i] + perp, rgt = path[i] - perp;
+                    _fillVerts.Add(new Vector3(lft.x, _field.SampleHeight(lft.x, lft.y) + BrushCursorLift, lft.y));
+                    _fillVerts.Add(new Vector3(rgt.x, _field.SampleHeight(rgt.x, rgt.y) + BrushCursorLift, rgt.y));
+                }
+                for (int i = 0; i < n - 1; i++)
+                {
+                    int b = i * 2; // L_i, R_i, L_i+1, R_i+1  (Cull Off so winding is moot)
+                    _fillIdx.Add(b); _fillIdx.Add(b + 2); _fillIdx.Add(b + 1);
+                    _fillIdx.Add(b + 1); _fillIdx.Add(b + 2); _fillIdx.Add(b + 3);
+                }
+            }
+            _slopeFillMesh.Clear();
+            _slopeFillMesh.SetVertices(_fillVerts);
+            _slopeFillMesh.SetTriangles(_fillIdx, 0);
+            _slopeFillMesh.RecalculateBounds();
+            _slopeFillMf.sharedMesh = _slopeFillMesh;
+        }
+
+        void EnsureSlopeFill()
+        {
+            if (_slopeFillMf != null) return;
+            GameObject go = MakeRuntimeRoot("SlopeFill");
+            _slopeFillMf = go.AddComponent<MeshFilter>();
+            _slopeFillMr = go.AddComponent<MeshRenderer>();
+            _slopeFillMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _slopeFillMr.receiveShadows = false;
+            _slopeFillMesh = new Mesh { name = "SlopeFillMesh" };
+            _slopeFillMf.sharedMesh = _slopeFillMesh;
+            // Transparent, always-on-top (same shader as the cursor ring, Cull Off).
+            Shader sh = Shader.Find("NetworkDesigner/CursorOverlay");
+            _slopeFillMat = sh != null
+                ? new Material(sh) { name = "SlopeFillMat", color = SlopeFillColor }
+                : PipelineMaterials.CreateUnlitColor(SlopeFillColor, "SlopeFillMat");
+            _slopeFillMr.sharedMaterial = _slopeFillMat;
         }
 
         // Rebuild the topographic contour lines from the current field.
@@ -1686,6 +1850,76 @@ namespace NetworkDesigner.Terrain
                     if (perp > halfW) continue;                        // outside the corridor
                     float target = Mathf.Lerp(elevA, elevB, along / L);
                     float tEdge = halfW > 0f ? perp / halfW : 0f;
+                    float w = tEdge <= inner ? 1f
+                        : 1f - Mathf.SmoothStep(0f, 1f, (tEdge - inner) / Mathf.Max(1e-3f, feather));
+                    float h = _field.GetHeight(x, z);
+                    _field.SetHeight(x, z, Mathf.Lerp(h, target, w));
+                }
+            }
+            RebuildChunkRegion(minX, minZ, (maxX - minX) + 1, (maxZ - minZ) + 1);
+        }
+
+        // Slope tool, plan-aware: grade a corridor that FOLLOWS a polyline (the plan
+        // centreline through curves) from elevA at the start to elevB at the end. Same
+        // feel as ApplySlope but the ramp parameter is arc-length along the path, and
+        // each cell is graded by its nearest path segment. halfWidth is the corridor
+        // half-width (caller passes the brush radius, already sized to the corridor).
+        void ApplySlopeAlongPath(List<Vector2> path, float elevA, float elevB, float halfWidth)
+        {
+            if (_field == null || path == null || path.Count < 2) return;
+            float cs = _field.CellSize;
+            float halfW = Mathf.Max(cs, halfWidth);
+            float feather = Mathf.Clamp01(BrushFalloff);
+            float inner = 1f - feather;
+
+            // Cumulative arc length at each path vertex (for the ramp parameter) and the
+            // XZ bounding box of the whole corridor.
+            int n = path.Count;
+            float[] cum = new float[n];
+            float total = 0f;
+            float minPx = path[0].x, maxPx = path[0].x, minPz = path[0].y, maxPz = path[0].y;
+            for (int i = 1; i < n; i++)
+            {
+                total += Vector2.Distance(path[i - 1], path[i]);
+                cum[i] = total;
+                minPx = Mathf.Min(minPx, path[i].x); maxPx = Mathf.Max(maxPx, path[i].x);
+                minPz = Mathf.Min(minPz, path[i].y); maxPz = Mathf.Max(maxPz, path[i].y);
+            }
+            if (total < 1e-3f) return;
+
+            int pad = Mathf.CeilToInt(halfW / cs) + 1;
+            int minX = Mathf.FloorToInt((minPx - halfW - _field.Origin.x) / cs) - 1;
+            int maxX = Mathf.CeilToInt((maxPx + halfW - _field.Origin.x) / cs) + 1;
+            int minZ = Mathf.FloorToInt((minPz - halfW - _field.Origin.z) / cs) - 1;
+            int maxZ = Mathf.CeilToInt((maxPz + halfW - _field.Origin.z) / cs) + 1;
+            minX -= pad; maxX += pad; minZ -= pad; maxZ += pad;
+
+            for (int z = minZ; z <= maxZ; z++)
+            {
+                for (int x = minX; x <= maxX; x++)
+                {
+                    if (!_field.InRange(x, z)) continue;
+                    Vector2 p = new Vector2(_field.Origin.x + x * cs, _field.Origin.z + z * cs);
+                    // Nearest point over all path segments → perpendicular distance + arc pos.
+                    float bestPerp = float.MaxValue, bestArc = 0f;
+                    for (int i = 0; i < n - 1; i++)
+                    {
+                        Vector2 s0 = path[i], s1 = path[i + 1];
+                        Vector2 seg = s1 - s0;
+                        float segLen2 = seg.sqrMagnitude;
+                        if (segLen2 < 1e-9f) continue;
+                        float t = Mathf.Clamp01(Vector2.Dot(p - s0, seg) / segLen2);
+                        Vector2 proj = s0 + seg * t;
+                        float d = (p - proj).magnitude;
+                        if (d < bestPerp)
+                        {
+                            bestPerp = d;
+                            bestArc = cum[i] + Mathf.Sqrt(segLen2) * t;
+                        }
+                    }
+                    if (bestPerp > halfW) continue;                 // outside the corridor
+                    float target = Mathf.Lerp(elevA, elevB, bestArc / total);
+                    float tEdge = halfW > 0f ? bestPerp / halfW : 0f;
                     float w = tEdge <= inner ? 1f
                         : 1f - Mathf.SmoothStep(0f, 1f, (tEdge - inner) / Mathf.Max(1e-3f, feather));
                     float h = _field.GetHeight(x, z);
