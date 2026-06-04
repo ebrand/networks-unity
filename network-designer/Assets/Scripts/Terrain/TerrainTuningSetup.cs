@@ -314,6 +314,33 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterColor("rail.puckHoverColor", "Rail", "Node puck hover color",
                 () => t.RailLayer.NodePuckHoverColor, v => t.RailLayer.NodePuckHoverColor = v,
                 description: "Colour of the puck under the cursor (the node you'd pick / insert by).");
+            TuningRegistry.RegisterBool("rail.showBraking", "Rail", "Show braking markers",
+                () => t.RailLayer.ShowBrakingMarkers, v => t.RailLayer.ShowBrakingMarkers = v,
+                description: "Mark braking distances at speed drops (committed + a live preview off the segment you're drawing): where decel must begin on the faster line, and where the train is fully slowed on the slower line.");
+            TuningRegistry.RegisterFloat("rail.brakingDecel", "Rail", "Braking decel (m/s^2)",
+                () => t.RailLayer.BrakingDecel, v => t.RailLayer.BrakingDecel = v, 0.1f, 1.3f,
+                description: "Service deceleration used for braking distance d = (vFast^2 - vSlow^2)/(2a). Comfortable rail ~0.2-0.4; emergency up to ~1.3. Bigger = shorter distance.");
+            TuningRegistry.RegisterColor("rail.brakingOkColor", "Rail", "Decel-complete color",
+                () => t.RailLayer.BrakingOkColor, v => t.RailLayer.BrakingOkColor = v,
+                description: "Marker colour for where the train is fully slowed on the new line (slower-speed curves can begin past there).");
+            TuningRegistry.RegisterFloat("rail.decelRingOuter", "Rail", "Decel ring outer radius (m)",
+                () => t.RailLayer.DecelRingOuterRadius, v => t.RailLayer.DecelRingOuterRadius = v, 1f, 50f,
+                description: "Radius of the dashed outer ring on a decel snap target.");
+            TuningRegistry.RegisterFloat("rail.decelRingInner", "Rail", "Decel ring inner radius (m)",
+                () => t.RailLayer.DecelRingInnerRadius, v => t.RailLayer.DecelRingInnerRadius = v, 0.2f, 10f,
+                description: "Radius of the small solid inner snap-point on a decel target.");
+            TuningRegistry.RegisterFloat("rail.decelSnap", "Rail", "Decel snap radius (m)",
+                () => t.RailLayer.DecelSnapRadius, v => t.RailLayer.DecelSnapRadius = v, 1f, 60f,
+                description: "How close the cursor must get to a decel target (half or full) to snap to it.");
+            TuningRegistry.RegisterColor("rail.decelRingColor", "Rail", "Decel ring color",
+                () => t.RailLayer.DecelRingColor, v => t.RailLayer.DecelRingColor = v,
+                description: "Colour of the decel target rings.");
+            TuningRegistry.RegisterBool("rail.showSpeedLabels", "Rail", "Show speed labels",
+                () => t.RailLayer.ShowSpeedLabels, v => t.RailLayer.ShowSpeedLabels = v,
+                description: "Label each rail line with its speed limit at intervals, to interrogate what speed an existing line carries. Shown while editing rail.");
+            TuningRegistry.RegisterFloat("rail.speedLabelSpacing", "Rail", "Speed label spacing (m)",
+                () => t.RailLayer.SpeedLabelSpacing, v => { t.RailLayer.SpeedLabelSpacing = v; t.RebuildRail(); }, 50f, 3000f,
+                description: "Spacing between speed-limit labels along a line. Bigger = fewer labels.");
             TuningRegistry.RegisterFloat("rail.ballastHeight", "Rail", "Ballast height (m)",
                 () => t.RailLayer.BallastHeight, v => { t.RailLayer.BallastHeight = v; t.RebuildRail(); }, 0f, 1.5f,
                 description: "Height of the raised gravel bed the ties sit on. 0 = no ballast.");
@@ -409,6 +436,15 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("plan.trackGap", "Rail plan", "Track gap (m)",
                 () => t.PlanLayer.TrackGap, v => { t.PlanLayer.TrackGap = v; t.RebuildPlan(); }, 1f, 30f,
                 description: "Distance between the two tracks (centre to centre) for a double-track corridor.");
+            TuningRegistry.RegisterBool("plan.limitRadius", "Rail plan", "Limit curve radius (speed)",
+                () => t.PlanLayer.LimitCurveRadius, v => t.PlanLayer.LimitCurveRadius = v,
+                description: "Restrict planned curves to the minimum radius for the design speed + lateral g (tighter curves are refused; preview turns red). Off = unconstrained survey lines.");
+            TuningRegistry.RegisterFloat("plan.speed", "Rail plan", "Design speed (km/h)",
+                () => t.PlanLayer.SpeedLimitKmh, v => t.PlanLayer.SpeedLimitKmh = v, 5f, 350f,
+                description: "Design speed the plan's curves are checked against. With max lateral g, sets the minimum curve radius R = v^2/(g*a).");
+            TuningRegistry.RegisterFloat("plan.maxLatG", "Rail plan", "Max lateral g (curve tightness)",
+                () => t.PlanLayer.MaxLateralG, v => t.PlanLayer.MaxLateralG = v, 0.05f, 0.5f,
+                description: "Max comfortable lateral acceleration in g. Higher = tighter curves allowed for a given speed. Real rail ~0.1.");
             TuningRegistry.RegisterFloat("plan.curveLever", "Rail plan", "Curve lever (arc width)",
                 () => t.PlanLayer.CurveLever, v => t.PlanLayer.CurveLever = v, 0.1f, 0.95f,
                 description: "Curve-tool shape for the plan: how far the bezier controls lean toward the guide corner.");

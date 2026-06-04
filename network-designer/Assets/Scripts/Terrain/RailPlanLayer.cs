@@ -31,6 +31,31 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Curve mode (held-Shift): how far the bezier controls sit from each " +
                  "node toward the guide corner (0 = sharp, 1 = wide arc).")]
         [Range(0.1f, 0.95f)] public float CurveLever = 0.55f;
+        [Tooltip("Restrict planned curves to the minimum radius for the design speed + " +
+                 "lateral g (curves tighter than that are refused; preview turns red). " +
+                 "Off = unconstrained survey lines.")]
+        public bool LimitCurveRadius = true;
+        [Tooltip("Design speed (km/h) the plan's curves are checked against. With Max " +
+                 "lateral g this sets the minimum curve radius (R = v^2 / (g*a)).")]
+        public float SpeedLimitKmh = 40f;
+        [Tooltip("Max comfortable lateral acceleration in g. Higher = tighter curves " +
+                 "allowed for a given speed. Real rail ~0.1.")]
+        [Range(0.05f, 0.5f)] public float MaxLateralG = 0.15f;
+
+        // Minimum curve radius (m) for the design speed: R = v^2 / (g*a), v in m/s.
+        public float MinRadiusForSpeed
+        {
+            get { float v = SpeedLimitKmh / 3.6f; return v * v / (9.81f * Mathf.Max(0.01f, MaxLateralG)); }
+        }
+        // Last previewed curve's tightest radius + whether it violated the minimum
+        // (read by the on-screen hint while a curve corner is armed).
+        [System.NonSerialized] public float LastPreviewRadius = float.PositiveInfinity;
+        [System.NonSerialized] public bool LastPreviewTooTight;
+        // While a curve corner is armed: the two leg lengths (A->bend, bend->B) in metres
+        // and draped world anchors for the on-screen dimension labels.
+        [System.NonSerialized] public bool CurveDimsValid;
+        [System.NonSerialized] public float CurveLegA, CurveLegB;
+        [System.NonSerialized] public Vector3 CurveLegAMid, CurveLegBMid;
         [Tooltip("Sampling step (m) for draping the lines onto the terrain surface. " +
                  "Smaller = smoother but more segments.")]
         public float SampleStep = 2f;
@@ -135,6 +160,13 @@ namespace NetworkDesigner.Terrain
             }
             if (_cornerPending)
             {
+                // Refuse a curve tighter than the design speed allows (keeps the corner
+                // armed so a wider endpoint can be picked) — same as the rail tool.
+                if (LimitCurveRadius)
+                {
+                    CurveControls(Graph.Nodes[_chainTail], p, _corner, out Vector2 cc1, out Vector2 cc2);
+                    if (MinCurveRadius(Graph.Nodes[_chainTail], cc1, cc2, p) < MinRadiusForSpeed) return;
+                }
                 int end = NearestOrNew(p);
                 AddCurvedEdge(_chainTail, end, _corner);
                 _chainTail = end; _cornerPending = false;
@@ -173,6 +205,25 @@ namespace NetworkDesigner.Terrain
             if (e == null) return;
             CurveControls(Graph.Nodes[e.A], Graph.Nodes[e.B], corner, out Vector2 c1, out Vector2 c2);
             e.HasCurve = true; e.ControlA = c1; e.ControlB = c2;
+        }
+
+        // Tightest radius (m) along a cubic bezier, via 3-point circumradius over
+        // samples. +inf for a straight line. (Same as the rail tool's check.)
+        static float MinCurveRadius(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            const int N = 24;
+            float minR = float.PositiveInfinity;
+            Vector2 a = LineGraph.Bezier(p0, p1, p2, p3, 0f);
+            Vector2 b = LineGraph.Bezier(p0, p1, p2, p3, 1f / N);
+            for (int i = 2; i <= N; i++)
+            {
+                Vector2 c = LineGraph.Bezier(p0, p1, p2, p3, i / (float)N);
+                float ab = Vector2.Distance(a, b), bc = Vector2.Distance(b, c), ca = Vector2.Distance(c, a);
+                float area2 = Mathf.Abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+                if (area2 > 1e-6f) minR = Mathf.Min(minR, ab * bc * ca / (2f * area2));
+                a = b; b = c;
+            }
+            return minR;
         }
 
         LineEdge FindEdge(int a, int b)
@@ -646,6 +697,9 @@ namespace NetworkDesigner.Terrain
             // Cursor ring.
             DrawRing(field, new Vector2(cursor.x, cursor.z), 0.9f);
 
+            LastPreviewRadius = float.PositiveInfinity;
+            LastPreviewTooTight = false;
+            CurveDimsValid = false;
             bool haveStart = _chainTail >= 0 && _chainTail < Graph.Nodes.Count;
             if (haveStart)
             {
@@ -661,7 +715,15 @@ namespace NetworkDesigner.Terrain
                 if (_cornerPending)
                 {
                     CurveControls(start, cur, _corner, out Vector2 c1, out Vector2 c2);
+                    LastPreviewRadius = MinCurveRadius(start, c1, c2, cur);
+                    LastPreviewTooTight = LimitCurveRadius && LastPreviewRadius < MinRadiusForSpeed;
                     EmitPendingEdge(field, start, c1, c2, cur);
+                    // Dimension labels: the two construction legs A->bend and bend->B.
+                    CurveDimsValid = true;
+                    CurveLegA = Vector2.Distance(start, _corner);
+                    CurveLegB = Vector2.Distance(_corner, cur);
+                    CurveLegAMid = LegMid(field, start, _corner);
+                    CurveLegBMid = LegMid(field, _corner, cur);
                 }
                 else if (CurveModifier)
                 {
@@ -680,7 +742,9 @@ namespace NetworkDesigner.Terrain
             _pvMesh.SetVertices(_pvVerts);
             _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0);
             _pvMesh.RecalculateBounds();
-            if (_pvMat != null) _pvMat.color = PlanColor;
+            // Red while the armed curve is tighter than the design speed allows.
+            if (_pvMat != null)
+                _pvMat.color = LastPreviewTooTight ? new Color(1f, 0.25f, 0.2f, 0.95f) : PlanColor;
         }
 
         void EmitPendingEdge(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3)
@@ -694,6 +758,14 @@ namespace NetworkDesigner.Terrain
             float hw = Mathf.Max(0.5f, CorridorWidth * 0.5f);
             EmitOffsetLine(field, q0, q1, q2, q3, hw, true, _pvVerts, _pvIdx);
             EmitOffsetLine(field, q0, q1, q2, q3, -hw, true, _pvVerts, _pvIdx);
+        }
+
+        // Draped world midpoint of an A->B leg (label anchor), lifted clear of the line.
+        Vector3 LegMid(TerrainField field, Vector2 a, Vector2 b)
+        {
+            Vector2 m = (a + b) * 0.5f;
+            float y = (field != null ? field.SampleHeight(m.x, m.y) : 0f) + Lift + 1.5f;
+            return new Vector3(m.x, y, m.y);
         }
 
         void DrawRing(TerrainField field, Vector2 c, float r)

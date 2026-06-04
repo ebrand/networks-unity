@@ -60,6 +60,11 @@ namespace NetworkDesigner.Terrain
         // (read by the on-screen hint; updated each frame while a corner is armed).
         [System.NonSerialized] public float LastPreviewRadius = float.PositiveInfinity;
         [System.NonSerialized] public bool LastPreviewTooTight;
+        // While a curve corner is armed: the two leg lengths (A->bend, bend->B) in metres
+        // and draped world anchors for the on-screen dimension labels.
+        [System.NonSerialized] public bool CurveDimsValid;
+        [System.NonSerialized] public float CurveLegA, CurveLegB;
+        [System.NonSerialized] public Vector3 CurveLegAMid, CurveLegBMid;
         [Tooltip("Max grade (degrees) any section may have. The terrain is sampled " +
                  "every GradeSampleStep metres along an edge; the edge is buildable " +
                  "up to the first section that exceeds this, and is truncated there " +
@@ -141,6 +146,47 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Colour of the puck under the cursor (the node you'd pick/insert by).")]
         public Color NodePuckHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);
 
+        [Tooltip("Mark braking distances at speed drops in the network: where decel must " +
+                 "begin on the faster line, and where the train is fully slowed on the " +
+                 "slower line (curves at the slower speed can start). Shown while editing rail.")]
+        public bool ShowBrakingMarkers = true;
+        [Tooltip("Service deceleration (m/s^2) used for the braking distance " +
+                 "d = (vFast^2 - vSlow^2) / (2a). Comfortable rail ~0.2-0.4.")]
+        public float BrakingDecel = 0.3f;
+        [Tooltip("Marker colour for where the train is fully slowed on the new line " +
+                 "(slower-speed curves can begin past here).")]
+        public Color BrakingOkColor = new Color(0.3f, 0.85f, 0.95f, 0.95f);
+
+        [Tooltip("Outer (dashed) ring radius (m) of a decel snap target.")]
+        public float DecelRingOuterRadius = 10f;
+        [Tooltip("Inner (solid) snap-point radius (m) of a decel target.")]
+        public float DecelRingInnerRadius = 1f;
+        [Tooltip("Cursor snap radius (m) to a decel target.")]
+        public float DecelSnapRadius = 15f;
+        [Tooltip("Colour of the decel target rings.")]
+        public Color DecelRingColor = new Color(1f, 0.2f, 0.2f, 1f);
+
+        [Tooltip("Label each rail line with its speed limit every so often (to interrogate " +
+                 "what speed an existing line is). Shown while editing rail.")]
+        public bool ShowSpeedLabels = true;
+        [Tooltip("Spacing (m) between speed-limit labels along a line.")]
+        public float SpeedLabelSpacing = 500f;
+
+        // A speed-limit label anchored along a line (km/h), for interrogating speeds.
+        public struct SpeedLabel { public Vector3 World; public float Kmh; }
+        [System.NonSerialized] public readonly List<SpeedLabel> SpeedLabels = new List<SpeedLabel>();
+        // Live readout while drawing off an existing line (for the rail HUD).
+        [System.NonSerialized] public bool PreviewHasIncoming; // tail sits on an existing edge
+        [System.NonSerialized] public bool PreviewBrakeValid;  // ...and the new line is slower
+        [System.NonSerialized] public float PreviewBrakeDist, PreviewBrakeVIn, PreviewBrakeVNew;
+        [System.NonSerialized] public float PreviewBrakeReqRadius; // required radius at the worst braking-zone violation (0 = none)
+        [System.NonSerialized] public float PreviewBrakeArcCovered; // arc already covered from the junction to the chain tail
+        // Snap-target rings along the line ahead of the junction: half-decel + full decel.
+        [System.NonSerialized] public bool PreviewDecelTargetsValid;
+        [System.NonSerialized] public Vector2 PreviewHalfXZ, PreviewFullXZ;
+        [System.NonSerialized] public Vector3 PreviewHalfWorld, PreviewFullWorld;
+        [System.NonSerialized] public float PreviewHalfDist, PreviewFullDist;
+
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
         GameObject _root, _railObj, _tieObj, _ballastObj, _structObj;
@@ -173,6 +219,17 @@ namespace NetworkDesigner.Terrain
         Material _netMat;
         readonly List<Vector3> _nv = new List<Vector3>();
         readonly List<int> _ni = new List<int>();
+
+        // Braking-distance marker overlay (per-vertex colour so both marker kinds share
+        // one mesh). Built in Rebuild; the labels are drawn by the editor in OnGUI.
+        GameObject _brkGo;
+        MeshFilter _brkMf;
+        MeshRenderer _brkMr;
+        Mesh _brkMesh;
+        Material _brkMat;
+        readonly List<Vector3> _brkV = new List<Vector3>();
+        readonly List<int> _brkIdx = new List<int>();
+        readonly List<Color32> _brkCol = new List<Color32>();
 
         // Translucent 3D vertex pucks (short lit cylinders) shown at each node while
         // editing; the one under the cursor highlights. Two submeshes (base / hover)
@@ -248,6 +305,10 @@ namespace NetworkDesigner.Terrain
                 Vector2 start = Graph.Nodes[_chainTail];
                 CurveControls(start, p, _corner, out Vector2 c1, out Vector2 c2);
                 if (MinCurveRadius(start, c1, c2, p) < MinRadiusForSpeed) return; // too tight
+                // In a braking zone (drawn off a faster line), the curve must also be
+                // gentle enough for the still-high speed there — refuse if it isn't.
+                if (PreviewBrakeValid
+                    && WorstBrakingRadiusViolation(start, c1, c2, p, PreviewBrakeVIn, SpeedLimitKmh, PreviewBrakeArcCovered) > 0f) return;
                 Vector2 endPt = p, cc1 = c1, cc2 = c2;
                 if (!OverrideGrade && ScanBuildable(field, start, c1, c2, p,
                         out float bl, out float bt, out _, out _) && bt < 0.999f)
@@ -430,6 +491,36 @@ namespace NetworkDesigner.Terrain
             return rev;
         }
 
+        // Speed-aware tightness check for a curve drawn off a faster line. Walks the
+        // curve from the junction; at each sample the braking-profile speed
+        // v(s) = sqrt(max(vNew^2, vIn^2 - 2*a*s)) sets the required min radius
+        // v(s)^2/(g*latG). Returns the largest required radius among violating samples
+        // (the worst point), or 0 if the curve is gentle enough the whole way.
+        float WorstBrakingRadiusViolation(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float vInKmh, float vNewKmh, float arcOffset)
+        {
+            const int N = 32;
+            float a = Mathf.Max(0.05f, BrakingDecel);
+            float vIn = vInKmh / 3.6f, vNew2 = (vNewKmh / 3.6f) * (vNewKmh / 3.6f);
+            float gLat = 9.81f * Mathf.Max(0.01f, MaxLateralG);
+            float worstReq = 0f;
+            Vector2 a0 = LineGraph.Bezier(p0, p1, p2, p3, 0f);
+            Vector2 b0 = LineGraph.Bezier(p0, p1, p2, p3, 1f / N);
+            float arc = Vector2.Distance(a0, b0);
+            for (int i = 2; i <= N; i++)
+            {
+                Vector2 c0 = LineGraph.Bezier(p0, p1, p2, p3, i / (float)N);
+                float ab = Vector2.Distance(a0, b0), bc = Vector2.Distance(b0, c0), ca = Vector2.Distance(c0, a0);
+                float area2 = Mathf.Abs((b0.x - a0.x) * (c0.y - a0.y) - (b0.y - a0.y) * (c0.x - a0.x));
+                float r = area2 > 1e-6f ? ab * bc * ca / (2f * area2) : float.PositiveInfinity;
+                // arcOffset = how far down the braking zone the segment already starts.
+                float v2 = Mathf.Max(vNew2, vIn * vIn - 2f * a * (arcOffset + arc));
+                float req = v2 / gLat;                                  // required radius here
+                if (r < req && req > worstReq) worstReq = req;
+                arc += bc; a0 = b0; b0 = c0;
+            }
+            return worstReq;
+        }
+
         // Tightest radius (m) along a cubic bezier, via 3-point circumradius over
         // samples. Returns +inf for a straight line.
         static float MinCurveRadius(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
@@ -537,6 +628,255 @@ namespace NetworkDesigner.Terrain
             // Refresh the navigable graph + the disconnected-track highlight.
             (Network ??= new RailNetwork()).Build(Graph);
             BuildNetworkOverlay(field);
+            BuildSpeedLabels(field);
+        }
+
+        // Place a speed-limit label every SpeedLabelSpacing metres along each edge (at
+        // least one per edge), for interrogating an existing line's speeds. Display is
+        // gated by the editor; the list is always populated so toggling is instant.
+        void BuildSpeedLabels(TerrainField field)
+        {
+            SpeedLabels.Clear();
+            if (field == null || Graph == null || Graph.Edges.Count == 0) return;
+            float spacing = Mathf.Max(50f, SpeedLabelSpacing);
+            foreach (LineEdge e in Graph.Edges)
+            {
+                OrientedBezier(e, e.A, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
+                float L = EdgeArcLength(q0, q1, q2, q3);
+                if (L < 1e-2f) continue;
+                int n = Mathf.Max(1, Mathf.RoundToInt(L / spacing));
+                float spd = EdgeSpeed(e);
+                for (int i = 0; i < n; i++)
+                {
+                    float arc = (i + 0.5f) / n * L;
+                    if (!WalkBezier(q0, q1, q2, q3, arc, out Vector2 p, out _)) continue;
+                    float y = field.SampleHeight(p.x, p.y) + 1.6f;
+                    SpeedLabels.Add(new SpeedLabel { World = new Vector3(p.x, y, p.y), Kmh = spd });
+                }
+            }
+        }
+
+        static float EdgeArcLength(Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3)
+        {
+            const int N = 24;
+            float L = 0f; Vector2 prev = q0;
+            for (int i = 1; i <= N; i++)
+            {
+                Vector2 cp = LineGraph.Bezier(q0, q1, q2, q3, i / (float)N);
+                L += Vector2.Distance(prev, cp); prev = cp;
+            }
+            return L;
+        }
+
+        // Design speed of an edge (km/h): its laid SpeedLimit, or the layer default.
+        float EdgeSpeed(LineEdge e) => e.SpeedLimit > 0f ? e.SpeedLimit : SpeedLimitKmh;
+
+        // Braking distance (m) to go from vFast to vSlow (km/h) at BrakingDecel.
+        float BrakeDist(float vFastKmh, float vSlowKmh)
+        {
+            float a = Mathf.Max(0.05f, BrakingDecel);
+            float vf = vFastKmh / 3.6f, vs = vSlowKmh / 3.6f;
+            return Mathf.Max(0f, (vf * vf - vs * vs) / (2f * a));
+        }
+
+        // Bezier control points of edge e oriented so param 0 = fromNode, 1 = the far end.
+        void OrientedBezier(LineEdge e, int fromNode, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3)
+        {
+            Vector2 a = Graph.Nodes[e.A], b = Graph.Nodes[e.B], c1, c2;
+            if (e.HasCurve) { c1 = e.ControlA; c2 = e.ControlB; }
+            else { Vector2 d = b - a; c1 = a + d / 3f; c2 = a + d * (2f / 3f); }
+            if (e.A == fromNode) { q0 = a; q1 = c1; q2 = c2; q3 = b; }
+            else { q0 = b; q1 = c2; q2 = c1; q3 = a; }
+        }
+
+        // Per-frame rebuild of the braking overlay: the LIVE decel snap-targets off the
+        // segment currently being drawn (cursor). Driven each frame by the editor while
+        // rail is the active line layer.
+        public void RebuildBraking(TerrainField field, Vector3 cursor, bool show)
+        {
+            EnsureBrakingOverlay();
+            bool on = show && ShowBrakingMarkers;
+            _brkMr.enabled = on;
+            _brkV.Clear(); _brkIdx.Clear(); _brkCol.Clear();
+            PreviewBrakeValid = false; PreviewHasIncoming = false; PreviewDecelTargetsValid = false;
+            // Only the LIVE decel snap-targets while drawing — the persistent committed
+            // "≤X km/h from here" markers on existing lines were removed (cluttered the
+            // finished network; the live rings cover the useful case).
+            if (on && field != null && Graph != null && Graph.Edges.Count > 0)
+                AppendPreviewBraking(field, cursor);
+            _brkMesh.Clear();
+            _brkMesh.SetVertices(_brkV);
+            _brkMesh.SetColors(_brkCol);
+            _brkMesh.SetIndices(_brkIdx, MeshTopology.Lines, 0);
+            _brkMesh.RecalculateBounds();
+        }
+
+        // Live braking preview for the segment being drawn. Walks back along the new
+        // (slower) line to the speed-drop junction to get the arc already covered, then
+        // projects two snap-target rings by ARC LENGTH along the current segment: the
+        // full decel point (vNew reached) and the half-decel point. Both are cursor snap
+        // targets; neither is enforced.
+        void AppendPreviewBraking(TerrainField field, Vector3 cursorW)
+        {
+            if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return;
+            float vNew = SpeedLimitKmh;
+            if (!FindBrakingContext(_chainTail, out float arcCovered, out float vIn))
+            {
+                // Not in a braking zone — but report the incoming speed for the HUD note.
+                float vMax = 0f; bool any = false;
+                for (int ei = 0; ei < Graph.Edges.Count; ei++)
+                {
+                    LineEdge e = Graph.Edges[ei];
+                    if (e.A != _chainTail && e.B != _chainTail) continue;
+                    any = true; vMax = Mathf.Max(vMax, EdgeSpeed(e));
+                }
+                if (any) { PreviewHasIncoming = true; PreviewBrakeVIn = vMax; PreviewBrakeVNew = vNew; }
+                return;
+            }
+            PreviewHasIncoming = true; PreviewBrakeVIn = vIn; PreviewBrakeVNew = vNew;
+            float d = BrakeDist(vIn, vNew);
+            float remainingFull = d - arcCovered;
+            if (d < 1f || remainingFull <= 1f) return;   // no drop / already fully slowed
+            PreviewBrakeValid = true; PreviewBrakeDist = d; PreviewBrakeArcCovered = arcCovered;
+
+            // Current segment's prospective path (curved when a corner is armed).
+            Vector2 start = Graph.Nodes[_chainTail];
+            Vector2 cur = new Vector2(cursorW.x, cursorW.z);
+            Vector2 q0 = start, q1, q2, q3 = cur;
+            if (_cornerPending) CurveControls(start, cur, _corner, out q1, out q2);
+            else { Vector2 dd = cur - start; q1 = start + dd / 3f; q2 = start + dd * (2f / 3f); }
+
+            PreviewFullDist = d;
+            PreviewFullXZ = PointAlongOrProject(q0, q1, q2, q3, remainingFull);
+            PreviewHalfDist = d * 0.5f;
+            float remainingHalf = d * 0.5f - arcCovered;
+            PreviewHalfXZ = remainingHalf > 1f ? PointAlongOrProject(q0, q1, q2, q3, remainingHalf) : start;
+
+            PreviewHalfWorld = new Vector3(PreviewHalfXZ.x, (field != null ? field.SampleHeight(PreviewHalfXZ.x, PreviewHalfXZ.y) : 0f) + 1.8f, PreviewHalfXZ.y);
+            PreviewFullWorld = new Vector3(PreviewFullXZ.x, (field != null ? field.SampleHeight(PreviewFullXZ.x, PreviewFullXZ.y) : 0f) + 1.8f, PreviewFullXZ.y);
+            PreviewDecelTargetsValid = true;
+            EmitBrakeRing(field, PreviewHalfXZ);
+            EmitBrakeRing(field, PreviewFullXZ);
+        }
+
+        // Walk back from `tail` along the new (slower) line to the speed-drop junction —
+        // a node touching an edge faster than the line speed. Returns the arc covered from
+        // the junction to `tail` and the junction's faster speed. False if none found.
+        bool FindBrakingContext(int tail, out float arc, out float vIn)
+        {
+            arc = 0f; vIn = 0f;
+            float vLine = SpeedLimitKmh;
+            int cur = tail, fromEdge = -1;
+            for (int guard = 0; guard < 400; guard++)
+            {
+                int back = -1; float vf = 0f;
+                for (int ei = 0; ei < Graph.Edges.Count; ei++)
+                {
+                    if (ei == fromEdge) continue;
+                    LineEdge e = Graph.Edges[ei];
+                    if (e.A != cur && e.B != cur) continue;
+                    float v = EdgeSpeed(e);
+                    if (v > vf) vf = v;
+                    if (back < 0) back = ei;
+                }
+                if (vf > vLine + 1f) { vIn = vf; return true; }   // junction reached
+                if (back < 0) return false;                       // dead end, no junction
+                OrientedBezier(Graph.Edges[back], cur, out Vector2 b0, out Vector2 b1, out Vector2 b2, out Vector2 b3);
+                arc += EdgeArcLength(b0, b1, b2, b3);
+                cur = Graph.Edges[back].A == cur ? Graph.Edges[back].B : Graph.Edges[back].A;
+                fromEdge = back;
+            }
+            return false;
+        }
+
+        // Point at arc-length `dist` along a bezier, or — if the curve is shorter than
+        // dist — projected past its end along the end tangent.
+        Vector2 PointAlongOrProject(Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3, float dist)
+        {
+            if (WalkBezier(q0, q1, q2, q3, dist, out Vector2 pt, out _)) return pt;
+            float lc = EdgeArcLength(q0, q1, q2, q3);
+            Vector2 endTan = LineGraph.BezierTangent(q0, q1, q2, q3, 1f);
+            if (endTan.sqrMagnitude < 1e-6f) endTan = q3 - q0;
+            endTan = endTan.sqrMagnitude > 1e-6f ? endTan.normalized : Vector2.right;
+            return q3 + endTan * Mathf.Max(0f, dist - lc);
+        }
+
+        // A decel snap target: a dashed outer ring + a small solid inner snap point.
+        void EmitBrakeRing(TerrainField field, Vector2 c)
+        {
+            Color32 col = DecelRingColor;
+            EmitCircle(field, c, Mathf.Max(0.5f, DecelRingOuterRadius), col, true);   // dashed outer
+            EmitCircle(field, c, Mathf.Max(0.1f, DecelRingInnerRadius), col, false);  // solid inner
+        }
+
+        void EmitCircle(TerrainField field, Vector2 c, float r, Color32 col, bool dashed)
+        {
+            const int N = 32;
+            Vector3 prev = default; bool havePrev = false;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                float x = c.x + Mathf.Cos(a) * r, z = c.y + Mathf.Sin(a) * r;
+                Vector3 w = new Vector3(x, (field != null ? field.SampleHeight(x, z) : 0f) + 0.25f, z);
+                if (havePrev && (!dashed || (i % 2 == 0)))
+                {
+                    int s = _brkV.Count; _brkV.Add(prev); _brkV.Add(w);
+                    _brkCol.Add(col); _brkCol.Add(col); _brkIdx.Add(s); _brkIdx.Add(s + 1);
+                }
+                prev = w; havePrev = true;
+            }
+        }
+
+        // Snap a cursor onto the nearest decel ring (full or half) within range.
+        public bool TrySnapToDecelTarget(Vector2 p, out Vector2 snapped)
+        {
+            snapped = p;
+            if (!PreviewDecelTargetsValid) return false;
+            float r = Mathf.Max(0.5f, DecelSnapRadius); float r2 = r * r;
+            float dFull = (PreviewFullXZ - p).sqrMagnitude, dHalf = (PreviewHalfXZ - p).sqrMagnitude;
+            if (dFull <= r2 && dFull <= dHalf) { snapped = PreviewFullXZ; return true; }
+            if (dHalf <= r2) { snapped = PreviewHalfXZ; return true; }
+            return false;
+        }
+
+        // Walk `dist` metres along a single bezier from q0. False if the curve is shorter
+        // than dist (so callers can skip an out-of-range mark).
+        bool WalkBezier(Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3, float dist, out Vector2 point, out Vector2 heading)
+        {
+            point = q3; heading = q3 - q0;
+            const int N = 32;
+            Vector2 prev = q0; float remaining = dist;
+            for (int i = 1; i <= N; i++)
+            {
+                Vector2 cp = LineGraph.Bezier(q0, q1, q2, q3, i / (float)N);
+                float seg = Vector2.Distance(prev, cp);
+                if (seg >= remaining)
+                {
+                    point = Vector2.Lerp(prev, cp, seg > 1e-4f ? remaining / seg : 0f);
+                    heading = cp - prev;
+                    return true;
+                }
+                remaining -= seg; prev = cp;
+            }
+            return false; // curve too short for `dist`
+        }
+
+
+        void EnsureBrakingOverlay()
+        {
+            if (_brkMf != null) return;
+            _brkGo = new GameObject(RootName + "_Braking") { hideFlags = HideFlags.DontSave };
+            _brkGo.transform.SetParent(_root != null ? _root.transform : null, worldPositionStays: false);
+            _brkMf = _brkGo.AddComponent<MeshFilter>();
+            _brkMr = _brkGo.AddComponent<MeshRenderer>();
+            _brkMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _brkMr.receiveShadows = false;
+            _brkMesh = new Mesh { name = "RailBrakingMesh" };
+            _brkMf.sharedMesh = _brkMesh;
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            _brkMat = sh != null ? new Material(sh) { name = "RailBrakingMat" }
+                                 : NetworkDesigner.PipelineMaterials.CreateUnlitColor(BrakingOkColor, "RailBrakingMat");
+            _brkMr.sharedMaterial = _brkMat;
         }
 
         // Append every node/edge of `src` into this track (preserving curves), at the
@@ -1282,6 +1622,8 @@ namespace NetworkDesigner.Terrain
             LastPreviewTruncated = false;
             LastPreviewBuildableLen = 0f;
             LastPreviewTotalLen = 0f;
+            CurveDimsValid = false;
+            PreviewBrakeReqRadius = 0f;
 
             if (haveStart)
             {
@@ -1305,12 +1647,30 @@ namespace NetworkDesigner.Terrain
                     CurveControls(start, cur, _corner, out Vector2 c1, out Vector2 c2);
                     LastPreviewRadius = MinCurveRadius(start, c1, c2, cur);
                     LastPreviewTooTight = LastPreviewRadius < MinRadiusForSpeed;
+                    // Off a faster line: also require the speed-appropriate radius through
+                    // the braking zone (gentle while still fast, tighter once slowed).
+                    if (PreviewBrakeValid)
+                    {
+                        PreviewBrakeReqRadius = WorstBrakingRadiusViolation(start, c1, c2, cur, PreviewBrakeVIn, SpeedLimitKmh, PreviewBrakeArcCovered);
+                        if (PreviewBrakeReqRadius > 0f) LastPreviewTooTight = true;
+                    }
                     float bLen = PreviewScan(field, start, c1, c2, cur);
                     DrawGradedRails(start, c1, c2, cur, yA, yB, lift, bLen);
+                    // Dimension labels: the two construction legs A->bend and bend->B.
+                    CurveDimsValid = true;
+                    CurveLegA = Vector2.Distance(start, _corner);
+                    CurveLegB = Vector2.Distance(_corner, cur);
+                    CurveLegAMid = LegMid(field, start, _corner);
+                    CurveLegBMid = LegMid(field, _corner, cur);
                 }
                 else if (CurveModifier)
                 {
                     EmitDashed(field, start, cur, Vector2.zero, lift); // arming the corner
+                    // Single-leg dimension while positioning the bend (before the click).
+                    CurveDimsValid = true;
+                    CurveLegA = Vector2.Distance(start, cur);
+                    CurveLegB = 0f;
+                    CurveLegAMid = LegMid(field, start, cur);
                 }
                 else
                 {
@@ -1333,6 +1693,14 @@ namespace NetworkDesigner.Terrain
             _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0);
             _pvMesh.SetIndices(_pvIdxRed, MeshTopology.Lines, 1);
             _pvMesh.RecalculateBounds();
+        }
+
+        // Draped world midpoint of an A->B leg (label anchor), lifted clear of the line.
+        Vector3 LegMid(TerrainField field, Vector2 a, Vector2 b)
+        {
+            Vector2 m = (a + b) * 0.5f;
+            float y = (field != null ? field.SampleHeight(m.x, m.y) : 0f) + 1.5f;
+            return new Vector3(m.x, y, m.y);
         }
 
         // Cursor ring.

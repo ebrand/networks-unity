@@ -515,6 +515,7 @@ namespace NetworkDesigner.Terrain
                 if (_lineActive is RailTrackLayer rl)
                 {
                     if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
+                    if (rl.TrySnapToDecelTarget(flat, out Vector2 dt)) return new Vector3(dt.x, raw.y, dt.y);
                     if (rl.TrySnapToExtension(flat, out Vector2 ep)) return new Vector3(ep.x, raw.y, ep.y);
                 }
                 if (_lineActive is RailPlanLayer pl)
@@ -765,11 +766,13 @@ namespace NetworkDesigner.Terrain
         void DrawPanels()
         {
             DrawPlanGradeLabels();
+            DrawCurveDimLabels();
+            DrawSpeedLabels();
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
                 bool plan = _lineActive is RailPlanLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 272f : (plan ? 256f : 104f)), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 332f : (plan ? 292f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -780,6 +783,14 @@ namespace NetworkDesigner.Terrain
                 {
                     GUILayout.Label($"Corridor {pl.CorridorWidth:0} m · {pl.Tracks} track"
                         + (pl.Tracks >= 2 ? $" (gap {pl.TrackGap:0} m)" : "") + " · snaps to rail end");
+                    if (pl.LimitCurveRadius)
+                    {
+                        GUILayout.Label($"Design {pl.SpeedLimitKmh:0} km/h → min radius {pl.MinRadiusForSpeed:0} m");
+                        if (pl.LastPreviewRadius < float.PositiveInfinity)
+                            GUILayout.Label(pl.LastPreviewTooTight
+                                ? $"Curve {pl.LastPreviewRadius:0} m — TOO TIGHT (slow down or widen)"
+                                : $"Curve radius {pl.LastPreviewRadius:0} m — ok");
+                    }
                     if (!pl.ShowAnalysis)
                         GUILayout.Label("Analysis off (plain survey). Toggle\n'plan.analyze' to colour the corridor.");
                     else if (pl.RouteLength < 1f)
@@ -801,6 +812,12 @@ namespace NetworkDesigner.Terrain
                 if (_lineActive is RailTrackLayer rt)
                 {
                     GUILayout.Label("Click a rail edge: insert node (chop).\nClick a node puck: branch from it.");
+                    if (rt.PreviewBrakeValid)
+                        GUILayout.Label($"Decel {rt.PreviewBrakeVIn:0}→{rt.PreviewBrakeVNew:0} km/h over {rt.PreviewBrakeDist:0} m\nalong this line (then {rt.PreviewBrakeVNew:0}-radius curves OK)");
+                    if (rt.PreviewBrakeReqRadius > 0f)
+                        GUILayout.Label($"TOO TIGHT for the braking zone — still fast here,\nneed radius ≥ {rt.PreviewBrakeReqRadius:0} m (not the {rt.PreviewBrakeVNew:0}-km/h min)");
+                    else if (!rt.PreviewBrakeValid && rt.PreviewHasIncoming)
+                        GUILayout.Label($"Off a {rt.PreviewBrakeVIn:0} km/h line, new is {rt.PreviewBrakeVNew:0} — no decel needed.");
                     if (_railSlopeNodeA >= 0)
                         GUILayout.Label(_railSlopePath != null
                             ? (_railSlopeGradeOk
@@ -892,6 +909,67 @@ namespace NetworkDesigner.Terrain
                 GUI.color = g.Over ? new Color(1f, 0.45f, 0.4f, 1f) : Color.white;
                 GUI.Box(new Rect(mx - size.x * 0.5f, my - size.y * 0.5f, size.x + 6f, size.y + 2f), content);
             }
+            GUI.color = prevC;
+        }
+
+        // A boxed text label centred at a world position, projected to the (Ui-scaled)
+        // screen. No-op when the point is behind the camera.
+        void DrawWorldLabel(Camera cam, float s, Vector3 world, string text)
+        {
+            Vector3 sp = cam.WorldToScreenPoint(world);
+            if (sp.z <= 0f) return;
+            float mx = sp.x / s, my = (Screen.height - sp.y) / s;
+            var content = new GUIContent(text);
+            Vector2 size = GUI.skin.box.CalcSize(content);
+            GUI.Box(new Rect(mx - size.x * 0.5f, my - size.y * 0.5f, size.x + 6f, size.y + 2f), content);
+        }
+
+        // While drawing a curve (rail or plan) with the bend placed, label the two
+        // construction legs A->bend and bend->B in metres.
+        void DrawCurveDimLabels()
+        {
+            float la, lb; Vector3 ma, mb;
+            if (_lineActive is RailPlanLayer pl && pl.CurveDimsValid)
+            { la = pl.CurveLegA; lb = pl.CurveLegB; ma = pl.CurveLegAMid; mb = pl.CurveLegBMid; }
+            else if (_lineActive is RailTrackLayer rt && rt.CurveDimsValid)
+            { la = rt.CurveLegA; lb = rt.CurveLegB; ma = rt.CurveLegAMid; mb = rt.CurveLegBMid; }
+            else return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            // Plain text the colour of the line (no boxed tooltip), floating at the legs.
+            Color lineCol = _lineActive is RailPlanLayer
+                ? new Color(1f, 0.92f, 0.2f) : new Color(1f, 0.8f, 0.3f);
+            if (la > 0f) DrawWorldText(cam, s, ma, $"{la:0} m", lineCol);
+            if (lb > 0f) DrawWorldText(cam, s, mb, $"{lb:0} m", lineCol); // 0 = bend not placed yet
+        }
+
+        // Plain centred text (no box) at a world position, in the given colour.
+        void DrawWorldText(Camera cam, float s, Vector3 world, string text, Color color)
+        {
+            Vector3 sp = cam.WorldToScreenPoint(world);
+            if (sp.z <= 0f) return;
+            float mx = sp.x / s, my = (Screen.height - sp.y) / s;
+            var content = new GUIContent(text);
+            Vector2 size = GUI.skin.label.CalcSize(content);
+            Color prev = GUI.color;
+            GUI.color = color;
+            GUI.Label(new Rect(mx - size.x * 0.5f, my - size.y * 0.5f, size.x + 2f, size.y), content);
+            GUI.color = prev;
+        }
+
+        // Speed-limit labels along each rail line (interrogate existing speeds). Shown
+        // while editing rail when rail.showSpeedLabels is on.
+        void DrawSpeedLabels()
+        {
+            if (!(_lineActive is RailTrackLayer rt) || !rt.ShowSpeedLabels || rt.SpeedLabels.Count == 0) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            Color prevC = GUI.color;
+            GUI.color = new Color(0.85f, 0.95f, 0.75f, 1f);
+            foreach (RailTrackLayer.SpeedLabel sl in rt.SpeedLabels)
+                DrawWorldLabel(cam, s, sl.World, $"{sl.Kmh:0} km/h");
             GUI.color = prevC;
         }
 
@@ -1352,9 +1430,12 @@ namespace NetworkDesigner.Terrain
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.
             if (RailLayer != null)
+            {
                 RailLayer.UpdateNodePucks(_field,
                     overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f),
                     _lineActive is RailTrackLayer, _railSlopeNodeA);
+                RailLayer.RebuildBraking(_field, cursorVis, _lineActive is RailTrackLayer);
+            }
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.
