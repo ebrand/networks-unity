@@ -86,7 +86,7 @@ namespace NetworkDesigner.Terrain
                 FindObjectsInactive.Include, FindObjectsSortMode.None);
             for (int i = 0; i < all.Length; i++)
                 if (all[i] != null && all[i].name == RootName) DestroySafe(all[i]);
-            _root = new GameObject(RootName);
+            _root = new GameObject(RootName) { hideFlags = HideFlags.DontSave };
         }
 
         // ---- palette enable state + packs ----
@@ -321,6 +321,7 @@ namespace NetworkDesigner.Terrain
             float wy = field != null ? field.SampleHeight(wx, wz) : 0f;
             GameObject go = UnityEngine.Object.Instantiate(prefab, new Vector3(wx, wy, wz),
                 Quaternion.Euler(0f, rotY, 0f), _root.transform);
+            go.hideFlags = HideFlags.DontSave; // runtime scatter, never serialize into the scene
             if (scale > 0f && !Mathf.Approximately(scale, 1f)) go.transform.localScale *= scale;
             // No physics: strip colliders so they cost nothing and can't be hit by
             // the sculpt/cursor raycast (which treats any MeshCollider as terrain).

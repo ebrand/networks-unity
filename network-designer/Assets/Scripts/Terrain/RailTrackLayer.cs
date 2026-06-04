@@ -407,7 +407,7 @@ namespace NetworkDesigner.Terrain
                     FindObjectsInactive.Include, FindObjectsSortMode.None);
                 for (int i = 0; i < all.Length; i++)
                     if (all[i] != null && all[i].name == RootName) DestroySafe(all[i]);
-                _root = new GameObject(RootName);
+                _root = new GameObject(RootName) { hideFlags = HideFlags.DontSave };
             }
             if (_railMat == null) _railMat = NetworkDesigner.PipelineMaterials.CreateLit(RailColor, 0.6f, "RailMat");
             if (_tieMat == null) _tieMat = NetworkDesigner.PipelineMaterials.CreateLitMatte(TieColor, "TieMat");
@@ -423,7 +423,7 @@ namespace NetworkDesigner.Terrain
         GameObject EnsureChild(GameObject go, string childName, ref Mesh mesh, Material mat)
         {
             if (go != null) return go;
-            go = new GameObject(childName);
+            go = new GameObject(childName) { hideFlags = HideFlags.DontSave };
             go.transform.SetParent(_root.transform, worldPositionStays: false);
             mesh = new Mesh { name = childName + "Mesh" };
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
@@ -494,7 +494,7 @@ namespace NetworkDesigner.Terrain
         void EnsureNetOverlay()
         {
             if (_netMf != null) return;
-            _netGo = new GameObject(RootName + "_Network");
+            _netGo = new GameObject(RootName + "_Network") { hideFlags = HideFlags.DontSave };
             _netGo.transform.SetParent(_root != null ? _root.transform : null, worldPositionStays: false);
             _netMf = _netGo.AddComponent<MeshFilter>();
             _netMr = _netGo.AddComponent<MeshRenderer>();
@@ -1190,7 +1190,7 @@ namespace NetworkDesigner.Terrain
         void EnsurePreview()
         {
             if (_pvMf != null) return;
-            _pvGo = new GameObject(RootName + "_Preview");
+            _pvGo = new GameObject(RootName + "_Preview") { hideFlags = HideFlags.DontSave };
             _pvMf = _pvGo.AddComponent<MeshFilter>();
             _pvMr = _pvGo.AddComponent<MeshRenderer>();
             _pvMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;

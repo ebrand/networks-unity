@@ -346,6 +346,7 @@ namespace NetworkDesigner.Terrain
             if (FindFirstObjectByType<TerrainTuningSetup>() != null) return;
             TerrainTuningSetup setup = new GameObject("TerrainTuning")
                 .AddComponent<TerrainTuningSetup>(); // RequireComponent adds TuningServer
+            setup.gameObject.hideFlags = HideFlags.DontSave; // runtime-only, never serialize into the scene
             setup.Terrain = this;
         }
 
@@ -452,7 +453,7 @@ namespace NetworkDesigner.Terrain
         void EnsureWater()
         {
             if (_waterGo != null) return;
-            _waterGo = new GameObject("TerrainWater");
+            _waterGo = new GameObject("TerrainWater") { hideFlags = HideFlags.DontSave };
             var mf = _waterGo.AddComponent<MeshFilter>();
             var mr = _waterGo.AddComponent<MeshRenderer>();
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -531,7 +532,7 @@ namespace NetworkDesigner.Terrain
             if (recreate)
             {
                 DestroyAllChunkRoots(); // tracked root + any orphans from edit-mode/reload
-                _chunkRoot = new GameObject("TerrainChunks");
+                _chunkRoot = new GameObject("TerrainChunks") { hideFlags = HideFlags.DontSave };
                 _chunksX = _chunksZ = chunksX;
                 _chunkMesh = new Mesh[n];
                 _chunkCol = new MeshCollider[n];
@@ -550,7 +551,7 @@ namespace NetworkDesigner.Terrain
         void CreateChunk(int cx, int cz, int cc)
         {
             int idx = cz * _chunksX + cx;
-            GameObject go = new GameObject($"Chunk_{cx}_{cz}");
+            GameObject go = new GameObject($"Chunk_{cx}_{cz}") { hideFlags = HideFlags.DontSave };
             go.transform.SetParent(_chunkRoot.transform, worldPositionStays: false);
             MeshFilter mf = go.AddComponent<MeshFilter>();
             MeshRenderer mr = go.AddComponent<MeshRenderer>();
@@ -914,6 +915,7 @@ namespace NetworkDesigner.Terrain
         {
             if (FindFirstObjectByType<SceneAmbiance>() != null) return;
             SceneAmbiance amb = new GameObject("SceneAmbiance").AddComponent<SceneAmbiance>();
+            amb.gameObject.hideFlags = HideFlags.DontSave; // runtime-only
             amb.CreateSunIfMissing = true;
             amb.ManageAmbient = true;
             amb.ShadowDistance = ShadowDistance;
@@ -1123,9 +1125,18 @@ namespace NetworkDesigner.Terrain
                 }
                 if (Input.GetMouseButtonDown(1))
                 {
-                    // Right-click near a node deletes it; otherwise ends the chain.
-                    if (overTerrain && _lineActive.DeleteNearNode(_field, hit.point, 3f))
-                        _dirtySince = Time.realtimeSinceStartup;
+                    // Right-click deletes the node the cursor SNAPPED to (a rail end) —
+                    // even when the raw mouse is off it — then a node directly under the
+                    // hit; otherwise ends the chain.
+                    bool deleted = false;
+                    if (overTerrain)
+                    {
+                        if (_lineActive is RailTrackLayer rlDel
+                            && rlDel.TrySnapToTrack(new Vector2(hit.point.x, hit.point.z), out Vector2 dsnap))
+                            deleted = rlDel.DeleteNearNode(_field, new Vector3(dsnap.x, hit.point.y, dsnap.y), 2f);
+                        if (!deleted) deleted = _lineActive.DeleteNearNode(_field, hit.point, 3f);
+                    }
+                    if (deleted) _dirtySince = Time.realtimeSinceStartup;
                     else _lineActive.EndChain();
                 }
                 if (Input.GetKeyDown(KeyCode.Backspace))
@@ -1409,7 +1420,7 @@ namespace NetworkDesigner.Terrain
         {
             if (_cursorMf != null) return;
             // Root object at world identity — the ring verts are world-space.
-            GameObject go = new GameObject("BrushCursor");
+            GameObject go = new GameObject("BrushCursor") { hideFlags = HideFlags.DontSave };
             _cursorMf = go.AddComponent<MeshFilter>();
             _cursorMr = go.AddComponent<MeshRenderer>();
             _cursorMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -1448,7 +1459,7 @@ namespace NetworkDesigner.Terrain
         void EnsureContours()
         {
             if (_contourMf != null) return;
-            GameObject go = new GameObject("ContourLines");
+            GameObject go = new GameObject("ContourLines") { hideFlags = HideFlags.DontSave };
             go.transform.SetParent(transform, worldPositionStays: false);
             _contourMf = go.AddComponent<MeshFilter>();
             _contourMr = go.AddComponent<MeshRenderer>();

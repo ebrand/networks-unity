@@ -35,7 +35,7 @@ namespace NetworkDesigner.Terrain
             float radius = Mathf.Max(b.extents.x, b.extents.y, b.extents.z);
             if (radius < 1e-3f) radius = 1f;
 
-            GameObject camGo = new GameObject("__TreePreviewCam");
+            GameObject camGo = new GameObject("__TreePreviewCam") { hideFlags = HideFlags.DontSave };
             Camera cam = camGo.AddComponent<Camera>();
             cam.cullingMask = 1 << PreviewLayer;
             cam.clearFlags = CameraClearFlags.SolidColor;
@@ -53,7 +53,7 @@ namespace NetworkDesigner.Terrain
 
             // A directional light so the thumbnail isn't flat ambient. Exists
             // only for this synchronous render; destroyed before frame end.
-            GameObject lightGo = new GameObject("__TreePreviewLight");
+            GameObject lightGo = new GameObject("__TreePreviewLight") { hideFlags = HideFlags.DontSave };
             Light light = lightGo.AddComponent<Light>();
             light.type = LightType.Directional;
             light.intensity = 1.1f;

@@ -74,7 +74,7 @@ namespace NetworkDesigner.Terrain
                 FindObjectsInactive.Include, FindObjectsSortMode.None);
             for (int i = 0; i < all.Length; i++)
                 if (all[i] != null && all[i].name == RootName) DestroySafe(all[i]);
-            _root = new GameObject(RootName);
+            _root = new GameObject(RootName) { hideFlags = HideFlags.DontSave };
         }
 
         // Where placed instances are parented: the override (e.g. a PoleChain) if
@@ -314,7 +314,7 @@ namespace NetworkDesigner.Terrain
         void EnsurePreview()
         {
             if (_pvMf != null) return;
-            _pvGo = new GameObject(RootName + "_Preview");
+            _pvGo = new GameObject(RootName + "_Preview") { hideFlags = HideFlags.DontSave };
             _pvMf = _pvGo.AddComponent<MeshFilter>();
             _pvMr = _pvGo.AddComponent<MeshRenderer>();
             _pvMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;

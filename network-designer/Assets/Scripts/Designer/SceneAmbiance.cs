@@ -75,6 +75,7 @@ namespace NetworkDesigner.Designer
             if (Sun == null && CreateSunIfMissing)
             {
                 Sun = new GameObject("Sun").AddComponent<Light>();
+                Sun.gameObject.hideFlags = HideFlags.DontSave; // runtime auto-created light
                 Sun.type = LightType.Directional;
             }
             if (Sun != null)
