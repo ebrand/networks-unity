@@ -279,6 +279,25 @@ namespace NetworkDesigner.Terrain
             }
         }
 
+        // True when EVERY plan edge's endpoint-to-endpoint grade is within MaxGradeDeg on
+        // the current terrain — i.e. a grade-limited rail can sit on the whole centreline.
+        // overEdges = count of segments that exceed it. False (and 0) on an empty plan.
+        public bool AllEdgesBuildable(TerrainField field, out int overEdges)
+        {
+            overEdges = 0;
+            if (Graph == null || field == null || Graph.Edges.Count == 0) return false;
+            float maxPct = Mathf.Tan(Mathf.Max(0.1f, MaxGradeDeg) * Mathf.Deg2Rad) * 100f;
+            foreach (LineEdge e in Graph.Edges)
+            {
+                GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
+                float L = ApproxArcLength(q0, q1, q2, q3);
+                if (L < 1e-3f) continue;
+                float eA = field.SampleHeight(q0.x, q0.y), eB = field.SampleHeight(q3.x, q3.y);
+                if (Mathf.Abs(eB - eA) / L * 100f > maxPct) overEdges++;
+            }
+            return overEdges == 0;
+        }
+
         public bool TryNearestOnPlan(Vector2 p, float maxDist, out Vector2 onPlan, out Vector2 dir)
         {
             onPlan = p; dir = Vector2.zero;

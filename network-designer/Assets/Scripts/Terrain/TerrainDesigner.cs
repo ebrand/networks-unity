@@ -186,6 +186,9 @@ namespace NetworkDesigner.Terrain
                  "bilinear-sampled to the grid. Black = 0, white = Max height. " +
                  "REPLACES the current heights. Run in Play mode.")]
         public string HeightmapPath = "terrain1.png";
+        [Tooltip("Folder the heightmap picker dropdown lists PNGs from (relative to the " +
+                 "project root in the Editor). Drop grayscale PNGs here to choose them.")]
+        public string HeightmapFolder = "Assets/Heightmaps";
         [Tooltip("Metres of elevation that pure white (1.0) maps to; black maps to 0.")]
         public float HeightmapMaxHeight = 250f;
         [Tooltip("Box-blur passes applied after import. Softens the 8-bit terracing " +
@@ -258,6 +261,12 @@ namespace NetworkDesigner.Terrain
         float _slopeGradePct;     // live grade % for the readout
         List<Vector2> _slopePath; // this frame's plan-centreline path A->end (null = straight)
         readonly List<RailPlanLayer.EdgeGrade> _planGrades = new List<RailPlanLayer.EdgeGrade>();
+        // Rail auto-slope (Alt+click node A, then node B): grade the rail bed between two
+        // rail nodes to a constant ramp, if the result stays within the rail's max grade.
+        int _railSlopeNodeA = -1;          // armed A node (-1 = none)
+        List<Vector2> _railSlopePath;      // this frame's preview path A -> hovered node
+        float _railSlopeGradePct;          // preview grade %
+        bool _railSlopeGradeOk;            // within the rail's max grade?
         // Inverted so a 0/false deserialize = snapping ENABLED (preserves behavior
         // for an already-serialized scene); the tunable presents it as a positive
         // "snap to rail" toggle, default on.
@@ -270,6 +279,9 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Slope tool (5): the end point snaps onto the rail 'straight' guide " +
                  "when within this perpendicular distance of it.")]
         public float SlopeGuideSnapRadius = 8f;
+        [Tooltip("Rail auto-slope (Alt+click two rail nodes): full width (m) of the bed " +
+                 "corridor graded between them.")]
+        public float RailSlopeWidth = 8f;
 
         public TerrainField Field => _field;
 
@@ -757,7 +769,7 @@ namespace NetworkDesigner.Terrain
             {
                 bool rail = _lineActive is RailTrackLayer;
                 bool plan = _lineActive is RailPlanLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 252f : (plan ? 256f : 104f)), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 272f : (plan ? 256f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -789,6 +801,14 @@ namespace NetworkDesigner.Terrain
                 if (_lineActive is RailTrackLayer rt)
                 {
                     GUILayout.Label("Click a rail edge: insert node (chop).\nClick a node puck: branch from it.");
+                    if (_railSlopeNodeA >= 0)
+                        GUILayout.Label(_railSlopePath != null
+                            ? (_railSlopeGradeOk
+                                ? $"Auto-slope → {_railSlopeGradePct:0.0}% — OK. Alt+click node B."
+                                : $"Auto-slope → {_railSlopeGradePct:0.0}% — OVER {rt.MaxGradeDeg:0.0}°. Pick a closer B.")
+                            : "Auto-slope: A set. Alt+click node B (right-click cancels).");
+                    else
+                        GUILayout.Label("Alt+click node A then node B: auto-slope the bed.");
                     GUILayout.Label($"Speed {rt.SpeedLimitKmh:0} km/h  →  min radius {rt.MinRadiusForSpeed:0} m");
                     if (rt.LastPreviewRadius < float.PositiveInfinity)
                         GUILayout.Label(rt.LastPreviewTooTight
@@ -1319,6 +1339,10 @@ namespace NetworkDesigner.Terrain
                                                    SlopeGuideDetectRadius, out _, out _))
                 BrushRadius = Mathf.Clamp(PlanLayer.CorridorWidth * 0.5f, 0.5f, MaxBrushRadius);
 
+            // Rail auto-slope: while node A is armed, resolve this frame's preview path
+            // to the node under the cursor and its resulting grade (BEFORE the fill draws).
+            ResolveRailSlopePreview(overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f));
+
             // Resolve the snapped cursor for the active tool ONCE, so the brush ring
             // sits exactly where placement will land (track / extension / grid / slope
             // guide). Scatter & plain sculpt don't snap.
@@ -1326,11 +1350,11 @@ namespace NetworkDesigner.Terrain
             UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
-            // cursor highlights (an off-terrain hover = no highlight).
+            // cursor (and the armed auto-slope node A) highlight.
             if (RailLayer != null)
                 RailLayer.UpdateNodePucks(_field,
                     overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f),
-                    _lineActive is RailTrackLayer);
+                    _lineActive is RailTrackLayer, _railSlopeNodeA);
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.
@@ -1355,28 +1379,30 @@ namespace NetworkDesigner.Terrain
                 // the raw hit so you can remove a node you're not snapping to.
                 Vector3 place = cursorVis;
                 _lineActive.UpdatePreview(_field, place, overTerrain);
+                bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 if (overTerrain && Input.GetMouseButtonDown(0))
                 {
-                    _lineActive.AddNode(_field, place);
-                    _dirtySince = Time.realtimeSinceStartup;
+                    if (_lineActive is RailTrackLayer railSlope && altMod)
+                    {
+                        // Rail auto-slope: Alt+click node A, then node B → grade between.
+                        int n = railSlope.NearestNodeForPick(new Vector2(hit.point.x, hit.point.z));
+                        if (n >= 0)
+                        {
+                            if (_railSlopeNodeA < 0) _railSlopeNodeA = n;     // pick A
+                            else { ApplyRailSlope(n); _railSlopeNodeA = -1; } // pick B → apply
+                        }
+                    }
+                    else
+                    {
+                        _lineActive.AddNode(_field, place);
+                        _dirtySince = Time.realtimeSinceStartup;
+                    }
                 }
                 if (Input.GetMouseButtonDown(1))
                 {
-                    // Right-click deletes the node the cursor SNAPPED to (a rail end) —
-                    // even when the raw mouse is off it — then a node directly under the
-                    // hit; otherwise ends the chain.
-                    bool deleted = false;
-                    if (overTerrain)
-                    {
-                        Vector2 dflat = new Vector2(hit.point.x, hit.point.z);
-                        if (_lineActive is RailTrackLayer rlDel && rlDel.TrySnapToTrack(dflat, out Vector2 dsnap))
-                            deleted = rlDel.DeleteNearNode(_field, new Vector3(dsnap.x, hit.point.y, dsnap.y), 2f);
-                        else if (_lineActive is RailPlanLayer plDel && plDel.TrySnapToOwnNode(dflat, out Vector2 psnap))
-                            deleted = plDel.DeleteNearNode(_field, new Vector3(psnap.x, hit.point.y, psnap.y), 2f);
-                        if (!deleted) deleted = _lineActive.DeleteNearNode(_field, hit.point, 3f);
-                    }
-                    if (deleted) _dirtySince = Time.realtimeSinceStartup;
-                    else _lineActive.EndChain();
+                    // An armed auto-slope cancels first (so right-click backs out of it).
+                    if (_railSlopeNodeA >= 0) _railSlopeNodeA = -1;
+                    else DeleteOrEndChain(hit, overTerrain);
                 }
                 if (Input.GetKeyDown(KeyCode.Backspace))
                 {
@@ -1694,17 +1720,107 @@ namespace NetworkDesigner.Terrain
         // sit on the plan and connect, it follows the planned centreline around curves.
         void UpdateSlopeFill()
         {
-            bool show = _slopeArmed && _slopeEndValid && Brush == BrushMode.Slope
-                        && _active == null && _lineActive == null && ShowBrushCursor && _field != null;
             EnsureSlopeFill();
+            // Two sources feed the same fill ribbon: the brush slope tool, and the rail
+            // node-to-node auto-slope preview. Pick whichever is active this frame.
+            List<Vector2> path = null;
+            float halfW = 0f;
+            bool tooSteep = false;
+            bool brushSlope = _slopeArmed && _slopeEndValid && Brush == BrushMode.Slope
+                              && _active == null && _lineActive == null;
+            if (brushSlope)
+            {
+                Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
+                Vector2 e2 = new Vector2(_slopeEnd.x, _slopeEnd.z);
+                path = _slopePath ?? new List<Vector2> { a2, e2 };
+                halfW = BrushRadius;
+            }
+            else if (_railSlopePath != null && _lineActive is RailTrackLayer)
+            {
+                path = _railSlopePath;
+                halfW = RailSlopeWidth * 0.5f;
+                tooSteep = !_railSlopeGradeOk;   // tint red when it would exceed max grade
+            }
+
+            bool show = path != null && ShowBrushCursor && _field != null;
             _slopeFillMr.enabled = show;
             if (!show) return;
-            if (_slopeFillMat != null) _slopeFillMat.color = SlopeFillColor;
+            if (_slopeFillMat != null)
+                _slopeFillMat.color = tooSteep ? new Color(1f, 0.3f, 0.25f, SlopeFillColor.a) : SlopeFillColor;
+            BuildSlopeRibbon(path, Mathf.Max(_field.CellSize, halfW));
+        }
 
-            Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
-            Vector2 e2 = new Vector2(_slopeEnd.x, _slopeEnd.z);
-            List<Vector2> path = _slopePath ?? new List<Vector2> { a2, e2 };
-            BuildSlopeRibbon(path, Mathf.Max(_field.CellSize, BrushRadius));
+        // Rail auto-slope: resolve the armed-A -> hovered-node preview path + grade, and
+        // clear the arm if rail mode was left or A no longer exists.
+        void ResolveRailSlopePreview(Vector2 cursorXz)
+        {
+            _railSlopePath = null;
+            if (!(_lineActive is RailTrackLayer) || RailLayer == null || _field == null)
+            { _railSlopeNodeA = -1; return; }
+            if (_railSlopeNodeA >= RailLayer.Graph.Nodes.Count) _railSlopeNodeA = -1;
+            if (_railSlopeNodeA < 0) return;
+            int hb = RailLayer.NearestNodeForPick(cursorXz);
+            if (hb < 0 || hb == _railSlopeNodeA) return;
+            if (!RailLayer.TryCenterlinePath(_railSlopeNodeA, hb, out List<Vector2> rp)) return;
+            _railSlopePath = rp;
+            Vector2 pa = RailLayer.Graph.Nodes[_railSlopeNodeA], pb = RailLayer.Graph.Nodes[hb];
+            float ea = _field.SampleHeight(pa.x, pa.y), eb = _field.SampleHeight(pb.x, pb.y);
+            float len = PathLengthXZ(rp);
+            _railSlopeGradePct = len > 1e-3f ? (eb - ea) / len * 100f : 0f;
+            float gradeDeg = len > 1e-3f ? Mathf.Atan2(Mathf.Abs(eb - ea), len) * Mathf.Rad2Deg : 0f;
+            _railSlopeGradeOk = gradeDeg <= RailLayer.MaxGradeDeg;
+        }
+
+        // Grade the rail bed between the armed node A and nodeB to a constant ramp (from
+        // A's to B's current terrain height), only if that stays within the rail's max
+        // grade. Then re-sit the track on the new bed.
+        void ApplyRailSlope(int nodeB)
+        {
+            if (RailLayer == null || _field == null || _railSlopeNodeA < 0 || nodeB < 0
+                || nodeB == _railSlopeNodeA) return;
+            if (!RailLayer.TryCenterlinePath(_railSlopeNodeA, nodeB, out List<Vector2> path))
+            { Debug.LogWarning("[Rail slope] Those two nodes aren't connected."); return; }
+            Vector2 pa = RailLayer.Graph.Nodes[_railSlopeNodeA], pb = RailLayer.Graph.Nodes[nodeB];
+            float ea = _field.SampleHeight(pa.x, pa.y), eb = _field.SampleHeight(pb.x, pb.y);
+            float len = PathLengthXZ(path);
+            float gradeDeg = len > 1e-3f ? Mathf.Atan2(Mathf.Abs(eb - ea), len) * Mathf.Rad2Deg : 0f;
+            if (gradeDeg > RailLayer.MaxGradeDeg)
+            {
+                Debug.LogWarning($"[Rail slope] {gradeDeg:0.0}° exceeds the {RailLayer.MaxGradeDeg:0.0}° "
+                    + "max — the endpoints are too far apart in height for this span. Not graded.");
+                return;
+            }
+            ApplySlopeAlongPath(path, ea, eb, Mathf.Max(_field.CellSize, RailSlopeWidth * 0.5f));
+            _dirtySince = Time.realtimeSinceStartup;
+            RebuildContours();
+            ConformScatterAndLines();
+            RebuildRail();   // re-sit the track on the freshly graded bed
+            Debug.Log($"[Rail slope] Graded {len:0} m at {gradeDeg:0.0}° between nodes {_railSlopeNodeA} and {nodeB}.");
+        }
+
+        static float PathLengthXZ(List<Vector2> p)
+        {
+            float L = 0f;
+            for (int i = 1; i < p.Count; i++) L += Vector2.Distance(p[i - 1], p[i]);
+            return L;
+        }
+
+        // Right-click in line mode: delete the snapped/under-cursor node, else end the
+        // chain. (Extracted so the rail auto-slope can intercept right-click to cancel.)
+        void DeleteOrEndChain(RaycastHit hit, bool overTerrain)
+        {
+            bool deleted = false;
+            if (overTerrain)
+            {
+                Vector2 dflat = new Vector2(hit.point.x, hit.point.z);
+                if (_lineActive is RailTrackLayer rlDel && rlDel.TrySnapToTrack(dflat, out Vector2 dsnap))
+                    deleted = rlDel.DeleteNearNode(_field, new Vector3(dsnap.x, hit.point.y, dsnap.y), 2f);
+                else if (_lineActive is RailPlanLayer plDel && plDel.TrySnapToOwnNode(dflat, out Vector2 psnap))
+                    deleted = plDel.DeleteNearNode(_field, new Vector3(psnap.x, hit.point.y, psnap.y), 2f);
+                if (!deleted) deleted = _lineActive.DeleteNearNode(_field, hit.point, 3f);
+            }
+            if (deleted) _dirtySince = Time.realtimeSinceStartup;
+            else _lineActive.EndChain();
         }
 
         // Build a draped triangle ribbon of half-width `halfW` centred on `path`.
@@ -2170,6 +2286,52 @@ namespace NetworkDesigner.Terrain
             foreach (string c in candidates)
                 if (System.IO.File.Exists(c)) return c;
             return candidates[0];
+        }
+
+        // Absolute path of the heightmap folder (relative resolves to the project root in
+        // the Editor, persistentDataPath in a build).
+        string HeightmapFolderFull()
+        {
+            if (System.IO.Path.IsPathRooted(HeightmapFolder)) return HeightmapFolder;
+#if UNITY_EDITOR
+            string baseDir = System.IO.Path.GetFullPath(System.IO.Path.Combine(Application.dataPath, ".."));
+#else
+            string baseDir = Application.persistentDataPath;
+#endif
+            return System.IO.Path.GetFullPath(System.IO.Path.Combine(baseDir, HeightmapFolder));
+        }
+
+        // PNG file names (no path) in the heightmap folder, for the picker dropdown.
+        public List<string> ListHeightmapFiles()
+        {
+            var list = new List<string>();
+            try
+            {
+                string dir = HeightmapFolderFull();
+                if (System.IO.Directory.Exists(dir))
+                    foreach (string f in System.IO.Directory.GetFiles(dir, "*.png"))
+                        list.Add(System.IO.Path.GetFileName(f));
+            }
+            catch { /* unreadable folder -> empty list */ }
+            list.Sort(System.StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
+        // The selected heightmap file (just the name). Getting it reports the current
+        // file if it lives in the folder; setting it only points HeightmapPath at the
+        // folder — the actual load waits for the "Load heightmap" button.
+        public string HeightmapFile
+        {
+            get
+            {
+                string name = System.IO.Path.GetFileName(HeightmapPath ?? "");
+                return ListHeightmapFiles().Contains(name) ? name : "";
+            }
+            set
+            {
+                if (string.IsNullOrEmpty(value)) return;
+                HeightmapPath = System.IO.Path.Combine(HeightmapFolder, value);
+            }
         }
 
         // Bilinear gray sample (uses the red channel; grayscale has r=g=b) at

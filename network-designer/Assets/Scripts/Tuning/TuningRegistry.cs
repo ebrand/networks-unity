@@ -57,6 +57,9 @@ namespace NetworkDesigner.Tuning
             public Func<object> Get;
             public Action<object> Set;
             public Dictionary<string, object> Meta = new Dictionary<string, object>();
+            // When set, the snapshot uses this (re-evaluated each send) instead of the
+            // static Meta — for entries whose meta is dynamic (e.g. a folder listing).
+            public Func<Dictionary<string, object>> MetaProvider;
         }
 
         // Order-preserving so the React panel can render in registration order.
@@ -136,6 +139,29 @@ namespace NetworkDesigner.Tuning
                 Description = description ?? "",
                 Get = () => ColorToHex(get()),
                 Set = v => set(HexToColor(v as string)),
+            });
+        }
+
+        // A dropdown of string options. `options` is re-evaluated for each snapshot, so
+        // a dynamic source (e.g. files in a folder) refreshes when the client reconnects
+        // / re-requests a snapshot.
+        public static void RegisterSelect(string key, string category, string label,
+            Func<string> get, Action<string> set, Func<IEnumerable<string>> options,
+            string description = null)
+        {
+            Add(new Entry
+            {
+                Key = key,
+                Type = "select",
+                Category = category,
+                Label = label ?? key,
+                Description = description ?? "",
+                Get = () => get(),
+                Set = v => set(v?.ToString() ?? ""),
+                MetaProvider = () => new Dictionary<string, object>
+                {
+                    { "options", new List<string>(options() ?? System.Array.Empty<string>()) },
+                },
             });
         }
 

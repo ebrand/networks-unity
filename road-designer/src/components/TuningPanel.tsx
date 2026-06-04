@@ -232,6 +232,8 @@ function EntryControl({
       return <ProfileControl entry={entry} onChange={onChange} />;
     case "string":
       return <StringControl entry={entry} onChange={onChange} />;
+    case "select":
+      return <SelectControl entry={entry} onChange={onChange} />;
     case "action":
       return <ActionControl entry={entry} onChange={onChange} />;
     default:
@@ -372,6 +374,34 @@ function ColorControl({
       }}
       onKeyDown={(ev) => {
         if (ev.key === "Enter") commit();
+      }}
+    />
+  );
+}
+
+// Dropdown of string options supplied by Unity in meta.options (e.g. the PNGs in
+// the Heightmaps folder). Selecting one sends it straight to Unity.
+function SelectControl({
+  entry,
+  onChange,
+}: {
+  entry: TuningEntry;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  const raw = (entry.meta as { options?: unknown })?.options;
+  const options = Array.isArray(raw) ? (raw as unknown[]).map(String) : [];
+  const value = typeof entry.value === "string" ? entry.value : "";
+  return (
+    <Select
+      label={<TipLabel text={entry.label} tip={entry.description} />}
+      size="xs"
+      data={options}
+      value={value && options.includes(value) ? value : null}
+      placeholder={options.length ? "Select…" : "(none found)"}
+      searchable
+      nothingFoundMessage="No match"
+      onChange={(v) => {
+        if (v) onChange(entry.key, v);
       }}
     />
   );

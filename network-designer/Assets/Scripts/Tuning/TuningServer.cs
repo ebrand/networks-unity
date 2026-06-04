@@ -166,7 +166,7 @@ namespace NetworkDesigner.Tuning
                     description = e.Description,
                     category = e.Category,
                     value = e.Get(),
-                    meta = e.Meta,
+                    meta = e.MetaProvider != null ? e.MetaProvider() : e.Meta,
                 });
             }
             string payload = JsonConvert.SerializeObject(new { op = "snapshot", entries });

@@ -7,6 +7,7 @@ export type TuningType =
   | "vector3"
   | "profile"
   | "string"
+  | "select"
   | "action";
 
 export type TuningEntry = {

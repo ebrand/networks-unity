@@ -373,6 +373,63 @@ namespace NetworkDesigner.Terrain
             return null;
         }
 
+        // Nearest node to an XZ point within the node-pick radius (the same radius the
+        // pucks highlight at), or -1. For the editor's node-anchored actions.
+        public int NearestNodeForPick(Vector2 p) => Graph != null ? Graph.NearestNode(p, NodePickRadius) : -1;
+
+        // Sample the rail centreline (XZ polyline) between two nodes, following edges via
+        // BFS (shortest hop count). False if the nodes aren't connected. Used by the
+        // editor's node-to-node auto-slope.
+        public bool TryCenterlinePath(int a, int b, out List<Vector2> path)
+        {
+            path = null;
+            if (Graph == null || a < 0 || b < 0 || a == b
+                || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) return false;
+            List<int> nodes = BfsNodePath(a, b);
+            if (nodes == null || nodes.Count < 2) return false;
+            path = new List<Vector2>();
+            for (int k = 0; k < nodes.Count - 1; k++)
+            {
+                LineEdge e = FindEdge(nodes[k], nodes[k + 1]);
+                if (e == null) { path = null; return false; }
+                Vector2 q0 = Graph.Nodes[e.A], q3 = Graph.Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = q3 - q0; q1 = q0 + d / 3f; q2 = q0 + d * (2f / 3f); }
+                bool fwd = e.A == nodes[k];
+                int steps = Mathf.Clamp(Mathf.CeilToInt(Vector2.Distance(q0, q3) / 2f), 1, 4000);
+                for (int s = (k == 0 ? 0 : 1); s <= steps; s++)
+                {
+                    float t = s / (float)steps;
+                    path.Add(LineGraph.Bezier(q0, q1, q2, q3, fwd ? t : 1f - t));
+                }
+            }
+            return path.Count >= 2;
+        }
+
+        // Breadth-first node path (fewest hops) between two nodes over the edge graph.
+        List<int> BfsNodePath(int start, int goal)
+        {
+            var prev = new Dictionary<int, int> { { start, -1 } };
+            var q = new Queue<int>();
+            q.Enqueue(start);
+            while (q.Count > 0)
+            {
+                int cur = q.Dequeue();
+                if (cur == goal) break;
+                foreach (LineEdge e in Graph.Edges)
+                {
+                    int nxt = e.A == cur ? e.B : (e.B == cur ? e.A : -1);
+                    if (nxt < 0 || prev.ContainsKey(nxt)) continue;
+                    prev[nxt] = cur; q.Enqueue(nxt);
+                }
+            }
+            if (!prev.ContainsKey(goal)) return null;
+            var rev = new List<int>();
+            for (int n = goal; n != -1; n = prev[n]) rev.Add(n);
+            rev.Reverse();
+            return rev;
+        }
+
         // Tightest radius (m) along a cubic bezier, via 3-point circumradius over
         // samples. Returns +inf for a straight line.
         static float MinCurveRadius(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
@@ -602,7 +659,7 @@ namespace NetworkDesigner.Terrain
         // Rebuild the node pucks: a short 3D lit cylinder per node sitting on the
         // terrain, the node nearest `hover` (within NodePickRadius) in the hover colour.
         // Driven each frame by the editor while rail is the active line layer.
-        public void UpdateNodePucks(TerrainField field, Vector2 hover, bool show)
+        public void UpdateNodePucks(TerrainField field, Vector2 hover, bool show, int armedNode = -1)
         {
             EnsurePuckOverlay();
             bool on = show && ShowNodePucks;
@@ -613,7 +670,7 @@ namespace NetworkDesigner.Terrain
             float r = Mathf.Max(0.2f, NodePuckSize), h = Mathf.Max(0.05f, NodePuckHeight);
             for (int i = 0; i < Graph.Nodes.Count; i++)
             {
-                bool hot = i == hoverIdx;
+                bool hot = i == hoverIdx || i == armedNode;   // armed A stays highlighted
                 EmitPuckCylinder(field, Graph.Nodes[i], hot ? r * 1.3f : r, hot ? h * 1.3f : h,
                                  hot ? _puckT1 : _puckT0);
             }

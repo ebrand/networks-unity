@@ -158,7 +158,10 @@ namespace NetworkDesigner.Terrain
                 description: "How fast the radius changes while you hold [ or ].");
 
             // --- Heightmap import ---
-            TuningRegistry.RegisterString("terrain.heightmapPath", "Heightmap", "File",
+            TuningRegistry.RegisterSelect("terrain.heightmapPick", "Heightmap", "Pick from Heightmaps/",
+                () => t.HeightmapFile, v => t.HeightmapFile = v, () => t.ListHeightmapFiles(),
+                description: "Choose a PNG from Assets/Heightmaps. This only selects it — click 'Load heightmap' to actually load it (which REPLACES all heights). Drop new PNGs in that folder and reconnect to refresh the list.");
+            TuningRegistry.RegisterString("terrain.heightmapPath", "Heightmap", "File (or path)",
                 () => t.HeightmapPath, v => t.HeightmapPath = v);
             TuningRegistry.RegisterFloat("terrain.heightmapMax", "Heightmap", "Max height (m)",
                 () => t.HeightmapMaxHeight, v => t.HeightmapMaxHeight = v, 1f, 2000f);
@@ -302,6 +305,9 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.puckHeight", "Rail", "Node puck height (m)",
                 () => t.RailLayer.NodePuckHeight, v => t.RailLayer.NodePuckHeight = v, 0.05f, 3f,
                 description: "Height (thickness) of the 3D node pucks.");
+            TuningRegistry.RegisterFloat("rail.slopeWidth", "Rail", "Auto-slope corridor width (m)",
+                () => t.RailSlopeWidth, v => t.RailSlopeWidth = v, 2f, 40f,
+                description: "Full width of the bed corridor graded by the node-to-node auto-slope (Alt+click node A then node B).");
             TuningRegistry.RegisterColor("rail.puckColor", "Rail", "Node puck color",
                 () => t.RailLayer.NodePuckColor, v => t.RailLayer.NodePuckColor = v,
                 description: "Colour (alpha < 1 = translucent) of the rail node pucks.");
