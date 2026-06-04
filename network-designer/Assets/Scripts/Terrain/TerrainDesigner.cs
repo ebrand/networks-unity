@@ -169,6 +169,7 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Rail-track layer (L). Procedural rails + ties generated along each " +
                  "edge — drawn like a fence; gauge/tie-spacing under the Rail tunables.")]
         public RailTrackLayer RailLayer = new RailTrackLayer { Name = "Rail" };
+        public RailPlanLayer PlanLayer = new RailPlanLayer { Name = "Plan" };
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -326,6 +327,7 @@ namespace NetworkDesigner.Terrain
             FenceLayer.Rebuild(_field);     // linework from the save
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
             RebuildContours();
             ApplyWater();
 
@@ -489,6 +491,15 @@ namespace NetworkDesigner.Terrain
                     if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
                     if (rl.TrySnapToExtension(flat, out Vector2 ep)) return new Vector3(ep.x, raw.y, ep.y);
                 }
+                if (_lineActive is RailPlanLayer pl)
+                {
+                    // Resume off the plan's own end > start off the rail end > the
+                    // collinear extension guide > grid.
+                    if (pl.TrySnapToOwnNode(flat, out Vector2 pn)) return new Vector3(pn.x, raw.y, pn.y);
+                    if (RailLayer != null && RailLayer.TrySnapToTrackPoint(flat, out Vector2 rp))
+                        return new Vector3(rp.x, raw.y, rp.y);
+                    if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
+                }
                 return ApplyGridSnap(raw);
             }
             if (Brush == BrushMode.Slope)
@@ -640,6 +651,16 @@ namespace NetworkDesigner.Terrain
             if (string.IsNullOrEmpty(PowerLineLayer.Name) || PowerLineLayer.Name == "Line") PowerLineLayer.Name = "PowerLine";
             if (RailLayer == null) RailLayer = new RailTrackLayer();
             if (string.IsNullOrEmpty(RailLayer.Name)) RailLayer.Name = "Rail";
+            if (PlanLayer == null) PlanLayer = new RailPlanLayer();
+            if (string.IsNullOrEmpty(PlanLayer.Name)) PlanLayer.Name = "Plan";
+            if (PlanLayer.CorridorWidth <= 0f) PlanLayer.CorridorWidth = 30f; // stale 0-deserialize
+            if (PlanLayer.Tracks < 1) PlanLayer.Tracks = 1;
+            if (PlanLayer.TrackGap <= 0f) PlanLayer.TrackGap = 4f;
+            if (PlanLayer.SampleStep <= 0f) PlanLayer.SampleStep = 2f;
+            if (PlanLayer.CurveLever <= 0f) PlanLayer.CurveLever = 0.55f;
+            if (PlanLayer.ExtensionGuideLength <= 0f) PlanLayer.ExtensionGuideLength = 120f;
+            if (PlanLayer.ExtensionSnapRadius <= 0f) PlanLayer.ExtensionSnapRadius = 4f;
+            if (PlanLayer.EndSnapRadius <= 0f) PlanLayer.EndSnapRadius = 8f;
             // New fields on the serialized layer can deserialize as 0 (Unity
             // footgun); 0 lateral-g would blow the required radius up ~100x.
             if (RailLayer.MaxLateralG <= 0f) RailLayer.MaxLateralG = 0.15f;
@@ -683,13 +704,21 @@ namespace NetworkDesigner.Terrain
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : 104f), GUI.skin.box);
+                bool plan = _lineActive is RailPlanLayer;
+                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 232f : (plan ? 150f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
-                GUILayout.Label(rail
+                GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
                     : "Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
                 if (_lineActive is LineworkLayer lw && lw.Asset == null)
                     GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
+                if (_lineActive is RailPlanLayer pl)
+                {
+                    GUILayout.Label($"Survey plan — unconstrained alignment\ndraped on the terrain (no grade limit).");
+                    GUILayout.Label($"Corridor {pl.CorridorWidth:0} m · {pl.Tracks} track"
+                        + (pl.Tracks >= 2 ? $" (gap {pl.TrackGap:0} m)" : ""));
+                    GUILayout.Label("Snaps to the rail end to start. Analyzer\ncomes next (Phase 2).");
+                }
                 if (_lineActive is RailTrackLayer rt)
                 {
                     GUILayout.Label($"Speed {rt.SpeedLimitKmh:0} km/h  →  min radius {rt.MinRadiusForSpeed:0} m");
@@ -780,6 +809,8 @@ namespace NetworkDesigner.Terrain
         }
         [ContextMenu("Clear Rail")]
         public void ClearRail() { RailLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
+        public void RebuildPlan() { PlanLayer.Rebuild(Field); }
+        public void ClearPlan() { PlanLayer.ClearAll(Field); _dirtySince = Time.realtimeSinceStartup; }
 
         // Cut open trenches in the terrain along rail sections that run below grade
         // (the tunnel approaches), down to the track bed with sloped batter walls,
@@ -845,6 +876,7 @@ namespace NetworkDesigner.Terrain
             FenceLayer.Rebuild(_field);
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
             RebuildContours();
             ApplyWater();
             _dirtySince = Time.realtimeSinceStartup;
@@ -893,7 +925,7 @@ namespace NetworkDesigner.Terrain
         // Mode switching (mutually exclusive; same key again returns to sculpt).
         void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; HideLinePreviews(); }
         void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; HideLinePreviews(); }
-        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); }
 
 #if UNITY_EDITOR
         [ContextMenu("Load Trees From Folder")]
@@ -1006,6 +1038,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
+            if (Input.GetKeyDown(KeyCode.K)) SetLineMode(PlanLayer);
             if (Input.GetKeyDown(KeyCode.G))
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
@@ -1109,10 +1142,20 @@ namespace NetworkDesigner.Terrain
             // (chain); right-click ends the chain; Backspace undoes the last node.
             if (_lineActive != null)
             {
-                // Rail: hold Shift = curve mode (else straight). Set before preview
-                // and click so both reflect the modifier this frame.
-                if (_lineActive is RailTrackLayer railMod)
-                    railMod.CurveModifier = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                // Rail/Plan: hold Shift = curve mode (else straight). Set before
+                // preview and click so both reflect the modifier this frame.
+                bool curveMod = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                if (_lineActive is RailTrackLayer railMod) railMod.CurveModifier = curveMod;
+                else if (_lineActive is RailPlanLayer planMod)
+                {
+                    planMod.CurveModifier = curveMod;
+                    // Seed the extension guide from the rail end the plan started on,
+                    // so the first segment can carry straight off the track.
+                    planMod.HasSeedDir = false;
+                    if (planMod.TryGetTailXZ(out Vector2 ptail) && RailLayer != null
+                        && RailLayer.TryEndHeading(ptail, 3f, out Vector2 seed))
+                    { planMod.SeedDir = seed; planMod.HasSeedDir = true; }
+                }
 
                 // The snapped placement point (same one the ring shows). Deletes use
                 // the raw hit so you can remove a node you're not snapping to.
@@ -1131,9 +1174,11 @@ namespace NetworkDesigner.Terrain
                     bool deleted = false;
                     if (overTerrain)
                     {
-                        if (_lineActive is RailTrackLayer rlDel
-                            && rlDel.TrySnapToTrack(new Vector2(hit.point.x, hit.point.z), out Vector2 dsnap))
+                        Vector2 dflat = new Vector2(hit.point.x, hit.point.z);
+                        if (_lineActive is RailTrackLayer rlDel && rlDel.TrySnapToTrack(dflat, out Vector2 dsnap))
                             deleted = rlDel.DeleteNearNode(_field, new Vector3(dsnap.x, hit.point.y, dsnap.y), 2f);
+                        else if (_lineActive is RailPlanLayer plDel && plDel.TrySnapToOwnNode(dflat, out Vector2 psnap))
+                            deleted = plDel.DeleteNearNode(_field, new Vector3(psnap.x, hit.point.y, psnap.y), 2f);
                         if (!deleted) deleted = _lineActive.DeleteNearNode(_field, hit.point, 3f);
                     }
                     if (deleted) _dirtySince = Time.realtimeSinceStartup;
@@ -1267,6 +1312,7 @@ namespace NetworkDesigner.Terrain
             RockLayer.ConformToSurface(_field);
             FenceLayer.Rebuild(_field);
             PowerLineLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field); // re-drape the survey lines onto the new surface
         }
 
         // World hit -> fractional grid coords, relative to the terrain corner
@@ -1628,6 +1674,7 @@ namespace NetworkDesigner.Terrain
             FenceLayer.Rebuild(_field);
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
             RebuildContours();
             ApplyWater();
             ResetCamera();
@@ -1658,6 +1705,7 @@ namespace NetworkDesigner.Terrain
             FenceLayer.Rebuild(_field);
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
             RebuildContours();
             ApplyWater();
             _dirtySince = Time.realtimeSinceStartup;
@@ -1742,6 +1790,7 @@ namespace NetworkDesigner.Terrain
             FenceLayer.Rebuild(_field); // re-place linework on the new surface
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
 
@@ -1927,6 +1976,7 @@ namespace NetworkDesigner.Terrain
             FenceLayer.Rebuild(_field);
             PowerLineLayer.Rebuild(_field);
             RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
             RebuildContours();
             ApplyWater();
             if (_havePendingCam) { ApplyCameraPose(_pendingCamPos, _pendingCamYaw, _pendingCamPitch); _havePendingCam = false; }
@@ -1961,6 +2011,7 @@ namespace NetworkDesigner.Terrain
                 Fences = FenceLayer.CollectData(),
                 PowerLines = PowerLineLayer.CollectData(),
                 Rails = RailLayer.CollectData(),
+                Plan = PlanLayer.CollectData(),
                 HasCamera = haveCam,
                 CamPos = camPos,
                 CamYaw = camYaw,
@@ -2025,12 +2076,12 @@ namespace NetworkDesigner.Terrain
                 int cap = 64 + n * 8
                           + TreeBytes(save.Trees) + TreeBytes(save.Rocks)
                           + GraphBytes(save.Fences) + GraphBytes(save.PowerLines)
-                          + GraphBytes(save.Rails) + 256;
+                          + GraphBytes(save.Rails) + GraphBytes(save.Plan) + 256;
                 using var ms = new System.IO.MemoryStream(cap);
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(6); // version (6 added per-pack brush settings)
+                    w.Write(7); // version (7 added the rail-planning survey graph)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -2044,6 +2095,7 @@ namespace NetworkDesigner.Terrain
                     WriteGraph(w, save.Fences);
                     WriteGraph(w, save.PowerLines);
                     WriteGraph(w, save.Rails);
+                    WriteGraph(w, save.Plan);               // v7+
                     w.Write(save.HasCamera);                // v5+
                     w.Write(save.CamPos.x); w.Write(save.CamPos.y); w.Write(save.CamPos.z);
                     w.Write(save.CamYaw); w.Write(save.CamPitch);
@@ -2152,6 +2204,7 @@ namespace NetworkDesigner.Terrain
                 FenceLayer.LoadState(save.Fences); // Rebuilt after chunks
                 PowerLineLayer.LoadState(save.PowerLines);
                 RailLayer.LoadState(save.Rails);
+                PlanLayer.LoadState(save.Plan);
                 // Stage the camera pose; applied in Start once the fly camera exists.
                 _havePendingCam = save.HasCamera;
                 _pendingCamPos = save.CamPos;
@@ -2195,6 +2248,7 @@ namespace NetworkDesigner.Terrain
                 s.Fences = ReadGraph(r, version);
                 s.PowerLines = ReadGraph(r, version);
                 if (version >= 2) s.Rails = ReadGraph(r, version); // older saves have no rails
+                if (version >= 7) s.Plan = ReadGraph(r, version);  // rail-planning survey graph
                 if (version >= 5) // fly-camera pose added in v5
                 {
                     s.HasCamera = r.ReadBoolean();

@@ -104,6 +104,7 @@ namespace NetworkDesigner.Terrain
         public LineGraphSave Fences;       // fence linework graph (nodes + edges)
         public LineGraphSave PowerLines;   // power-line linework graph
         public LineGraphSave Rails;        // rail-track graph (procedural rails + ties)
+        public LineGraphSave Plan;         // v7+: rail-planning survey alignment
         public bool HasCamera;             // v5+: a saved fly-camera pose follows
         public Vector3 CamPos;             // camera world position
         public float CamYaw;               // fly-camera yaw / pitch (its look state)

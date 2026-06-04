@@ -986,6 +986,32 @@ namespace NetworkDesigner.Terrain
             return true;
         }
 
+        // Outward continuation heading at the rail NODE nearest p (within maxDist):
+        // the direction the track was travelling as it reached that end, so a plan
+        // can carry straight on off the rail. False if no node / it has no edge.
+        public bool TryEndHeading(Vector2 p, float maxDist, out Vector2 dir)
+        {
+            dir = Vector2.zero;
+            if (Graph == null) return false;
+            int n = Graph.NearestNode(p, maxDist);
+            if (n < 0) return false;
+            for (int i = 0; i < Graph.Edges.Count; i++)
+            {
+                LineEdge e = Graph.Edges[i];
+                if (e.A != n && e.B != n) continue;
+                Vector2 p0 = Graph.Nodes[e.A], p3 = Graph.Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
+                dir = e.B == n ? LineGraph.BezierTangent(p0, q1, q2, p3, 1f)
+                               : -LineGraph.BezierTangent(p0, q1, q2, p3, 0f);
+                if (dir.sqrMagnitude < 1e-6f) dir = e.B == n ? p3 - p0 : p0 - p3;
+                if (dir.sqrMagnitude < 1e-6f) return false;
+                dir = dir.normalized;
+                return true;
+            }
+            return false;
+        }
+
         // Heading (unit XZ) of the nearest rail edge within maxDist of p, plus the
         // point on that edge. For the terrain slope tool's network-aware "straight"
         // guide. False if no edge is in range.

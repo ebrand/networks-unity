@@ -375,6 +375,38 @@ namespace NetworkDesigner.Terrain
                 () => t.ClearRail(),
                 description: "Delete the entire rail network (all nodes and edges).");
 
+            // --- Rail planning (survey) ---
+            TuningRegistry.RegisterFloat("plan.corridorWidth", "Rail plan", "Corridor width (m)",
+                () => t.PlanLayer.CorridorWidth, v => { t.PlanLayer.CorridorWidth = v; t.RebuildPlan(); }, 2f, 200f,
+                description: "Plan mode (K): total graded-corridor width — the dashed edge lines sit this far apart, centred on the alignment.");
+            TuningRegistry.RegisterFloat("plan.tracks", "Rail plan", "Tracks (1 or 2)",
+                () => t.PlanLayer.Tracks, v => { t.PlanLayer.Tracks = Mathf.Clamp(Mathf.RoundToInt(v), 1, 2); t.RebuildPlan(); }, 1f, 2f,
+                description: "Plan a single centreline (1) or a double-track pair (2) drawn at +/- half the track gap.");
+            TuningRegistry.RegisterFloat("plan.trackGap", "Rail plan", "Track gap (m)",
+                () => t.PlanLayer.TrackGap, v => { t.PlanLayer.TrackGap = v; t.RebuildPlan(); }, 1f, 30f,
+                description: "Distance between the two tracks (centre to centre) for a double-track corridor.");
+            TuningRegistry.RegisterFloat("plan.curveLever", "Rail plan", "Curve lever (arc width)",
+                () => t.PlanLayer.CurveLever, v => t.PlanLayer.CurveLever = v, 0.1f, 0.95f,
+                description: "Curve-tool shape for the plan: how far the bezier controls lean toward the guide corner.");
+            TuningRegistry.RegisterFloat("plan.guideLength", "Rail plan", "Guide length (m)",
+                () => t.PlanLayer.ExtensionGuideLength, v => t.PlanLayer.ExtensionGuideLength = v, 0f, 1000f,
+                description: "Length of the dashed straight-ahead alignment guide (off the rail end or the previous segment). Also bounds how far the snap reaches.");
+            TuningRegistry.RegisterFloat("plan.guideSnap", "Rail plan", "Guide snap radius (m)",
+                () => t.PlanLayer.ExtensionSnapRadius, v => t.PlanLayer.ExtensionSnapRadius = v, 0f, 30f,
+                description: "Perpendicular distance within which the cursor snaps onto the alignment guide.");
+            TuningRegistry.RegisterFloat("plan.endSnap", "Rail plan", "End/resume snap radius (m)",
+                () => t.PlanLayer.EndSnapRadius, v => t.PlanLayer.EndSnapRadius = v, 0f, 30f,
+                description: "Snap radius for resuming/joining the plan's own nodes (the end of the corridor you already drew).");
+            TuningRegistry.RegisterFloat("plan.sampleStep", "Rail plan", "Drape step (m)",
+                () => t.PlanLayer.SampleStep, v => { t.PlanLayer.SampleStep = v; t.RebuildPlan(); }, 0.5f, 20f,
+                description: "Sampling step for draping the plan lines onto the terrain. Smaller = smoother, more segments.");
+            TuningRegistry.RegisterColor("plan.color", "Rail plan", "Plan color",
+                () => t.PlanLayer.PlanColor, v => { t.PlanLayer.PlanColor = v; t.RebuildPlan(); },
+                description: "Colour (with alpha) of the draped survey lines.");
+            TuningRegistry.RegisterAction("plan.clear", "Rail plan", "Clear plan",
+                () => t.ClearPlan(),
+                description: "Delete the entire survey plan (all nodes and edges).");
+
             // --- Brush cursor ---
             TuningRegistry.RegisterBool("terrain.showCursor", "Brush cursor", "Show ring",
                 () => t.ShowBrushCursor, v => t.ShowBrushCursor = v);

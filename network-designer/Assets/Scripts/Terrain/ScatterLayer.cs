@@ -77,16 +77,45 @@ namespace NetworkDesigner.Terrain
             if (Application.isPlaying) UnityEngine.Object.Destroy(o); else UnityEngine.Object.DestroyImmediate(o);
         }
 
-        // Destroy any stray roots by name (a prior edit-mode build / domain reload
-        // leaves the runtime _root reference null while the GameObject lives on).
+        // Acquire our container root. After a domain reload (script recompile while
+        // in Play) the runtime _root/_placed reset but the spawned tree GameObjects
+        // survive — so ADOPT the existing root and re-track its trees (rather than
+        // destroying them), which would otherwise leave untrackable "phantom" trees
+        // the eraser can't see. Duplicate roots are merged into the first.
         void EnsureRoot()
         {
             if (_root != null) return;
             GameObject[] all = UnityEngine.Object.FindObjectsByType<GameObject>(
                 FindObjectsInactive.Include, FindObjectsSortMode.None);
             for (int i = 0; i < all.Length; i++)
-                if (all[i] != null && all[i].name == RootName) DestroySafe(all[i]);
-            _root = new GameObject(RootName) { hideFlags = HideFlags.DontSave };
+            {
+                if (all[i] == null || all[i].name != RootName) continue;
+                if (_root == null) _root = all[i]; else DestroySafe(all[i]);
+            }
+            if (_root == null) { _root = new GameObject(RootName) { hideFlags = HideFlags.DontSave }; return; }
+            _root.hideFlags = HideFlags.DontSave;
+            ReadoptChildren();
+        }
+
+        // Rebuild tracking (_placed/_byCell) from the trees already parented under the
+        // adopted root, so post-reload survivors become erasable again. No-op when
+        // already tracked.
+        void ReadoptChildren()
+        {
+            if (_root == null || _placed.Count > 0) return;
+            PlacedTree[] found = _root.GetComponentsInChildren<PlacedTree>(true);
+            for (int i = 0; i < found.Length; i++)
+            {
+                PlacedTree pt = found[i];
+                if (pt == null) continue;
+                Vector2 pos = pt.Data != null ? pt.Data.Position
+                    : new Vector2(pt.transform.position.x, pt.transform.position.z);
+                long key = CellKeyFromWorld(pos.x, pos.y);
+                pt.Cell = key;
+                _placed.Add(pt);
+                if (!_byCell.TryGetValue(key, out List<PlacedTree> b)) _byCell[key] = b = new List<PlacedTree>();
+                b.Add(pt);
+            }
         }
 
         // ---- palette enable state + packs ----
@@ -347,6 +376,7 @@ namespace NetworkDesigner.Terrain
         // Erase items within the brush. Visits only overlapping lattice cells.
         public bool Erase(Vector3 center, float brushRadius)
         {
+            EnsureRoot(); // re-adopt post-reload survivors so they're erasable
             // Scan the full placed list (not just current-spacing buckets) so the
             // brush removes ANY item in range — including ones placed under a
             // different pack's spacing, which live in differently-keyed buckets.
@@ -410,10 +440,15 @@ namespace NetworkDesigner.Terrain
         // Destroy every placed item in this layer.
         public void ClearAll()
         {
+            EnsureRoot(); // adopt any post-reload survivors so they're cleared too
             for (int i = 0; i < _placed.Count; i++)
                 if (_placed[i] != null) DestroySafe(_placed[i].gameObject);
             _placed.Clear();
             _byCell.Clear();
+            // Belt-and-suspenders: nuke any stragglers still parented under the root.
+            if (_root != null)
+                for (int i = _root.transform.childCount - 1; i >= 0; i--)
+                    DestroySafe(_root.transform.GetChild(i).gameObject);
         }
 
         // ---- save / load / conform ----
