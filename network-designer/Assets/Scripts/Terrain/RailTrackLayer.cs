@@ -637,8 +637,21 @@ namespace NetworkDesigner.Terrain
             Graph.RemoveNode(n);
             if (_chainTail == n) _chainTail = -1; else if (_chainTail > n) _chainTail--;
             _cornerPending = false;
+            PruneOrphanNodes();   // drop the far end(s) of the deleted segment(s) if now edgeless
             Rebuild(field);
             return true;
+        }
+
+        // Remove any node left with no edges (e.g. the far end of a just-deleted segment),
+        // keeping the active chain tail (a fresh, not-yet-connected start node).
+        void PruneOrphanNodes()
+        {
+            for (int i = Graph.Nodes.Count - 1; i >= 0; i--)
+            {
+                if (i == _chainTail || NodeHasEdge(i)) continue;
+                Graph.RemoveNode(i);
+                if (_chainTail > i) _chainTail--;
+            }
         }
 
         // ---- rendering ----

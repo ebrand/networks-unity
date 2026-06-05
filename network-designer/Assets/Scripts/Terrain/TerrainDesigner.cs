@@ -1377,12 +1377,18 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = cam.GetComponent<FlyCameraController>();
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
-            fly.ScrollSuppressor = MouseOverActivePanel;
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll();
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
             if (fresh) FrameFly(fly);
         }
 
         float WorldGroundHeight(Vector3 p) => _field != null ? _field.SampleHeight(p.x, p.z) : 0f;
+
+        // True while Cmd is held in rail/plan mode: the wheel adjusts the design speed
+        // (and the camera ignores it, via ScrollSuppressor).
+        bool CmdSpeedScroll() => RailLayer != null
+            && (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer)
+            && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand));
 
         // URP render scale — the biggest lever for fill-rate-bound (high-res /
         // full-screen) rendering. Set at runtime on the pipeline asset (in-memory,
@@ -1439,6 +1445,15 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
             if (Input.GetKeyDown(KeyCode.K)) SetLineMode(PlanLayer);
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
+            // Cmd + mouse wheel: nudge the shared design speed ±10 km/h per notch while in
+            // rail/plan mode — set it without leaving the plan. The camera ignores the wheel
+            // while Cmd is held (see ScrollSuppressor in the camera setup).
+            if (CmdSpeedScroll())
+            {
+                int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
+                if (notches != 0)
+                    RailLayer.SpeedLimitKmh = Mathf.Clamp(RailLayer.SpeedLimitKmh + notches * 10f, 10f, 200f);
+            }
             if (Input.GetKeyDown(KeyCode.G))
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
