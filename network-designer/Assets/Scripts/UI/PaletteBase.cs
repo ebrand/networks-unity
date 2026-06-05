@@ -65,7 +65,10 @@ namespace NetworkDesigner.UI
         static readonly HashSet<string> _open = new HashSet<string>();
         public static IReadOnlyList<PaletteBase> All => _all;
         public bool IsOpen => _open.Contains(PaletteId);
+        public static bool IsOpenId(string id) => _open.Contains(id);
         public void SetOpen(bool v) { if (v) _open.Add(PaletteId); else _open.Remove(PaletteId); }
+        // Radio toggle by id: open it exclusively, or close it if it's already open.
+        public static void ToggleExclusive(string id) => SetExclusive(IsOpenId(id) ? null : id);
         // Radio behaviour: open exactly `id` (closing every other palette), or null = none.
         public static void SetExclusive(string id)
         {

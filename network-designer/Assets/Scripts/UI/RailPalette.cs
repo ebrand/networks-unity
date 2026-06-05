@@ -12,6 +12,7 @@ namespace NetworkDesigner.UI
     public class RailPalette : PaletteBase
     {
         public override string PaletteId => "Rail";
+        public override string MenuLabel => "Rail (L/K)";
         protected override Color Accent => Amber;
 
         protected override void BuildBody(VisualElement body)

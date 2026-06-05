@@ -1430,6 +1430,11 @@ namespace NetworkDesigner.Terrain
         public bool IsSculptMode => _lineActive == null && _active == null;
         // Grid overlay toggle (the G key path), exposed for the palette footer button.
         public void ToggleGrid() { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
+
+        // Entering rail mode (L/K) opens the Rail palette exclusively (closing any other
+        // open palette); toggling back to sculpt returns to the default Terrain palette.
+        void SyncPaletteToMode()
+            => NetworkDesigner.UI.PaletteBase.SetExclusive(IsRailMode ? "Rail" : "Terrain");
         // Switch to build (plan=false) or plan (plan=true). Radio-style: clicking the
         // mode you're already in is a no-op (use the L/K hotkeys to toggle back out).
         public void SetRailMode(bool plan)
@@ -1629,8 +1634,11 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.R)) SetScatterMode(RockLayer);
             if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
-            if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
-            if (Input.GetKeyDown(KeyCode.K)) SetLineMode(PlanLayer);
+            if (Input.GetKeyDown(KeyCode.L)) { SetLineMode(RailLayer); SyncPaletteToMode(); }
+            if (Input.GetKeyDown(KeyCode.K)) { SetLineMode(PlanLayer); SyncPaletteToMode(); }
+            // Launcher palette hotkeys (radio toggle, same as the launcher buttons).
+            if (Input.GetKeyDown(KeyCode.N)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Terrain");
+            if (Input.GetKeyDown(KeyCode.Y)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("System");
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
             // Cmd + mouse wheel: nudge the shared design speed ±10 km/h per notch while in
             // rail/plan mode — set it without leaving the plan. The camera ignores the wheel

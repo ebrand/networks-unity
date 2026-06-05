@@ -13,6 +13,7 @@ namespace NetworkDesigner.UI
     public class SystemPalette : PaletteBase
     {
         public override string PaletteId => "System";
+        public override string MenuLabel => "System (Y)";
         protected override string Title => "System";
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);   // match Terrain palette
         protected override float PanelWidth => 300f;
