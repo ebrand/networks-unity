@@ -254,6 +254,7 @@ namespace NetworkDesigner.Terrain
         public Color CurveInspectOutline = new Color(1f, 0.95f, 0.20f, 0.85f);
         public Color CurveInspectDecelFill = new Color(1f, 0.55f, 0.12f, 0.85f); // amber hatch on decel zones
         readonly Dictionary<int, float> _nodeMaxSpeed = new Dictionary<int, float>(); // node -> fastest incident edge
+        readonly Dictionary<int, float> _nodeMinSpeed = new Dictionary<int, float>(); // node -> slowest incident edge
         GameObject _inspGo;
         MeshFilter _inspMf;
         MeshRenderer _inspMr;
@@ -265,6 +266,7 @@ namespace NetworkDesigner.Terrain
         readonly List<int> _inspLine = new List<int>();   // submesh 1: outline + hover legs
         readonly List<Vector2> _boxL = new List<Vector2>();
         readonly List<Vector2> _boxR = new List<Vector2>();
+        readonly List<Vector2> _decelPath = new List<Vector2>();
         int _inspSig = -1;   // last-built signature; rebuild only when it changes (not every frame)
         // Two-click connect preview (green = buildable, red = not).
         GameObject _connGo; MeshFilter _connMf; MeshRenderer _connMr; Mesh _connMesh; Material _connMat;
@@ -741,10 +743,13 @@ namespace NetworkDesigner.Terrain
         public void CommitConnect(TerrainField field, in ConnectResult r)
         {
             if (!r.Valid) return;
+            // The whole join (both fillers + curve) is rated for the FASTER speed, so the
+            // speed drop lands where the connection meets the slower existing line — and the
+            // decel zone walks back through the filler + curve, not just the curve.
             int sa = r.NodeA;
-            if (r.NeedStraightA) { sa = Graph.AddNode(r.CurveStartA); Graph.AddEdge(r.NodeA, sa); var es = FindEdge(r.NodeA, sa); if (es != null) es.SpeedLimit = r.SpeedA; }
+            if (r.NeedStraightA) { sa = Graph.AddNode(r.CurveStartA); Graph.AddEdge(r.NodeA, sa); var es = FindEdge(r.NodeA, sa); if (es != null) es.SpeedLimit = r.FasterV; }
             int sb = r.NodeB;
-            if (r.NeedStraightB) { sb = Graph.AddNode(r.CurveEndB); Graph.AddEdge(r.NodeB, sb); var es = FindEdge(r.NodeB, sb); if (es != null) es.SpeedLimit = r.SpeedB; }
+            if (r.NeedStraightB) { sb = Graph.AddNode(r.CurveEndB); Graph.AddEdge(r.NodeB, sb); var es = FindEdge(r.NodeB, sb); if (es != null) es.SpeedLimit = r.FasterV; }
             Graph.AddEdge(sa, sb);
             LineEdge ce = FindEdge(sa, sb);
             if (ce != null)
@@ -1270,11 +1275,12 @@ namespace NetworkDesigner.Terrain
             {
                 LineEdge e = Graph.Edges[ei];
                 EdgeControls(e, Graph.Nodes[e.A], Graph.Nodes[e.B], out Vector2 c1, out Vector2 c2);
-                // Decel zones are always hatched (so they read at a glance); everything else
-                // fills solid only when hovered.
                 EmitCurveBox(field, Graph.Nodes[e.A], c1, c2, Graph.Nodes[e.B], halfW, lift,
-                             ei == hovered, IsDecelEdge(e), fill, outline, hatch);
+                             ei == hovered, false, fill, outline, hatch);
             }
+            // Decel zones: a hatched band that ends at each speed-drop node and walks back up
+            // the fast approach for the brake distance (across curves) — not a whole edge.
+            AppendDecelBands(field, halfW, lift, hatch);
             if (hovered >= 0) EmitHoverDetails(field, hovered, lift);
             _inspMesh.Clear();
             _inspMesh.SetVertices(_inspV);
@@ -1341,21 +1347,84 @@ namespace NetworkDesigner.Terrain
         // Fastest incident-edge speed at every node, in one pass (so decel detection is O(E)).
         void BuildNodeMaxSpeed()
         {
-            _nodeMaxSpeed.Clear();
+            _nodeMaxSpeed.Clear(); _nodeMinSpeed.Clear();
             for (int i = 0; i < Graph.Edges.Count; i++)
             {
                 LineEdge e = Graph.Edges[i]; float v = EdgeSpeed(e);
                 if (!_nodeMaxSpeed.TryGetValue(e.A, out float a) || v > a) _nodeMaxSpeed[e.A] = v;
                 if (!_nodeMaxSpeed.TryGetValue(e.B, out float b) || v > b) _nodeMaxSpeed[e.B] = v;
+                if (!_nodeMinSpeed.TryGetValue(e.A, out float na) || v < na) _nodeMinSpeed[e.A] = v;
+                if (!_nodeMinSpeed.TryGetValue(e.B, out float nb) || v < nb) _nodeMinSpeed[e.B] = v;
             }
         }
 
-        // A faster edge ties into this one at either end → it's a braking (decel) zone.
-        bool IsDecelEdge(LineEdge e)
+        // For every node where a faster edge meets a slower one, hatch a band that ENDS at
+        // that node and walks back up the fast approach (across curves) for the brake
+        // distance — i.e. where a train slows from the fast speed to the slow speed.
+        void AppendDecelBands(TerrainField field, float halfW, float lift, Color32 hatch)
         {
-            float a = _nodeMaxSpeed.TryGetValue(e.A, out float va) ? va : 0f;
-            float b = _nodeMaxSpeed.TryGetValue(e.B, out float vb) ? vb : 0f;
-            return Mathf.Max(a, b) > EdgeSpeed(e) + 1f;
+            foreach (var kv in _nodeMaxSpeed)
+            {
+                int n = kv.Key; float vMax = kv.Value;
+                if (!_nodeMinSpeed.TryGetValue(n, out float vMin) || vMax <= vMin + 1f) continue; // no drop
+                float dist = BrakeDist(vMax, vMin);
+                if (dist < 1f) continue;
+                _decelPath.Clear();
+                WalkFastApproach(n, vMin, dist, _decelPath);     // centreline from n backward
+                if (_decelPath.Count >= 2) EmitBandHatch(field, _decelPath, halfW, lift, hatch);
+            }
+        }
+
+        // Centreline polyline from `startNode` back along the fastest edges (those above
+        // vSlow) until `budget` metres of arc are covered, sampled ~every 8 m.
+        void WalkFastApproach(int startNode, float vSlow, float budget, List<Vector2> path)
+        {
+            int cur = startNode, fromEdge = -1;
+            float remaining = budget;
+            path.Add(Graph.Nodes[cur]);
+            for (int guard = 0; guard < 400 && remaining > 0.5f; guard++)
+            {
+                int best = -1; float bestV = vSlow + 1f;
+                for (int ei = 0; ei < Graph.Edges.Count; ei++)
+                {
+                    if (ei == fromEdge) continue;
+                    LineEdge e = Graph.Edges[ei];
+                    if (e.A != cur && e.B != cur) continue;
+                    float v = EdgeSpeed(e); if (v > bestV) { bestV = v; best = ei; }
+                }
+                if (best < 0) break;                              // no faster edge to continue back along
+                LineEdge be = Graph.Edges[best];
+                OrientedBezier(be, cur, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3); // from cur
+                float arc = EdgeArcLength(q0, q1, q2, q3);
+                int steps = Mathf.Max(2, Mathf.CeilToInt(arc / 8f));
+                Vector2 prev = q0; bool stopped = false;
+                for (int s = 1; s <= steps; s++)
+                {
+                    Vector2 p = LineGraph.Bezier(q0, q1, q2, q3, s / (float)steps);
+                    float seg = Vector2.Distance(prev, p);
+                    if (seg >= remaining) { path.Add(Vector2.Lerp(prev, p, remaining / Mathf.Max(seg, 1e-4f))); remaining = 0f; stopped = true; break; }
+                    remaining -= seg; path.Add(p); prev = p;
+                }
+                if (stopped) break;
+                cur = be.A == cur ? be.B : be.A; fromEdge = best;
+            }
+        }
+
+        // A diagonal hatch band of width 2*halfW along a centreline polyline.
+        void EmitBandHatch(TerrainField field, List<Vector2> path, float halfW, float lift, Color32 hatch)
+        {
+            int n = path.Count;
+            _boxL.Clear(); _boxR.Clear();
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 dir = i + 1 < n ? path[i + 1] - path[i] : path[i] - path[i - 1];
+                if (dir.sqrMagnitude < 1e-8f) dir = Vector2.right;
+                dir = dir.normalized;
+                Vector2 nrm = new Vector2(-dir.y, dir.x);
+                _boxL.Add(path[i] + nrm * halfW); _boxR.Add(path[i] - nrm * halfW);
+            }
+            for (int i = 0; i + 1 < n; i++)
+                InspLine(InspLift(field, _boxL[i], lift), InspLift(field, _boxR[i + 1], lift), hatch);
         }
 
         // A box of width 2*halfW hugging the segment, with a dashed outline (sides + caps).
