@@ -98,6 +98,10 @@ namespace NetworkDesigner.UI
             _railBody.style.display = rail ? DisplayStyle.Flex : DisplayStyle.None;
             if (rail) for (int i = 0; i < _sync.Count; i++) _sync[i]();
 
+            // Live palette opacity (tunable from the React panel via TerrainDesigner).
+            _panel.style.backgroundColor = new Color(PanelBg.r, PanelBg.g, PanelBg.b,
+                Mathf.Clamp01(Designer.PaletteBgAlpha));
+
             // Footer sync (every frame, every mode).
             _footMode.text = Designer.PaletteModeLabel;
             _footSub.text = Designer.PaletteSubModeLabel;

@@ -573,6 +573,9 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.uiScale", "Interface", "UI scale (in-game panels)",
                 () => TerrainDesigner.UiScale, v => TerrainDesigner.UiScale = v, 0.75f, 3f,
                 description: "Scale of the in-game IMGUI panels (palettes, mode hints), so they don't shrink at high resolution.");
+            TuningRegistry.RegisterFloat("terrain.paletteAlpha", "Interface", "Palette background alpha",
+                () => t.PaletteBgAlpha, v => t.PaletteBgAlpha = v, 0f, 1f,
+                description: "Opacity of the in-game UI Toolkit tool palette background (0 = transparent, 1 = solid).");
 
             // --- Camera (free-fly) ---
             if (Fly != null)

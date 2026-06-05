@@ -134,6 +134,9 @@ namespace NetworkDesigner.Terrain
         public Texture2D RaiseIcon, LowerIcon, SmoothIcon, FlattenIcon, SlopeIcon;
         [Tooltip("On-screen size (px) of the brush-mode icon.")]
         public float BrushIconSize = 30f;
+        [Range(0f, 1f)]
+        [Tooltip("Opacity of the in-game UI Toolkit tool palette background (RailPalette).")]
+        public float PaletteBgAlpha = 0.96f;
 
         [Header("Topographic lines")]
         public bool ShowContours = false;
