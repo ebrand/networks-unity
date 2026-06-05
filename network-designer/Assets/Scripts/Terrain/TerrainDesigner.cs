@@ -785,13 +785,32 @@ namespace NetworkDesigner.Terrain
         // Palette IMGUI for the active scatter layer, or a hint for linework.
         void OnGUI()
         {
-            bool sculptHud = (Brush == BrushMode.Slope || Brush == BrushMode.Flatten)
-                             && _lineActive == null && _active == null;
-            if (_lineActive == null && _active == null && !sculptHud) return;
             Matrix4x4 prev = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
-            DrawPanels();
+            DrawModeStatus();   // always on: current mode/sub-mode + grid/snap state
+            bool sculptHud = (Brush == BrushMode.Slope || Brush == BrushMode.Flatten)
+                             && _lineActive == null && _active == null;
+            if (_lineActive != null || _active != null || sculptHud)
+                DrawPanels();
             GUI.matrix = prev;
+        }
+
+        // Persistent top-left strip so the active mode/sub-mode and whether snap-to-grid
+        // is on are always visible — including in plain sculpt, where no other panel shows.
+        // Mode is the top-level tool (Sculpt / Scatter / Line); sub-mode is the specific
+        // brush or layer. Snap-to-grid (Shift+G) is distinct from the grid overlay (G).
+        void DrawModeStatus()
+        {
+            string mode, sub;
+            if (_lineActive != null) { mode = "Line"; sub = _lineActive.LayerName; }
+            else if (_active != null) { mode = "Scatter"; sub = _active.Name; }
+            else { mode = "Sculpt"; sub = Brush.ToString(); }
+
+            GUILayout.BeginArea(new Rect(8f, 8f, 234f, 56f), GUI.skin.box);
+            GUILayout.Label($"{mode}  ·  {sub}");
+            GUILayout.Label($"Grid {(GridEnabled ? "on" : "off")} (G)   ·   "
+                + $"Snap-to-grid {(SnapToGrid ? "ON" : "off")} (⇧G)");
+            GUILayout.EndArea();
         }
 
         void DrawPanels()
