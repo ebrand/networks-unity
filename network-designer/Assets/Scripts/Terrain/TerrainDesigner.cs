@@ -518,6 +518,10 @@ namespace NetworkDesigner.Terrain
                 Vector2 flat = new Vector2(raw.x, raw.z);
                 if (_lineActive is RailTrackLayer rl)
                 {
+                    rl.ExtensionOffAxis = false;   // TrySnapExtensionHard sets it if reached + off-axis
+                    // Hovering another endpoint: snap to it (the auto-fillet join), ahead of
+                    // the bend snap.
+                    if (rl.TryChainConnectSnap(flat, out Vector2 ccs)) return new Vector3(ccs.x, raw.y, ccs.y);
                     // While placing the bend, it sticks to the min-distance target; while
                     // placing the end, the equal-leg lock owns the cursor.
                     if (rl.TrySnapBendToTarget(flat, out Vector2 bt)) return new Vector3(bt.x, raw.y, bt.y);
@@ -856,10 +860,10 @@ namespace NetworkDesigner.Terrain
                             : "Auto-slope: A set. Alt+click node B (right-click cancels).");
                     else
                         GUILayout.Label("Alt+click node A then node B: auto-slope the bed.");
-                    if (_railConnectNodeA >= 0)
-                        GUILayout.Label(_connectStatus ?? "Connect: A set. C+click end B (right-click cancels).");
+                    if (_connectStatus != null)
+                        GUILayout.Label(_connectStatus);
                     else
-                        GUILayout.Label("C+click end A then end B: join two lines.");
+                        GUILayout.Label("C+click two ends, or hover an end in curve mode, to join.");
                     GUILayout.Label($"Speed {rt.SpeedLimitKmh:0} km/h  →  min radius {rt.MinRadiusForSpeed:0} m");
                     if (rt.LastPreviewRadius < float.PositiveInfinity)
                         GUILayout.Label(rt.LastPreviewTooTight
@@ -1344,14 +1348,27 @@ namespace NetworkDesigner.Terrain
             _connectStatus = null;
             if (!(_lineActive is RailTrackLayer rc)) return;
             if (_railConnectNodeA >= rc.Graph.Nodes.Count) _railConnectNodeA = -1;   // stale after an edit
-            if (_railConnectNodeA < 0 || !overTerrain || !Input.GetKey(KeyCode.C)) { rc.HideConnectPreview(); return; }
-            int b = rc.NearestNodeForPick(new Vector2(hit.point.x, hit.point.z));
-            if (b < 0 || b == _railConnectNodeA || !rc.IsEndpoint(b)) { rc.HideConnectPreview(); _connectStatus = "Connect: click end B."; return; }
-            rc.TryConnectGeometry(_railConnectNodeA, b, out var cr);
-            rc.RenderConnectPreview(_field, cr);
-            _connectStatus = cr.Valid
-                ? $"Connect → R {cr.Radius:0} m, max {cr.MaxSpeed:0} km/h — OK. Click end B."
-                : $"Connect — {cr.Reason}.";
+            Vector2 cursor = new Vector2(hit.point.x, hit.point.z);
+            // Explicit C-connect (armed end A):
+            if (_railConnectNodeA >= 0 && overTerrain && Input.GetKey(KeyCode.C))
+            {
+                int b = rc.NearestNodeForPick(cursor);
+                if (b < 0 || b == _railConnectNodeA || !rc.IsEndpoint(b)) { rc.HideConnectPreview(); _connectStatus = "Connect: click end B."; return; }
+                rc.TryConnectGeometry(_railConnectNodeA, b, out var cr);
+                rc.RenderConnectPreview(_field, cr);
+                _connectStatus = cr.Valid
+                    ? $"Connect → R {cr.Radius:0} m, max {cr.MaxSpeed:0} km/h — OK. Click end B."
+                    : $"Connect — {cr.Reason}.";
+                return;
+            }
+            // Curve mode hovering another endpoint → auto-fillet join preview (A = chain tail):
+            if (overTerrain && rc.TryChainConnectTarget(cursor, out var ccr))
+            {
+                rc.RenderConnectPreview(_field, ccr);
+                _connectStatus = ccr.Valid ? $"Join → R {ccr.Radius:0} m, max {ccr.MaxSpeed:0} km/h — click to join." : $"Join — {ccr.Reason}.";
+                return;
+            }
+            rc.HideConnectPreview();
         }
 
 #if UNITY_EDITOR
@@ -1624,9 +1641,10 @@ namespace NetworkDesigner.Terrain
             // sits exactly where placement will land (track / extension / grid / slope
             // guide). Scatter & plain sculpt don't snap.
             Vector3 cursorVis = SnapCursor(hit.point, overTerrain);
-            // The sculpt brush ring is irrelevant in line modes (rail/plan have their own
-            // cursor + rings) — hide it so it doesn't clutter curve drawing.
-            UpdateBrushCursor(ShowBrushCursor && overTerrain && _lineActive == null, cursorVis);
+            // Brush ring: in line modes show it at the RAW mouse (not the snapped track
+            // cursor) so you always have a stable "where my mouse actually is" anchor —
+            // distinct from the placement cursor that slides along the extension line.
+            UpdateBrushCursor(ShowBrushCursor && overTerrain, _lineActive != null ? hit.point : cursorVis);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.
@@ -1693,6 +1711,18 @@ namespace NetworkDesigner.Terrain
                                 _railConnectNodeA = -1; railConn.HideConnectPreview();
                             } // invalid B → keep A armed so a different B can be picked
                         }
+                    }
+                    else if (_lineActive is RailTrackLayer railCC
+                             && railCC.TryChainConnectTarget(new Vector2(hit.point.x, hit.point.z), out var ccr) && ccr.Valid)
+                    {
+                        // Hovering another endpoint → commit the auto-fillet join.
+                        railCC.CommitConnect(_field, ccr); railCC.EndChain(); railCC.HideConnectPreview();
+                        _dirtySince = Time.realtimeSinceStartup;
+                    }
+                    else if (_lineActive is RailTrackLayer railOA && railOA.ExtensionOffAxis)
+                    {
+                        // Mouse is off the extension line and not over a node — ignore the
+                        // click (no wonky straight; come back on-axis or hover a node).
                     }
                     else
                     {

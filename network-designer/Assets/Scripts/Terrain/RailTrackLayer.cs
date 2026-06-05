@@ -814,6 +814,33 @@ namespace NetworkDesigner.Terrain
             _connCol.Add(col); _connCol.Add(col); _connIdx.Add(s); _connIdx.Add(s + 1);
         }
 
+        // Join-on-hover: while extending (straight OR curve mode, no bend armed), is the
+        // cursor over another endpoint we could auto-fillet to from the chain tail?
+        public bool HasChainConnectTarget(Vector2 cursor)
+        {
+            if (_cornerPending || _chainTail < 0 || !IsEndpoint(_chainTail)) return false;
+            int b = Graph.NearestNode(cursor, ConnectHoverRadius);
+            return b >= 0 && b != _chainTail && IsEndpoint(b);
+        }
+
+        // The auto-fillet from the chain tail to the hovered endpoint (r.Valid = buildable).
+        public bool TryChainConnectTarget(Vector2 cursor, out ConnectResult r)
+        {
+            r = new ConnectResult();
+            if (!HasChainConnectTarget(cursor)) return false;
+            TryConnectGeometry(_chainTail, Graph.NearestNode(cursor, ConnectHoverRadius), out r);
+            return true;
+        }
+
+        // Snap the cursor onto the join target so the curve preview shows the fillet to it.
+        public bool TryChainConnectSnap(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (!TryChainConnectTarget(cursor, out ConnectResult r)) return false;
+            snapped = r.Bpos;
+            return true;
+        }
+
         // ---- rendering ----
 
         void EnsureObjects()
@@ -2133,6 +2160,14 @@ namespace NetworkDesigner.Terrain
                  "that line locks onto it so the next segment continues dead straight. " +
                  "0 = off.")]
         public float ExtensionSnapRadius = 4f;
+        [Tooltip("Hover within this (m) of another endpoint while extending to engage the " +
+                 "auto-fillet join (and stop the placement cursor sliding to it).")]
+        public float ConnectHoverRadius = 30f;
+        [Tooltip("While extending a straight, if the mouse is more than this (m) off the " +
+                 "collinear line the placement cursor stops sliding (only the brush ring " +
+                 "follows) — so going for a distant node doesn't drag a long ghost track.")]
+        public float ExtensionOffAxisDist = 12f;
+        [System.NonSerialized] public bool ExtensionOffAxis;   // mouse is off the extension line
 
         // Snap a cursor XZ onto the straight-ahead alignment guide — the collinear
         // extension of the incoming edge — when within ExtensionSnapRadius of that
@@ -2161,12 +2196,18 @@ namespace NetworkDesigner.Terrain
         public bool TrySnapExtensionHard(Vector2 cursor, out Vector2 snapped)
         {
             snapped = cursor;
+            ExtensionOffAxis = false;
             if (CurveModifier || _cornerPending
                 || _chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
             if (!IncomingDirection(cursor, out Vector2 ext)) return false;
             Vector2 origin = Graph.Nodes[_chainTail];
             float along = Mathf.Max(0.5f, Vector2.Dot(cursor - origin, ext)); // stay ahead of the tail
-            snapped = origin + ext * along;
+            Vector2 foot = origin + ext * along;
+            // Clearly off the line (heading for a node): stop sliding — sit at the raw cursor
+            // and let the preview/commit suppress (only the brush ring follows).
+            if (Vector2.Distance(cursor, foot) > Mathf.Max(1f, ExtensionOffAxisDist))
+            { ExtensionOffAxis = true; snapped = cursor; return true; }
+            snapped = foot;   // on-axis: lock to the collinear line
             return true;
         }
 
@@ -2388,6 +2429,11 @@ namespace NetworkDesigner.Terrain
                     CurveCornerWorld = LegMid(field, _corner, _corner);
                     CurveDeflectionDeg = Vector2.Angle(_corner - start, cur - _corner);
                 }
+                else if (HasChainConnectTarget(cur))
+                {
+                    // Hovering another endpoint: the auto-fillet preview (drawn in the connect
+                    // overlay by the editor) owns it — skip the bend/straight guide.
+                }
                 else if (CurveModifier)
                 {
                     // Below the min leg, no symmetric turn meets the speed's min radius —
@@ -2407,7 +2453,7 @@ namespace NetworkDesigner.Terrain
                     CurveLegB = 0f;
                     CurveLegAMid = LegMid(field, start, cur);
                 }
-                else
+                else if (!ExtensionOffAxis)   // off-axis straight: no sliding ghost preview
                 {
                     Vector2 dd = cur - start; // straight: chord controls
                     Vector2 c1 = start + dd / 3f, c2 = start + dd * (2f / 3f);

@@ -278,6 +278,12 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.curveSymmetrySnap", "Rail", "Symmetric-curve snap",
                 () => t.RailLayer.CurveSymmetrySnap, v => t.RailLayer.CurveSymmetrySnap = v, 0f, 0.5f,
                 description: "After the bend, snap the end to the same leg length as start->bend (symmetric curve) when within this fraction of it. 0 = off.");
+            TuningRegistry.RegisterFloat("rail.connectHover", "Rail", "Join hover radius (m)",
+                () => t.RailLayer.ConnectHoverRadius, v => t.RailLayer.ConnectHoverRadius = v, 5f, 120f,
+                description: "Hover within this of another endpoint while extending to engage the auto-fillet join (and stop the placement cursor sliding toward it).");
+            TuningRegistry.RegisterFloat("rail.extOffAxis", "Rail", "Off-axis suppress (m)",
+                () => t.RailLayer.ExtensionOffAxisDist, v => t.RailLayer.ExtensionOffAxisDist = v, 2f, 60f,
+                description: "While extending a straight, if the mouse is more than this off the collinear line the placement cursor stops sliding (only the brush ring follows).");
             TuningRegistry.RegisterFloat("rail.minDeflection", "Rail", "Min curve deflection (deg)",
                 () => t.RailLayer.MinCurveDeflectionDeg, v => t.RailLayer.MinCurveDeflectionDeg = v, 0.5f, 30f,
                 description: "Min-distance target: the bend can't be placed until the first leg gives at least this much turn above/below the centreline for the speed. Guide stays red until then; any safe deflection builds past it.");
