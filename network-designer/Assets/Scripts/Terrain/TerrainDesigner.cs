@@ -525,6 +525,9 @@ namespace NetworkDesigner.Terrain
                     if (rl.PlacingCurveEnd) return raw;
                     if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
                     if (rl.TrySnapToDecelTarget(flat, out Vector2 dt)) return new Vector3(dt.x, raw.y, dt.y);
+                    // Extending straight: collinear-lock (rail can't kink). Connecting to a
+                    // node above still wins; otherwise the cursor rides the extension line.
+                    if (rl.TrySnapExtensionHard(flat, out Vector2 eh)) return new Vector3(eh.x, raw.y, eh.y);
                     if (rl.TrySnapToExtension(flat, out Vector2 ep)) return new Vector3(ep.x, raw.y, ep.y);
                 }
                 if (_lineActive is RailPlanLayer pl)
@@ -538,6 +541,8 @@ namespace NetworkDesigner.Terrain
                     if (pl.TrySnapToOwnNode(flat, out Vector2 pn)) return new Vector3(pn.x, raw.y, pn.y);
                     if (RailLayer != null && RailLayer.TrySnapToTrackPoint(flat, out Vector2 rp))
                         return new Vector3(rp.x, raw.y, rp.y);
+                    // Extending straight: collinear-lock onto the chosen leg.
+                    if (pl.TrySnapExtensionHard(flat, out Vector2 peh)) return new Vector3(peh.x, raw.y, peh.y);
                     if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
                 }
                 // Grid snap makes no sense while shaping an arc — the bend/end are already
@@ -784,8 +789,10 @@ namespace NetworkDesigner.Terrain
         {
             DrawPlanGradeLabels();
             DrawCurveDimLabels();
+            DrawCurveTickLabels();
             DrawSpeedLabels();
             DrawDesignSpeedReadout();
+            DrawCurveInspectLabels();
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
@@ -962,6 +969,21 @@ namespace NetworkDesigner.Terrain
             if (lb > 0f) DrawWorldText(cam, s, mb, $"{lb:0} m", lineCol); // 0 = bend not placed yet
         }
 
+        // Degree labels at the PAC angle ticks (15/30/.../90°) while placing a curve end.
+        void DrawCurveTickLabels()
+        {
+            List<Vector3> pos = null; List<int> deg = null;
+            if (_lineActive is RailTrackLayer rt && rt.PlacingCurveEnd) { pos = rt.CurveTickWorld; deg = rt.CurveTickDeg; }
+            else if (_lineActive is RailPlanLayer pl && pl.PlacingCurveEnd) { pos = pl.CurveTickWorld; deg = pl.CurveTickDeg; }
+            if (pos == null || pos.Count == 0) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            Color col = new Color(1f, 0.88f, 0.2f);   // PAC yellow
+            for (int i = 0; i < pos.Count && i < deg.Count; i++)
+                DrawWorldText(cam, s, pos[i], $"{deg[i]}°", col);
+        }
+
         // The design speed of the active rail/plan layer, floating near the cursor so
         // you always see what speed you're planning/building for (not just the palette).
         void DrawDesignSpeedReadout()
@@ -986,6 +1008,75 @@ namespace NetworkDesigner.Terrain
                 if (dir.sqrMagnitude > 1e-4f) { dir.Normalize(); anchor += new Vector3(dir.x, 0f, dir.y) * 10f; }
             }
             DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col);
+        }
+
+        // Curve-inspection readout for the hovered curve: leg distances + deflection angle
+        // at the construction geometry, and a metrics block (decel / radius+max-speed /
+        // grade / rated) anchored near the curve. Fed by the active layer's Inspect* fields.
+        void DrawCurveInspectLabels()
+        {
+            bool hovered = false, hasCorner = false, hasGrade = false, isCurve = false;
+            Vector2 mid = default, corner = default, laMid = default, lbMid = default;
+            float legA = 0, legB = 0, ang = 0, radius = 0, maxSpd = 0, gradePct = 0, rated = 0, len = 0, trains = 0;
+            string decel = null;
+            if (_lineActive is RailTrackLayer rt && rt.ShowCurveInspect && rt.InspectHovered)
+            {
+                hovered = true; hasCorner = rt.InspectHasCorner; hasGrade = rt.InspectHasGrade; isCurve = rt.InspectIsCurve;
+                mid = rt.InspectMid; corner = rt.InspectCorner; laMid = rt.InspectLegAMid; lbMid = rt.InspectLegBMid;
+                legA = rt.InspectLegA; legB = rt.InspectLegB; ang = rt.InspectAngleDeg;
+                radius = rt.InspectRadius; maxSpd = rt.InspectMaxSpeed; gradePct = rt.InspectGradePct;
+                rated = rt.InspectRated; decel = rt.InspectDecel; len = rt.InspectLength; trains = rt.InspectTrainCount;
+            }
+            else if (_lineActive is RailPlanLayer pl && pl.ShowCurveInspect && pl.InspectHovered)
+            {
+                hovered = true; hasCorner = pl.InspectHasCorner; hasGrade = pl.InspectHasGrade; isCurve = pl.InspectIsCurve;
+                mid = pl.InspectMid; corner = pl.InspectCorner; laMid = pl.InspectLegAMid; lbMid = pl.InspectLegBMid;
+                legA = pl.InspectLegA; legB = pl.InspectLegB; ang = pl.InspectAngleDeg;
+                radius = pl.InspectRadius; maxSpd = pl.InspectMaxSpeed; gradePct = pl.InspectGradePct;
+                rated = pl.InspectRated; decel = pl.InspectDecel; len = pl.InspectLength; trains = pl.InspectTrainCount;
+            }
+            if (!hovered) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            Color col = new Color(1f, 0.95f, 0.25f);
+
+            if (hasCorner)
+            {
+                if (legA > 0f) DrawWorldText(cam, s, ToWorldXZ(laMid, 2f), $"{legA:0} m", col);
+                if (legB > 0f) DrawWorldText(cam, s, ToWorldXZ(lbMid, 2f), $"{legB:0} m", col);
+                DrawWorldText(cam, s, ToWorldXZ(corner, 2f), $"{ang:0}°", col);
+            }
+            var lines = new List<string>(4);
+            if (decel != null) lines.Add(decel);
+            if (isCurve) lines.Add($"{radius:0}m radius, max speed: {maxSpd:0} km/h");
+            else lines.Add($"{len:0}m queue (~{trains:0.0} trains)");
+            if (hasGrade) lines.Add($"{gradePct:0.0}% grade");
+            lines.Add($"{rated:0} km/h rated");
+            DrawWorldTextBlock(cam, s, ToWorldXZ(mid, 3f), lines, col);
+        }
+
+        Vector3 ToWorldXZ(Vector2 xz, float lift)
+        {
+            float y = _field != null ? _field.SampleHeight(xz.x, xz.y) : 0f;
+            return new Vector3(xz.x, y + lift, xz.y);
+        }
+
+        // Left-aligned multi-line text stacked downward from a world position.
+        void DrawWorldTextBlock(Camera cam, float s, Vector3 world, List<string> lines, Color color)
+        {
+            Vector3 sp = cam.WorldToScreenPoint(world);
+            if (sp.z <= 0f) return;
+            float mx = sp.x / s, my = (Screen.height - sp.y) / s;
+            float lh = GUI.skin.label.lineHeight; if (lh < 1f) lh = 16f;
+            Color prev = GUI.color; GUI.color = color;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                var content = new GUIContent(lines[i]);
+                Vector2 size = GUI.skin.label.CalcSize(content);
+                GUI.Label(new Rect(mx, my + i * lh, size.x + 2f, size.y), content);
+            }
+            GUI.color = prev;
         }
 
         // Plain centred text (no box) at a world position, in the given colour.
@@ -1347,6 +1438,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) SetLineMode(RailLayer);
             if (Input.GetKeyDown(KeyCode.K)) SetLineMode(PlanLayer);
+            if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
             if (Input.GetKeyDown(KeyCode.G))
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
@@ -1505,6 +1597,16 @@ namespace NetworkDesigner.Terrain
                 // One design speed for the whole network: the plan mirrors the rail's.
                 if (PlanLayer != null)
                 { PlanLayer.SpeedLimitKmh = RailLayer.SpeedLimitKmh; PlanLayer.MaxLateralG = RailLayer.MaxLateralG; }
+                // Curve-inspection overlay: hover off the raw cursor; plan mirrors the toggle.
+                Vector3 inspCur = overTerrain ? hit.point : new Vector3(1e9f, 0f, 1e9f);
+                RailLayer.RebuildCurveInspect(_field, inspCur, _lineActive is RailTrackLayer);
+                if (PlanLayer != null)
+                {
+                    PlanLayer.ShowCurveInspect = RailLayer.ShowCurveInspect;
+                    PlanLayer.CurveInspectWidth = RailLayer.CurveInspectWidth;
+                    PlanLayer.TypicalTrainLengthM = RailLayer.TypicalTrainLengthM;
+                    PlanLayer.RebuildCurveInspect(_field, inspCur, _lineActive is RailPlanLayer);
+                }
             }
             // Remember the placement cursor + whether it's over terrain, for the on-screen
             // design-speed readout drawn in OnGUI.

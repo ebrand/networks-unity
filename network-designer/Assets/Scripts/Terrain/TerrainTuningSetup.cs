@@ -281,6 +281,15 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.minDeflection", "Rail", "Min curve deflection (deg)",
                 () => t.RailLayer.MinCurveDeflectionDeg, v => t.RailLayer.MinCurveDeflectionDeg = v, 0.5f, 30f,
                 description: "Min-distance target: the bend can't be placed until the first leg gives at least this much turn above/below the centreline for the speed. Guide stays red until then; any safe deflection builds past it.");
+            TuningRegistry.RegisterBool("rail.inspectShow", "Rail", "Curve inspect overlay (I)",
+                () => t.RailLayer.ShowCurveInspect, v => t.RailLayer.ShowCurveInspect = v,
+                description: "Design-mode overlay: a dashed box around every built curve (rail + plan). Hover a curve for its decel zone, radius + max speed, grade, and rated speed. Hotkey: I.");
+            TuningRegistry.RegisterFloat("rail.inspectWidth", "Rail", "Curve inspect box width (m)",
+                () => t.RailLayer.CurveInspectWidth, v => t.RailLayer.CurveInspectWidth = v, 4f, 60f,
+                description: "Width of the dashed inspection box drawn around each segment in the inspect overlay.");
+            TuningRegistry.RegisterFloat("rail.trainLength", "Rail", "Typical train length (m)",
+                () => t.RailLayer.TypicalTrainLengthM, v => t.RailLayer.TypicalTrainLengthM = v, 10f, 600f,
+                description: "Used by the inspect overlay to report queue space on a straight: how many of these trains fit on the hovered segment.");
             TuningRegistry.RegisterFloat("rail.speedLimit", "Rail", "Design speed (km/h)",
                 () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f,
                 description: "The ONE design speed for the whole network (build AND plan). Sets the minimum curve radius (R = v^2/(g*a)); tighter curves are refused. Lower it to lay tighter curves.");

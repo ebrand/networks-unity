@@ -132,6 +132,8 @@ namespace NetworkDesigner.Terrain
         int _chainTail = -1;
         Vector2 _corner;
         bool _cornerPending;
+        [System.NonSerialized] public readonly List<Vector3> CurveTickWorld = new List<Vector3>();
+        [System.NonSerialized] public readonly List<int> CurveTickDeg = new List<int>();
 
         // Rendered draped lines (persistent) + the placement preview.
         GameObject _go; MeshFilter _mf; MeshRenderer _mr; Mesh _mesh; Material _mat;
@@ -146,6 +148,29 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _symV = new List<Vector3>();
         readonly List<int> _symIdx = new List<int>();
         readonly List<Color32> _symCol = new List<Color32>();
+
+        // Curve-inspection overlay ("design mode"): translucent box per curve + hovered-
+        // curve legs/angle. Submesh 0 triangles (fill), 1 lines (outline + legs). Mirrors
+        // RailTrackLayer; plan curves carry radius/max-speed/angle only (no grade/decel).
+        [System.NonSerialized] public bool ShowCurveInspect;
+        public float CurveInspectWidth = 20f;
+        public float TypicalTrainLengthM = 100f;
+        public Color CurveInspectFill = new Color(0.72f, 0.82f, 0.35f, 0.22f);
+        public Color CurveInspectOutline = new Color(1f, 0.95f, 0.20f, 0.85f);
+        GameObject _inspGo; MeshFilter _inspMf; MeshRenderer _inspMr; Mesh _inspMesh; Material _inspMat;
+        readonly List<Vector3> _inspV = new List<Vector3>();
+        readonly List<Color32> _inspCol = new List<Color32>();
+        readonly List<int> _inspTri = new List<int>();
+        readonly List<int> _inspLine = new List<int>();
+        readonly List<Vector2> _boxL = new List<Vector2>();
+        readonly List<Vector2> _boxR = new List<Vector2>();
+        int _inspSig = -1;
+        [System.NonSerialized] public bool InspectHovered, InspectHasCorner, InspectHasGrade, InspectIsCurve;
+        [System.NonSerialized] public Vector2 InspectMid, InspectCorner, InspectLegAMid, InspectLegBMid;
+        [System.NonSerialized] public float InspectLegA, InspectLegB, InspectAngleDeg;
+        [System.NonSerialized] public float InspectRadius, InspectMaxSpeed, InspectGradePct, InspectRated;
+        [System.NonSerialized] public float InspectLength, InspectTrainCount;
+        [System.NonSerialized] public string InspectDecel;
 
         public string LayerName => Name;
         string RootName => "TerrainRailPlan_" + Name;
@@ -260,24 +285,30 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
-        // Heading continuing straight out of the chain tail's incoming edge (180° /
-        // collinear). False when the tail has no edge.
-        bool IncomingDirection(out Vector2 dir)
+        // Heading continuing straight out of the chain tail (180° / collinear). When the
+        // tail is mid-corridor (several edges), pick the edge whose continuation points
+        // toward `toward`, so the cursor side selects which leg to extend. False when the
+        // tail has no edge (then the seeded rail heading, if any, is used).
+        bool IncomingDirection(Vector2 toward, out Vector2 dir)
         {
             dir = Vector2.zero;
             if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
-            for (int i = Graph.Edges.Count - 1; i >= 0; i--)
+            Vector2 side = toward - Graph.Nodes[_chainTail];
+            float bestDot = float.NegativeInfinity; bool found = false;
+            for (int i = 0; i < Graph.Edges.Count; i++)
             {
                 LineEdge e = Graph.Edges[i];
                 if (e.A != _chainTail && e.B != _chainTail) continue;
                 GetBezier(e, out Vector2 p0, out Vector2 q1, out Vector2 q2, out Vector2 p3);
-                dir = e.B == _chainTail ? LineGraph.BezierTangent(p0, q1, q2, p3, 1f)
-                                        : -LineGraph.BezierTangent(p0, q1, q2, p3, 0f);
-                if (dir.sqrMagnitude < 1e-6f) dir = e.B == _chainTail ? p3 - p0 : p0 - p3;
-                if (dir.sqrMagnitude < 1e-6f) return false;
-                dir = dir.normalized;
-                return true;
+                Vector2 cont = e.B == _chainTail ? LineGraph.BezierTangent(p0, q1, q2, p3, 1f)
+                                                 : -LineGraph.BezierTangent(p0, q1, q2, p3, 0f);
+                if (cont.sqrMagnitude < 1e-6f) cont = e.B == _chainTail ? p3 - p0 : p0 - p3;
+                if (cont.sqrMagnitude < 1e-6f) continue;
+                cont = cont.normalized;
+                float dot = Vector2.Dot(cont, side);
+                if (dot > bestDot) { bestDot = dot; dir = cont; found = true; }
             }
+            if (found) return true;
             // No own edge yet (first segment off the rail): use the seeded heading.
             if (HasSeedDir && SeedDir.sqrMagnitude > 1e-6f) { dir = SeedDir.normalized; return true; }
             return false;
@@ -299,13 +330,29 @@ namespace NetworkDesigner.Terrain
         {
             snapped = cursor;
             float r = Mathf.Max(0f, ExtensionSnapRadius);
-            if (r <= 0f || !IncomingDirection(out Vector2 dir)) return false;
+            if (r <= 0f || !IncomingDirection(cursor, out Vector2 dir)) return false;
             Vector2 origin = Graph.Nodes[_chainTail];
             float along = Vector2.Dot(cursor - origin, dir);
             if (along <= 0f || along > ExtensionGuideLength) return false;
             Vector2 proj = origin + dir * along;
             if ((cursor - proj).sqrMagnitude > r * r) return false;
             snapped = proj;
+            return true;
+        }
+
+        // Extending a corridor in STRAIGHT mode: HARD-lock the cursor onto the chosen
+        // collinear extension line (ahead of the tail) — a rail corridor can't kink, so a
+        // straight continuation stays collinear (turns use the curve tool). Off in curve
+        // mode and on a fresh start with no incoming/seeded heading.
+        public bool TrySnapExtensionHard(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (CurveModifier || _cornerPending
+                || _chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            if (!IncomingDirection(cursor, out Vector2 ext)) return false;
+            Vector2 origin = Graph.Nodes[_chainTail];
+            float along = Mathf.Max(0.5f, Vector2.Dot(cursor - origin, ext));
+            snapped = origin + ext * along;
             return true;
         }
 
@@ -355,8 +402,23 @@ namespace NetworkDesigner.Terrain
             // Constrain to [0, thMax] on the cursor's side — straight-ahead up to the
             // tightest safe turn. The end can never leave this yellow arc.
             float thMax = MaxBuildableDeflection(start, bend, legA, a0A, sign);
-            float ang = (a0A + Mathf.Clamp(Mathf.Abs(delta), 0f, thMax) * sign) * Mathf.Deg2Rad;
+            float mag = SnapDeflectionToTick(Mathf.Clamp(Mathf.Abs(delta), 0f, thMax), thMax);
+            float ang = (a0A + mag * sign) * Mathf.Deg2Rad;
             outDir = new Vector2(Mathf.Cos(ang), Mathf.Sin(ang));
+        }
+
+        static readonly float[] DeflectionTicksDeg = { 15f, 30f, 45f, 60f, 75f, 90f };
+
+        static float SnapDeflectionToTick(float deg, float maxDeg)
+        {
+            const float tol = 3f;
+            for (int i = 0; i < DeflectionTicksDeg.Length; i++)
+            {
+                float t = DeflectionTicksDeg[i];
+                if (t > maxDeg + 0.5f) break;
+                if (Mathf.Abs(deg - t) <= tol) return t;
+            }
+            return deg;
         }
 
         bool DeflectionBuildable(Vector2 start, Vector2 bend, float legA, float a0A, float sign, float d)
@@ -370,13 +432,15 @@ namespace NetworkDesigner.Terrain
         // deflection), then bisect so the clamp reaches the FULL yellow extent.
         float MaxBuildableDeflection(Vector2 start, Vector2 bend, float legA, float a0A, float sign)
         {
-            float lo = 0f, hi = 91f;
-            for (float d = 0.5f; d <= 90f; d += 1f)
+            // Scan to nearly 180°: a curve can deflect past 90° (toward a U-turn) while its
+            // radius stays ≥ the speed's minimum, so the buildable arc isn't capped at 90°.
+            float lo = 0f, hi = 181f;
+            for (float d = 0.5f; d <= 179f; d += 1f)
             {
                 if (DeflectionBuildable(start, bend, legA, a0A, sign, d)) lo = d;
                 else { hi = d; break; }
             }
-            for (int i = 0; i < 6 && hi <= 90f; i++)
+            for (int i = 0; i < 6 && hi <= 179f; i++)
             {
                 float mid = 0.5f * (lo + hi);
                 if (DeflectionBuildable(start, bend, legA, a0A, sign, mid)) lo = mid; else hi = mid;
@@ -397,7 +461,7 @@ namespace NetworkDesigner.Terrain
             float minLeg = MinFirstLegForSpeed();
             if (minLeg < 1f) return false;
             Vector2 start = Graph.Nodes[_chainTail];
-            if (IncomingDirection(out Vector2 ext))
+            if (IncomingDirection(cursor, out Vector2 ext))
             {
                 float along = Mathf.Max(minLeg, Vector2.Dot(cursor - start, ext));
                 snapped = start + ext * along;   // on the extension line, no closer than the MDT
@@ -842,7 +906,7 @@ namespace NetworkDesigner.Terrain
                 Vector2 cur = new Vector2(cursor.x, cursor.z);
                 // Straight-ahead alignment guide (collinear continuation), dashed.
                 // Hidden once the bend is armed — the curve is what's being placed then.
-                if (!_cornerPending && IncomingDirection(out Vector2 ext))
+                if (!_cornerPending && IncomingDirection(cur, out Vector2 ext))
                 {
                     Vector2 gend = start + ext * ExtensionGuideLength;
                     Vector2 gd = gend - start;
@@ -938,6 +1002,7 @@ namespace NetworkDesigner.Terrain
         {
             EnsureSymRing();
             _symV.Clear(); _symIdx.Clear(); _symCol.Clear();
+            CurveTickWorld.Clear(); CurveTickDeg.Clear();
             float radius = Vector2.Distance(start, bend);
             if (radius >= 0.5f)
             {
@@ -955,6 +1020,24 @@ namespace NetworkDesigner.Terrain
                     int s = _symV.Count; _symV.Add(prev); _symV.Add(w);
                     _symCol.Add(col); _symCol.Add(col); _symIdx.Add(s); _symIdx.Add(s + 1);
                     prev = w;
+                }
+                // Standard-angle tick marks (snap targets) at ±15/30/45/60/75/90° where buildable.
+                Vector2 a0 = (bend - start).sqrMagnitude > 1e-6f ? (bend - start).normalized : Vector2.right;
+                float a0A = Mathf.Atan2(a0.y, a0.x) * Mathf.Rad2Deg;
+                float tl = Mathf.Clamp(radius * 0.02f, 2f, 25f);
+                Color32 tickCol = ok;
+                for (int sgn = -1; sgn <= 1; sgn += 2)
+                {
+                    float thMax = MaxBuildableDeflection(start, bend, radius, a0A, sgn);
+                    for (int ti = 0; ti < DeflectionTicksDeg.Length && DeflectionTicksDeg[ti] <= thMax + 0.5f; ti++)
+                    {
+                        float ang = (a0A + sgn * DeflectionTicksDeg[ti]) * Mathf.Deg2Rad;
+                        Vector3 wi = RingPt(field, bend, radius - tl, ang), wo = RingPt(field, bend, radius + tl, ang);
+                        int ts = _symV.Count; _symV.Add(wi); _symV.Add(wo);
+                        _symCol.Add(tickCol); _symCol.Add(tickCol); _symIdx.Add(ts); _symIdx.Add(ts + 1);
+                        CurveTickWorld.Add(RingPt(field, bend, radius + tl + Mathf.Max(2f, tl), ang));
+                        CurveTickDeg.Add((int)DeflectionTicksDeg[ti]);
+                    }
                 }
             }
             _symMesh.Clear();
@@ -1066,6 +1149,239 @@ namespace NetworkDesigner.Terrain
         }
 
         public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; HideSymRing(); }
+
+        // ---- curve inspection overlay ("design mode") — mirrors RailTrackLayer ----
+
+        void EnsureCurveInspect()
+        {
+            if (_inspMf != null) return;
+            _inspGo = new GameObject(RootName + "_Inspect") { hideFlags = HideFlags.DontSave };
+            _inspMf = _inspGo.AddComponent<MeshFilter>();
+            _inspMr = _inspGo.AddComponent<MeshRenderer>();
+            _inspMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _inspMr.receiveShadows = false;
+            _inspMesh = new Mesh { name = "RailPlanInspectMesh" };
+            _inspMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            _inspMf.sharedMesh = _inspMesh;
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            _inspMat = sh != null ? new Material(sh) { name = "RailPlanInspectMat" } : MakeLineMat("RailPlanInspectMat");
+            _inspMr.sharedMaterials = new[] { _inspMat, _inspMat };
+        }
+
+        public void RebuildCurveInspect(TerrainField field, Vector3 cursorW, bool show)
+        {
+            EnsureCurveInspect();
+            bool on = show && ShowCurveInspect && field != null && Graph != null && Graph.Edges.Count > 0;
+            _inspMr.enabled = on;
+            if (!on)
+            {
+                if (_inspSig != -1) { _inspV.Clear(); _inspCol.Clear(); _inspTri.Clear(); _inspLine.Clear(); _inspMesh.Clear(); _inspSig = -1; InspectHovered = false; }
+                return;
+            }
+            Vector2 cursor = new Vector2(cursorW.x, cursorW.z);
+            float halfW = Mathf.Max(1f, CurveInspectWidth * 0.5f);
+            int hovered = HoveredCurveEdge(cursor, halfW);
+            int sig = Graph.Edges.Count * 92821 ^ (hovered + 1) * 6379 ^ Mathf.RoundToInt(CurveInspectWidth * 16f);
+            if (sig == _inspSig) return;
+            _inspSig = sig;
+
+            _inspV.Clear(); _inspCol.Clear(); _inspTri.Clear(); _inspLine.Clear();
+            InspectHovered = false;
+            Color32 fill = CurveInspectFill, outline = CurveInspectOutline;
+            const float lift = 0.2f;
+            for (int ei = 0; ei < Graph.Edges.Count; ei++)
+            {
+                LineEdge e = Graph.Edges[ei];
+                EdgeControls(e, Graph.Nodes[e.A], Graph.Nodes[e.B], out Vector2 c1, out Vector2 c2);
+                EmitCurveBox(field, Graph.Nodes[e.A], c1, c2, Graph.Nodes[e.B], halfW, lift, ei == hovered, false, fill, outline, fill);
+            }
+            if (hovered >= 0) EmitHoverDetails(field, hovered, lift);
+            _inspMesh.Clear();
+            _inspMesh.SetVertices(_inspV);
+            _inspMesh.SetColors(_inspCol);
+            _inspMesh.subMeshCount = 2;
+            _inspMesh.SetIndices(_inspTri, MeshTopology.Triangles, 0);
+            _inspMesh.SetIndices(_inspLine, MeshTopology.Lines, 1);
+            _inspMesh.RecalculateBounds();
+        }
+
+        Vector3 InspLift(TerrainField field, Vector2 p, float lift)
+        {
+            float y = field != null ? field.SampleHeight(p.x, p.y) : 0f;
+            return new Vector3(p.x, y + lift, p.y);
+        }
+
+        void InspTri(Vector3 a, Vector3 b, Vector3 c, Color32 col)
+        {
+            int s = _inspV.Count;
+            _inspV.Add(a); _inspV.Add(b); _inspV.Add(c);
+            _inspCol.Add(col); _inspCol.Add(col); _inspCol.Add(col);
+            _inspTri.Add(s); _inspTri.Add(s + 1); _inspTri.Add(s + 2);
+        }
+
+        void InspLine(Vector3 a, Vector3 b, Color32 col)
+        {
+            int s = _inspV.Count;
+            _inspV.Add(a); _inspV.Add(b);
+            _inspCol.Add(col); _inspCol.Add(col);
+            _inspLine.Add(s); _inspLine.Add(s + 1);
+        }
+
+        // Dash each segment with a bounded for-loop (no growing phase accumulator).
+        void InspDashedPolyline(TerrainField field, List<Vector2> pts, float lift, Color32 col)
+        {
+            const float dash = 2.5f, gap = 1.8f, period = dash + gap;
+            for (int i = 0; i + 1 < pts.Count; i++)
+            {
+                Vector2 a = pts[i], b = pts[i + 1];
+                float seg = Vector2.Distance(a, b);
+                if (seg < 1e-5f) continue;
+                Vector2 dir = (b - a) / seg;
+                for (float p = 0f; p < seg; p += period)
+                    InspLine(InspLift(field, a + dir * p, lift),
+                             InspLift(field, a + dir * Mathf.Min(p + dash, seg), lift), col);
+            }
+        }
+
+        void InspDashedSeg(TerrainField field, Vector2 a, Vector2 b, float lift, Color32 col)
+        {
+            _boxL.Clear(); _boxL.Add(a); _boxL.Add(b);
+            InspDashedPolyline(field, _boxL, lift, col);
+        }
+
+        void EdgeControls(LineEdge e, Vector2 S, Vector2 E, out Vector2 c1, out Vector2 c2)
+        {
+            if (e.HasCurve) { c1 = e.ControlA; c2 = e.ControlB; }
+            else { Vector2 d = E - S; c1 = S + d / 3f; c2 = S + d * (2f / 3f); }
+        }
+
+        void EmitCurveBox(TerrainField field, Vector2 S, Vector2 c1, Vector2 c2, Vector2 E,
+                          float halfW, float lift, bool filled, bool hatched, Color32 fill, Color32 outline, Color32 hatch)
+        {
+            const int N = 20;
+            _boxL.Clear(); _boxR.Clear();
+            for (int i = 0; i <= N; i++)
+            {
+                float t = i / (float)N;
+                Vector2 p = LineGraph.Bezier(S, c1, c2, E, t);
+                Vector2 tan = LineGraph.BezierTangent(S, c1, c2, E, t);
+                if (tan.sqrMagnitude < 1e-8f) tan = E - S;
+                tan = tan.sqrMagnitude > 1e-8f ? tan.normalized : Vector2.right;
+                Vector2 nrm = new Vector2(-tan.y, tan.x);
+                _boxL.Add(p + nrm * halfW);
+                _boxR.Add(p - nrm * halfW);
+            }
+            if (hatched)
+                for (int i = 0; i < N; i++)
+                    InspLine(InspLift(field, _boxL[i], lift), InspLift(field, _boxR[i + 1], lift), hatch);
+            else if (filled)
+                for (int i = 0; i < N; i++)
+                {
+                    Vector3 l0 = InspLift(field, _boxL[i], lift), r0 = InspLift(field, _boxR[i], lift);
+                    Vector3 l1 = InspLift(field, _boxL[i + 1], lift), r1 = InspLift(field, _boxR[i + 1], lift);
+                    InspTri(l0, r0, r1, fill); InspTri(l0, r1, l1, fill);
+                }
+            InspDashedPolyline(field, _boxL, lift, outline);
+            InspDashedPolyline(field, _boxR, lift, outline);
+            InspLine(InspLift(field, _boxL[0], lift), InspLift(field, _boxR[0], lift), outline);
+            InspLine(InspLift(field, _boxL[N], lift), InspLift(field, _boxR[N], lift), outline);
+        }
+
+        int HoveredCurveEdge(Vector2 cursor, float halfW)
+        {
+            int best = -1; float bestD = halfW * halfW;
+            for (int ei = 0; ei < Graph.Edges.Count; ei++)
+            {
+                LineEdge e = Graph.Edges[ei];
+                Vector2 S = Graph.Nodes[e.A], E = Graph.Nodes[e.B];
+                EdgeControls(e, S, E, out Vector2 c1, out Vector2 c2);
+                const int N = 16;
+                Vector2 prev = S;
+                for (int i = 1; i <= N; i++)
+                {
+                    Vector2 cur = LineGraph.Bezier(S, c1, c2, E, i / (float)N);
+                    float d2 = SqDistToSeg(cursor, prev, cur);
+                    if (d2 < bestD) { bestD = d2; best = ei; }
+                    prev = cur;
+                }
+            }
+            return best;
+        }
+
+        static float SqDistToSeg(Vector2 p, Vector2 a, Vector2 b)
+        {
+            Vector2 ab = b - a; float len2 = ab.sqrMagnitude;
+            float t = len2 > 1e-9f ? Mathf.Clamp01(Vector2.Dot(p - a, ab) / len2) : 0f;
+            return (p - (a + ab * t)).sqrMagnitude;
+        }
+
+        void EmitHoverDetails(TerrainField field, int ei, float lift)
+        {
+            LineEdge e = Graph.Edges[ei];
+            Vector2 S = Graph.Nodes[e.A], E = Graph.Nodes[e.B];
+            EdgeControls(e, S, E, out Vector2 c1, out Vector2 c2);
+            Color32 legCol = new Color32(255, 235, 90, 230);
+
+            InspectHovered = true;
+            InspectIsCurve = e.HasCurve;
+            InspectMid = LineGraph.Bezier(S, c1, c2, E, 0.5f);
+            InspectRated = SpeedLimitKmh;                  // plan: the one design speed
+            InspectHasGrade = false; InspectGradePct = 0f; InspectDecel = null; // plan has no built grade/decel
+
+            if (!e.HasCurve)
+            {
+                float run = (E - S).magnitude;
+                InspectRadius = float.PositiveInfinity;
+                InspectMaxSpeed = 0f;
+                InspectHasCorner = false;
+                InspectLength = run;
+                InspectTrainCount = TypicalTrainLengthM > 1f ? run / TypicalTrainLengthM : 0f;
+                return;
+            }
+
+            InspectRadius = MinCurveRadius(S, c1, c2, E);
+            float rMS = float.IsInfinity(InspectRadius) ? 1e6f : InspectRadius;
+            InspectMaxSpeed = Mathf.Sqrt(Mathf.Max(0f, rMS) * 9.81f * Mathf.Max(0.01f, MaxLateralG)) * 3.6f;
+
+            InspectHasCorner = LineIntersect(S, c1 - S, E, c2 - E, out Vector2 corner);
+            if (InspectHasCorner)
+            {
+                InspectCorner = corner;
+                InspectLegA = Vector2.Distance(S, corner);
+                InspectLegB = Vector2.Distance(E, corner);
+                InspectLegAMid = (S + corner) * 0.5f;
+                InspectLegBMid = (E + corner) * 0.5f;
+                InspectAngleDeg = Vector2.Angle(corner - S, E - corner);
+                InspDashedSeg(field, S, corner, lift, legCol);
+                InspDashedSeg(field, E, corner, lift, legCol);
+                Vector2 d1 = (S - corner), d2 = (E - corner);
+                if (d1.sqrMagnitude > 1e-6f && d2.sqrMagnitude > 1e-6f)
+                {
+                    float r = Mathf.Min(InspectLegA, InspectLegB) * 0.18f;
+                    float a1 = Mathf.Atan2(d1.y, d1.x), a2 = Mathf.Atan2(d2.y, d2.x);
+                    float sweep = Mathf.DeltaAngle(a1 * Mathf.Rad2Deg, a2 * Mathf.Rad2Deg) * Mathf.Deg2Rad;
+                    const int AN = 12; Vector3 prev = default; bool have = false;
+                    for (int i = 0; i <= AN; i++)
+                    {
+                        float a = a1 + sweep * (i / (float)AN);
+                        Vector2 ap = corner + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * r;
+                        Vector3 w = InspLift(field, ap, lift);
+                        if (have) InspLine(prev, w, legCol);
+                        prev = w; have = true;
+                    }
+                }
+            }
+        }
+
+        static bool LineIntersect(Vector2 p1, Vector2 d1, Vector2 p2, Vector2 d2, out Vector2 x)
+        {
+            x = Vector2.zero;
+            float denom = d1.x * d2.y - d1.y * d2.x;
+            if (Mathf.Abs(denom) < 1e-6f) return false;
+            float t = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / denom;
+            x = p1 + d1 * t;
+            return true;
+        }
 
         public void ClearAll(TerrainField field)
         {
