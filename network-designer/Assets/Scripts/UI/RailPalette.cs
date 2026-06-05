@@ -15,6 +15,9 @@ namespace NetworkDesigner.UI
         public override string MenuLabel => "Rail (L/K)";
         protected override Color Accent => Amber;
 
+        // Opening Rail from the launcher defaults into Build (L) mode.
+        protected override void OnOpened() => Designer.SetRailMode(false);
+
         protected override void BuildBody(VisualElement body)
         {
             body.Add(SectionLabel("MODES"));

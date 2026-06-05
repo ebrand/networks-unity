@@ -69,6 +69,9 @@ namespace NetworkDesigner.UI
         public void SetOpen(bool v) { if (v) _open.Add(PaletteId); else _open.Remove(PaletteId); }
         // Radio toggle by id: open it exclusively, or close it if it's already open.
         public static void ToggleExclusive(string id) => SetExclusive(IsOpenId(id) ? null : id);
+        // Open this palette exclusively and run its OnOpened hook (e.g. Rail → Build mode).
+        public void OpenExclusive() { SetExclusive(PaletteId); OnOpened(); }
+        protected virtual void OnOpened() { }
         // Radio behaviour: open exactly `id` (closing every other palette), or null = none.
         public static void SetExclusive(string id)
         {

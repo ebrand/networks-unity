@@ -27,8 +27,9 @@ namespace NetworkDesigner.UI
             {
                 if (!p.Toggleable) continue;
                 var pal = p;   // capture
-                // Radio: open this one (closing the others), or close it if it's already open.
-                var b = MakeButton(pal.MenuLabel, () => SetExclusive(pal.IsOpen ? null : pal.PaletteId));
+                // Radio: open this one (closing the others, running its OnOpened hook),
+                // or close it if it's already open.
+                var b = MakeButton(pal.MenuLabel, () => { if (pal.IsOpen) SetExclusive(null); else pal.OpenExclusive(); });
                 b.style.marginBottom = 6;
                 body.Add(b);
                 _sync.Add(() => StyleActive(b, pal.IsOpen));
