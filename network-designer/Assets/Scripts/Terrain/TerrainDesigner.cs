@@ -1353,7 +1353,7 @@ namespace NetworkDesigner.Terrain
             if (_railConnectNodeA >= 0 && overTerrain && Input.GetKey(KeyCode.C))
             {
                 int b = rc.NearestNodeForPick(cursor);
-                if (b < 0 || b == _railConnectNodeA || !rc.IsEndpoint(b)) { rc.HideConnectPreview(); _connectStatus = "Connect: click end B."; return; }
+                if (b < 0 || b == _railConnectNodeA || rc.NodeDegree(b) < 1) { rc.HideConnectPreview(); _connectStatus = "Connect: click end B."; return; }
                 rc.TryConnectGeometry(_railConnectNodeA, b, out var cr);
                 rc.RenderConnectPreview(_field, cr);
                 _connectStatus = cr.Valid
@@ -1700,9 +1700,10 @@ namespace NetworkDesigner.Terrain
                     }
                     else if (_lineActive is RailTrackLayer railConn && connectMod)
                     {
-                        // Rail connect: C+click endpoint A, then endpoint B → fillet join.
+                        // Rail connect: C+click node A, then node B → join (fillet between two
+                        // ends, or a tangent branch when a mid-line through-node is involved).
                         int n = railConn.NearestNodeForPick(new Vector2(hit.point.x, hit.point.z));
-                        if (n >= 0 && railConn.IsEndpoint(n))
+                        if (n >= 0 && railConn.NodeDegree(n) >= 1)
                         {
                             if (_railConnectNodeA < 0) _railConnectNodeA = n;          // pick A
                             else if (railConn.TryConnectGeometry(_railConnectNodeA, n, out var cr) && cr.Valid)

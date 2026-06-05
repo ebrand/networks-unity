@@ -670,14 +670,45 @@ namespace NetworkDesigner.Terrain
             public Vector2 Apos, Bpos, P, CurveStartA, CurveEndB;
             public float LegA, LegB, Leg, Radius, MaxSpeed, FasterV, SpeedA, SpeedB;
             public bool NeedStraightA, NeedStraightB, HasP;   // HasP: a forward intersection exists to draw
+            public bool DirectTangent;                        // a through-node is involved → tangent curve, no fillers
         }
 
-        public bool IsEndpoint(int n)
+        public bool IsEndpoint(int n) => NodeDegree(n) == 1;
+
+        public int NodeDegree(int n)
         {
-            if (n < 0 || n >= Graph.Nodes.Count) return false;
+            if (n < 0 || n >= Graph.Nodes.Count) return 0;
             int deg = 0;
-            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) if (++deg > 1) return false; }
-            return deg == 1;
+            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) deg++; }
+            return deg;
+        }
+
+        readonly List<Vector2> _tmpTangents = new List<Vector2>();
+
+        // Tangent of the track AT node n for the connect to leave/arrive along. Degree-1 end:
+        // the outgoing heading. Through-node (degree >= 2): the through axis — a pair of nearly
+        // opposite incident edges (the trunk), so a branch curves off tangent to the trunk,
+        // not to some other branch. The sign doesn't matter (used as a line).
+        bool NodeTangent(int n, out Vector2 dir)
+        {
+            dir = Vector2.zero;
+            int deg = NodeDegree(n);
+            if (deg <= 1) return EndHeading(n, out dir);
+            _tmpTangents.Clear();
+            for (int i = 0; i < Graph.Edges.Count; i++)
+            {
+                LineEdge e = Graph.Edges[i];
+                if (e.A != n && e.B != n) continue;
+                OrientedBezier(e, n, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3); // from n
+                Vector2 t = LineGraph.BezierTangent(q0, q1, q2, q3, 0f);
+                if (t.sqrMagnitude < 1e-6f) t = q3 - q0;
+                if (t.sqrMagnitude > 1e-6f) _tmpTangents.Add(t.normalized);
+            }
+            for (int i = 0; i < _tmpTangents.Count; i++)
+                for (int j = i + 1; j < _tmpTangents.Count; j++)
+                    if (Vector2.Dot(_tmpTangents[i], _tmpTangents[j]) < -0.9f) { dir = _tmpTangents[i]; return true; }
+            if (_tmpTangents.Count > 0) { dir = _tmpTangents[0]; return true; }
+            return false;
         }
 
         // Outward heading at a node's single edge (continuing the track past the node).
@@ -715,24 +746,40 @@ namespace NetworkDesigner.Terrain
         public bool TryConnectGeometry(int a, int b, out ConnectResult r)
         {
             r = new ConnectResult { NodeA = a, NodeB = b };
-            if (a < 0 || b < 0 || a == b || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) { r.Reason = "pick two ends"; return false; }
-            if (!IsEndpoint(a) || !IsEndpoint(b)) { r.Reason = "not an endpoint"; return false; }
+            if (a < 0 || b < 0 || a == b || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) { r.Reason = "pick two nodes"; return false; }
+            int degA = NodeDegree(a), degB = NodeDegree(b);
+            if (degA < 1 || degB < 1) { r.Reason = "pick two track nodes"; return false; }
+            bool through = degA >= 2 || degB >= 2;   // a mid-line node → branch (tangent curve, no fillers)
             r.Apos = Graph.Nodes[a]; r.Bpos = Graph.Nodes[b];
-            if (!EndHeading(a, out Vector2 extA) || !EndHeading(b, out Vector2 extB)) { r.Reason = "no heading"; return false; }
+            if (!NodeTangent(a, out Vector2 extA) || !NodeTangent(b, out Vector2 extB)) { r.Reason = "no heading"; return false; }
             if (!LineIntersect(r.Apos, extA, r.Bpos, extB, out Vector2 P)) { r.Reason = "lines are parallel"; return false; }
-            float tA = Vector2.Dot(P - r.Apos, extA), tB = Vector2.Dot(P - r.Bpos, extB);
-            if (tA <= 0f || tB <= 0f) { r.Reason = "intersection is behind an end"; return false; }
-            r.P = P;
+            // A through-node's track extends both ways, so only endpoints get the behind check.
+            if (degA == 1 && Vector2.Dot(P - r.Apos, extA) <= 0f) { r.Reason = "intersection is behind an end"; return false; }
+            if (degB == 1 && Vector2.Dot(P - r.Bpos, extB) <= 0f) { r.Reason = "intersection is behind an end"; return false; }
+            r.P = P; r.HasP = true;
             r.LegA = Vector2.Distance(r.Apos, P); r.LegB = Vector2.Distance(r.Bpos, P);
             if (Mathf.Max(r.LegA, r.LegB) > MaxConnectSpan) { r.Reason = "ends too far apart"; return false; }
-            r.Leg = Mathf.Min(r.LegA, r.LegB);
-            r.CurveStartA = P - extA * r.Leg; r.CurveEndB = P - extB * r.Leg;
-            r.HasP = true;   // a drawable fillet now exists (even if it turns out too tight)
-            r.NeedStraightA = r.LegA > r.Leg + 0.01f; r.NeedStraightB = r.LegB > r.Leg + 0.01f;
             r.SpeedA = EdgeSpeedAtNode(a); r.SpeedB = EdgeSpeedAtNode(b);
-            r.FasterV = Mathf.Max(r.SpeedA, r.SpeedB);
-            CurveControls(r.CurveStartA, r.CurveEndB, P, out Vector2 c1, out Vector2 c2);
-            r.Radius = MinCurveRadius(r.CurveStartA, c1, c2, r.CurveEndB);
+            Vector2 c1, c2;
+            if (through)
+            {
+                // Branch directly between the two fixed nodes, tangent to each track at it.
+                r.DirectTangent = true;
+                r.CurveStartA = r.Apos; r.CurveEndB = r.Bpos;
+                r.FasterV = SpeedLimitKmh;   // the turnout is rated for the current design speed
+                CurveControls(r.Apos, r.Bpos, P, out c1, out c2);
+                r.Radius = MinCurveRadius(r.Apos, c1, c2, r.Bpos);
+            }
+            else
+            {
+                // Symmetric fillet: equal legs, straight auto-filling the longer side.
+                r.Leg = Mathf.Min(r.LegA, r.LegB);
+                r.CurveStartA = P - extA * r.Leg; r.CurveEndB = P - extB * r.Leg;
+                r.NeedStraightA = r.LegA > r.Leg + 0.01f; r.NeedStraightB = r.LegB > r.Leg + 0.01f;
+                r.FasterV = Mathf.Max(r.SpeedA, r.SpeedB);
+                CurveControls(r.CurveStartA, r.CurveEndB, P, out c1, out c2);
+                r.Radius = MinCurveRadius(r.CurveStartA, c1, c2, r.CurveEndB);
+            }
             float minR = MinRadiusFor(r.FasterV, MaxLateralG);
             r.MaxSpeed = Mathf.Sqrt(Mathf.Max(0f, float.IsInfinity(r.Radius) ? 1e6f : r.Radius) * 9.81f * Mathf.Max(0.01f, MaxLateralG)) * 3.6f;
             if (r.Radius < minR) { r.Reason = $"too tight for {r.FasterV:0} km/h"; return false; }
@@ -743,6 +790,20 @@ namespace NetworkDesigner.Terrain
         public void CommitConnect(TerrainField field, in ConnectResult r)
         {
             if (!r.Valid) return;
+            if (r.DirectTangent)
+            {
+                // Branch curve straight between the two existing nodes (no fillers / split);
+                // the through-node becomes a junction, the endpoint a smooth degree-2 branch.
+                Graph.AddEdge(r.NodeA, r.NodeB);
+                LineEdge be = FindEdge(r.NodeA, r.NodeB);
+                if (be != null)
+                {
+                    CurveControls(r.Apos, r.Bpos, r.P, out Vector2 bc1, out Vector2 bc2);
+                    be.HasCurve = true; be.ControlA = bc1; be.ControlB = bc2; be.SpeedLimit = r.FasterV;
+                }
+                Rebuild(field);
+                return;
+            }
             // The whole join (both fillers + curve) is rated for the FASTER speed, so the
             // speed drop lands where the connection meets the slower existing line — and the
             // decel zone walks back through the filler + curve, not just the curve.
@@ -825,7 +886,7 @@ namespace NetworkDesigner.Terrain
         {
             if (_cornerPending || _chainTail < 0 || !IsEndpoint(_chainTail)) return false;
             int b = Graph.NearestNode(cursor, ConnectHoverRadius);
-            return b >= 0 && b != _chainTail && IsEndpoint(b);
+            return b >= 0 && b != _chainTail && NodeDegree(b) >= 1;   // target may be a through-node
         }
 
         // The auto-fillet from the chain tail to the hovered endpoint (r.Valid = buildable).
