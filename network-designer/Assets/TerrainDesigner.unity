@@ -3853,6 +3853,8 @@ GameObject:
   - component: {fileID: 1486752336}
   - component: {fileID: 1486752335}
   - component: {fileID: 1486752334}
+  - component: {fileID: 1486752339}
+  - component: {fileID: 1486752338}
   m_Layer: 0
   m_Name: Terrain
   m_TagString: Untagged
@@ -3910,11 +3912,18 @@ MonoBehaviour:
   PickCamera: {fileID: 0}
   ShowBrushCursor: 1
   BrushCursorColor: {r: 0.2, g: 0.9, b: 1, a: 0.9}
+  SlopeFillColor: {r: 0.3, g: 0.95, b: 0.35, a: 0.28}
   BrushCursorSegments: 48
   BrushCursorLift: 0.15
   BrushCursorDashed: 0
   BrushCursorDashLength: 1.5
   BrushCursorDashGap: 1.5
+  RaiseIcon: {fileID: 0}
+  LowerIcon: {fileID: 0}
+  SmoothIcon: {fileID: 0}
+  FlattenIcon: {fileID: 0}
+  SlopeIcon: {fileID: 0}
+  BrushIconSize: 30
   ShowContours: 0
   ContourInterval: 1
   ContourColor: {r: 0.22, g: 0.15, b: 0.08, a: 1}
@@ -3976,11 +3985,15 @@ MonoBehaviour:
     VerticalOffset: 0.02
     Conform: 1
     CurveLever: 0.55
+    CurveSymmetrySnap: 0.1
+    MinCurveDeflectionDeg: 5
     SpeedLimitKmh: 80
     MaxLateralG: 0.12
     MaxGradeDeg: 5
     GradeSampleStep: 10
     OverrideGrade: 0
+    ParallelEnabled: 0
+    ParallelSpacing: 5
     RailColor: {r: 0.28, g: 0.28, b: 0.3, a: 1}
     TieColor: {r: 0.32, g: 0.22, b: 0.14, a: 1}
     BallastHeight: 0.25
@@ -4003,24 +4016,61 @@ MonoBehaviour:
     TunnelClearance: 6
     TunnelMargin: 0.6
     HighlightDisconnected: 1
+    ShowNodePucks: 1
+    NodePuckSize: 1.6
+    NodePuckHeight: 0.6
+    NodePuckColor: {r: 0.3, g: 0.7, b: 1, a: 0.55}
+    NodePuckHoverColor: {r: 1, g: 0.85, b: 0.3, a: 0.85}
+    ShowBrakingMarkers: 1
+    BrakingDecel: 0.3
+    BrakingOkColor: {r: 0.3, g: 0.85, b: 0.95, a: 0.95}
+    DecelRingOuterRadius: 10
+    DecelRingInnerRadius: 1
+    DecelSnapRadius: 15
+    DecelRingColor: {r: 1, g: 0.2, b: 0.2, a: 1}
+    ShowSpeedLabels: 1
+    SpeedLabelSpacing: 500
+    CurveInspectWidth: 20
+    TypicalTrainLengthM: 100
+    CurveInspectFill: {r: 0.72, g: 0.82, b: 0.35, a: 0.22}
+    CurveInspectOutline: {r: 1, g: 0.95, b: 0.2, a: 0.85}
+    CurveInspectDecelFill: {r: 1, g: 0.55, b: 0.12, a: 0.85}
     TrackSnapRadius: 8
     ExtensionGuideLength: 120
     ExtensionSnapRadius: 4
+    ConnectHoverRadius: 30
+    ExtensionOffAxisDist: 12
   PlanLayer:
     Name: Plan
     CorridorWidth: 30
     Tracks: 1
     TrackGap: 4
     CurveLever: 0.55
+    CurveSymmetrySnap: 0.1
+    MinCurveDeflectionDeg: 5
+    LimitCurveRadius: 1
+    SpeedLimitKmh: 40
+    MaxLateralG: 0.15
     SampleStep: 2
     Lift: 0.2
     ExtensionGuideLength: 120
     ExtensionSnapRadius: 4
     EndSnapRadius: 8
     PlanColor: {r: 1, g: 0.92, b: 0.2, a: 0.85}
+    ShowAnalysis: 1
+    MaxGradeDeg: 5
+    AtGradeBand: 0.6
+    BridgeFillDepth: 6
+    TunnelCutDepth: 8
+    ShowGradeLabels: 1
+    CurveInspectWidth: 20
+    TypicalTrainLengthM: 100
+    CurveInspectFill: {r: 0.72, g: 0.82, b: 0.35, a: 0.22}
+    CurveInspectOutline: {r: 1, g: 0.95, b: 0.2, a: 0.85}
   TestHill: 0
   TestHillHeight: 80
   HeightmapPath: terrain1.png
+  HeightmapFolder: Assets/Heightmaps
   HeightmapMaxHeight: 150
   HeightmapSmoothPasses: 0
   Autosave: 1
@@ -4029,6 +4079,7 @@ MonoBehaviour:
   SlopeDisableRailSnap: 0
   SlopeGuideDetectRadius: 40
   SlopeGuideSnapRadius: 8
+  RailSlopeWidth: 8
   AutoLighting: 1
   ShadowDistance: 300
   AutoCameraControl: 1
@@ -4118,6 +4169,43 @@ Transform:
   - {fileID: 519172430}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1486752338
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1486752333}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 33972b13048d44906b45287860c476a6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::NetworkDesigner.UI.RailPalette
+  Designer: {fileID: 0}
+  PanelSettings: {fileID: 0}
+--- !u!114 &1486752339
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1486752333}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 19102, guid: 0000000000000000e000000000000000, type: 0}
+  m_Name: 
+  m_EditorClassIdentifier: UnityEngine.dll::UnityEngine.UIElements.UIDocument
+  m_PanelSettings: {fileID: 11400000, guid: 1b0cafc3a62584c4ca778dab44772dbc, type: 2}
+  m_ParentUI: {fileID: 0}
+  sourceAsset: {fileID: 0}
+  m_SortingOrder: 0
+  m_Position: 0
+  m_WorldSpaceSizeMode: 1
+  m_WorldSpaceWidth: 1920
+  m_WorldSpaceHeight: 1080
+  m_PivotReferenceSize: 0
+  m_Pivot: 0
+  m_WorldSpaceCollider: {fileID: 0}
 --- !u!43 &1786698457
 Mesh:
   m_ObjectHideFlags: 0

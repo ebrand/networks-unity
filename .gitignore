@@ -103,3 +103,7 @@ road-designer/node_modules/
 road-designer/dist/
 road-designer/.vite/
 road-designer/*.log
+
+# Purchased asset pack (1,000+ icons) — kept out of the repo for now (unused until
+# the 3D-prefab cursor is built). Remove this line to start tracking it.
+network-designer/Assets/icons/

@@ -50,8 +50,11 @@ namespace NetworkDesigner.UI
         static readonly Color RuleCol  = new Color(1f, 1f, 1f, 0.12f);
 
         UIDocument _doc;
-        VisualElement _panel;
-        readonly List<Action> _sync = new List<Action>();
+        VisualElement _panel;       // always visible (footer is always on)
+        VisualElement _railBody;    // rail/plan controls — shown only in rail mode
+        Label _footMode, _footSub;  // common footer: mode + sub-mode
+        Button _snapBtn;            // common footer: snap-to-grid toggle
+        readonly List<Action> _sync = new List<Action>();   // rail-body control sync
         bool _built;
 
         void Start()
@@ -89,10 +92,16 @@ namespace NetworkDesigner.UI
         void Update()
         {
             if (!_built || Designer == null || _panel == null) return;
-            bool show = Designer.IsRailMode;
-            _panel.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
-            if (!show) { PointerOverUI = false; return; }   // can't be "over" a hidden panel
-            for (int i = 0; i < _sync.Count; i++) _sync[i]();
+
+            // Common footer is always on; the rail/plan body only shows in rail mode.
+            bool rail = Designer.IsRailMode;
+            _railBody.style.display = rail ? DisplayStyle.Flex : DisplayStyle.None;
+            if (rail) for (int i = 0; i < _sync.Count; i++) _sync[i]();
+
+            // Footer sync (every frame, every mode).
+            _footMode.text = Designer.PaletteModeLabel;
+            _footSub.text = Designer.PaletteSubModeLabel;
+            StyleSnap(_snapBtn, Designer.SnapToGrid);
         }
 
         // ---- build ----
@@ -115,7 +124,11 @@ namespace NetworkDesigner.UI
             _panel.RegisterCallback<PointerLeaveEvent>(_ => PointerOverUI = false);
             root.Add(_panel);
 
-            _panel.Add(SectionLabel("MODES"));
+            // Rail/plan body — shown only in rail mode (Update toggles its display).
+            _railBody = new VisualElement();
+            _panel.Add(_railBody);
+
+            _railBody.Add(SectionLabel("MODES"));
 
             // Build / Plan segmented buttons.
             var modeRow = HBox();
@@ -124,28 +137,28 @@ namespace NetworkDesigner.UI
             buildBtn.style.marginRight = 6;
             modeRow.Add(buildBtn); modeRow.Add(planBtn);
             modeRow.style.marginBottom = 12;
-            _panel.Add(modeRow);
+            _railBody.Add(modeRow);
             _sync.Add(() =>
             {
                 StyleMode(buildBtn, Designer.IsRailBuildMode);
                 StyleMode(planBtn,  Designer.IsRailPlanMode);
             });
 
-            _panel.Add(NumberRow("Dgn Speed", "km/h",
+            _railBody.Add(NumberRow("Dgn Speed", "km/h",
                 () => Designer.RailLayer.SpeedLimitKmh, v => Designer.RailLayer.SpeedLimitKmh = v, 10f, 200f, "0"));
-            _panel.Add(NumberRow("Max Grade", "deg",
+            _railBody.Add(NumberRow("Max Grade", "deg",
                 () => Designer.RailLayer.MaxGradeDeg, v => Designer.RailLayer.MaxGradeDeg = v, 0.5f, 15f, "0.#"));
 
-            _panel.Add(ToggleRow("Force Grade",
+            _railBody.Add(ToggleRow("Force Grade",
                 () => Designer.RailLayer.OverrideGrade, v => Designer.RailLayer.OverrideGrade = v));
-            _panel.Add(ToggleRow("Show Nodes",
+            _railBody.Add(ToggleRow("Show Nodes",
                 () => Designer.RailLayer.ShowNodePucks, v => Designer.RailLayer.ShowNodePucks = v));
-            _panel.Add(ToggleRow("Show Decel",
+            _railBody.Add(ToggleRow("Show Decel",
                 () => Designer.RailLayer.ShowBrakingMarkers, v => Designer.RailLayer.ShowBrakingMarkers = v));
-            _panel.Add(ToggleRow("Inspect",
+            _railBody.Add(ToggleRow("Inspect",
                 () => Designer.RailLayer.ShowCurveInspect, v => Designer.RailLayer.ShowCurveInspect = v));
 
-            _panel.Add(NumberRow("Corridor Width", "m",
+            _railBody.Add(NumberRow("Corridor Width", "m",
                 () => Designer.PlanLayer.CorridorWidth,
                 v => { Designer.PlanLayer.CorridorWidth = v; Designer.RebuildPlan(); }, 2f, 200f, "0"));
 
@@ -156,23 +169,60 @@ namespace NetworkDesigner.UI
             carve.style.marginRight = 6;
             actRow.Add(carve); actRow.Add(bop);
             actRow.style.marginTop = 4;
-            _panel.Add(actRow);
+            _railBody.Add(actRow);
             var clear = MakeButton("Clear Plan", () => Designer.ClearPlan());
             clear.style.marginTop = 6;
-            _panel.Add(clear);
+            _railBody.Add(clear);
 
-            _panel.Add(Divider());
+            _railBody.Add(Divider());
 
-            _panel.Add(ToggleRow("Parallel",
+            _railBody.Add(ToggleRow("Parallel",
                 () => Designer.RailLayer.ParallelEnabled, v => Designer.RailLayer.ParallelEnabled = v));
-            _panel.Add(NumberRow("Spacing", "m",
+            _railBody.Add(NumberRow("Spacing", "m",
                 () => Designer.RailLayer.ParallelSpacing, v => Designer.RailLayer.ParallelSpacing = v, 5f, 100f, "0.#"));
 
-            var tbd = new Label("TBD");
-            tbd.style.color = Sub; tbd.style.fontSize = 11;
-            tbd.style.unityTextAlign = TextAnchor.MiddleCenter;
-            tbd.style.marginTop = 12;
-            _panel.Add(tbd);
+            // Common footer — ALWAYS visible (mode + sub-mode + Snap), on every palette.
+            _panel.Add(BuildFooter());
+        }
+
+        // The shared footer: a rule, the current mode (bold) + sub-mode, and a Snap
+        // (snap-to-grid) toggle button. Same block regardless of mode, so it reads as
+        // the common base of every palette and replaces the old IMGUI status strip.
+        VisualElement BuildFooter()
+        {
+            var foot = new VisualElement();
+            foot.Add(Divider());
+
+            var row = HBox();
+            row.style.justifyContent = Justify.SpaceBetween;
+
+            var labels = new VisualElement();
+            _footMode = new Label("Terrain");
+            _footMode.style.color = Ink; _footMode.style.fontSize = 14;
+            _footMode.style.unityFontStyleAndWeight = FontStyle.Bold;
+            _footSub = new Label(string.Empty);
+            _footSub.style.color = Sub; _footSub.style.fontSize = 13;
+            _footSub.style.marginTop = 2;
+            labels.Add(_footMode); labels.Add(_footSub);
+
+            _snapBtn = new Button(() => Designer.SnapToGrid = !Designer.SnapToGrid) { text = "Snap" };
+            _snapBtn.style.width = 76; _snapBtn.style.height = 44;
+            _snapBtn.style.marginLeft = 0; _snapBtn.style.marginRight = 0;
+            _snapBtn.style.borderTopWidth = _snapBtn.style.borderBottomWidth = 0;
+            _snapBtn.style.borderLeftWidth = _snapBtn.style.borderRightWidth = 0;
+            Radius(_snapBtn, 8);
+            StyleSnap(_snapBtn, false);
+
+            row.Add(labels); row.Add(_snapBtn);
+            foot.Add(row);
+            return foot;
+        }
+
+        void StyleSnap(Button b, bool on)
+        {
+            b.style.backgroundColor = on ? Amber : BtnBg;
+            b.style.color = on ? DarkInk : Ink;
+            b.style.unityFontStyleAndWeight = on ? FontStyle.Bold : FontStyle.Normal;
         }
 
         // ---- rows / widgets ----

@@ -128,6 +128,13 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Gap length (m) between dashes when Brush Cursor Dashed is on.")]
         public float BrushCursorDashGap = 1.5f;
 
+        [Header("Brush mode icon (shown beside the ring in sculpt modes)")]
+        [Tooltip("Icon drawn next to the brush ring per sculpt mode. Raise/Lower fall back " +
+                 "to generated up/down arrows; assign Smooth/Flatten/Slope textures.")]
+        public Texture2D RaiseIcon, LowerIcon, SmoothIcon, FlattenIcon, SlopeIcon;
+        [Tooltip("On-screen size (px) of the brush-mode icon.")]
+        public float BrushIconSize = 30f;
+
         [Header("Topographic lines")]
         public bool ShowContours = false;
         [Tooltip("Elevation between contour lines, in metres.")]
@@ -228,6 +235,9 @@ namespace NetworkDesigner.Terrain
         MeshRenderer _cursorMr;
         Mesh _cursorMesh;
         Material _cursorMat;
+        bool _brushCursorVisible;          // mirror of the ring's visibility for the OnGUI icon
+        Vector3 _brushCursorWorld;         // ring centre in world space, for projecting the icon
+        Texture2D _genUpArrow, _genDownArrow;  // procedural fallbacks for Raise/Lower
         readonly List<Vector3> _ring = new List<Vector3>();
         readonly List<Vector3> _cursorVerts = new List<Vector3>();
         readonly List<int> _cursorIdx = new List<int>();
@@ -785,32 +795,76 @@ namespace NetworkDesigner.Terrain
         // Palette IMGUI for the active scatter layer, or a hint for linework.
         void OnGUI()
         {
-            Matrix4x4 prev = GUI.matrix;
-            GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
-            DrawModeStatus();   // always on: current mode/sub-mode + grid/snap state
+            // Mode/sub-mode + snap now live in the UI Toolkit palette footer (RailPalette),
+            // so the old always-on IMGUI status strip is gone.
+            DrawBrushModeIcon();   // per-mode glyph beside the ring (sculpt modes only)
             bool sculptHud = (Brush == BrushMode.Slope || Brush == BrushMode.Flatten)
                              && _lineActive == null && _active == null;
-            if (_lineActive != null || _active != null || sculptHud)
-                DrawPanels();
+            if (_lineActive == null && _active == null && !sculptHud) return;
+            Matrix4x4 prev = GUI.matrix;
+            GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
+            DrawPanels();
             GUI.matrix = prev;
         }
 
-        // Persistent top-left strip so the active mode/sub-mode and whether snap-to-grid
-        // is on are always visible — including in plain sculpt, where no other panel shows.
-        // Mode is the top-level tool (Sculpt / Scatter / Line); sub-mode is the specific
-        // brush or layer. Snap-to-grid (Shift+G) is distinct from the grid overlay (G).
-        void DrawModeStatus()
+        // A small per-mode glyph just outside the brush ring (raw screen pixels, drawn
+        // before any UiScale matrix). Sculpt modes only — Raise/Lower use generated
+        // arrows; Smooth/Flatten/Slope use assigned textures (none = nothing drawn).
+        void DrawBrushModeIcon()
         {
-            string mode, sub;
-            if (_lineActive != null) { mode = "Line"; sub = _lineActive.LayerName; }
-            else if (_active != null) { mode = "Scatter"; sub = _active.Name; }
-            else { mode = "Sculpt"; sub = Brush.ToString(); }
+            if (_active != null || _lineActive != null) return;   // sculpt modes only
+            if (!_brushCursorVisible) return;
+            bool generated = (Brush == BrushMode.Raise || Brush == BrushMode.Lower);
+            Texture2D tex = IconForBrush(Brush);
+            if (tex == null) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            Vector3 sp = cam.WorldToScreenPoint(_brushCursorWorld);
+            if (sp.z <= 0f) return;                                // behind the camera
+            // Ring radius in screen px, so the icon sits just outside it at any zoom.
+            Vector3 edge = cam.WorldToScreenPoint(_brushCursorWorld + cam.transform.right * BrushRadius);
+            float screenR = Vector2.Distance(new Vector2(sp.x, sp.y), new Vector2(edge.x, edge.y));
+            float size = Mathf.Max(8f, BrushIconSize);
+            float x = sp.x + screenR + 6f;
+            float y = Screen.height - sp.y - size * 0.5f;          // GUI y is top-down
+            Color old = GUI.color;
+            GUI.color = generated ? BrushCursorColor : Color.white;
+            GUI.DrawTexture(new Rect(x, y, size, size), tex, ScaleMode.ScaleToFit, true);
+            GUI.color = old;
+        }
 
-            GUILayout.BeginArea(new Rect(8f, 8f, 234f, 56f), GUI.skin.box);
-            GUILayout.Label($"{mode}  ·  {sub}");
-            GUILayout.Label($"Grid {(GridEnabled ? "on" : "off")} (G)   ·   "
-                + $"Snap-to-grid {(SnapToGrid ? "ON" : "off")} (⇧G)");
-            GUILayout.EndArea();
+        Texture2D IconForBrush(BrushMode m)
+        {
+            switch (m)
+            {
+                case BrushMode.Raise:   return RaiseIcon != null ? RaiseIcon : (_genUpArrow ??= MakeArrowTex(true));
+                case BrushMode.Lower:   return LowerIcon != null ? LowerIcon : (_genDownArrow ??= MakeArrowTex(false));
+                case BrushMode.Smooth:  return SmoothIcon;
+                case BrushMode.Flatten: return FlattenIcon;
+                case BrushMode.Slope:   return SlopeIcon;
+                default:                return null;
+            }
+        }
+
+        // A filled triangle (apex up or down) on transparent, tinted at draw time.
+        static Texture2D MakeArrowTex(bool up)
+        {
+            const int s = 64;
+            var t = new Texture2D(s, s, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            var px = new Color32[s * s];
+            var solid = new Color32(255, 255, 255, 255);
+            for (int y = 0; y < s; y++)
+            {
+                // ty: 0 at the base, 1 at the apex (row 0 is the bottom of a Texture2D).
+                float ty = up ? y / (float)(s - 1) : 1f - y / (float)(s - 1);
+                float halfW = (1f - ty) * 0.5f * (s - 1);
+                int cx = s / 2;
+                for (int x = 0; x < s; x++)
+                    px[y * s + x] = Mathf.Abs(x - cx) <= halfW ? solid : default;
+            }
+            t.SetPixels32(px);
+            t.Apply();
+            return t;
         }
 
         void DrawPanels()
@@ -1373,6 +1427,40 @@ namespace NetworkDesigner.Terrain
             ITerrainLineLayer target = plan ? PlanLayer : (ITerrainLineLayer)RailLayer;
             if (!ReferenceEquals(_lineActive, target)) SetLineMode(target);
         }
+
+        // Common-footer labels for the palette. "Terrain" is the sculpt mode; sub-mode is
+        // the active brush/layer with its hotkey (e.g. "Slope (5)").
+        public string PaletteModeLabel
+        {
+            get
+            {
+                if (IsRailMode) return "Rail";
+                if (_active != null) return "Scatter";
+                if (_lineActive != null) return _lineActive.LayerName;
+                return "Terrain";
+            }
+        }
+        public string PaletteSubModeLabel
+        {
+            get
+            {
+                if (_lineActive is RailTrackLayer) return "Build (L)";
+                if (_lineActive is RailPlanLayer) return "Plan (K)";
+                if (ReferenceEquals(_active, TreeLayer)) return "Trees (T)";
+                if (ReferenceEquals(_active, RockLayer)) return "Rocks (R)";
+                if (ReferenceEquals(_lineActive, FenceLayer)) return "Fence (F)";
+                if (ReferenceEquals(_lineActive, PowerLineLayer)) return "Power (P)";
+                switch (Brush)
+                {
+                    case BrushMode.Raise: return "Raise (1)";
+                    case BrushMode.Lower: return "Lower (2)";
+                    case BrushMode.Smooth: return "Smooth (3)";
+                    case BrushMode.Flatten: return "Flatten (4)";
+                    case BrushMode.Slope: return "Slope (5)";
+                    default: return "";
+                }
+            }
+        }
         void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RailLayer.HideConnectPreview(); }
 
         // Live preview while a connect end is armed (C held + rail mode): the join to the
@@ -1595,6 +1683,10 @@ namespace NetworkDesigner.Terrain
                 overTerrain = Physics.Raycast(ray, out hit, 100000f)
                               && hit.collider is MeshCollider;
             }
+            // The raycast passes THROUGH the UI Toolkit palette to the terrain behind it,
+            // so treat "cursor over a panel" as not-over-terrain — suppresses the brush
+            // cursor, line preview, and the world-space design-speed readout over the UI.
+            if (overTerrain && MouseOverActivePanel()) overTerrain = false;
 
             // Flatten mode: remember the world elevation under the cursor for the HUD.
             _flattenCursorValid = Brush == BrushMode.Flatten && overTerrain
@@ -1679,7 +1771,10 @@ namespace NetworkDesigner.Terrain
             // Brush ring: in line modes show it at the RAW mouse (not the snapped track
             // cursor) so you always have a stable "where my mouse actually is" anchor —
             // distinct from the placement cursor that slides along the extension line.
-            UpdateBrushCursor(ShowBrushCursor && overTerrain, _lineActive != null ? hit.point : cursorVis);
+            // Brush outline sits at the SNAPPED placement point (cursorVis), so the
+            // ring tracks where a node will actually land instead of the raw cursor —
+            // matches the grid/rail snap in both sculpt and line modes.
+            UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.
@@ -1879,7 +1974,7 @@ namespace NetworkDesigner.Terrain
                 if (_sculptedStroke) { ConformScatterAndLines(); _sculptedStroke = false; }
             }
 
-            if (!overTerrain || !Input.GetMouseButton(0)) return;
+            if (!overTerrain || !Input.GetMouseButton(0) || MouseOverActivePanel()) return;
 
             if (!_hasFlattenTarget)
             {
@@ -1944,6 +2039,8 @@ namespace NetworkDesigner.Terrain
         // Rendered as a line mesh (like the contours) so it can be dashed.
         void UpdateBrushCursor(bool visible, Vector3 worldCenter)
         {
+            _brushCursorVisible = visible;        // for the OnGUI brush-mode icon
+            _brushCursorWorld = worldCenter;
             EnsureCursor();
             _cursorMr.enabled = visible;
             if (!visible) return;
