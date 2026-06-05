@@ -287,39 +287,24 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.minDeflection", "Rail", "Min curve deflection (deg)",
                 () => t.RailLayer.MinCurveDeflectionDeg, v => t.RailLayer.MinCurveDeflectionDeg = v, 0.5f, 30f,
                 description: "Min-distance target: the bend can't be placed until the first leg gives at least this much turn above/below the centreline for the speed. Guide stays red until then; any safe deflection builds past it.");
-            TuningRegistry.RegisterBool("rail.inspectShow", "Rail", "Curve inspect overlay (I)",
-                () => t.RailLayer.ShowCurveInspect, v => t.RailLayer.ShowCurveInspect = v,
-                description: "Design-mode overlay: a dashed box around every built curve (rail + plan). Hover a curve for its decel zone, radius + max speed, grade, and rated speed. Hotkey: I.");
             TuningRegistry.RegisterFloat("rail.inspectWidth", "Rail", "Curve inspect box width (m)",
                 () => t.RailLayer.CurveInspectWidth, v => t.RailLayer.CurveInspectWidth = v, 4f, 60f,
                 description: "Width of the dashed inspection box drawn around each segment in the inspect overlay.");
             TuningRegistry.RegisterFloat("rail.trainLength", "Rail", "Typical train length (m)",
                 () => t.RailLayer.TypicalTrainLengthM, v => t.RailLayer.TypicalTrainLengthM = v, 10f, 600f,
                 description: "Used by the inspect overlay to report queue space on a straight: how many of these trains fit on the hovered segment.");
-            TuningRegistry.RegisterFloat("rail.speedLimit", "Rail", "Design speed (km/h)",
-                () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f,
-                description: "The ONE design speed for the whole network (build AND plan). Sets the minimum curve radius (R = v^2/(g*a)); tighter curves are refused. Lower it to lay tighter curves.");
             TuningRegistry.RegisterFloat("rail.maxLatG", "Rail", "Max lateral g (curve tightness)",
                 () => t.RailLayer.MaxLateralG, v => t.RailLayer.MaxLateralG = v, 0.05f, 0.5f,
                 description: "Comfort/cant limit (shared by build + plan). Higher = tighter curves allowed at a given speed (smaller min radius). Real rail ~0.1; raise for game-scaled curves.");
-            TuningRegistry.RegisterFloat("rail.maxGrade", "Rail", "Max grade (deg)",
-                () => t.RailLayer.MaxGradeDeg, v => t.RailLayer.MaxGradeDeg = v, 0.5f, 15f,
-                description: "Steepest grade any section may have. The terrain is sampled every 'Grade sample step' m along an edge; the edge is buildable up to the first section over this, then truncated there (the rest shows red). 5 deg ~ 8.7%.");
             TuningRegistry.RegisterFloat("rail.gradeStep", "Rail", "Grade sample step (m)",
                 () => t.RailLayer.GradeSampleStep, v => t.RailLayer.GradeSampleStep = v, 1f, 50f,
                 description: "Spacing at which the terrain elevation is sampled along an edge to check the per-section grade — the 'every N metres' resolution. Smaller = finer (catches short steep bumps), larger = smoother.");
-            TuningRegistry.RegisterBool("rail.overrideGrade", "Rail", "Override grade (bridge anyway)",
-                () => t.RailLayer.OverrideGrade, v => t.RailLayer.OverrideGrade = v,
-                description: "Ignore the grade limit and DON'T truncate: build the whole edge across whatever terrain it crosses (deep fills become bridges automatically). For 'the terrain's whacked, span it anyway'. Hotkey B in rail mode.");
             TuningRegistry.RegisterFloat("rail.trackSnap", "Rail", "Track snap radius (m)",
                 () => t.RailLayer.TrackSnapRadius, v => t.RailLayer.TrackSnapRadius = v, 0f, 25f,
                 description: "Snap radius for connecting to EXISTING track: a click within this of a node or rail edge is pulled exactly onto it (overrides grid snap) so it reliably joins the network. 0 = grid snap only.");
             TuningRegistry.RegisterFloat("rail.guideLength", "Rail", "Alignment guide length (m)",
                 () => t.RailLayer.ExtensionGuideLength, v => t.RailLayer.ExtensionGuideLength = v, 0f, 600f,
                 description: "Length of the dashed straight-ahead alignment guide drawn out of the chain tail. Also bounds how far ahead the extension snap reaches. 0 = no guide / no extension snap.");
-            TuningRegistry.RegisterBool("rail.showPucks", "Rail", "Show node pucks",
-                () => t.RailLayer.ShowNodePucks, v => t.RailLayer.ShowNodePucks = v,
-                description: "Show a translucent puck at each rail node while editing rail; the node under the cursor highlights. Click a rail edge to insert a node (chop a segment), or a node puck to branch from it.");
             TuningRegistry.RegisterFloat("rail.puckSize", "Rail", "Node puck size (m)",
                 () => t.RailLayer.NodePuckSize, v => t.RailLayer.NodePuckSize = v, 0.3f, 6f,
                 description: "Radius of the translucent node pucks.");
@@ -335,9 +320,6 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterColor("rail.puckHoverColor", "Rail", "Node puck hover color",
                 () => t.RailLayer.NodePuckHoverColor, v => t.RailLayer.NodePuckHoverColor = v,
                 description: "Colour of the puck under the cursor (the node you'd pick / insert by).");
-            TuningRegistry.RegisterBool("rail.showBraking", "Rail", "Show braking markers",
-                () => t.RailLayer.ShowBrakingMarkers, v => t.RailLayer.ShowBrakingMarkers = v,
-                description: "Mark braking distances at speed drops (committed + a live preview off the segment you're drawing): where decel must begin on the faster line, and where the train is fully slowed on the slower line.");
             TuningRegistry.RegisterFloat("rail.brakingDecel", "Rail", "Braking decel (m/s^2)",
                 () => t.RailLayer.BrakingDecel, v => t.RailLayer.BrakingDecel = v, 0.1f, 1.3f,
                 description: "Service deceleration used for braking distance d = (vFast^2 - vSlow^2)/(2a). Comfortable rail ~0.2-0.4; emergency up to ~1.3. Bigger = shorter distance.");
@@ -431,9 +413,6 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.cutSmooth", "Rail", "Cut smoothing passes",
                 () => t.CutSmoothPasses, v => t.CutSmoothPasses = Mathf.RoundToInt(v), 0f, 6f, 1f,
                 description: "Carve action: smoothing passes that round the coarse cut walls afterward. The floor under the track is protected, so it won't re-bury the rails. 0 = off.");
-            TuningRegistry.RegisterAction("rail.carve", "Rail", "Carve approaches (destructive)",
-                () => t.CarveRailApproaches(),
-                description: "DESTRUCTIVE: permanently lowers the terrain into open cuts along below-grade track + notches tunnel mouths open. No undo; re-press to dig further (additive).");
             TuningRegistry.RegisterColor("rail.railColor", "Rail", "Rail color",
                 () => t.RailLayer.RailColor, v => { t.RailLayer.RailColor = v; t.RebuildRail(); },
                 description: "Colour of the metal rails.");
@@ -448,9 +427,6 @@ namespace NetworkDesigner.Terrain
                 description: "Log every non-terrain mesh renderer (name/path/hideFlags/scene) — for tracking down 'phantom' objects that aren't deletable.");
 
             // --- Rail planning (survey) ---
-            TuningRegistry.RegisterFloat("plan.corridorWidth", "Rail plan", "Corridor width (m)",
-                () => t.PlanLayer.CorridorWidth, v => { t.PlanLayer.CorridorWidth = v; t.RebuildPlan(); }, 2f, 200f,
-                description: "Plan mode (K): total graded-corridor width — the dashed edge lines sit this far apart, centred on the alignment.");
             TuningRegistry.RegisterFloat("plan.tracks", "Rail plan", "Tracks (1 or 2)",
                 () => t.PlanLayer.Tracks, v => { t.PlanLayer.Tracks = Mathf.Clamp(Mathf.RoundToInt(v), 1, 2); t.RebuildPlan(); }, 1f, 2f,
                 description: "Plan a single centreline (1) or a double-track pair (2) drawn at +/- half the track gap.");
@@ -484,12 +460,6 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterColor("plan.color", "Rail plan", "Plan color",
                 () => t.PlanLayer.PlanColor, v => { t.PlanLayer.PlanColor = v; t.RebuildPlan(); },
                 description: "Colour (with alpha) of the draped survey lines.");
-            TuningRegistry.RegisterAction("plan.clear", "Rail plan", "Clear plan",
-                () => t.ClearPlan(),
-                description: "Delete the entire survey plan (all nodes and edges).");
-            TuningRegistry.RegisterAction("plan.buildRail", "Rail plan", "Build rail on centreline",
-                () => t.PromotePlanToRail(),
-                description: "Build real rail track on the plan centreline. Only works when the ENTIRE plan is buildable (no segment over the max grade) — grade the red sections first. The plan is left in place.");
             TuningRegistry.RegisterBool("plan.analyze", "Rail plan", "Analyze (mark corridor)",
                 () => t.PlanLayer.ShowAnalysis, v => { t.PlanLayer.ShowAnalysis = v; t.RebuildPlan(); },
                 description: "Mark the corridor by what each section needs vs a grade-limited bed. Colour-blind-safe: at-grade=solid plan line, cut=dashed, fill=double-dashed; bridge=cyan, tunnel=purple, over-grade=red. Off = plain survey.");

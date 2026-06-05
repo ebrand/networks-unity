@@ -57,6 +57,8 @@ namespace NetworkDesigner.Designer
 
         // Set true to swallow scroll this frame (e.g. cursor over a UI panel).
         public System.Func<bool> ScrollSuppressor;
+        // Set true to swallow middle-mouse look this frame (e.g. dragging over a UI panel).
+        public System.Func<bool> LookSuppressor;
 
         public float Yaw;
         public float Pitch = 35f;
@@ -121,6 +123,7 @@ namespace NetworkDesigner.Designer
             // Middle-mouse = look. Left/right stay free for tools; Shift only
             // affects move speed.
             if (!Input.GetMouseButton(2)) return;
+            if (LookSuppressor != null && LookSuppressor()) return;  // cursor over a UI panel
             Yaw += Input.GetAxis("Mouse X") * LookSensitivity;
             Pitch -= Input.GetAxis("Mouse Y") * LookSensitivity;
             Pitch = Mathf.Clamp(Pitch, -89f, 89f);

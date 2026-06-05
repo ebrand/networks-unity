@@ -1147,6 +1147,9 @@ namespace NetworkDesigner.Terrain
         // PanelRect is stored in the unscaled virtual-screen space.
         bool MouseOverActivePanel()
         {
+            // UI Toolkit palette swallows its own events, but the legacy Input polling
+            // used by the camera/tools is blind to it — so gate on its hover flag too.
+            if (NetworkDesigner.UI.RailPalette.PointerOverUI) return true;
             if (_active == null || _active.PanelRect.width <= 0f) return false;
             float s = Mathf.Max(0.25f, UiScale);
             Vector2 m = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y) / s;
@@ -1358,6 +1361,18 @@ namespace NetworkDesigner.Terrain
         // Mode switching (mutually exclusive; same key again returns to sculpt).
         void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; _railConnectNodeA = -1; HideLinePreviews(); }
         void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; _railConnectNodeA = -1; HideLinePreviews(); }
+
+        // --- Rail palette hooks (the UI Toolkit RailPalette drives these) ---
+        public bool IsRailBuildMode => ReferenceEquals(_lineActive, RailLayer);
+        public bool IsRailPlanMode => ReferenceEquals(_lineActive, PlanLayer);
+        public bool IsRailMode => IsRailBuildMode || IsRailPlanMode;
+        // Switch to build (plan=false) or plan (plan=true). Radio-style: clicking the
+        // mode you're already in is a no-op (use the L/K hotkeys to toggle back out).
+        public void SetRailMode(bool plan)
+        {
+            ITerrainLineLayer target = plan ? PlanLayer : (ITerrainLineLayer)RailLayer;
+            if (!ReferenceEquals(_lineActive, target)) SetLineMode(target);
+        }
         void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RailLayer.HideConnectPreview(); }
 
         // Live preview while a connect end is armed (C held + rail mode): the join to the
@@ -1441,6 +1456,7 @@ namespace NetworkDesigner.Terrain
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
             fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll();
+            fly.LookSuppressor = () => MouseOverActivePanel();
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
             if (fresh) FrameFly(fly);
         }
@@ -1705,7 +1721,8 @@ namespace NetworkDesigner.Terrain
                 _lineActive.UpdatePreview(_field, place, overTerrain);
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);
-                if (overTerrain && Input.GetMouseButtonDown(0))
+                bool overPanel = MouseOverActivePanel();   // cursor over the rail palette
+                if (!overPanel && overTerrain && Input.GetMouseButtonDown(0))
                 {
                     if (_lineActive is RailTrackLayer railSlope && altMod)
                     {
@@ -1750,7 +1767,7 @@ namespace NetworkDesigner.Terrain
                         _dirtySince = Time.realtimeSinceStartup;
                     }
                 }
-                if (Input.GetMouseButtonDown(1))
+                if (!overPanel && Input.GetMouseButtonDown(1))
                 {
                     // An armed auto-slope / connect cancels first (right-click backs out).
                     if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }

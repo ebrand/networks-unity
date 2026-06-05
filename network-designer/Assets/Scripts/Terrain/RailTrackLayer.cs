@@ -85,6 +85,12 @@ namespace NetworkDesigner.Terrain
                  "bridges automatically). For 'the terrain's whacked, span it anyway'. " +
                  "Toggle with B in rail mode.")]
         public bool OverrideGrade = false;
+        [Tooltip("Parallel drawing: when on, laying track also lays additional tracks " +
+                 "offset to one side by ParallelSpacing. (Geometry not wired yet — the " +
+                 "palette controls exist; the offset generator is the next step.)")]
+        public bool ParallelEnabled = false;
+        [Tooltip("Center-to-center spacing (m) between parallel tracks. Floor 5 m.")]
+        public float ParallelSpacing = 5f;
         [System.NonSerialized] public float LastPreviewGradeDeg;        // steepest sampled section
         [System.NonSerialized] public float LastPreviewEndpointGradeDeg; // true grade A->B (the constant build grade)
         [System.NonSerialized] public bool LastPreviewTooSteep;
