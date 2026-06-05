@@ -1209,7 +1209,7 @@ namespace NetworkDesigner.Terrain
         {
             // UI Toolkit palette swallows its own events, but the legacy Input polling
             // used by the camera/tools is blind to it — so gate on its hover flag too.
-            if (NetworkDesigner.UI.RailPalette.PointerOverUI) return true;
+            if (NetworkDesigner.UI.PaletteBase.PointerOverUI) return true;
             if (_active == null || _active.PanelRect.width <= 0f) return false;
             float s = Mathf.Max(0.25f, UiScale);
             Vector2 m = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y) / s;
@@ -1426,6 +1426,10 @@ namespace NetworkDesigner.Terrain
         public bool IsRailBuildMode => ReferenceEquals(_lineActive, RailLayer);
         public bool IsRailPlanMode => ReferenceEquals(_lineActive, PlanLayer);
         public bool IsRailMode => IsRailBuildMode || IsRailPlanMode;
+        // Default terrain (sculpt) mode: no line layer and no scatter layer active.
+        public bool IsSculptMode => _lineActive == null && _active == null;
+        // Grid overlay toggle (the G key path), exposed for the palette footer button.
+        public void ToggleGrid() { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
         // Switch to build (plan=false) or plan (plan=true). Radio-style: clicking the
         // mode you're already in is a no-op (use the L/K hotkeys to toggle back out).
         public void SetRailMode(bool plan)
@@ -1549,7 +1553,7 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = cam.GetComponent<FlyCameraController>();
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
-            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll();
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll();
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
             if (fresh) FrameFly(fly);
@@ -1567,6 +1571,11 @@ namespace NetworkDesigner.Terrain
         bool AltParallelScroll() => RailLayer != null
             && _lineActive is RailTrackLayer && RailLayer.ParallelEnabled
             && (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt));
+
+        // Shift + wheel resizes the brush (sculpt/scatter — i.e. not while drawing lines,
+        // where Shift is the curve modifier). Camera ignores the wheel then.
+        bool ShiftBrushScroll() => _lineActive == null
+            && (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift));
 
         // URP render scale — the biggest lever for fill-rate-bound (high-res /
         // full-screen) rendering. Set at runtime on the pipeline asset (in-memory,
@@ -1639,6 +1648,13 @@ namespace NetworkDesigner.Terrain
                 int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
                 if (notches != 0)
                     RailLayer.ParallelCount = Mathf.Clamp(RailLayer.ParallelCount + (notches > 0 ? 1 : -1), 1, 8);
+            }
+            // Shift + wheel: resize the brush (proportional, ~10% per notch).
+            if (ShiftBrushScroll())
+            {
+                int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
+                if (notches != 0)
+                    BrushRadius = Mathf.Clamp(BrushRadius * Mathf.Pow(1.1f, notches), 0.5f, MaxBrushRadius);
             }
             if (Input.GetKeyDown(KeyCode.G))
             {
