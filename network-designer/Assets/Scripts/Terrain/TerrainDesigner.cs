@@ -1649,10 +1649,14 @@ namespace NetworkDesigner.Terrain
                 if (notches != 0)
                     RailLayer.ParallelCount = Mathf.Clamp(RailLayer.ParallelCount + (notches > 0 ? 1 : -1), 1, 8);
             }
-            // Shift + wheel: resize the brush (proportional, ~10% per notch).
+            // Shift + wheel: resize the brush (proportional, ~10% per notch). macOS remaps
+            // Shift+wheel to HORIZONTAL scroll, so the delta lands in .x not .y — read
+            // whichever axis carries it.
             if (ShiftBrushScroll())
             {
-                int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
+                Vector2 sd = Input.mouseScrollDelta;
+                float raw = Mathf.Abs(sd.x) > Mathf.Abs(sd.y) ? sd.x : sd.y;
+                int notches = Mathf.RoundToInt(raw);
                 if (notches != 0)
                     BrushRadius = Mathf.Clamp(BrushRadius * Mathf.Pow(1.1f, notches), 0.5f, MaxBrushRadius);
             }
