@@ -62,8 +62,8 @@ namespace NetworkDesigner.Terrain
         // While a curve corner is armed: the two leg lengths (A->bend, bend->B) in metres
         // and draped world anchors for the on-screen dimension labels.
         [System.NonSerialized] public bool CurveDimsValid;
-        [System.NonSerialized] public float CurveLegA, CurveLegB;
-        [System.NonSerialized] public Vector3 CurveLegAMid, CurveLegBMid;
+        [System.NonSerialized] public float CurveLegA, CurveLegB, CurveDeflectionDeg;
+        [System.NonSerialized] public Vector3 CurveLegAMid, CurveLegBMid, CurveCornerWorld;
         [Tooltip("Sampling step (m) for draping the lines onto the terrain surface. " +
                  "Smaller = smoother but more segments.")]
         public float SampleStep = 2f;
@@ -944,6 +944,8 @@ namespace NetworkDesigner.Terrain
                     CurveLegB = Vector2.Distance(_corner, cur);
                     CurveLegAMid = LegMid(field, start, _corner);
                     CurveLegBMid = LegMid(field, _corner, cur);
+                    CurveCornerWorld = LegMid(field, _corner, _corner);
+                    CurveDeflectionDeg = Vector2.Angle(_corner - start, cur - _corner);
                 }
                 else if (CurveModifier)
                 {

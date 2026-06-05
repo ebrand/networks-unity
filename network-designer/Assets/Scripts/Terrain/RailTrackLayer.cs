@@ -70,8 +70,8 @@ namespace NetworkDesigner.Terrain
         // While a curve corner is armed: the two leg lengths (A->bend, bend->B) in metres
         // and draped world anchors for the on-screen dimension labels.
         [System.NonSerialized] public bool CurveDimsValid;
-        [System.NonSerialized] public float CurveLegA, CurveLegB;
-        [System.NonSerialized] public Vector3 CurveLegAMid, CurveLegBMid;
+        [System.NonSerialized] public float CurveLegA, CurveLegB, CurveDeflectionDeg;
+        [System.NonSerialized] public Vector3 CurveLegAMid, CurveLegBMid, CurveCornerWorld;
         [Tooltip("Max grade (degrees) any section may have. The terrain is sampled " +
                  "every GradeSampleStep metres along an edge; the edge is buildable " +
                  "up to the first section that exceeds this, and is truncated there " +
@@ -266,6 +266,11 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector2> _boxL = new List<Vector2>();
         readonly List<Vector2> _boxR = new List<Vector2>();
         int _inspSig = -1;   // last-built signature; rebuild only when it changes (not every frame)
+        // Two-click connect preview (green = buildable, red = not).
+        GameObject _connGo; MeshFilter _connMf; MeshRenderer _connMr; Mesh _connMesh; Material _connMat;
+        readonly List<Vector3> _connV = new List<Vector3>();
+        readonly List<int> _connIdx = new List<int>();
+        readonly List<Color32> _connCol = new List<Color32>();
         // Hovered-curve readout, consumed by the editor's OnGUI (null/false when none).
         [System.NonSerialized] public bool InspectHovered, InspectIsCurve;
         [System.NonSerialized] public Vector2 InspectMid, InspectCorner, InspectLegAMid, InspectLegBMid;
@@ -652,6 +657,161 @@ namespace NetworkDesigner.Terrain
                 Graph.RemoveNode(i);
                 if (_chainTail > i) _chainTail--;
             }
+        }
+
+        // ---- two-click connect (fillet two line ends) ----
+
+        public struct ConnectResult
+        {
+            public bool Valid; public string Reason;
+            public int NodeA, NodeB;
+            public Vector2 Apos, Bpos, P, CurveStartA, CurveEndB;
+            public float LegA, LegB, Leg, Radius, MaxSpeed, FasterV, SpeedA, SpeedB;
+            public bool NeedStraightA, NeedStraightB, HasP;   // HasP: a forward intersection exists to draw
+        }
+
+        public bool IsEndpoint(int n)
+        {
+            if (n < 0 || n >= Graph.Nodes.Count) return false;
+            int deg = 0;
+            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) if (++deg > 1) return false; }
+            return deg == 1;
+        }
+
+        // Outward heading at a node's single edge (continuing the track past the node).
+        bool EndHeading(int n, out Vector2 dir)
+        {
+            dir = Vector2.zero;
+            if (n < 0 || n >= Graph.Nodes.Count) return false;
+            for (int i = 0; i < Graph.Edges.Count; i++)
+            {
+                LineEdge e = Graph.Edges[i];
+                if (e.A != n && e.B != n) continue;
+                Vector2 p0 = Graph.Nodes[e.A], p3 = Graph.Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
+                dir = e.B == n ? LineGraph.BezierTangent(p0, q1, q2, p3, 1f) : -LineGraph.BezierTangent(p0, q1, q2, p3, 0f);
+                if (dir.sqrMagnitude < 1e-6f) dir = e.B == n ? p3 - p0 : p0 - p3;
+                if (dir.sqrMagnitude < 1e-6f) return false;
+                dir = dir.normalized; return true;
+            }
+            return false;
+        }
+
+        float EdgeSpeedAtNode(int n)
+        {
+            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) return EdgeSpeed(e); }
+            return SpeedLimitKmh;
+        }
+
+        static float MinRadiusFor(float kmh, float latG) { float v = kmh / 3.6f; return v * v / (9.81f * Mathf.Max(0.01f, latG)); }
+
+        const float MaxConnectSpan = 4000f;   // refuse near-parallel joins beyond this (m)
+
+        // Compute the fillet that joins endpoints a and b: bend at the extension
+        // intersection P, equal legs = min(distA,distB), straight filling the longer side.
+        public bool TryConnectGeometry(int a, int b, out ConnectResult r)
+        {
+            r = new ConnectResult { NodeA = a, NodeB = b };
+            if (a < 0 || b < 0 || a == b || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) { r.Reason = "pick two ends"; return false; }
+            if (!IsEndpoint(a) || !IsEndpoint(b)) { r.Reason = "not an endpoint"; return false; }
+            r.Apos = Graph.Nodes[a]; r.Bpos = Graph.Nodes[b];
+            if (!EndHeading(a, out Vector2 extA) || !EndHeading(b, out Vector2 extB)) { r.Reason = "no heading"; return false; }
+            if (!LineIntersect(r.Apos, extA, r.Bpos, extB, out Vector2 P)) { r.Reason = "lines are parallel"; return false; }
+            float tA = Vector2.Dot(P - r.Apos, extA), tB = Vector2.Dot(P - r.Bpos, extB);
+            if (tA <= 0f || tB <= 0f) { r.Reason = "intersection is behind an end"; return false; }
+            r.P = P;
+            r.LegA = Vector2.Distance(r.Apos, P); r.LegB = Vector2.Distance(r.Bpos, P);
+            if (Mathf.Max(r.LegA, r.LegB) > MaxConnectSpan) { r.Reason = "ends too far apart"; return false; }
+            r.Leg = Mathf.Min(r.LegA, r.LegB);
+            r.CurveStartA = P - extA * r.Leg; r.CurveEndB = P - extB * r.Leg;
+            r.HasP = true;   // a drawable fillet now exists (even if it turns out too tight)
+            r.NeedStraightA = r.LegA > r.Leg + 0.01f; r.NeedStraightB = r.LegB > r.Leg + 0.01f;
+            r.SpeedA = EdgeSpeedAtNode(a); r.SpeedB = EdgeSpeedAtNode(b);
+            r.FasterV = Mathf.Max(r.SpeedA, r.SpeedB);
+            CurveControls(r.CurveStartA, r.CurveEndB, P, out Vector2 c1, out Vector2 c2);
+            r.Radius = MinCurveRadius(r.CurveStartA, c1, c2, r.CurveEndB);
+            float minR = MinRadiusFor(r.FasterV, MaxLateralG);
+            r.MaxSpeed = Mathf.Sqrt(Mathf.Max(0f, float.IsInfinity(r.Radius) ? 1e6f : r.Radius) * 9.81f * Mathf.Max(0.01f, MaxLateralG)) * 3.6f;
+            if (r.Radius < minR) { r.Reason = $"too tight for {r.FasterV:0} km/h"; return false; }
+            r.Valid = true; r.Reason = "OK";
+            return true;
+        }
+
+        public void CommitConnect(TerrainField field, in ConnectResult r)
+        {
+            if (!r.Valid) return;
+            int sa = r.NodeA;
+            if (r.NeedStraightA) { sa = Graph.AddNode(r.CurveStartA); Graph.AddEdge(r.NodeA, sa); var es = FindEdge(r.NodeA, sa); if (es != null) es.SpeedLimit = r.SpeedA; }
+            int sb = r.NodeB;
+            if (r.NeedStraightB) { sb = Graph.AddNode(r.CurveEndB); Graph.AddEdge(r.NodeB, sb); var es = FindEdge(r.NodeB, sb); if (es != null) es.SpeedLimit = r.SpeedB; }
+            Graph.AddEdge(sa, sb);
+            LineEdge ce = FindEdge(sa, sb);
+            if (ce != null)
+            {
+                CurveControls(Graph.Nodes[sa], Graph.Nodes[sb], r.P, out Vector2 c1, out Vector2 c2);
+                ce.HasCurve = true; ce.ControlA = c1; ce.ControlB = c2; ce.SpeedLimit = r.FasterV;
+            }
+            Rebuild(field);
+        }
+
+        void EnsureConnectOverlay()
+        {
+            if (_connMf != null) return;
+            _connGo = new GameObject(RootName + "_Connect") { hideFlags = HideFlags.DontSave };
+            _connGo.transform.SetParent(_root != null ? _root.transform : null, false);
+            _connMf = _connGo.AddComponent<MeshFilter>();
+            _connMr = _connGo.AddComponent<MeshRenderer>();
+            _connMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _connMr.receiveShadows = false;
+            _connMesh = new Mesh { name = "RailConnectMesh" };
+            _connMf.sharedMesh = _connMesh;
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            _connMat = sh != null ? new Material(sh) { name = "RailConnectMat" }
+                                  : NetworkDesigner.PipelineMaterials.CreateUnlitColor(Color.green, "RailConnectMat");
+            _connMr.sharedMaterial = _connMat;
+        }
+
+        public void HideConnectPreview() { if (_connMr != null) _connMr.enabled = false; }
+
+        // Draw the proposed join (straight + fillet + straight), green if buildable, red if
+        // not (a red straight A→B when there's no usable intersection at all).
+        public void RenderConnectPreview(TerrainField field, in ConnectResult r)
+        {
+            EnsureConnectOverlay();
+            _connV.Clear(); _connIdx.Clear(); _connCol.Clear();
+            Color32 col = r.Valid ? new Color32(60, 220, 90, 235) : new Color32(235, 70, 55, 235);
+            const float lift = 0.3f;
+            if (!r.HasP)
+            {
+                ConnSeg(field, r.Apos, r.Bpos, lift, col);
+            }
+            else
+            {
+                if (r.NeedStraightA) ConnSeg(field, r.Apos, r.CurveStartA, lift, col);
+                CurveControls(r.CurveStartA, r.CurveEndB, r.P, out Vector2 c1, out Vector2 c2);
+                Vector2 prev = r.CurveStartA;
+                const int N = 24;
+                for (int i = 1; i <= N; i++)
+                {
+                    Vector2 cur = LineGraph.Bezier(r.CurveStartA, c1, c2, r.CurveEndB, i / (float)N);
+                    ConnSeg(field, prev, cur, lift, col); prev = cur;
+                }
+                if (r.NeedStraightB) ConnSeg(field, r.CurveEndB, r.Bpos, lift, col);
+            }
+            _connMesh.Clear();
+            _connMesh.SetVertices(_connV);
+            _connMesh.SetColors(_connCol);
+            _connMesh.SetIndices(_connIdx, MeshTopology.Lines, 0);
+            _connMesh.RecalculateBounds();
+            _connMr.enabled = true;
+        }
+
+        void ConnSeg(TerrainField field, Vector2 a, Vector2 b, float lift, Color32 col)
+        {
+            int s = _connV.Count;
+            _connV.Add(InspLift(field, a, lift)); _connV.Add(InspLift(field, b, lift));
+            _connCol.Add(col); _connCol.Add(col); _connIdx.Add(s); _connIdx.Add(s + 1);
         }
 
         // ---- rendering ----
@@ -2225,6 +2385,8 @@ namespace NetworkDesigner.Terrain
                     CurveLegB = Vector2.Distance(_corner, cur);
                     CurveLegAMid = LegMid(field, start, _corner);
                     CurveLegBMid = LegMid(field, _corner, cur);
+                    CurveCornerWorld = LegMid(field, _corner, _corner);
+                    CurveDeflectionDeg = Vector2.Angle(_corner - start, cur - _corner);
                 }
                 else if (CurveModifier)
                 {

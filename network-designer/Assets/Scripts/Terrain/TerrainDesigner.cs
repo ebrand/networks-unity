@@ -269,6 +269,8 @@ namespace NetworkDesigner.Terrain
         List<Vector2> _railSlopePath;      // this frame's preview path A -> hovered node
         float _railSlopeGradePct;          // preview grade %
         bool _railSlopeGradeOk;            // within the rail's max grade?
+        int _railConnectNodeA = -1;        // armed connect end A (-1 = none)
+        string _connectStatus;             // HUD line while connecting
         // Inverted so a 0/false deserialize = snapping ENABLED (preserves behavior
         // for an already-serialized scene); the tunable presents it as a positive
         // "snap to rail" toggle, default on.
@@ -523,11 +525,13 @@ namespace NetworkDesigner.Terrain
                     // Placing the end: the PAC owns the cursor — don't let a nearby track or
                     // the straight extension line pull it off the buildable (yellow) arc.
                     if (rl.PlacingCurveEnd) return raw;
-                    if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
+                    // On-line decel snap-target first (it's a point on the extension line),
+                    // then the collinear lock — which wins over grabbing a nearby node, so a
+                    // straight can't be completed off-axis (rail can't kink; use connect for
+                    // real joins). Node/edge snap only applies when NOT extending.
                     if (rl.TrySnapToDecelTarget(flat, out Vector2 dt)) return new Vector3(dt.x, raw.y, dt.y);
-                    // Extending straight: collinear-lock (rail can't kink). Connecting to a
-                    // node above still wins; otherwise the cursor rides the extension line.
                     if (rl.TrySnapExtensionHard(flat, out Vector2 eh)) return new Vector3(eh.x, raw.y, eh.y);
+                    if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
                     if (rl.TrySnapToExtension(flat, out Vector2 ep)) return new Vector3(ep.x, raw.y, ep.y);
                 }
                 if (_lineActive is RailPlanLayer pl)
@@ -538,11 +542,12 @@ namespace NetworkDesigner.Terrain
                     if (pl.TrySnapCurveSymmetry(flat, out Vector2 psym)) return new Vector3(psym.x, raw.y, psym.y);
                     // Placing the end: the PAC owns the cursor exclusively.
                     if (pl.PlacingCurveEnd) return raw;
+                    // Collinear lock wins over grabbing a node while extending (no kink);
+                    // node/rail-end snap only applies when NOT extending.
+                    if (pl.TrySnapExtensionHard(flat, out Vector2 peh)) return new Vector3(peh.x, raw.y, peh.y);
                     if (pl.TrySnapToOwnNode(flat, out Vector2 pn)) return new Vector3(pn.x, raw.y, pn.y);
                     if (RailLayer != null && RailLayer.TrySnapToTrackPoint(flat, out Vector2 rp))
                         return new Vector3(rp.x, raw.y, rp.y);
-                    // Extending straight: collinear-lock onto the chosen leg.
-                    if (pl.TrySnapExtensionHard(flat, out Vector2 peh)) return new Vector3(peh.x, raw.y, peh.y);
                     if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
                 }
                 // Grid snap makes no sense while shaping an arc — the bend/end are already
@@ -851,6 +856,10 @@ namespace NetworkDesigner.Terrain
                             : "Auto-slope: A set. Alt+click node B (right-click cancels).");
                     else
                         GUILayout.Label("Alt+click node A then node B: auto-slope the bed.");
+                    if (_railConnectNodeA >= 0)
+                        GUILayout.Label(_connectStatus ?? "Connect: A set. C+click end B (right-click cancels).");
+                    else
+                        GUILayout.Label("C+click end A then end B: join two lines.");
                     GUILayout.Label($"Speed {rt.SpeedLimitKmh:0} km/h  →  min radius {rt.MinRadiusForSpeed:0} m");
                     if (rt.LastPreviewRadius < float.PositiveInfinity)
                         GUILayout.Label(rt.LastPreviewTooTight
@@ -953,11 +962,11 @@ namespace NetworkDesigner.Terrain
         // construction legs A->bend and bend->B in metres.
         void DrawCurveDimLabels()
         {
-            float la, lb; Vector3 ma, mb;
+            float la, lb, deg = 0f; Vector3 ma, mb, corner = default;
             if (_lineActive is RailPlanLayer pl && pl.CurveDimsValid)
-            { la = pl.CurveLegA; lb = pl.CurveLegB; ma = pl.CurveLegAMid; mb = pl.CurveLegBMid; }
+            { la = pl.CurveLegA; lb = pl.CurveLegB; ma = pl.CurveLegAMid; mb = pl.CurveLegBMid; deg = pl.CurveDeflectionDeg; corner = pl.CurveCornerWorld; }
             else if (_lineActive is RailTrackLayer rt && rt.CurveDimsValid)
-            { la = rt.CurveLegA; lb = rt.CurveLegB; ma = rt.CurveLegAMid; mb = rt.CurveLegBMid; }
+            { la = rt.CurveLegA; lb = rt.CurveLegB; ma = rt.CurveLegAMid; mb = rt.CurveLegBMid; deg = rt.CurveDeflectionDeg; corner = rt.CurveCornerWorld; }
             else return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
@@ -967,6 +976,7 @@ namespace NetworkDesigner.Terrain
                 ? new Color(1f, 0.92f, 0.2f) : new Color(1f, 0.8f, 0.3f);
             if (la > 0f) DrawWorldText(cam, s, ma, $"{la:0} m", lineCol);
             if (lb > 0f) DrawWorldText(cam, s, mb, $"{lb:0} m", lineCol); // 0 = bend not placed yet
+            if (lb > 0f) DrawWorldText(cam, s, corner, $"{deg:0}°", lineCol); // deflection at the bend
         }
 
         // Degree labels at the PAC angle ticks (15/30/.../90°) while placing a curve end.
@@ -1323,9 +1333,26 @@ namespace NetworkDesigner.Terrain
         }
 
         // Mode switching (mutually exclusive; same key again returns to sculpt).
-        void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; HideLinePreviews(); }
-        void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; HideLinePreviews(); }
-        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); }
+        void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; _railConnectNodeA = -1; HideLinePreviews(); }
+        void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; _railConnectNodeA = -1; HideLinePreviews(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RailLayer.HideConnectPreview(); }
+
+        // Live preview while a connect end is armed (C held + rail mode): the join to the
+        // endpoint under the cursor, green/red, with a HUD line.
+        void UpdateConnectPreview(RaycastHit hit, bool overTerrain)
+        {
+            _connectStatus = null;
+            if (!(_lineActive is RailTrackLayer rc)) return;
+            if (_railConnectNodeA >= rc.Graph.Nodes.Count) _railConnectNodeA = -1;   // stale after an edit
+            if (_railConnectNodeA < 0 || !overTerrain || !Input.GetKey(KeyCode.C)) { rc.HideConnectPreview(); return; }
+            int b = rc.NearestNodeForPick(new Vector2(hit.point.x, hit.point.z));
+            if (b < 0 || b == _railConnectNodeA || !rc.IsEndpoint(b)) { rc.HideConnectPreview(); _connectStatus = "Connect: click end B."; return; }
+            rc.TryConnectGeometry(_railConnectNodeA, b, out var cr);
+            rc.RenderConnectPreview(_field, cr);
+            _connectStatus = cr.Valid
+                ? $"Connect → R {cr.Radius:0} m, max {cr.MaxSpeed:0} km/h — OK. Click end B."
+                : $"Connect — {cr.Reason}.";
+        }
 
 #if UNITY_EDITOR
         [ContextMenu("Load Trees From Folder")]
@@ -1607,7 +1634,7 @@ namespace NetworkDesigner.Terrain
             {
                 RailLayer.UpdateNodePucks(_field,
                     overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f),
-                    _lineActive is RailTrackLayer, _railSlopeNodeA);
+                    _lineActive is RailTrackLayer, _railSlopeNodeA >= 0 ? _railSlopeNodeA : _railConnectNodeA);
                 RailLayer.RebuildBraking(_field, cursorVis, _lineActive is RailTrackLayer);
                 // One design speed for the whole network: the plan mirrors the rail's.
                 if (PlanLayer != null)
@@ -1622,6 +1649,7 @@ namespace NetworkDesigner.Terrain
                     PlanLayer.TypicalTrainLengthM = RailLayer.TypicalTrainLengthM;
                     PlanLayer.RebuildCurveInspect(_field, inspCur, _lineActive is RailPlanLayer);
                 }
+                UpdateConnectPreview(hit, overTerrain);
             }
             // Remember the placement cursor + whether it's over terrain, for the on-screen
             // design-speed readout drawn in OnGUI.
@@ -1639,6 +1667,7 @@ namespace NetworkDesigner.Terrain
                 Vector3 place = cursorVis;
                 _lineActive.UpdatePreview(_field, place, overTerrain);
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+                bool connectMod = Input.GetKey(KeyCode.C);
                 if (overTerrain && Input.GetMouseButtonDown(0))
                 {
                     if (_lineActive is RailTrackLayer railSlope && altMod)
@@ -1651,6 +1680,20 @@ namespace NetworkDesigner.Terrain
                             else { ApplyRailSlope(n); _railSlopeNodeA = -1; } // pick B → apply
                         }
                     }
+                    else if (_lineActive is RailTrackLayer railConn && connectMod)
+                    {
+                        // Rail connect: C+click endpoint A, then endpoint B → fillet join.
+                        int n = railConn.NearestNodeForPick(new Vector2(hit.point.x, hit.point.z));
+                        if (n >= 0 && railConn.IsEndpoint(n))
+                        {
+                            if (_railConnectNodeA < 0) _railConnectNodeA = n;          // pick A
+                            else if (railConn.TryConnectGeometry(_railConnectNodeA, n, out var cr) && cr.Valid)
+                            {
+                                railConn.CommitConnect(_field, cr); _dirtySince = Time.realtimeSinceStartup;
+                                _railConnectNodeA = -1; railConn.HideConnectPreview();
+                            } // invalid B → keep A armed so a different B can be picked
+                        }
+                    }
                     else
                     {
                         _lineActive.AddNode(_field, place);
@@ -1659,8 +1702,9 @@ namespace NetworkDesigner.Terrain
                 }
                 if (Input.GetMouseButtonDown(1))
                 {
-                    // An armed auto-slope cancels first (so right-click backs out of it).
-                    if (_railSlopeNodeA >= 0) _railSlopeNodeA = -1;
+                    // An armed auto-slope / connect cancels first (right-click backs out).
+                    if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }
+                    else if (_railSlopeNodeA >= 0) _railSlopeNodeA = -1;
                     else DeleteOrEndChain(hit, overTerrain);
                 }
                 if (Input.GetKeyDown(KeyCode.Backspace))
