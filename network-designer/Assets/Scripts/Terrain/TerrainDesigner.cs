@@ -564,11 +564,14 @@ namespace NetworkDesigner.Terrain
                         return new Vector3(rp.x, raw.y, rp.y);
                     if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
                 }
-                // Grid snap makes no sense while shaping an arc — the bend/end are already
-                // pinned to the MDT / extension line / PAC. So skip it in curve mode.
+                // Grid snap makes no sense while shaping an arc that EXTENDS existing track —
+                // the bend/end are pinned to the MDT / extension line / PAC. But a brand-new
+                // rail curve has no incoming tangent to honour, so snapping its bend to the
+                // grid is exactly what you want — keep grid snap on in that case.
                 bool curveMode = (_lineActive is RailTrackLayer crl && crl.InCurveMode)
                               || (_lineActive is RailPlanLayer cpl && cpl.InCurveMode);
-                return curveMode ? raw : ApplyGridSnap(raw);
+                bool brandNewRailCurve = _lineActive is RailTrackLayer nrl && !nrl.ChainExtendsExisting;
+                return (curveMode && !brandNewRailCurve) ? raw : ApplyGridSnap(raw);
             }
             if (Brush == BrushMode.Slope)
             {
@@ -1543,7 +1546,7 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = cam.GetComponent<FlyCameraController>();
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
-            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll();
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll();
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
             if (fresh) FrameFly(fly);
@@ -1556,6 +1559,11 @@ namespace NetworkDesigner.Terrain
         bool CmdSpeedScroll() => RailLayer != null
             && (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer)
             && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand));
+
+        // Option(Alt) + wheel adjusts the parallel-track count (rail Build mode, parallel on).
+        bool AltParallelScroll() => RailLayer != null
+            && _lineActive is RailTrackLayer && RailLayer.ParallelEnabled
+            && (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt));
 
         // URP render scale — the biggest lever for fill-rate-bound (high-res /
         // full-screen) rendering. Set at runtime on the pipeline asset (in-memory,
@@ -1621,6 +1629,14 @@ namespace NetworkDesigner.Terrain
                 if (notches != 0)
                     RailLayer.SpeedLimitKmh = Mathf.Clamp(RailLayer.SpeedLimitKmh + notches * 10f, 10f, 200f);
             }
+            // Option(Alt) + wheel in rail parallel mode: ±1 parallel track per notch. The
+            // camera ignores the wheel while this is active (ScrollSuppressor).
+            if (AltParallelScroll())
+            {
+                int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
+                if (notches != 0)
+                    RailLayer.ParallelCount = Mathf.Clamp(RailLayer.ParallelCount + (notches > 0 ? 1 : -1), 1, 8);
+            }
             if (Input.GetKeyDown(KeyCode.G))
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
@@ -1631,6 +1647,11 @@ namespace NetworkDesigner.Terrain
             // the edge crosses instead of truncating at the grade limit.
             if (Input.GetKeyDown(KeyCode.B) && _lineActive is RailTrackLayer)
                 RailLayer.OverrideGrade = !RailLayer.OverrideGrade;
+            // Z (rail mode): toggle parallel drawing. X: flip which side it's laid on.
+            if (Input.GetKeyDown(KeyCode.Z) && _lineActive is RailTrackLayer)
+                RailLayer.ParallelEnabled = !RailLayer.ParallelEnabled;
+            if (Input.GetKeyDown(KeyCode.X) && _lineActive is RailTrackLayer && RailLayer.ParallelEnabled)
+                RailLayer.FlipParallelSide();
             // Bake thumbnails only while NOT painting — the first render of each
             // prefab compiles its shader variant (a one-time editor stall), and
             // we don't want that landing mid-stroke.

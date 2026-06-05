@@ -176,10 +176,13 @@ namespace NetworkDesigner.UI
 
             _railBody.Add(Divider());
 
-            _railBody.Add(ToggleRow("Parallel",
+            _railBody.Add(ToggleRow("Parallel (Z)",
                 () => Designer.RailLayer.ParallelEnabled, v => Designer.RailLayer.ParallelEnabled = v));
             _railBody.Add(NumberRow("Spacing", "m",
                 () => Designer.RailLayer.ParallelSpacing, v => Designer.RailLayer.ParallelSpacing = v, 5f, 100f, "0.#"));
+            _railBody.Add(NumberRow("Parallels", "",
+                () => Designer.RailLayer.ParallelCount,
+                v => Designer.RailLayer.ParallelCount = Mathf.Max(1, Mathf.RoundToInt(v)), 1f, 8f, "0"));
 
             // Common footer — ALWAYS visible (mode + sub-mode + Snap), on every palette.
             _panel.Add(BuildFooter());
@@ -240,7 +243,9 @@ namespace NetworkDesigner.UI
             tf.RegisterCallback<FocusOutEvent>(_ => { editing = false; tf.SetValueWithoutNotify(Fmt(get(), suffix, fmt)); });
             tf.RegisterValueChangedCallback(evt =>
             {
-                string s = evt.newValue.Replace(suffix, "").Trim();
+                // NOTE: string.Replace("", "") throws — guard the empty-suffix case.
+                string s = (string.IsNullOrEmpty(suffix) ? evt.newValue
+                                                         : evt.newValue.Replace(suffix, "")).Trim();
                 if (float.TryParse(s, out float v))
                 {
                     v = Mathf.Clamp(v, min, max);

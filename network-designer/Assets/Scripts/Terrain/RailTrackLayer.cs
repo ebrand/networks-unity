@@ -91,6 +91,11 @@ namespace NetworkDesigner.Terrain
         public bool ParallelEnabled = false;
         [Tooltip("Center-to-center spacing (m) between parallel tracks. Floor 5 m.")]
         public float ParallelSpacing = 5f;
+        [Tooltip("Number of parallel tracks added alongside the drawn line (each a further " +
+                 "ParallelSpacing out, on the chosen side).")]
+        public int ParallelCount = 1;
+        [Tooltip("Side of travel the parallel track is laid on (+1 / -1). Flip with X in rail mode.")]
+        [System.NonSerialized] public int ParallelSide = 1;
         [System.NonSerialized] public float LastPreviewGradeDeg;        // steepest sampled section
         [System.NonSerialized] public float LastPreviewEndpointGradeDeg; // true grade A->B (the constant build grade)
         [System.NonSerialized] public bool LastPreviewTooSteep;
@@ -206,6 +211,7 @@ namespace NetworkDesigner.Terrain
         Mesh _railMesh, _tieMesh, _ballastMesh, _structMesh;
         Material _railMat, _tieMat, _ballastMat, _structMat;
         int _chainTail = -1;          // current anchor node (start of next segment)
+        int[] _parTails;              // tail node per parallel track (null = no active run)
         // Straight by default; while CurveModifier (Shift) is held, a click drops a
         // guide corner and the next click ends a curve through it.
         [System.NonSerialized] public bool CurveModifier;
@@ -339,7 +345,7 @@ namespace NetworkDesigner.Terrain
             if (_chainTail < 0)
             {
                 int near = Graph.NearestNode(p, NodePickRadius);
-                if (near >= 0) { _chainTail = near; _cornerPending = false; return; }
+                if (near >= 0) { _chainTail = near; _cornerPending = false; ResetParallel(); return; }
                 if (Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _))
                 {
                     Graph.SplitEdge(ei, tt);   // chop the edge — insert a node, don't arm a chain
@@ -349,6 +355,7 @@ namespace NetworkDesigner.Terrain
                 }
                 _chainTail = Graph.AddNode(p);
                 _cornerPending = false;
+                ResetParallel();
                 return;
             }
 
@@ -379,6 +386,7 @@ namespace NetworkDesigner.Terrain
                 Graph.AddEdge(_chainTail, end);
                 LineEdge ce = FindEdge(_chainTail, end);
                 if (ce != null) { ce.HasCurve = true; ce.ControlA = cc1; ce.ControlB = cc2; ce.SpeedLimit = SpeedLimitKmh; }
+                ExtendParallel(_chainTail, end, true, cc1, cc2);
                 _chainTail = end;
                 _cornerPending = false;
                 Rebuild(field);
@@ -407,8 +415,70 @@ namespace NetworkDesigner.Terrain
             int idx = NearestOrNew(endS);           // join to an existing node if clicked on one
             Graph.AddEdge(_chainTail, idx);
             TagEdge(_chainTail, idx);
+            ExtendParallel(_chainTail, idx, false, Vector2.zero, Vector2.zero);
             _chainTail = idx;
             Rebuild(field);
+        }
+
+        // --- Parallel drawing: one offset track to one side, as real nodes + edges ---
+        // Flip the offset side; reset the parallel runs so they start fresh on the other
+        // side instead of crossing over from the old-side tail nodes.
+        public void FlipParallelSide() { ParallelSide = ParallelSide >= 0 ? -1 : 1; _parTails = null; }
+        void ResetParallel() { _parTails = null; }
+
+        // Mirror a just-committed main edge (a->b) into ParallelCount connected parallel
+        // tracks, each offset a further ParallelSpacing perpendicular on ParallelSide.
+        // Each track's nodes are SHARED between consecutive edges (_parTails[k]), so the
+        // offset chains have no gaps; sharp straight corners get a small kink (curves stay
+        // smooth). Forward-draw oriented: the runs reset on any chain boundary, so undo/
+        // backspace is not parallel-aware yet (it can leave the offset tracks in place).
+        void ExtendParallel(int a, int b, bool hasCurve, Vector2 cA, Vector2 cB)
+        {
+            if (!ParallelEnabled || a < 0 || b < 0
+                || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) return;
+            int count = Mathf.Max(1, ParallelCount);
+            if (_parTails == null || _parTails.Length != count)   // (re)start runs; count change resets
+            {
+                _parTails = new int[count];
+                for (int i = 0; i < count; i++) _parTails[i] = -1;
+            }
+            Vector2 A = Graph.Nodes[a], B = Graph.Nodes[b];
+            Vector2 q1 = hasCurve ? cA : A + (B - A) / 3f;
+            Vector2 q2 = hasCurve ? cB : A + (B - A) * (2f / 3f);
+            float side = ParallelSide >= 0 ? 1f : -1f;
+            float spacing = Mathf.Max(5f, ParallelSpacing);
+            for (int k = 1; k <= count; k++)
+            {
+                float off = spacing * k * side;
+                int prevTail = _parTails[k - 1];
+                int pa = prevTail >= 0 && prevTail < Graph.Nodes.Count
+                    ? prevTail
+                    : Graph.AddNode(A + OffsetNormal(A, q1, q2, B, 0f, off));
+                int pb = Graph.AddNode(B + OffsetNormal(A, q1, q2, B, 1f, off));
+                Graph.AddEdge(pa, pb);
+                LineEdge pe = FindEdge(pa, pb);
+                if (pe != null)
+                {
+                    pe.SpeedLimit = SpeedLimitKmh;   // NOTE: inner-curve radius not re-validated yet
+                    if (hasCurve)
+                    {
+                        pe.HasCurve = true;
+                        pe.ControlA = cA + OffsetNormal(A, q1, q2, B, 1f / 3f, off);
+                        pe.ControlB = cB + OffsetNormal(A, q1, q2, B, 2f / 3f, off);
+                    }
+                }
+                _parTails[k - 1] = pb;
+            }
+        }
+
+        // Perpendicular offset VECTOR at bezier parameter t (left normal * signed distance).
+        static Vector2 OffsetNormal(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t, float dist)
+        {
+            Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, t);
+            if (tan.sqrMagnitude < 1e-8f) tan = p3 - p0;
+            if (tan.sqrMagnitude < 1e-8f) return Vector2.zero;
+            tan.Normalize();
+            return new Vector2(-tan.y, tan.x) * dist;
         }
 
         const float NodePickRadius = 5f; // click within this of a node to pick it up / join
@@ -605,7 +675,7 @@ namespace NetworkDesigner.Terrain
             // it so an orphan node (and its puck) isn't left behind.
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count && !NodeHasEdge(_chainTail))
                 Graph.RemoveNode(_chainTail);
-            _chainTail = -1; _cornerPending = false;
+            _chainTail = -1; _cornerPending = false; ResetParallel();
         }
 
         bool NodeHasEdge(int n)
@@ -613,6 +683,13 @@ namespace NetworkDesigner.Terrain
             foreach (LineEdge e in Graph.Edges) if (e.A == n || e.B == n) return true;
             return false;
         }
+
+        // True when the active chain continues from track that ALREADY exists (the tail
+        // node has edges), vs a brand-new line whose first anchor is still edgeless. Curve
+        // mode keeps grid snap off while extending (the incoming tangent owns the cursor)
+        // but on for a fresh curve, where snapping the bend to the grid is what you want.
+        public bool ChainExtendsExisting =>
+            _chainTail >= 0 && _chainTail < Graph.Nodes.Count && NodeHasEdge(_chainTail);
 
         // XZ of the current chain tail (start of the next segment), for label placement.
         public bool TryGetTailXZ(out Vector2 pos)
@@ -628,6 +705,7 @@ namespace NetworkDesigner.Terrain
             Graph.Clear();
             _chainTail = -1;
             _cornerPending = false;
+            ResetParallel();
             Rebuild(field);
         }
 
@@ -640,6 +718,7 @@ namespace NetworkDesigner.Terrain
             Graph.Edges.RemoveAll(e => e.A == last || e.B == last);
             Graph.Nodes.RemoveAt(last);
             if (_chainTail >= Graph.Nodes.Count) _chainTail = -1;
+            ResetParallel();   // parallel runs aren't undo-tracked; start fresh after a backspace
             Rebuild(field);
         }
 
@@ -649,7 +728,7 @@ namespace NetworkDesigner.Terrain
             if (n < 0) return false;
             Graph.RemoveNode(n);
             if (_chainTail == n) _chainTail = -1; else if (_chainTail > n) _chainTail--;
-            _cornerPending = false;
+            _cornerPending = false; ResetParallel();
             PruneOrphanNodes();   // drop the far end(s) of the deleted segment(s) if now edgeless
             Rebuild(field);
             return true;
@@ -2556,6 +2635,7 @@ namespace NetworkDesigner.Terrain
                     }
                     float bLen = PreviewScan(field, start, c1, c2, cur);
                     DrawGradedRails(start, c1, c2, cur, yA, yB, lift, bLen);
+                    EmitParallelPreview(field, start, c1, c2, cur, lift);   // which side X adds to
                     // Dimension labels: the two construction legs A->bend and bend->B.
                     CurveDimsValid = true;
                     CurveLegA = Vector2.Distance(start, _corner);
@@ -2595,6 +2675,7 @@ namespace NetworkDesigner.Terrain
                     Vector2 c1 = start + dd / 3f, c2 = start + dd * (2f / 3f);
                     float bLen = PreviewScan(field, start, c1, c2, cur);
                     DrawGradedRails(start, c1, c2, cur, yA, yB, lift, bLen);
+                    EmitParallelPreview(field, start, c1, c2, cur, lift);   // which side X adds to
                 }
             }
 
@@ -2762,6 +2843,32 @@ namespace NetworkDesigner.Terrain
             _pvVerts.Add(a); _pvVerts.Add(b);
             List<int> idx = red ? _pvIdxRed : _pvIdx;
             idx.Add(s); idx.Add(s + 1);
+        }
+
+        // Dashed preview of the parallel track that would be created, offset from the
+        // segment being drawn (a..b, controls c1/c2) on the current ParallelSide. Sampled
+        // so it follows curves; draped onto terrain. Shows which side X will add to.
+        void EmitParallelPreview(TerrainField field, Vector2 a, Vector2 c1, Vector2 c2, Vector2 b, float lift)
+        {
+            if (!ParallelEnabled) return;
+            int count = Mathf.Max(1, ParallelCount);
+            float side = ParallelSide >= 0 ? 1f : -1f;
+            float spacing = Mathf.Max(5f, ParallelSpacing);
+            const int N = 24;
+            for (int k = 1; k <= count; k++)
+            {
+                float off = spacing * k * side;
+                Vector3 prev = default;
+                for (int i = 0; i <= N; i++)
+                {
+                    float t = i / (float)N;
+                    Vector2 p = LineGraph.Bezier(a, c1, c2, b, t) + OffsetNormal(a, c1, c2, b, t, off);
+                    float y = (field != null ? field.SampleHeight(p.x, p.y) : 0f) + lift;
+                    Vector3 w = new Vector3(p.x, y, p.y);
+                    if (i > 0 && (i % 2 == 1)) AddSeg(prev, w);   // every other sub-seg -> dashes
+                    prev = w;
+                }
+            }
         }
 
         void EnsurePreview()
