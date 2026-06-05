@@ -263,6 +263,8 @@ namespace NetworkDesigner.Terrain
         readonly List<RailPlanLayer.EdgeGrade> _planGrades = new List<RailPlanLayer.EdgeGrade>();
         // Rail auto-slope (Alt+click node A, then node B): grade the rail bed between two
         // rail nodes to a constant ramp, if the result stays within the rail's max grade.
+        Vector3 _lineCursorWorld;          // placement cursor (for the on-screen speed readout)
+        bool _lineCursorValid;
         int _railSlopeNodeA = -1;          // armed A node (-1 = none)
         List<Vector2> _railSlopePath;      // this frame's preview path A -> hovered node
         float _railSlopeGradePct;          // preview grade %
@@ -514,20 +516,35 @@ namespace NetworkDesigner.Terrain
                 Vector2 flat = new Vector2(raw.x, raw.z);
                 if (_lineActive is RailTrackLayer rl)
                 {
+                    // While placing the bend, it sticks to the min-distance target; while
+                    // placing the end, the equal-leg lock owns the cursor.
+                    if (rl.TrySnapBendToTarget(flat, out Vector2 bt)) return new Vector3(bt.x, raw.y, bt.y);
+                    if (rl.TrySnapCurveSymmetry(flat, out Vector2 sym)) return new Vector3(sym.x, raw.y, sym.y);
+                    // Placing the end: the PAC owns the cursor — don't let a nearby track or
+                    // the straight extension line pull it off the buildable (yellow) arc.
+                    if (rl.PlacingCurveEnd) return raw;
                     if (rl.TrySnapToTrack(flat, out Vector2 sp)) return new Vector3(sp.x, raw.y, sp.y);
                     if (rl.TrySnapToDecelTarget(flat, out Vector2 dt)) return new Vector3(dt.x, raw.y, dt.y);
                     if (rl.TrySnapToExtension(flat, out Vector2 ep)) return new Vector3(ep.x, raw.y, ep.y);
                 }
                 if (_lineActive is RailPlanLayer pl)
                 {
-                    // Resume off the plan's own end > start off the rail end > the
-                    // collinear extension guide > grid.
+                    // Bend sticks to the target > equal-leg lock (placing a curve end) >
+                    // resume off the plan's own end > rail end > extension guide > grid.
+                    if (pl.TrySnapBendToTarget(flat, out Vector2 pbt)) return new Vector3(pbt.x, raw.y, pbt.y);
+                    if (pl.TrySnapCurveSymmetry(flat, out Vector2 psym)) return new Vector3(psym.x, raw.y, psym.y);
+                    // Placing the end: the PAC owns the cursor exclusively.
+                    if (pl.PlacingCurveEnd) return raw;
                     if (pl.TrySnapToOwnNode(flat, out Vector2 pn)) return new Vector3(pn.x, raw.y, pn.y);
                     if (RailLayer != null && RailLayer.TrySnapToTrackPoint(flat, out Vector2 rp))
                         return new Vector3(rp.x, raw.y, rp.y);
                     if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
                 }
-                return ApplyGridSnap(raw);
+                // Grid snap makes no sense while shaping an arc — the bend/end are already
+                // pinned to the MDT / extension line / PAC. So skip it in curve mode.
+                bool curveMode = (_lineActive is RailTrackLayer crl && crl.InCurveMode)
+                              || (_lineActive is RailPlanLayer cpl && cpl.InCurveMode);
+                return curveMode ? raw : ApplyGridSnap(raw);
             }
             if (Brush == BrushMode.Slope)
             {
@@ -768,6 +785,7 @@ namespace NetworkDesigner.Terrain
             DrawPlanGradeLabels();
             DrawCurveDimLabels();
             DrawSpeedLabels();
+            DrawDesignSpeedReadout();
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
@@ -942,6 +960,32 @@ namespace NetworkDesigner.Terrain
                 ? new Color(1f, 0.92f, 0.2f) : new Color(1f, 0.8f, 0.3f);
             if (la > 0f) DrawWorldText(cam, s, ma, $"{la:0} m", lineCol);
             if (lb > 0f) DrawWorldText(cam, s, mb, $"{lb:0} m", lineCol); // 0 = bend not placed yet
+        }
+
+        // The design speed of the active rail/plan layer, floating near the cursor so
+        // you always see what speed you're planning/building for (not just the palette).
+        void DrawDesignSpeedReadout()
+        {
+            if (!_lineCursorValid) return;
+            float kmh; Color col; bool haveTail; Vector2 tail;
+            if (_lineActive is RailTrackLayer rt)
+            { kmh = rt.SpeedLimitKmh; col = new Color(1f, 0.8f, 0.3f); haveTail = rt.TryGetTailXZ(out tail); }
+            else if (_lineActive is RailPlanLayer pl)
+            { kmh = pl.SpeedLimitKmh; col = new Color(1f, 0.92f, 0.2f); haveTail = pl.TryGetTailXZ(out tail); }
+            else return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            // Sit it just AHEAD of the cursor along the leg (toward the ring), off the
+            // distance label which lives back on the leg.
+            Vector3 anchor = _lineCursorWorld + new Vector3(0f, 2f, 0f);
+            if (haveTail)
+            {
+                Vector2 cur = new Vector2(_lineCursorWorld.x, _lineCursorWorld.z);
+                Vector2 dir = cur - tail;
+                if (dir.sqrMagnitude > 1e-4f) { dir.Normalize(); anchor += new Vector3(dir.x, 0f, dir.y) * 10f; }
+            }
+            DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col);
         }
 
         // Plain centred text (no box) at a world position, in the given colour.
@@ -1421,11 +1465,34 @@ namespace NetworkDesigner.Terrain
             // to the node under the cursor and its resulting grade (BEFORE the fill draws).
             ResolveRailSlopePreview(overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f));
 
+            // Rail/Plan: hold Shift = curve mode (else straight). Set BEFORE SnapCursor and
+            // the ring rebuild so the bend/MDT/extension snap and preview reflect THIS
+            // frame's modifier — otherwise a Shift pressed after the first click lags a
+            // frame, the bend snap doesn't fire, and the bend lands inside the MDT (leaving
+            // an empty PAC so the end can't be constrained).
+            if (_lineActive != null)
+            {
+                bool curveModNow = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                if (_lineActive is RailTrackLayer railModNow) railModNow.CurveModifier = curveModNow;
+                else if (_lineActive is RailPlanLayer planModNow)
+                {
+                    planModNow.CurveModifier = curveModNow;
+                    // Seed the extension guide from the rail end the plan started on,
+                    // so the first segment can carry straight off the track.
+                    planModNow.HasSeedDir = false;
+                    if (planModNow.TryGetTailXZ(out Vector2 ptailNow) && RailLayer != null
+                        && RailLayer.TryEndHeading(ptailNow, 3f, out Vector2 seedNow))
+                    { planModNow.SeedDir = seedNow; planModNow.HasSeedDir = true; }
+                }
+            }
+
             // Resolve the snapped cursor for the active tool ONCE, so the brush ring
             // sits exactly where placement will land (track / extension / grid / slope
             // guide). Scatter & plain sculpt don't snap.
             Vector3 cursorVis = SnapCursor(hit.point, overTerrain);
-            UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
+            // The sculpt brush ring is irrelevant in line modes (rail/plan have their own
+            // cursor + rings) — hide it so it doesn't clutter curve drawing.
+            UpdateBrushCursor(ShowBrushCursor && overTerrain && _lineActive == null, cursorVis);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.
@@ -1435,26 +1502,20 @@ namespace NetworkDesigner.Terrain
                     overTerrain ? new Vector2(hit.point.x, hit.point.z) : new Vector2(1e9f, 1e9f),
                     _lineActive is RailTrackLayer, _railSlopeNodeA);
                 RailLayer.RebuildBraking(_field, cursorVis, _lineActive is RailTrackLayer);
+                // One design speed for the whole network: the plan mirrors the rail's.
+                if (PlanLayer != null)
+                { PlanLayer.SpeedLimitKmh = RailLayer.SpeedLimitKmh; PlanLayer.MaxLateralG = RailLayer.MaxLateralG; }
             }
+            // Remember the placement cursor + whether it's over terrain, for the on-screen
+            // design-speed readout drawn in OnGUI.
+            _lineCursorWorld = cursorVis; _lineCursorValid = overTerrain
+                && (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer);
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.
             if (_lineActive != null)
             {
-                // Rail/Plan: hold Shift = curve mode (else straight). Set before
-                // preview and click so both reflect the modifier this frame.
-                bool curveMod = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-                if (_lineActive is RailTrackLayer railMod) railMod.CurveModifier = curveMod;
-                else if (_lineActive is RailPlanLayer planMod)
-                {
-                    planMod.CurveModifier = curveMod;
-                    // Seed the extension guide from the rail end the plan started on,
-                    // so the first segment can carry straight off the track.
-                    planMod.HasSeedDir = false;
-                    if (planMod.TryGetTailXZ(out Vector2 ptail) && RailLayer != null
-                        && RailLayer.TryEndHeading(ptail, 3f, out Vector2 seed))
-                    { planMod.SeedDir = seed; planMod.HasSeedDir = true; }
-                }
+                // (Curve modifier + plan seed-dir were set above, before SnapCursor.)
 
                 // The snapped placement point (same one the ring shows). Deletes use
                 // the raw hit so you can remove a node you're not snapping to.
@@ -1901,7 +1962,7 @@ namespace NetworkDesigner.Terrain
                 if (!deleted) deleted = _lineActive.DeleteNearNode(_field, hit.point, 3f);
             }
             if (deleted) _dirtySince = Time.realtimeSinceStartup;
-            else _lineActive.EndChain();
+            else { _lineActive.EndChain(); _dirtySince = Time.realtimeSinceStartup; } // may have dropped an orphan tail
         }
 
         // Build a draped triangle ribbon of half-width `halfW` centred on `path`.

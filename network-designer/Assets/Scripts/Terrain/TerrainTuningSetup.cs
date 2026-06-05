@@ -275,12 +275,18 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.curveLever", "Rail", "Curve lever (arc width)",
                 () => t.RailLayer.CurveLever, v => { t.RailLayer.CurveLever = v; t.RebuildRail(); }, 0.1f, 0.95f,
                 description: "Curve-tool shape: how far the bezier controls lean toward the guide corner. Low = sharp through the corner, high = a wide arc.");
-            TuningRegistry.RegisterFloat("rail.speedLimit", "Rail", "Speed limit (km/h)",
+            TuningRegistry.RegisterFloat("rail.curveSymmetrySnap", "Rail", "Symmetric-curve snap",
+                () => t.RailLayer.CurveSymmetrySnap, v => t.RailLayer.CurveSymmetrySnap = v, 0f, 0.5f,
+                description: "After the bend, snap the end to the same leg length as start->bend (symmetric curve) when within this fraction of it. 0 = off.");
+            TuningRegistry.RegisterFloat("rail.minDeflection", "Rail", "Min curve deflection (deg)",
+                () => t.RailLayer.MinCurveDeflectionDeg, v => t.RailLayer.MinCurveDeflectionDeg = v, 0.5f, 30f,
+                description: "Min-distance target: the bend can't be placed until the first leg gives at least this much turn above/below the centreline for the speed. Guide stays red until then; any safe deflection builds past it.");
+            TuningRegistry.RegisterFloat("rail.speedLimit", "Rail", "Design speed (km/h)",
                 () => t.RailLayer.SpeedLimitKmh, v => t.RailLayer.SpeedLimitKmh = v, 10f, 200f,
-                description: "Design speed for sections laid now. Sets the minimum curve radius (R = v^2/(g*a)); tighter curves are refused. Lower it to lay tighter curves.");
+                description: "The ONE design speed for the whole network (build AND plan). Sets the minimum curve radius (R = v^2/(g*a)); tighter curves are refused. Lower it to lay tighter curves.");
             TuningRegistry.RegisterFloat("rail.maxLatG", "Rail", "Max lateral g (curve tightness)",
                 () => t.RailLayer.MaxLateralG, v => t.RailLayer.MaxLateralG = v, 0.05f, 0.5f,
-                description: "Comfort/cant limit. Higher = tighter curves allowed at a given speed (smaller min radius). Real rail ~0.1; raise for game-scaled curves.");
+                description: "Comfort/cant limit (shared by build + plan). Higher = tighter curves allowed at a given speed (smaller min radius). Real rail ~0.1; raise for game-scaled curves.");
             TuningRegistry.RegisterFloat("rail.maxGrade", "Rail", "Max grade (deg)",
                 () => t.RailLayer.MaxGradeDeg, v => t.RailLayer.MaxGradeDeg = v, 0.5f, 15f,
                 description: "Steepest grade any section may have. The terrain is sampled every 'Grade sample step' m along an edge; the edge is buildable up to the first section over this, then truncated there (the rest shows red). 5 deg ~ 8.7%.");
@@ -438,16 +444,16 @@ namespace NetworkDesigner.Terrain
                 description: "Distance between the two tracks (centre to centre) for a double-track corridor.");
             TuningRegistry.RegisterBool("plan.limitRadius", "Rail plan", "Limit curve radius (speed)",
                 () => t.PlanLayer.LimitCurveRadius, v => t.PlanLayer.LimitCurveRadius = v,
-                description: "Restrict planned curves to the minimum radius for the design speed + lateral g (tighter curves are refused; preview turns red). Off = unconstrained survey lines.");
-            TuningRegistry.RegisterFloat("plan.speed", "Rail plan", "Design speed (km/h)",
-                () => t.PlanLayer.SpeedLimitKmh, v => t.PlanLayer.SpeedLimitKmh = v, 5f, 350f,
-                description: "Design speed the plan's curves are checked against. With max lateral g, sets the minimum curve radius R = v^2/(g*a).");
-            TuningRegistry.RegisterFloat("plan.maxLatG", "Rail plan", "Max lateral g (curve tightness)",
-                () => t.PlanLayer.MaxLateralG, v => t.PlanLayer.MaxLateralG = v, 0.05f, 0.5f,
-                description: "Max comfortable lateral acceleration in g. Higher = tighter curves allowed for a given speed. Real rail ~0.1.");
+                description: "Restrict planned curves to the minimum radius for the design speed + lateral g (tighter curves are refused; preview turns red). Off = unconstrained survey lines. Uses the shared design speed (rail.speedLimit / rail.maxLatG).");
             TuningRegistry.RegisterFloat("plan.curveLever", "Rail plan", "Curve lever (arc width)",
                 () => t.PlanLayer.CurveLever, v => t.PlanLayer.CurveLever = v, 0.1f, 0.95f,
                 description: "Curve-tool shape for the plan: how far the bezier controls lean toward the guide corner.");
+            TuningRegistry.RegisterFloat("plan.curveSymmetrySnap", "Rail plan", "Symmetric-curve snap",
+                () => t.PlanLayer.CurveSymmetrySnap, v => t.PlanLayer.CurveSymmetrySnap = v, 0f, 0.5f,
+                description: "After the bend, snap the end to the same leg length as start->bend (symmetric curve) when within this fraction of it. 0 = off.");
+            TuningRegistry.RegisterFloat("plan.minDeflection", "Rail plan", "Min curve deflection (deg)",
+                () => t.PlanLayer.MinCurveDeflectionDeg, v => t.PlanLayer.MinCurveDeflectionDeg = v, 0.5f, 30f,
+                description: "Min-distance target: the bend can't be placed until the first leg gives at least this much turn above/below the centreline for the speed. Guide stays red until then; any safe deflection builds past it.");
             TuningRegistry.RegisterFloat("plan.guideLength", "Rail plan", "Guide length (m)",
                 () => t.PlanLayer.ExtensionGuideLength, v => t.PlanLayer.ExtensionGuideLength = v, 0f, 1000f,
                 description: "Length of the dashed straight-ahead alignment guide (off the rail end or the previous segment). Also bounds how far the snap reaches.");
