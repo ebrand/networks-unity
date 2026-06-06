@@ -65,6 +65,9 @@ namespace NetworkDesigner.Trains
         void Update()
         {
             if (_path == null || _total <= 0f || _cars.Count == 0) return;
+            // Recompute the rear bound so live CarSpacing changes keep the train on track.
+            _minS = (_cars.Count - 1) * Mathf.Max(1f, CarSpacing);
+            if (_minS >= _total) _minS = 0f;
             _headS += Speed * _dir * Time.deltaTime;
             if (_headS >= _total) { _headS = _total; _dir = -1; }
             else if (_headS <= _minS) { _headS = _minS; _dir = 1; }

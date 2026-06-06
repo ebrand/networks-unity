@@ -18,12 +18,25 @@ namespace NetworkDesigner.Trains
         public GameObject Wagon;
         [Min(0)] public int WagonCount = 3;
         [Tooltip("Arc-length spacing (m) between car origins — set to roughly a car length.")]
-        public float CarSpacing = 12f;
+        public float CarSpacing = 18f;
         public float SpeedKmh = 60f;
         [Tooltip("Extra lift (m) so the cars sit on the rail tops, not in the ballast.")]
         public float RideHeight = 0f;
 
         readonly List<TrainAgent> _trains = new List<TrainAgent>();
+
+        // Push live tunables (spacing / ride height) to every running train each frame, so
+        // adjusting them from the palette updates the train in place — no re-spawn needed.
+        void Update()
+        {
+            for (int i = 0; i < _trains.Count; i++)
+            {
+                TrainAgent t = _trains[i];
+                if (t == null) continue;
+                t.CarSpacing = CarSpacing;
+                t.RideHeight = RideHeight;
+            }
+        }
 
         public void SpawnTestTrain()
         {
