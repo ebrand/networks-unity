@@ -2805,6 +2805,40 @@ namespace NetworkDesigner.Terrain
         // heights), then rebuild + conform trees. Read via File+LoadImage so the
         // source needn't be a Read/Write-Enabled asset (or even under Assets/).
         // Bilinear-sampled, so any image size maps onto the grid.
+        // Procedurally generate the terrain heightfield at the configured resolution,
+        // then rebuild the mesh and re-settle everything onto the new surface.
+        public void GenerateTerrain(TerrainGenSettings settings)
+        {
+            if (settings == null) return;
+            EnsureField(forceRebuild: true);
+            int cx = _field.ColumnsX, rz = _field.RowsZ;
+            if (_field.Heights == null || _field.Heights.Length != cx * rz)
+                _field = new TerrainField(cx, rz, _field.CellSize, _field.Origin);
+            TerrainGenerator.Generate(_field.Heights, cx, rz, _field.WidthX, _field.LengthZ, settings);
+            if (settings.Rivers)
+                RiverGenerator.ComputeAndCarve(_field.Heights, cx, rz, _field.CellSize,
+                    settings.RiverDensity, settings.RiverCarve, carve: true);
+            RebuildAfterHeightChange();
+            Debug.Log($"[TerrainDesigner] Generated {settings.Style} terrain ({cx}x{rz}, seed {settings.Seed}" +
+                      $"{(settings.Rivers ? ", rivers" : "")}).");
+        }
+
+        // Shared tail after a wholesale height change (heightmap import / generation):
+        // recreate the chunk meshes and re-place everything that sits on the surface.
+        void RebuildAfterHeightChange()
+        {
+            _chunkMesh = null; _chunkCol = null;
+            BuildAllChunks();
+            TreeLayer.ConformToSurface(_field);
+            RockLayer.ConformToSurface(_field);
+            FenceLayer.Rebuild(_field);
+            PowerLineLayer.Rebuild(_field);
+            RailLayer.Rebuild(_field);
+            PlanLayer.Rebuild(_field);
+            RebuildContours();
+            _dirtySince = Time.realtimeSinceStartup;
+        }
+
         [ContextMenu("Import Heightmap")]
         public void ImportHeightmap()
         {
