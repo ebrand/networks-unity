@@ -84,7 +84,7 @@ namespace NetworkDesigner.UI
             body.Add(Divider());
             body.Add(SectionLabel("CAMERA"));
             body.Add(SliderRow("Speed", () => Designer.CameraSpeed,
-                v => Designer.CameraSpeed = v, 5f, 1000f, "0"));
+                v => Designer.CameraSpeed = v, 5f, 50000f, "0"));
 
             // ---- HEIGHTMAP ----
             body.Add(Divider());
@@ -104,6 +104,34 @@ namespace NetworkDesigner.UI
             body.Add(SectionLabel("GENERATE"));
             var genBtn = MakeButton("Terrain Generator…", () => OpenGeneratorModal());
             body.Add(genBtn);
+
+            // ---- DEM WORLD (Unity Terrain, render-only first step) ----
+            body.Add(Divider());
+            body.Add(SectionLabel("DEM WORLD (Unity Terrain)"));
+            var cities = DemTerrainWorld.ListWorlds();
+            var demCity = new DropdownField("City", cities, cities.Count > 0 ? 0 : -1);
+            demCity.style.marginBottom = 6;
+            body.Add(demCity);
+            float demTile = 10000f, demFrom = -367.602f, demTo = 652.285f;
+            // The metres range isn't in the DEM files, so it's entered once per city and
+            // remembered — auto-fill it when a city is picked, save it on Build.
+            void LoadCityNorm(string city)
+            { if (DemTerrainWorld.TryGetNorm(city, out float f, out float t)) { demFrom = f; demTo = t; } }
+            demCity.RegisterValueChangedCallback(e => LoadCityNorm(e.newValue));
+            if (cities.Count > 0) LoadCityNorm(demCity.value);
+            body.Add(NumberRow("Tile", "m", () => demTile, v => demTile = v, 100f, 200000f, "0"));
+            body.Add(NumberRow("Norm From", "m", () => demFrom, v => demFrom = v, -10000f, 10000f, "0.###"));
+            body.Add(NumberRow("Norm To", "m", () => demTo, v => demTo = v, -10000f, 10000f, "0.###"));
+            var demBuild = MakeButton("Build DEM World", () =>
+            {
+                DemTerrainWorld.SaveNorm(demCity.value, demFrom, demTo);   // remember for next time
+                DemTerrainWorld.Build(demCity.value, demTile, demFrom, demTo);
+            });
+            demBuild.style.marginTop = 4;
+            body.Add(demBuild);
+            var demClear = MakeButton("Clear DEM World", () => DemTerrainWorld.Clear());
+            demClear.style.marginTop = 6;
+            body.Add(demClear);
 
             // ---- AUTOSAVE ----
             body.Add(Divider());

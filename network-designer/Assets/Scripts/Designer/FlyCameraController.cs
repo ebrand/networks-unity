@@ -42,7 +42,7 @@ namespace NetworkDesigner.Designer
 
         [Header("Limits (min/max zoom)")]
         [Tooltip("Max camera altitude (world Y) — caps how far you can zoom/fly out.")]
-        public float MaxAltitude = 1500f;
+        public float MaxAltitude = 200000f;   // 200 km — high enough to see a 100km+ world from above
         [Tooltip("Minimum metres above the ground — caps zoom-in so you can't go underground.")]
         public float MinClearance = 3f;
         // Ground height (world Y) at a world position; set by the host so the
@@ -52,8 +52,8 @@ namespace NetworkDesigner.Designer
         [Header("Lens")]
         [Tooltip("Vertical field of view (degrees). 60 is a good default.")]
         public float FieldOfView = 60f;
-        public float NearClipPlane = 0.1f;
-        public float FarClipPlane = 5000f;
+        public float NearClipPlane = 1f;        // raised from 0.1 — a 300km far plane needs a bigger near to keep depth precision (3m min clearance keeps this safe)
+        public float FarClipPlane = 300000f;    // 300 km — see across a 100km world from altitude
 
         // Set true to swallow scroll this frame (e.g. cursor over a UI panel).
         public System.Func<bool> ScrollSuppressor;

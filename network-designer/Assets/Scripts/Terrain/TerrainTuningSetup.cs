@@ -581,11 +581,11 @@ namespace NetworkDesigner.Terrain
             if (Fly != null)
             {
                 TuningRegistry.RegisterFloat("fly.moveSpeed", "Camera", "Move speed (m/s)",
-                    () => Fly.MoveSpeed, v => Fly.MoveSpeed = v, 5f, 1000f);
+                    () => Fly.MoveSpeed, v => Fly.MoveSpeed = v, 5f, 50000f);
                 TuningRegistry.RegisterFloat("fly.zoomStep", "Camera", "Zoom step (m/notch)",
-                    () => Fly.ZoomStep, v => Fly.ZoomStep = v, 5f, 500f);
+                    () => Fly.ZoomStep, v => Fly.ZoomStep = v, 5f, 20000f);
                 TuningRegistry.RegisterFloat("fly.fastMultiplier", "Camera", "Shift fast multiplier",
-                    () => Fly.FastMultiplier, v => Fly.FastMultiplier = v, 1f, 20f);
+                    () => Fly.FastMultiplier, v => Fly.FastMultiplier = v, 1f, 100f);
                 TuningRegistry.RegisterFloat("fly.lookSensitivity", "Camera", "Look sensitivity",
                     () => Fly.LookSensitivity, v => Fly.LookSensitivity = v, 0.2f, 10f);
                 TuningRegistry.RegisterFloat("fly.smoothing", "Camera", "Look smoothing (higher = snappier)",
@@ -597,15 +597,15 @@ namespace NetworkDesigner.Terrain
                 TuningRegistry.RegisterFloat("fly.moveDamping", "Camera", "Move damping (lower = more drift)",
                     () => Fly.MoveDamping, v => Fly.MoveDamping = v, 0.5f, 30f);
                 TuningRegistry.RegisterFloat("fly.speedAltRef", "Camera", "Full-speed altitude (m)",
-                    () => Fly.SpeedAltitudeReference, v => Fly.SpeedAltitudeReference = v, 10f, 1000f);
+                    () => Fly.SpeedAltitudeReference, v => Fly.SpeedAltitudeReference = v, 10f, 200000f);
                 TuningRegistry.RegisterFloat("fly.minSpeedFactor", "Camera", "Min speed factor (low altitude)",
                     () => Fly.MinSpeedFactor, v => Fly.MinSpeedFactor = v, 0.05f, 1f);
                 TuningRegistry.RegisterFloat("fly.maxAltitude", "Camera", "Max altitude (m)",
-                    () => Fly.MaxAltitude, v => Fly.MaxAltitude = v, 50f, 5000f);
+                    () => Fly.MaxAltitude, v => Fly.MaxAltitude = v, 50f, 1000000f);
                 TuningRegistry.RegisterFloat("fly.minClearance", "Camera", "Min height above ground (m)",
                     () => Fly.MinClearance, v => Fly.MinClearance = v, 0.5f, 100f);
                 TuningRegistry.RegisterFloat("fly.farClipPlane", "Camera", "Far clip plane (m)",
-                    () => Fly.FarClipPlane, v => Fly.FarClipPlane = v, 100f, 50000f);
+                    () => Fly.FarClipPlane, v => Fly.FarClipPlane = v, 100f, 1000000f);
                 TuningRegistry.RegisterAction("camera.reset", "Camera", "Reset camera (frame terrain)",
                     () => Terrain.ResetCamera());
             }

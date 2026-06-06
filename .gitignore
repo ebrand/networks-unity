@@ -107,3 +107,9 @@ road-designer/*.log
 # Purchased asset pack (1,000+ icons) — kept out of the repo for now (unused until
 # the 3D-prefab cursor is built). Remove this line to start tracking it.
 network-designer/Assets/icons/
+
+# Large, regenerable DEM heightmap/albedo sets (downloaded per-machine).
+# Albedo mosaics are 200MB+ each — over GitHub's 100MB limit. Keep the data
+# out of git; only the per-city norm memory is tracked (re-download tiles as needed).
+network-designer/Assets/Heightmaps/Highres/*
+!network-designer/Assets/Heightmaps/Highres/dem_norms.txt
