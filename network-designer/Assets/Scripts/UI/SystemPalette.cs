@@ -108,41 +108,33 @@ namespace NetworkDesigner.UI
             // ---- DEM WORLD (Unity Terrain, render-only first step) ----
             body.Add(Divider());
             body.Add(SectionLabel("DEM WORLD (Unity Terrain)"));
+            // City picker: a fixed-width "City" label + a dropdown that fills the rest and
+            // shrinks to the panel width (no inline field-label, which overflows).
             var cities = DemTerrainWorld.ListWorlds();
-            var demCity = new DropdownField("City", cities, cities.Count > 0 ? 0 : -1);
-            demCity.style.marginBottom = 6;
-            body.Add(demCity);
-            float demTile = 10000f, demFrom = -367.602f, demTo = 652.285f;
-            // The metres range isn't in the DEM files, so it's entered once per city and
-            // remembered — auto-fill it when a city is picked, save it on Build.
-            void LoadCityNorm(string city)
-            { if (DemTerrainWorld.TryGetNorm(city, out float f, out float t)) { demFrom = f; demTo = t; } }
-            demCity.RegisterValueChangedCallback(e => LoadCityNorm(e.newValue));
-            if (cities.Count > 0) LoadCityNorm(demCity.value);
-            body.Add(NumberRow("Tile", "m", () => demTile, v => demTile = v, 100f, 200000f, "0"));
-            body.Add(NumberRow("Norm From", "m", () => demFrom, v => demFrom = v, -10000f, 10000f, "0.###"));
-            body.Add(NumberRow("Norm To", "m", () => demTo, v => demTo = v, -10000f, 10000f, "0.###"));
+            var cityRow = HBox(); cityRow.style.marginBottom = 6;
+            var cityLbl = new Label("City"); cityLbl.style.color = Ink; cityLbl.style.minWidth = 40; cityLbl.style.flexShrink = 0;
+            var demCity = new DropdownField { choices = cities };
+            if (cities.Count > 0) demCity.SetValueWithoutNotify(cities[0]);
+            demCity.style.flexGrow = 1; demCity.style.flexShrink = 1; demCity.style.minWidth = 0;
+            cityRow.Add(cityLbl); cityRow.Add(demCity);
+            body.Add(cityRow);
+            // Fixed elevation range for ALL cities (export every DEM with -500..9000m;
+            // covers all land on Earth at ~0.14m precision). Tile size is auto-derived from
+            // the filename lat/lon, so demTile is only a fallback. Norm boxes removed.
+            const float demTile = 10000f, demFrom = -500f, demTo = 9000f;
+            bool demAlbedo = true;
+            body.Add(ToggleRow("Albedo", () => demAlbedo,
+                v => { demAlbedo = v; DemTerrainWorld.SetGreen(!v); }));   // live: albedo imagery vs flat green
             var demBuild = MakeButton("Build DEM World", () =>
             {
-                DemTerrainWorld.SaveNorm(demCity.value, demFrom, demTo);   // remember for next time
                 DemTerrainWorld.Build(demCity.value, demTile, demFrom, demTo);
+                DemTerrainWorld.SetGreen(!demAlbedo);   // honor the toggle on (re)build
             });
             demBuild.style.marginTop = 4;
             body.Add(demBuild);
             var demClear = MakeButton("Clear DEM World", () => DemTerrainWorld.Clear());
             demClear.style.marginTop = 6;
             body.Add(demClear);
-
-            // ---- AUTOSAVE ----
-            body.Add(Divider());
-            body.Add(SectionLabel("AUTOSAVE"));
-            body.Add(ToggleRow("Autosave", () => Designer.Autosave, v => Designer.Autosave = v));
-            var save = MakeButton("Save", () => Designer.SaveNow());
-            save.style.marginTop = 4;
-            body.Add(save);
-            var load = MakeButton("Load", () => Designer.LoadNow());
-            load.style.marginTop = 6;
-            body.Add(load);
         }
 
         // --- Terrain Generator modal: style + seed + params with a live hill-shaded

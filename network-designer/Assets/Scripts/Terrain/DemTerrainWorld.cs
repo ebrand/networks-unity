@@ -17,6 +17,7 @@
 
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO.Compression;
 using System.IO;
 using UnityEngine;
 
@@ -27,6 +28,11 @@ namespace NetworkDesigner.Terrain
         public const string RootName = "DemTerrainWorld";
         public const string BaseRel = "Heightmaps/Highres";   // Assets/Heightmaps/Highres/<City>/
         const int Res = 1025;   // Unity heightmap resolution per tile (2^10 + 1)
+
+        // Live state for the albedo/flat-green toggle (kept so we can swap without rebuilding).
+        static UnityEngine.Terrain[,] _grid;
+        static TerrainLayer[,] _albedo;   // per-tile draped imagery (null if none)
+        static TerrainLayer _green;       // shared flat-green layer
 
         // City folders under Assets/Heightmaps/Highres that contain DEM tiles.
         public static List<string> ListWorlds()
@@ -41,52 +47,50 @@ namespace NetworkDesigner.Terrain
             return list;
         }
 
-        // --- per-city Norm range memory ---
-        // The DEM export doesn't record the metres range anywhere, so it must be entered
-        // once per city; we remember it here (tab-delimited so city names with commas/
-        // spaces are safe) and auto-fill it next time that city is picked.
-        static string NormsPath => Path.Combine(Application.dataPath, BaseRel, "dem_norms.txt");
-
-        public static bool TryGetNorm(string city, out float from, out float to)
-        {
-            from = 0f; to = 0f;
-            try
-            {
-                if (string.IsNullOrEmpty(city) || !File.Exists(NormsPath)) return false;
-                foreach (string line in File.ReadAllLines(NormsPath))
-                {
-                    string[] p = line.Split('\t');
-                    if (p.Length >= 3 && p[0] == city
-                        && float.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out from)
-                        && float.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out to))
-                        return true;
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        public static void SaveNorm(string city, float from, float to)
-        {
-            if (string.IsNullOrEmpty(city)) return;
-            try
-            {
-                var lines = File.Exists(NormsPath) ? new List<string>(File.ReadAllLines(NormsPath)) : new List<string>();
-                lines.RemoveAll(l => { var p = l.Split('\t'); return p.Length > 0 && p[0] == city; });
-                lines.Add($"{city}\t{from.ToString(CultureInfo.InvariantCulture)}\t{to.ToString(CultureInfo.InvariantCulture)}");
-                File.WriteAllLines(NormsPath, lines);
-            }
-            catch (System.Exception e) { Debug.LogWarning($"[DemTerrainWorld] norm save failed: {e.Message}"); }
-        }
+        // Norm range is now a fixed -500..9000m for every city (export all DEMs with that
+        // range), so there's no per-city norm file to read anymore.
 
         public static void Clear()
         {
+            // Free the cropped albedo textures + the green texture we created.
+            if (_albedo != null)
+                foreach (var l in _albedo)
+                    if (l != null && l.diffuseTexture != null) Object.DestroyImmediate(l.diffuseTexture);
+            if (_green != null && _green.diffuseTexture != null) Object.DestroyImmediate(_green.diffuseTexture);
+            _grid = null; _albedo = null; _green = null;
+
             var existing = GameObject.Find(RootName);
             if (existing != null)
             {
                 if (Application.isPlaying) Object.Destroy(existing);
                 else Object.DestroyImmediate(existing);
             }
+        }
+
+        // Swap every tile between its draped albedo and a shared flat-green layer, live
+        // (no rebuild). Tiles without albedo always show green.
+        public static void SetGreen(bool green)
+        {
+            if (_grid == null) return;
+            EnsureGreen();
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                {
+                    var t = _grid[r, c];
+                    if (t == null || t.terrainData == null) continue;
+                    TerrainLayer layer = (!green && _albedo != null && _albedo[r, c] != null) ? _albedo[r, c] : _green;
+                    t.terrainData.terrainLayers = new[] { layer };
+                }
+        }
+
+        static void EnsureGreen()
+        {
+            if (_green != null && _green.diffuseTexture != null) return;
+            var tex = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+            tex.SetPixel(0, 0, new Color(0.32f, 0.5f, 0.24f, 0f));   // alpha 0 = matte (terrain reads diffuse alpha as smoothness)
+            tex.Apply();
+            _green = new TerrainLayer { diffuseTexture = tex, tileSize = new Vector2(64f, 64f), smoothness = 0f, metallic = 0f };
         }
 
         // folder: absolute or Assets-relative path to the *_tile_<row>_<col>.png set.
@@ -100,23 +104,45 @@ namespace NetworkDesigner.Terrain
             string[] files = Directory.GetFiles(dir, "*.png");
             if (files.Length == 0) { Debug.LogError($"[DemTerrainWorld] no PNGs in {dir}"); return null; }
 
-            // Parse (row,col) from each filename; find grid extent.
+            // Parse (row,col) + lat/lon from each filename; find grid extent + geo span.
             var tiles = new List<(int row, int col, string path)>();
             int maxRow = 0, maxCol = 0;
+            double minLat = double.MaxValue, maxLat = double.MinValue, minLon = double.MaxValue, maxLon = double.MinValue;
+            bool haveGeo = false;
             foreach (string f in files)
             {
-                if (!TryParseRowCol(Path.GetFileNameWithoutExtension(f), out int r, out int c)) continue;
+                string name = Path.GetFileNameWithoutExtension(f);
+                if (!TryParseRowCol(name, out int r, out int c)) continue;
                 tiles.Add((r, c, f));
                 if (r > maxRow) maxRow = r;
                 if (c > maxCol) maxCol = c;
+                if (TryParseLatLon(name, out double lat, out double lon))
+                {
+                    haveGeo = true;
+                    minLat = System.Math.Min(minLat, lat); maxLat = System.Math.Max(maxLat, lat);
+                    minLon = System.Math.Min(minLon, lon); maxLon = System.Math.Max(maxLon, lon);
+                }
             }
             if (tiles.Count == 0) { Debug.LogError("[DemTerrainWorld] no files matched *_tile_<row>_<col>.png"); return null; }
 
             Clear();
             int rows = maxRow + 1, cols = maxCol + 1;
+
+            // Derive the REAL per-tile ground size from the filename lat/lon span, so the
+            // world renders at 1:1 scale for any export area (not a hard-coded 10km). Falls
+            // back to the passed tileMeters if the coords didn't parse.
+            float tileX = tileMeters, tileZ = tileMeters;
+            if (haveGeo && rows > 1 && cols > 1 && maxLat > minLat && maxLon > minLon)
+            {
+                double centerLat = (maxLat + minLat) * 0.5;
+                tileX = (float)((maxLon - minLon) / (cols - 1) * 111320.0 * System.Math.Cos(centerLat * System.Math.PI / 180.0));
+                tileZ = (float)((maxLat - minLat) / (rows - 1) * 111320.0);
+            }
+
             float range = Mathf.Max(1f, normTo - normFrom);
             var root = new GameObject(RootName);
             var grid = new UnityEngine.Terrain[rows, cols];
+            _grid = grid; _albedo = new TerrainLayer[rows, cols];   // for the live albedo/green toggle
 
             foreach (var (row, col, path) in tiles)
             {
@@ -124,14 +150,14 @@ namespace NetworkDesigner.Terrain
                 if (heights == null) continue;
 
                 var td = new TerrainData { heightmapResolution = Res };
-                td.size = new Vector3(tileMeters, range, tileMeters);
+                td.size = new Vector3(tileX, range, tileZ);
                 td.SetHeights(0, 0, heights);
 
                 GameObject go = UnityEngine.Terrain.CreateTerrainGameObject(td);
                 go.name = $"Terrain_{row:00}_{col:00}";
                 go.transform.SetParent(root.transform, false);
                 // row 0 = north → highest Z (north = +Z); col → +X (east).
-                go.transform.position = new Vector3(col * tileMeters, normFrom, (rows - 1 - row) * tileMeters);
+                go.transform.position = new Vector3(col * tileX, normFrom, (rows - 1 - row) * tileZ);
                 grid[row, col] = go.GetComponent<UnityEngine.Terrain>();
             }
 
@@ -149,10 +175,11 @@ namespace NetworkDesigner.Terrain
                         r < rows - 1 ? grid[r + 1, c] : null);
                 }
 
-            ApplyAlbedo(dir, grid, rows, cols, tileMeters);
+            ApplyAlbedo(dir, grid, rows, cols, tileX, tileZ);
 
             Debug.Log($"[DemTerrainWorld] built {tiles.Count} tiles ({rows}x{cols}), " +
-                      $"tile {tileMeters}m, height {normFrom:0.#}..{normTo:0.#}m.");
+                      $"tile {tileX:0}x{tileZ:0}m → world {tileX * cols / 1000f:0.#}x{tileZ * rows / 1000f:0.#}km, " +
+                      $"height {normFrom:0.#}..{normTo:0.#}m.");
             return root;
         }
 
@@ -164,11 +191,18 @@ namespace NetworkDesigner.Terrain
             try { bytes = File.ReadAllBytes(path); }
             catch (System.Exception e) { Debug.LogWarning($"[DemTerrainWorld] read failed {path}: {e.Message}"); return null; }
 
-            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-            if (!tex.LoadImage(bytes)) { Object.DestroyImmediate(tex); Debug.LogWarning($"[DemTerrainWorld] decode failed {path}"); return null; }
-            int w = tex.width, h = tex.height;
-            Color[] px = tex.GetPixels();
-            Object.DestroyImmediate(tex);
+            // True 16-bit decode (full precision); fall back to 8-bit LoadImage if the PNG
+            // isn't 16-bit grayscale. gray[] is bottom-up, normalized 0..1 (GetPixels layout).
+            if (!TryDecodeGray16(bytes, out float[] gray, out int w, out int h))
+            {
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!tex.LoadImage(bytes)) { Object.DestroyImmediate(tex); Debug.LogWarning($"[DemTerrainWorld] decode failed {path}"); return null; }
+                w = tex.width; h = tex.height;
+                Color[] px = tex.GetPixels();
+                Object.DestroyImmediate(tex);
+                gray = new float[w * h];
+                for (int i = 0; i < gray.Length; i++) gray[i] = px[i].r;
+            }
 
             var heights = new float[Res, Res];
             for (int z = 0; z < Res; z++)
@@ -185,12 +219,100 @@ namespace NetworkDesigner.Terrain
                     int x0 = Mathf.Clamp(Mathf.FloorToInt(sx), 0, w - 1);
                     int x1 = Mathf.Min(x0 + 1, w - 1);
                     float fx = sx - x0;
-                    float a = px[y0 * w + x0].r, b = px[y0 * w + x1].r;
-                    float c = px[y1 * w + x0].r, d = px[y1 * w + x1].r;
+                    float a = gray[y0 * w + x0], b = gray[y0 * w + x1];
+                    float c = gray[y1 * w + x0], d = gray[y1 * w + x1];
                     heights[z, x] = Mathf.Lerp(Mathf.Lerp(a, b, fx), Mathf.Lerp(c, d, fx), fy);
                 }
             }
             return heights;
+        }
+
+        // Decode a non-interlaced 16-bit grayscale PNG to normalized 0..1 floats, BOTTOM-UP
+        // (matching Texture2D.GetPixels) so it's a drop-in for the 8-bit path. Returns false
+        // for any other PNG type (caller falls back to LoadImage).
+        static bool TryDecodeGray16(byte[] b, out float[] gray, out int width, out int height)
+        {
+            gray = null; width = height = 0;
+            if (b == null || b.Length < 8 || b[0] != 137 || b[1] != 80 || b[2] != 78 || b[3] != 71) return false;
+
+            int w = 0, h = 0, bitDepth = 0, colorType = 0, interlace = 0, pos = 8;
+            var idat = new System.IO.MemoryStream();
+            while (pos + 8 <= b.Length)
+            {
+                int len = (b[pos] << 24) | (b[pos + 1] << 16) | (b[pos + 2] << 8) | b[pos + 3];
+                string type = System.Text.Encoding.ASCII.GetString(b, pos + 4, 4);
+                int d = pos + 8;
+                if (len < 0 || d + len + 4 > b.Length) break;
+                if (type == "IHDR")
+                {
+                    w = (b[d] << 24) | (b[d + 1] << 16) | (b[d + 2] << 8) | b[d + 3];
+                    h = (b[d + 4] << 24) | (b[d + 5] << 16) | (b[d + 6] << 8) | b[d + 7];
+                    bitDepth = b[d + 8]; colorType = b[d + 9]; interlace = b[d + 12];
+                }
+                else if (type == "IDAT") idat.Write(b, d, len);
+                else if (type == "IEND") break;
+                pos = d + len + 4;   // skip data + CRC
+            }
+            if (w <= 0 || h <= 0 || bitDepth != 16 || colorType != 0 || interlace != 0) return false;
+
+            byte[] comp = idat.ToArray();
+            if (comp.Length < 3) return false;
+            byte[] raw;
+            try
+            {
+                using var ms = new System.IO.MemoryStream(comp, 2, comp.Length - 2);   // skip 2-byte zlib header
+                using var ds = new DeflateStream(ms, CompressionMode.Decompress);
+                using var outMs = new System.IO.MemoryStream(w * h * 2 + h);
+                ds.CopyTo(outMs);
+                raw = outMs.ToArray();
+            }
+            catch { return false; }
+
+            const int bpp = 2;                 // 16-bit grayscale
+            int stride = w * bpp;
+            if (raw.Length < h * (stride + 1)) return false;
+
+            var recon = new byte[h * stride];
+            for (int y = 0; y < h; y++)
+            {
+                int filt = raw[y * (stride + 1)];
+                int inRow = y * (stride + 1) + 1, recRow = y * stride, prevRow = (y - 1) * stride;
+                for (int i = 0; i < stride; i++)
+                {
+                    int rawv = raw[inRow + i];
+                    int a = i >= bpp ? recon[recRow + i - bpp] : 0;
+                    int up = y > 0 ? recon[prevRow + i] : 0;
+                    int c = (y > 0 && i >= bpp) ? recon[prevRow + i - bpp] : 0;
+                    int val;
+                    switch (filt)
+                    {
+                        case 0: val = rawv; break;
+                        case 1: val = rawv + a; break;
+                        case 2: val = rawv + up; break;
+                        case 3: val = rawv + ((a + up) >> 1); break;
+                        case 4: val = rawv + Paeth(a, up, c); break;
+                        default: return false;
+                    }
+                    recon[recRow + i] = (byte)(val & 0xFF);
+                }
+            }
+
+            gray = new float[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                int srcRow = y * stride, dstRow = (h - 1 - y) * w;   // flip to bottom-up
+                for (int x = 0; x < w; x++)
+                    gray[dstRow + x] = ((recon[srcRow + x * 2] << 8) | recon[srcRow + x * 2 + 1]) / 65535f;
+            }
+            width = w; height = h;
+            return true;
+        }
+
+        static int Paeth(int a, int b, int c)
+        {
+            int p = a + b - c, pa = System.Math.Abs(p - a), pb = System.Math.Abs(p - b), pc = System.Math.Abs(p - c);
+            if (pa <= pb && pa <= pc) return a;
+            return pb <= pc ? b : c;
         }
 
         // Trailing "..._tile_<row>_<col>" -> row, col.
@@ -202,6 +324,16 @@ namespace NetworkDesigner.Terrain
             if (ti < 0 || ti + 2 >= t.Length) return false;
             return int.TryParse(t[ti + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out row)
                 && int.TryParse(t[ti + 2], NumberStyles.Integer, CultureInfo.InvariantCulture, out col);
+        }
+
+        // Leading "LAT_LATFRAC_LON_LONFRAC_..." (e.g. 47_929_-122_646_...) -> degrees.
+        static bool TryParseLatLon(string name, out double lat, out double lon)
+        {
+            lat = lon = 0;
+            string[] t = name.Split('_');
+            if (t.Length < 4) return false;
+            return double.TryParse($"{t[0]}.{t[1]}", NumberStyles.Float, CultureInfo.InvariantCulture, out lat)
+                && double.TryParse($"{t[2]}.{t[3]}", NumberStyles.Float, CultureInfo.InvariantCulture, out lon);
         }
 
         // Accept a bare city name (under Heightmaps/Highres), an Assets-relative path,
@@ -219,7 +351,7 @@ namespace NetworkDesigner.Terrain
         // Drape the single full-mosaic albedo (one *albedo*.png) across the tiles by
         // cropping each tile's window into a full-coverage TerrainLayer. Uses the SAME
         // row/col→world orientation as the heights, so the colour aligns with the relief.
-        static void ApplyAlbedo(string dir, UnityEngine.Terrain[,] grid, int rows, int cols, float tileMeters)
+        static void ApplyAlbedo(string dir, UnityEngine.Terrain[,] grid, int rows, int cols, float tileX, float tileZ)
         {
             string[] al = Directory.GetFiles(dir, "*albedo*.png");
             if (al.Length == 0) return;
@@ -243,15 +375,21 @@ namespace NetworkDesigner.Terrain
                     int sx = Mathf.Clamp(c * tw, 0, aw - tw);
                     int sy = Mathf.Clamp(ah - (r + 1) * th, 0, ah - th);
                     Color[] block = big.GetPixels(sx, sy, tw, th);
+                    // Terrain reads diffuse ALPHA as smoothness when there's no mask map;
+                    // PNGs load opaque (a=1 = glass), so zero it for a matte surface.
+                    for (int i = 0; i < block.Length; i++) block[i].a = 0f;
                     var tex = new Texture2D(tw, th, TextureFormat.RGBA32, true) { wrapMode = TextureWrapMode.Clamp };
                     tex.SetPixels(block);
                     tex.Apply();
                     var layer = new TerrainLayer
                     {
                         diffuseTexture = tex,
-                        tileSize = new Vector2(tileMeters, tileMeters),  // cover the tile exactly once
-                        tileOffset = Vector2.zero
+                        tileSize = new Vector2(tileX, tileZ),  // cover the tile exactly once
+                        tileOffset = Vector2.zero,
+                        smoothness = 0f,
+                        metallic = 0f
                     };
+                    if (_albedo != null) _albedo[r, c] = layer;   // cache for the toggle
                     t.terrainData.terrainLayers = new[] { layer };
                 }
             Object.DestroyImmediate(big);
