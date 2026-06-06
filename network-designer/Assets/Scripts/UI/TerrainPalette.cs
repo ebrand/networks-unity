@@ -54,6 +54,8 @@ namespace NetworkDesigner.UI
             body.Add(SectionLabel("WATER"));
             body.Add(ToggleRow("Show Water",
                 () => Designer.ShowWater, v => { Designer.ShowWater = v; Designer.ApplyWater(); }));
+            body.Add(SliderRow("Level", () => Designer.WaterLevel,
+                v => { Designer.WaterLevel = v; Designer.ApplyWater(); }, -50f, 300f, "0.0"));
             body.Add(SliderRow("Alpha", () => Designer.WaterColor.a,
                 v => { Color c = Designer.WaterColor; c.a = v; Designer.WaterColor = c; Designer.ApplyWater(); }, 0.05f, 1f, "0.00"));
             body.Add(SliderRow("Smooth", () => Designer.WaterSmoothness,

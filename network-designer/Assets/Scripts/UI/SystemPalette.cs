@@ -26,6 +26,31 @@ namespace NetworkDesigner.UI
 
         protected override void BuildBody(VisualElement body)
         {
+            // ---- MAP (named save/load from Resources/Maps) ----
+            body.Add(SectionLabel("MAP"));
+            // Type a name to save a new map; pick an existing one from the dropdown to fill it.
+            var mapName = new TextField();
+            mapName.style.marginBottom = 6;
+            body.Add(mapName);
+            var mapDrop = new DropdownField { choices = Designer.ListMaps() };
+            mapDrop.style.marginBottom = 6;
+            mapDrop.RegisterValueChangedCallback(e => mapName.value = e.newValue);   // pick -> fill name
+            body.Add(mapDrop);
+            var mapRow = HBox();
+            var loadBtn = MakeButton("Load", () => Designer.LoadMap(mapName.value));   // refuses if dirty
+            var saveBtn = MakeButton("Save", () =>
+            {
+                if (string.IsNullOrWhiteSpace(mapName.value))
+                { Debug.LogWarning("[SystemPalette] Enter a map name to save."); return; }
+                Designer.SaveMap(mapName.value);
+                mapDrop.choices = Designer.ListMaps();      // refresh after a new save
+            });
+            loadBtn.style.marginRight = 6;
+            mapRow.Add(loadBtn); mapRow.Add(saveBtn);
+            mapRow.style.marginBottom = 6;
+            body.Add(mapRow);
+            body.Add(Divider());
+
             // ---- TERRAIN ----
             body.Add(SectionLabel("TERRAIN"));
             body.Add(NumberRow("Map Side", "m", () => Designer.TerrainSizeMeters,
@@ -34,7 +59,7 @@ namespace NetworkDesigner.UI
                 v => Designer.CellSize = v, 1f, 50f, "0.#"));
             body.Add(NumberRow("Cells/Chnk", "", () => Designer.ChunkCells,
                 v => Designer.ChunkCells = Mathf.Max(1, Mathf.RoundToInt(v)), 1f, 200f, "0"));
-            var gen = MakeButton("Generate Terrain (destructive!)", () => Designer.RebuildTerrain());
+            var gen = MakeButton("Generate", () => Designer.RebuildTerrain());
             gen.style.marginTop = 4;
             body.Add(gen);
 

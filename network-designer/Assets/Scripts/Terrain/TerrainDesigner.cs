@@ -1126,7 +1126,7 @@ namespace NetworkDesigner.Terrain
                 Vector2 dir = cur - tail;
                 if (dir.sqrMagnitude > 1e-4f) { dir.Normalize(); anchor += new Vector3(dir.x, 0f, dir.y) * 10f; }
             }
-            DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col, 0.75f, new Vector2(-15f, 0f));
+            DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col, 0.75f, new Vector2(-40f, 0f));
         }
 
         // Curve-inspection readout for the hovered curve: leg distances + deflection angle
@@ -1894,9 +1894,10 @@ namespace NetworkDesigner.Terrain
             // Brush outline sits at the SNAPPED placement point (cursorVis), so the
             // ring tracks where a node will actually land instead of the raw cursor —
             // matches the grid/rail snap in both sculpt and line modes.
-            // The brush ring isn't meaningful while laying rail/lines (they have their own
-            // preview), so hide it in line modes — only show it in sculpt/scatter.
-            UpdateBrushCursor(ShowBrushCursor && overTerrain && _lineActive == null, cursorVis);
+            // Line/rail modes show a small fixed 5 m cursor (matching the node/grid); sculpt
+            // and scatter use the brush-radius ring.
+            UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis,
+                              _lineActive != null ? 5f : BrushRadius);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.
@@ -2171,7 +2172,7 @@ namespace NetworkDesigner.Terrain
         // to the terrain surface (each point sampled via HeightAtGrid) and
         // transform-correct (built in local space, then TransformPoint'd).
         // Rendered as a line mesh (like the contours) so it can be dashed.
-        void UpdateBrushCursor(bool visible, Vector3 worldCenter)
+        void UpdateBrushCursor(bool visible, Vector3 worldCenter, float radius)
         {
             _brushCursorVisible = visible;        // for the OnGUI brush-mode icon
             _brushCursorWorld = worldCenter;
@@ -2188,8 +2189,8 @@ namespace NetworkDesigner.Terrain
             for (int i = 0; i < n; i++)
             {
                 float ang = (i / (float)n) * Mathf.PI * 2f;
-                float wx = worldCenter.x + Mathf.Cos(ang) * BrushRadius;
-                float wz = worldCenter.z + Mathf.Sin(ang) * BrushRadius;
+                float wx = worldCenter.x + Mathf.Cos(ang) * radius;
+                float wz = worldCenter.z + Mathf.Sin(ang) * radius;
                 float wy = _field.SampleHeight(wx, wz) + BrushCursorLift;
                 _ring.Add(new Vector3(wx, wy, wz));
             }
@@ -3123,6 +3124,14 @@ namespace NetworkDesigner.Terrain
         {
             TerrainField loaded = TryLoadTerrain();
             if (loaded == null) { Debug.LogWarning("[TerrainDesigner] Nothing to load."); return; }
+            ApplyLoadedField(loaded);
+            Debug.Log("[TerrainDesigner] Loaded.");
+        }
+
+        // Adopt a freshly-loaded field, live: re-origin, swap the field, rebuild chunks +
+        // all layers + water + camera, and mark clean. Shared by autosave-load and map-load.
+        void ApplyLoadedField(TerrainField loaded)
+        {
             TreeLayer.ClearAll();
             RockLayer.ClearAll();
             float half = (loaded.ColumnsX - 1) * loaded.CellSize * 0.5f;
@@ -3144,7 +3153,66 @@ namespace NetworkDesigner.Terrain
             ApplyWater();
             if (_havePendingCam) { ApplyCameraPose(_pendingCamPos, _pendingCamYaw, _pendingCamPitch); _havePendingCam = false; }
             _dirtySince = -1f;
-            Debug.Log("[TerrainDesigner] Loaded.");
+        }
+
+        // --- Named maps (save/load the whole terrain state by name in Resources/Maps) ---
+        public bool IsDirty => _dirtySince >= 0f;
+
+        string MapsFolder()
+#if UNITY_EDITOR
+            => System.IO.Path.Combine(Application.dataPath, "Resources", "Maps");
+#else
+            => System.IO.Path.Combine(Application.persistentDataPath, "Maps");
+#endif
+
+        public List<string> ListMaps()
+        {
+            var list = new List<string>();
+            try
+            {
+                string dir = MapsFolder();
+                if (System.IO.Directory.Exists(dir))
+                    foreach (string f in System.IO.Directory.GetFiles(dir, "*.json"))
+                        list.Add(System.IO.Path.GetFileNameWithoutExtension(f));
+            }
+            catch { /* unreadable -> empty */ }
+            list.Sort(System.StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
+        // Save the whole current state to Resources/Maps/<name>.json (marks clean).
+        public void SaveMap(string name)
+        {
+            if (_field == null || string.IsNullOrWhiteSpace(name)) return;
+            try
+            {
+                string dir = MapsFolder();
+                System.IO.Directory.CreateDirectory(dir);
+                string path = System.IO.Path.Combine(dir, name.Trim() + ".json");
+                try { _saveTask?.Wait(2000); } catch { /* ignore */ }
+                WriteSave(BuildSnapshot(), path);
+                SavePacks();
+                _dirtySince = -1f;
+                Debug.Log($"[TerrainDesigner] Map saved → {path}");
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Map save failed: {ex.Message}"); }
+        }
+
+        // Load a named map live. REFUSES if there are unsaved changes (dirty) — save first.
+        public bool LoadMap(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return false;
+            if (IsDirty)
+            {
+                Debug.LogWarning("[TerrainDesigner] Unsaved changes — save the current map before loading another.");
+                return false;
+            }
+            string path = System.IO.Path.Combine(MapsFolder(), name.Trim() + ".json");
+            TerrainField loaded = TryLoadTerrainFrom(path);
+            if (loaded == null) { Debug.LogWarning($"[TerrainDesigner] Map not found / unreadable: {name}"); return false; }
+            ApplyLoadedField(loaded);
+            Debug.Log($"[TerrainDesigner] Loaded map: {name}");
+            return true;
         }
 
         // Snapshot the current field + trees + packs into an owned, immutable
@@ -3329,11 +3397,12 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        TerrainField TryLoadTerrain()
+        TerrainField TryLoadTerrain() => TryLoadTerrainFrom(ResolveAutosavePath());
+
+        TerrainField TryLoadTerrainFrom(string path)
         {
             try
             {
-                string path = ResolveAutosavePath();
                 if (!System.IO.File.Exists(path)) return null;
                 byte[] bytes = System.IO.File.ReadAllBytes(path);
                 TerrainSave save = ReadSaveBinary(bytes);
