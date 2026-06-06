@@ -596,6 +596,48 @@ namespace NetworkDesigner.Terrain
             return path.Count >= 2;
         }
 
+        // World centerline of the LONGEST route between two endpoints (degree-1 nodes),
+        // for a test train to run on. Y = rail top (bed + rail height). Falls back to the
+        // longest route from node 0 when there are no endpoints (e.g. a closed loop).
+        // NOTE: bed Y follows the terrain (NodeBedY), not the graded/bridged bed — fine on
+        // at-grade track, approximate on deep cut/fill until we sample the true grade.
+        public bool TryLongestRouteWorld(TerrainField field, out List<Vector3> world)
+        {
+            world = null;
+            if (Graph == null || Graph.Nodes.Count < 2) return false;
+            List<Vector2> best = null; float bestLen = -1f;
+
+            var ends = new List<int>();
+            for (int n = 0; n < Graph.Nodes.Count; n++) if (NodeDegree(n) == 1) ends.Add(n);
+            if (ends.Count >= 2)
+            {
+                for (int i = 0; i < ends.Count; i++)
+                    for (int j = i + 1; j < ends.Count; j++)
+                        if (TryCenterlinePath(ends[i], ends[j], out List<Vector2> p))
+                        { float L = PolyLenXZ(p); if (L > bestLen) { bestLen = L; best = p; } }
+            }
+            if (best == null)   // no connected endpoint pair (loop / single edge) — scan from 0
+            {
+                for (int j = 1; j < Graph.Nodes.Count; j++)
+                    if (TryCenterlinePath(0, j, out List<Vector2> p))
+                    { float L = PolyLenXZ(p); if (L > bestLen) { bestLen = L; best = p; } }
+            }
+            if (best == null || best.Count < 2) return false;
+
+            float lift = Mathf.Max(0f, RailHeight);
+            world = new List<Vector3>(best.Count);
+            for (int k = 0; k < best.Count; k++)
+                world.Add(new Vector3(best[k].x, NodeBedY(field, best[k]) + lift, best[k].y));
+            return true;
+        }
+
+        static float PolyLenXZ(List<Vector2> p)
+        {
+            float len = 0f;
+            for (int i = 1; i < p.Count; i++) len += Vector2.Distance(p[i - 1], p[i]);
+            return len;
+        }
+
         // Breadth-first node path (fewest hops) between two nodes over the edge graph.
         List<int> BfsNodePath(int start, int goal)
         {

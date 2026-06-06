@@ -75,6 +75,33 @@ namespace NetworkDesigner.UI
             body.Add(NumberRow("Parallels", "",
                 () => Designer.RailLayer.ParallelCount,
                 v => Designer.RailLayer.ParallelCount = Mathf.Max(1, Mathf.RoundToInt(v)), 1f, 8f, "0"));
+
+            body.Add(Divider());
+            body.Add(SectionLabel("TRAINS"));
+            var trainRow = HBox();
+            var spawn = MakeButton("Spawn Train", SpawnTrain);
+            var clearTrains = MakeButton("Clear", () => FindManager()?.ClearTrains());
+            spawn.style.marginRight = 6;
+            trainRow.Add(spawn); trainRow.Add(clearTrains);
+            body.Add(trainRow);
+        }
+
+        NetworkDesigner.Trains.TrainManager _tm;
+        NetworkDesigner.Trains.TrainManager FindManager()
+            => _tm != null ? _tm : (_tm = FindFirstObjectByType<NetworkDesigner.Trains.TrainManager>());
+
+        void SpawnTrain()
+        {
+            var m = FindManager();
+            if (m == null)
+            {
+                // None in the scene — make one so Spawn always works. With no prefabs it
+                // spawns placeholder cubes; assign Locomotive/Wagon on it for real trains.
+                m = _tm = new GameObject("TrainManager").AddComponent<NetworkDesigner.Trains.TrainManager>();
+                Debug.LogWarning("[RailPalette] Created a TrainManager — assign Locomotive_01 / " +
+                    "Wagon_01 prefabs on it for real trains (placeholder cubes until then).");
+            }
+            m.SpawnTestTrain();
         }
     }
 }
