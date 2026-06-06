@@ -144,7 +144,7 @@ namespace NetworkDesigner.Designer
             Vector3 move = Vector3.zero;
             // Ignore WASD while typing in an IMGUI field (then target velocity is
             // zero, so the camera drifts to a stop instead of cutting out).
-            if (GUIUtility.keyboardControl == 0)
+            if (GUIUtility.keyboardControl == 0 && !global::NetworkDesigner.UI.PaletteBase.ModalOpen)
             {
                 // Heading-relative, flattened to the ground plane: W goes where
                 // you're looking (projected onto XZ), never diving when pitched.

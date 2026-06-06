@@ -19,8 +19,19 @@ namespace NetworkDesigner.UI
     [RequireComponent(typeof(UIDocument))]
     public abstract class PaletteBase : MonoBehaviour
     {
-        // True while the cursor is over ANY visible palette (one shows at a time).
-        public static bool PointerOverUI { get; private set; }
+        // True while the cursor is over ANY palette UI: a panel, an in-panel scroll
+        // list, OR an open dropdown popup. Enter/leave tracks the panel body; the
+        // per-frame hit-test (PointerOverPanelTree) additionally catches dropdown
+        // popups, which UI Toolkit renders OUTSIDE the panel as a sibling tree —
+        // so scrolling an open dropdown no longer leaks to the camera zoom.
+        public static bool PointerOverUI => ModalOpen || _hoverPanel || PointerOverPanelTree();
+        static bool _hoverPanel;                                   // enter/leave over a panel body
+        static readonly List<VisualElement> _panels = new List<VisualElement>();  // live panel bodies (for the hit-test)
+        // True while a modal is up — the designer/camera suspend keyboard input so typing
+        // doesn't trigger hotkeys or move the camera. Ref-counted so a confirm modal
+        // stacked over another modal doesn't clear it early when the top one closes.
+        public static bool ModalOpen => _modalDepth > 0;
+        static int _modalDepth;
 
         public TerrainDesigner Designer;
         [Tooltip("Optional themed PanelSettings. If empty, the palette finds one " +
@@ -112,9 +123,33 @@ namespace NetworkDesigner.UI
             if (DefaultOpen) _open.Add(PaletteId);
         }
 
-        protected virtual void OnDestroy() { _all.Remove(this); }
+        protected virtual void OnDestroy() { _all.Remove(this); if (_panel != null) _panels.Remove(_panel); }
 
-        protected virtual void OnDisable() { PointerOverUI = false; }
+        protected virtual void OnDisable() { _hoverPanel = false; }
+
+        // True while a UI Toolkit dropdown popup is OPEN. Panels themselves are handled by
+        // the reliable _hoverPanel enter/leave; this only covers the dropdown popup, which
+        // the enter/leave callbacks can't see (it's a sibling tree). Detection is
+        // COORDINATE-FREE — we just check whether the open menu exists in the panel tree —
+        // because a cursor->panel pick with a wrong Y-flip would mis-flag the cursor as
+        // over UI and wrongly suppress painting/sculpting/look across the world. While a
+        // dropdown is open the user is interacting with it, so treating it as "over UI"
+        // regardless of cursor position is correct anyway.
+        static bool PointerOverPanelTree()
+        {
+            for (int i = 0; i < _panels.Count; i++)
+            {
+                IPanel p = _panels[i] != null ? _panels[i].panel : null;
+                if (p == null) continue;
+                VisualElement root = p.visualTree;
+                if (root == null) return false;
+                // The dropdown menu is added near the top of the panel tree.
+                for (int c = 0; c < root.childCount; c++)
+                    if (root[c].ClassListContains("unity-base-dropdown")) return true;
+                return false;   // shared panel — one check covers all palettes
+            }
+            return false;
+        }
 
         protected virtual void Update()
         {
@@ -161,8 +196,9 @@ namespace NetworkDesigner.UI
             _panel.style.backgroundColor = PanelBg;
             Radius(_panel, 12);
             _panel.style.borderTopWidth = 3; _panel.style.borderTopColor = Accent;
-            _panel.RegisterCallback<PointerEnterEvent>(_ => PointerOverUI = true);
-            _panel.RegisterCallback<PointerLeaveEvent>(_ => PointerOverUI = false);
+            _panel.RegisterCallback<PointerEnterEvent>(_ => _hoverPanel = true);
+            _panel.RegisterCallback<PointerLeaveEvent>(_ => _hoverPanel = false);
+            if (!_panels.Contains(_panel)) _panels.Add(_panel);   // for the dropdown-popup hit-test
             root.Add(_panel);
 
             if (!string.IsNullOrEmpty(Title))
@@ -177,6 +213,7 @@ namespace NetworkDesigner.UI
 
             // Body scrolls if it's taller than the panel; the footer stays pinned below.
             var scroll = new ScrollView(ScrollViewMode.Vertical);
+            scroll.horizontalScrollerVisibility = ScrollerVisibility.Hidden;  // never a horizontal bar
             scroll.style.flexGrow = 1;
             _panel.Add(scroll);
             _body = scroll.contentContainer;
@@ -351,6 +388,108 @@ namespace NetworkDesigner.UI
             l.style.color = Ink; l.style.fontSize = 13; l.style.flexGrow = 1;
             row.Add(l);
             return row;
+        }
+
+        // A simple modal: dim full-screen backdrop + centered panel with a text field and
+        // Cancel / <ok> buttons. onOk receives the entered text. Click the backdrop or
+        // Cancel to dismiss. Added to this palette's UIDocument root (overlays everything).
+        // Build a centered modal over the whole screen and return the content
+        // container the caller fills. `close` dismisses it. ModalOpen is held while it's
+        // up (suspends world keyboard/camera). width/maxHeight in panel px; maxHeight
+        // <= 0 = unconstrained. closeOnBackdropClick=false forces dismissal through an
+        // explicit control (so a heavy modal can guard against accidental close).
+        protected VisualElement BeginModal(string title, float width, float maxHeight, out Action close,
+                                           bool closeOnBackdropClick = true)
+        {
+            close = () => { };
+            var root = _doc != null ? _doc.rootVisualElement : null;
+            if (root == null) return null;
+
+            var backdrop = new VisualElement();
+            backdrop.style.position = Position.Absolute;
+            backdrop.style.left = 0; backdrop.style.right = 0; backdrop.style.top = 0; backdrop.style.bottom = 0;
+            backdrop.style.backgroundColor = new Color(0f, 0f, 0f, 0.55f);
+            backdrop.style.alignItems = Align.Center;
+            backdrop.style.justifyContent = Justify.Center;
+            // Cover the screen so world input doesn't leak while the modal is up.
+            // ModalOpen (ref-counted) forces PointerOverUI true on its own.
+            _modalDepth++;
+            void Close()
+            {
+                if (backdrop.parent == null) return;      // already closed (don't double-decrement)
+                root.Remove(backdrop);
+                _modalDepth = Mathf.Max(0, _modalDepth - 1);
+            }
+            close = Close;
+            if (closeOnBackdropClick)
+                backdrop.RegisterCallback<ClickEvent>(e => { if (e.target == backdrop) Close(); });
+            root.Add(backdrop);
+
+            var modal = new VisualElement();
+            modal.style.width = width;
+            if (maxHeight > 0f) modal.style.maxHeight = maxHeight;
+            Pad(modal, 16, 16, 14, 16);
+            modal.style.backgroundColor = new Color(PanelBg.r, PanelBg.g, PanelBg.b, 0.99f);
+            Radius(modal, 12);
+            modal.style.borderTopWidth = 3; modal.style.borderTopColor = Accent;
+            backdrop.Add(modal);
+
+            if (!string.IsNullOrEmpty(title))
+            {
+                var t = new Label(title);
+                t.style.color = Ink; t.style.fontSize = 15;
+                t.style.unityFontStyleAndWeight = FontStyle.Bold;
+                t.style.unityTextAlign = TextAnchor.MiddleCenter;
+                t.style.marginBottom = 10;
+                modal.Add(t);
+            }
+            return modal;
+        }
+
+        protected void ShowTextModal(string title, string okLabel, Action<string> onOk)
+        {
+            var modal = BeginModal(title, 320f, 0f, out Action close);
+            if (modal == null) return;
+
+            var tf = new TextField();
+            tf.style.marginBottom = 12;
+            modal.Add(tf);
+
+            var row = HBox();
+            row.style.justifyContent = Justify.FlexEnd;
+            var cancel = MakeButton("Cancel", close);
+            var ok = MakeButton(okLabel, () => { string v = tf.value; close(); onOk?.Invoke(v); });
+            cancel.style.flexGrow = 0; cancel.style.width = 96; cancel.style.marginRight = 6;
+            ok.style.flexGrow = 0; ok.style.width = 96;
+            StyleActive(ok, true);
+            row.Add(cancel); row.Add(ok);
+            modal.Add(row);
+
+            tf.Focus();
+        }
+
+        // A yes/no confirmation modal. Cancel just dismisses (returning to whatever was
+        // beneath); the confirm button dismisses AND runs onConfirm. Safe to stack over
+        // another modal — ModalOpen is ref-counted.
+        protected void ShowConfirm(string title, string message, string confirmLabel, Action onConfirm)
+        {
+            var modal = BeginModal(title, 400f, 0f, out Action close);
+            if (modal == null) return;
+
+            var msg = new Label(message);
+            msg.style.color = Ink; msg.style.fontSize = 13;
+            msg.style.whiteSpace = WhiteSpace.Normal; msg.style.marginBottom = 16;
+            modal.Add(msg);
+
+            var row = HBox();
+            row.style.justifyContent = Justify.FlexEnd;
+            var cancel = MakeButton("Cancel", close);
+            var ok = MakeButton(confirmLabel, () => { close(); onConfirm?.Invoke(); });
+            cancel.style.flexGrow = 0; cancel.style.width = 100; cancel.style.marginRight = 6;
+            ok.style.flexGrow = 0; ok.style.width = 110;
+            StyleActive(ok, true);
+            row.Add(cancel); row.Add(ok);
+            modal.Add(row);
         }
 
         // A fixed-max-height vertical scroll box for long lists, so the rest of the body

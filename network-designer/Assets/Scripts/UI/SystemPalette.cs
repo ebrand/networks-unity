@@ -1,4 +1,4 @@
-// System palette (UI Toolkit): terrain generation + heightmap import + autosave — the
+// System palette (UI Toolkit): named map save/load + heightmap import + autosave — the
 // heavier, less-frequent "system" operations split out of the Terrain Operations palette so that
 // one isn't absurdly tall. Opened (exclusively) from the launcher; renders top-left like
 // the other content palettes, with the shared footer. Shared plumbing is in PaletteBase.
@@ -28,40 +28,62 @@ namespace NetworkDesigner.UI
         {
             // ---- MAP (named save/load from Resources/Maps) ----
             body.Add(SectionLabel("MAP"));
-            // Type a name to save a new map; pick an existing one from the dropdown to fill it.
-            var mapName = new TextField();
-            mapName.style.marginBottom = 6;
-            body.Add(mapName);
             var mapDrop = new DropdownField { choices = Designer.ListMaps() };
             mapDrop.style.marginBottom = 6;
-            mapDrop.RegisterValueChangedCallback(e => mapName.value = e.newValue);   // pick -> fill name
             body.Add(mapDrop);
+            // Transient status line under the buttons (auto-clears after a few seconds).
+            var status = new Label();
+            status.style.fontSize = 11;
+            status.style.unityFontStyleAndWeight = FontStyle.Italic;
+            status.style.marginBottom = 6;
+            float[] until = { 0f };
+            void Status(string msg, bool ok)
+            {
+                status.text = msg;
+                status.style.color = ok ? new Color(0.55f, 0.85f, 0.55f) : new Color(0.95f, 0.6f, 0.5f);
+                until[0] = Time.realtimeSinceStartup + 3f;
+            }
+            _sync.Add(() => { if (!string.IsNullOrEmpty(status.text) && Time.realtimeSinceStartup > until[0]) status.text = ""; });
+
             var mapRow = HBox();
-            var loadBtn = MakeButton("Load", () => Designer.LoadMap(mapName.value));   // refuses if dirty
+            var newBtn = MakeButton("New", () => ShowTextModal("New Map", "Create", n =>
+            {
+                if (string.IsNullOrWhiteSpace(n)) { Status("Enter a map name", false); return; }
+                if (Designer.NewMap(n))
+                {
+                    mapDrop.choices = Designer.ListMaps();
+                    mapDrop.SetValueWithoutNotify(n);
+                    Status($"Created “{n}” ✓", true);
+                }
+                else Status("Create failed (see Console)", false);
+            }));
+            var loadBtn = MakeButton("Load", () =>
+            {
+                if (string.IsNullOrWhiteSpace(mapDrop.value)) { Status("Pick a map to load", false); return; }
+                if (Designer.LoadMap(mapDrop.value)) Status($"Loaded “{mapDrop.value}”", true);
+                else Status(Designer.IsDirty ? "Unsaved changes — save first" : "Load failed", false);
+            });
             var saveBtn = MakeButton("Save", () =>
             {
-                if (string.IsNullOrWhiteSpace(mapName.value))
-                { Debug.LogWarning("[SystemPalette] Enter a map name to save."); return; }
-                Designer.SaveMap(mapName.value);
-                mapDrop.choices = Designer.ListMaps();      // refresh after a new save
+                if (string.IsNullOrWhiteSpace(mapDrop.value)) { Status("Pick or create a map first", false); return; }
+                if (Designer.SaveMap(mapDrop.value))
+                {
+                    Status($"Saved “{mapDrop.value}” ✓", true);
+                    mapDrop.choices = Designer.ListMaps();
+                }
+                else Status("Save failed (see Console)", false);
             });
-            loadBtn.style.marginRight = 6;
-            mapRow.Add(loadBtn); mapRow.Add(saveBtn);
+            newBtn.style.marginRight = 6; loadBtn.style.marginRight = 6;
+            mapRow.Add(newBtn); mapRow.Add(loadBtn); mapRow.Add(saveBtn);
             mapRow.style.marginBottom = 6;
             body.Add(mapRow);
-            body.Add(Divider());
+            body.Add(status);
 
-            // ---- TERRAIN ----
-            body.Add(SectionLabel("TERRAIN"));
-            body.Add(NumberRow("Map Side", "m", () => Designer.TerrainSizeMeters,
-                v => Designer.TerrainSizeMeters = v, 100f, 20000f, "0"));
-            body.Add(NumberRow("Cell Size", "m", () => Designer.CellSize,
-                v => Designer.CellSize = v, 1f, 50f, "0.#"));
-            body.Add(NumberRow("Cells/Chnk", "", () => Designer.ChunkCells,
-                v => Designer.ChunkCells = Mathf.Max(1, Mathf.RoundToInt(v)), 1f, 200f, "0"));
-            var gen = MakeButton("Generate", () => Designer.RebuildTerrain());
-            gen.style.marginTop = 4;
-            body.Add(gen);
+            // ---- CAMERA ----
+            body.Add(Divider());
+            body.Add(SectionLabel("CAMERA"));
+            body.Add(SliderRow("Speed", () => Designer.CameraSpeed,
+                v => Designer.CameraSpeed = v, 5f, 1000f, "0"));
 
             // ---- HEIGHTMAP ----
             body.Add(Divider());

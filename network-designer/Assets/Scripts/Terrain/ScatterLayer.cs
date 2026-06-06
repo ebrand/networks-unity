@@ -192,7 +192,8 @@ namespace NetworkDesigner.Terrain
         }
 
         // Returns true if a pack was added/replaced (so the host can mark dirty).
-        bool CreatePack(string name)
+        // Public so the UI Toolkit pack-management modal can save/replace by name.
+        public bool CreatePack(string name)
         {
             SyncEnabled();
             name = (name ?? "").Trim();
@@ -230,6 +231,27 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        // True if the named pack's saved state differs from the CURRENT live state —
+        // membership and the brush params a save would capture. Drives the "*" dirty
+        // marker in the UI Toolkit pack modal. Unknown name => not dirty.
+        public bool PackIsDirty(string name)
+        {
+            SyncEnabled();
+            int idx = _packs.FindIndex(p => p != null && p.Name == name);
+            if (idx < 0) return false;
+            if (PackDiffersFromCurrent(idx)) return true;
+            TreePack pack = _packs[idx];
+            if (pack.HasParams)
+            {
+                if (!Mathf.Approximately(pack.PaintRate, PaintRate)) return true;
+                if (!Mathf.Approximately(pack.Spacing, Spacing)) return true;
+                if (!Mathf.Approximately(pack.MaxSlopeDeg, MaxSlopeDeg)) return true;
+                if (pack.AvoidWater != AvoidWater) return true;
+                if (!Mathf.Approximately(pack.WaterlineMargin, WaterlineMargin)) return true;
+            }
+            return false;
+        }
+
         bool DeletePack(int idx)
         {
             if (idx < 0 || idx >= _packs.Count) return false;
@@ -237,6 +259,14 @@ namespace NetworkDesigner.Terrain
             if (_activePack == idx) _activePack = -1;
             else if (_activePack > idx) _activePack--;
             return true;
+        }
+
+        // Delete the pack with this name (for the UI Toolkit pack modal). Returns
+        // true if one was removed.
+        public bool DeletePackByName(string name)
+        {
+            int idx = _packs.FindIndex(p => p != null && p.Name == name);
+            return idx >= 0 && DeletePack(idx);
         }
 
         // Bake the hi-res modal preview for the clicked prefab (driven from Update,
@@ -262,6 +292,33 @@ namespace NetworkDesigner.Terrain
                 }
             }
         }
+
+        // --- grid access for the UI Toolkit pack-management modal ---
+        public int PrefabCount => Prefabs != null ? Prefabs.Count : 0;
+        public GameObject PrefabAt(int i) =>
+            (Prefabs != null && i >= 0 && i < Prefabs.Count) ? Prefabs[i] : null;
+        // Per-prefab include state (the live brush membership a pack save captures).
+        public bool IsEnabled(int i)
+        {
+            SyncEnabled();
+            return _enabled != null && i >= 0 && i < _enabled.Length && _enabled[i];
+        }
+        public void SetEnabled(int i, bool on)
+        {
+            SyncEnabled();
+            if (_enabled != null && i >= 0 && i < _enabled.Length) _enabled[i] = on;
+        }
+        // Include/exclude every prefab (the modal's All / None buttons). Leaves the
+        // active-pack selection alone so the dirty "*" marker reflects the change.
+        public void SetAllEnabled(bool on)
+        {
+            SyncEnabled();
+            if (_enabled == null) return;
+            for (int i = 0; i < _enabled.Length; i++) _enabled[i] = on;
+        }
+        // Cached thumbnail (null until EnsureOneThumb has baked it).
+        public Texture GetThumb(GameObject prefab) =>
+            (prefab != null && _thumbs.TryGetValue(prefab, out Texture t)) ? t : null;
 
         GameObject RandomPrefab()
         {
@@ -551,6 +608,67 @@ namespace NetworkDesigner.Terrain
             }
         }
 
+        // Runtime load: populate Prefabs from a Resources/<resFolder> folder (works in
+        // play AND builds — no editor APIs), so prefabs needn't be assigned on the
+        // GameObject. De-duped by name (a folder can hold model + prefab pairs). Keeps the
+        // existing list if the folder is empty. Returns true if the list changed.
+        public bool LoadFromResources(string resFolder)
+        {
+            if (string.IsNullOrEmpty(resFolder)) return false;
+            var loaded = Resources.LoadAll<GameObject>(resFolder);
+            // A pack folder typically holds BOTH the source model (.dae/.fbx, imported
+            // with importMaterials off → no/default material → renders GRAY) and the real
+            // .prefab (which references the URP .mat). They share a name, so dedupe by
+            // name but KEEP the candidate that actually has materials — otherwise the
+            // bare model can win and every scattered item paints gray.
+            var best = new Dictionary<string, GameObject>();
+            foreach (var go in loaded)
+            {
+                if (go == null || go.GetComponentInChildren<Renderer>() == null) continue;
+                if (!best.TryGetValue(go.name, out GameObject cur)
+                    || MaterialScore(go) > MaterialScore(cur))
+                    best[go.name] = go;
+            }
+            var list = new List<GameObject>(best.Values);
+            list.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
+            if (list.Count == 0 || SamePrefabList(list, Prefabs)) return false;
+            Prefabs = list;
+            _enabled = null;   // re-sync include toggles
+            Debug.Log($"[ScatterLayer:{Name}] loaded {list.Count} prefab(s) from Resources/{resFolder}.");
+            return true;
+        }
+
+        // Count renderer slots that carry a REAL (assigned, non-default) material.
+        // A model imported with materials off has only null / built-in-default slots
+        // (which render gray), so it scores 0 and loses the dedupe to its prefab.
+        static int MaterialScore(GameObject go)
+        {
+            int score = 0;
+            Renderer[] rends = go.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < rends.Length; i++)
+            {
+                Material[] mats = rends[i].sharedMaterials;
+                if (mats == null) continue;
+                for (int m = 0; m < mats.Length; m++)
+                    if (mats[m] != null && !IsDefaultMaterialName(mats[m].name)) score++;
+            }
+            return score;
+        }
+
+        // Names Unity gives the built-in fallback/default materials (the gray ones a
+        // material-less import falls back to). URP's default is literally "Lit".
+        static bool IsDefaultMaterialName(string n) =>
+            string.IsNullOrEmpty(n) || n == "Lit" || n == "Default-Material"
+            || n == "Default-Diffuse" || n.StartsWith("Default-");
+
+        // True if two prefab lists hold the same references in the same order.
+        static bool SamePrefabList(List<GameObject> a, List<GameObject> b)
+        {
+            if (a == null || b == null || a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
 #if UNITY_EDITOR
         // Populate Prefabs from every renderable prefab under Folder (recursive),
         // sorted by name. Idempotent: identical set → no-op (preserves toggles).
@@ -580,13 +698,6 @@ namespace NetworkDesigner.Terrain
             Prefabs = list;
             _enabled = null; // re-sync toggles; thumbs kept (survivors reuse, new bake lazily)
             Debug.Log($"[ScatterLayer:{Name}] loaded {list.Count} prefab(s) from '{folder}'.");
-            return true;
-        }
-
-        static bool SamePrefabList(List<GameObject> a, List<GameObject> b)
-        {
-            if (a == null || b == null || a.Count != b.Count) return false;
-            for (int i = 0; i < a.Count; i++) if (a[i] != b[i]) return false;
             return true;
         }
 

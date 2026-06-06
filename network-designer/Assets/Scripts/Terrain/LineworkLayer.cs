@@ -117,6 +117,17 @@ namespace NetworkDesigner.Terrain
             Rebuild(field);
         }
 
+        // Runtime: load the segment Asset from the first renderable prefab in a
+        // Resources/<resFolder> folder, so it needn't be assigned on the GameObject.
+        public bool LoadAssetFromResources(string resFolder)
+        {
+            if (string.IsNullOrEmpty(resFolder)) return false;
+            var loaded = Resources.LoadAll<GameObject>(resFolder);
+            foreach (var go in loaded)
+                if (go != null && go.GetComponentInChildren<Renderer>() != null) { Asset = go; return true; }
+            return false;
+        }
+
         // ---- rendering ----
 
         public void Rebuild(TerrainField field)

@@ -334,10 +334,15 @@ namespace NetworkDesigner.Terrain
 
             StripStaleHostMesh();
             EnsureScatterDefaults();
+            // Load scatter/fence prefabs from Resources at runtime — folders moved to
+            // Assets/Resources/{Trees,Rocks,Fences}, so nothing needs assigning on the
+            // GameObject. Runs in play AND builds.
+            TreeLayer.LoadFromResources("Trees");
+            RockLayer.LoadFromResources("Rocks");
+            FenceLayer.LoadAssetFromResources("Fences");
 #if UNITY_EDITOR
-            // Self-heal lost prefab references: if a layer's list is empty,
-            // repopulate from its Folder so a broken link doesn't silently
-            // disable the brush.
+            // Self-heal lost prefab references: if a layer's list is STILL empty (no
+            // Resources folder), fall back to the editor Folder load.
             if (TreeLayer.IsEmpty && TreeLayer.LoadFromFolder()) UnityEditor.EditorUtility.SetDirty(this);
             if (RockLayer.IsEmpty && RockLayer.LoadFromFolder()) UnityEditor.EditorUtility.SetDirty(this);
 #endif
@@ -1671,6 +1676,9 @@ namespace NetworkDesigner.Terrain
 
         void Update()
         {
+            // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
+            // typing a name doesn't fire hotkeys or sculpt.
+            if (NetworkDesigner.UI.PaletteBase.ModalOpen) return;
             // Brush-mode hotkeys.
             if (Input.GetKeyDown(KeyCode.Alpha1)) Brush = BrushMode.Raise;
             else if (Input.GetKeyDown(KeyCode.Alpha2)) Brush = BrushMode.Lower;
@@ -3052,6 +3060,14 @@ namespace NetworkDesigner.Terrain
         class PacksFile { public List<TreePack> TreePacks; public List<TreePack> RockPacks; }
 
         // Write the pack presets to the standalone file (on pack edits + on save).
+        // A pack create/update/delete from the UI Toolkit pack modal — mirror the
+        // IMGUI scatter palette: persist the standalone pack library + mark dirty.
+        public void OnScatterPacksChanged()
+        {
+            _dirtySince = Time.realtimeSinceStartup;
+            SavePacks();
+        }
+
         public void SavePacks()
         {
             try
@@ -3180,10 +3196,10 @@ namespace NetworkDesigner.Terrain
             return list;
         }
 
-        // Save the whole current state to Resources/Maps/<name>.json (marks clean).
-        public void SaveMap(string name)
+        // Save the whole current state to Resources/Maps/<name>.json (marks clean). True on success.
+        public bool SaveMap(string name)
         {
-            if (_field == null || string.IsNullOrWhiteSpace(name)) return;
+            if (_field == null || string.IsNullOrWhiteSpace(name)) return false;
             try
             {
                 string dir = MapsFolder();
@@ -3194,8 +3210,36 @@ namespace NetworkDesigner.Terrain
                 SavePacks();
                 _dirtySince = -1f;
                 Debug.Log($"[TerrainDesigner] Map saved → {path}");
+                return true;
             }
-            catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Map save failed: {ex.Message}"); }
+            catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Map save failed: {ex.Message}"); return false; }
+        }
+
+        // Create a fresh FLAT map at the current size — no scatter / rail / plan / fence /
+        // power / placeables — display it, and save it under `name`. Returns true if saved.
+        public bool NewMap(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return false;
+            float size = Mathf.Max(1f, TerrainSizeMeters);
+            float cs = Mathf.Max(0.1f, CellSize);
+            int res = Mathf.Max(2, Mathf.RoundToInt(size / cs) + 1);
+            float half = (res - 1) * cs * 0.5f;
+            _field = new TerrainField(res, res, cs, transform.position - new Vector3(half, 0f, half));
+            ColumnsX = _field.ColumnsX; RowsZ = _field.RowsZ; CellSize = _field.CellSize;
+
+            TreeLayer.ClearAll(); RockLayer.ClearAll();
+            FenceLayer.ClearAll(_field); PowerLineLayer.ClearAll(_field);
+            RailLayer.ClearAll(_field); PlanLayer.ClearAll(_field);
+            FindFirstObjectByType<NetworkDesigner.Placeables.PlaceablesManager>()?.ClearPlaced();
+
+            ShowWater = false;   // a fresh map starts dry
+            _chunkMesh = null; _chunkCol = null;
+            BuildAllChunks();
+            RebuildContours();
+            ApplyWater();
+            ResetCamera();       // frame the fresh terrain (same as the React camera.reset)
+            _dirtySince = -1f;
+            return SaveMap(name);
         }
 
         // Load a named map live. REFUSES if there are unsaved changes (dirty) — save first.
@@ -3291,6 +3335,13 @@ namespace NetworkDesigner.Terrain
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             FlyCameraController fly = cam != null ? cam.GetComponent<FlyCameraController>() : null;
             return fly != null ? fly : FindFirstObjectByType<FlyCameraController>();
+        }
+
+        // Fly-camera move speed (m/s), for the System palette Camera slider.
+        public float CameraSpeed
+        {
+            get { var f = ResolveFly(); return f != null ? f.MoveSpeed : 12f; }
+            set { var f = ResolveFly(); if (f != null) f.MoveSpeed = value; }
         }
 
         const int SaveMagic = 0x54524E33; // "TRN3"
