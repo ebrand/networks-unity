@@ -59,6 +59,10 @@ namespace NetworkDesigner.UI
         protected virtual bool AnchorRight => false;     // right edge instead of left
         protected virtual bool AnchorBottom => false;    // bottom edge instead of top
         protected virtual bool ShowFooter => true;       // mode/Grid/Snap footer
+        // Footer mode/sub labels. Default = the live editing mode (right for Terrain/Rail);
+        // palettes with no editing mode (System/Spike) override to name themselves.
+        protected virtual string FooterMode => Designer.PaletteModeLabel;
+        protected virtual string FooterSub => Designer.PaletteSubModeLabel;
 
         // --- open/close registry (the launcher drives these) ---
         static readonly List<PaletteBase> _all = new List<PaletteBase>();
@@ -123,8 +127,8 @@ namespace NetworkDesigner.UI
                 Mathf.Clamp01(Designer.PaletteBgAlpha));
             if (_footMode != null)
             {
-                _footMode.text = Designer.PaletteModeLabel;
-                _footSub.text = Designer.PaletteSubModeLabel;
+                _footMode.text = FooterMode;
+                _footSub.text = FooterSub;
                 StyleActive(_snapBtn, Designer.SnapToGrid);
                 StyleActive(_gridBtn, Designer.GridEnabled);
             }

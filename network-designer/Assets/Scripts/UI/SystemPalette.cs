@@ -1,5 +1,5 @@
-// System palette (UI Toolkit): terrain generation + heightmap import — the heavier,
-// less-frequent "system" operations split out of the Terrain Operations palette so that
+// System palette (UI Toolkit): terrain generation + heightmap import + autosave — the
+// heavier, less-frequent "system" operations split out of the Terrain Operations palette so that
 // one isn't absurdly tall. Opened (exclusively) from the launcher; renders top-left like
 // the other content palettes, with the shared footer. Shared plumbing is in PaletteBase.
 
@@ -17,6 +17,9 @@ namespace NetworkDesigner.UI
         protected override string Title => "System";
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);   // match Terrain palette
         protected override float PanelWidth => 300f;
+
+        protected override string FooterMode => "System";
+        protected override string FooterSub => string.Empty;
 
         // Opening System exits any rail/scatter mode (these are terrain-level operations).
         protected override void OnOpened() => Designer.EnterSculptMode();
@@ -47,6 +50,17 @@ namespace NetworkDesigner.UI
             var hmLoad = MakeButton("Load", () => Designer.ImportHeightmap());
             hmLoad.style.marginTop = 4;
             body.Add(hmLoad);
+
+            // ---- AUTOSAVE ----
+            body.Add(Divider());
+            body.Add(SectionLabel("AUTOSAVE"));
+            body.Add(ToggleRow("Autosave", () => Designer.Autosave, v => Designer.Autosave = v));
+            var save = MakeButton("Save", () => Designer.SaveNow());
+            save.style.marginTop = 4;
+            body.Add(save);
+            var load = MakeButton("Load", () => Designer.LoadNow());
+            load.style.marginTop = 6;
+            body.Add(load);
         }
     }
 }

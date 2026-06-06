@@ -1,6 +1,6 @@
 // In-game terrain operations palette (UI Toolkit). Shows in the default sculpt mode.
-// Sections: brush, grid, water, autosave. Terrain generation + heightmap live in the
-// separate SystemPalette (right side); the Env Colors section (hex-field swatches) is
+// Sections: brush, grid, water. Terrain generation, heightmap, and autosave live in the
+// separate SystemPalette; the Env Colors section (hex-field swatches) is
 // increment 2. Shared plumbing lives in PaletteBase; this applies the same side-effects
 // the live-tuning setters do (ApplyTerrainMaterial for grid, ApplyWater for water).
 
@@ -60,16 +60,6 @@ namespace NetworkDesigner.UI
             body.Add(SliderRow("Smooth", () => Designer.WaterSmoothness,
                 v => { Designer.WaterSmoothness = v; Designer.ApplyWater(); }, 0f, 1f, "0.00"));
 
-            // ---- AUTOSAVE ----
-            body.Add(Divider());
-            body.Add(SectionLabel("AUTOSAVE"));
-            body.Add(ToggleRow("Autosave", () => Designer.Autosave, v => Designer.Autosave = v));
-            var save = MakeButton("Save", () => Designer.SaveNow());
-            save.style.marginTop = 4;
-            body.Add(save);
-            var load = MakeButton("Load", () => Designer.LoadNow());
-            load.style.marginTop = 6;
-            body.Add(load);
         }
 
         void AddBrushButton(VisualElement body, string label, TerrainDesigner.BrushMode mode)

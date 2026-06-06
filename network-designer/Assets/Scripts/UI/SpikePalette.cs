@@ -15,6 +15,9 @@ namespace NetworkDesigner.UI
         protected override Color Accent => new Color(0.72f, 0.5f, 0.95f);   // purple = scratch
         protected override float PanelWidth => 300f;
 
+        protected override string FooterMode => "Spike";
+        protected override string FooterSub => string.Empty;
+
         // Not a brushing mode — exit any rail/scatter so no tool stays live behind it.
         protected override void OnOpened() => Designer.EnterSculptMode();
 
