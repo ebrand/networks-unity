@@ -5,6 +5,7 @@
 
 using UnityEngine;
 using UnityEngine.UIElements;
+using NetworkDesigner.Terrain;
 
 namespace NetworkDesigner.UI
 {
@@ -36,7 +37,8 @@ namespace NetworkDesigner.UI
             var altRow = ValueRow("Alt", out Label altV);
             var xRow = ValueRow("X", out Label xV);
             var zRow = ValueRow("Z", out Label zV);
-            body.Add(altRow); body.Add(xRow); body.Add(zRow);
+            var routeRow = ValueRow("Route", out Label routeV);
+            body.Add(altRow); body.Add(xRow); body.Add(zRow); body.Add(routeRow);
 
             _sync.Add(() =>
             {
@@ -46,6 +48,11 @@ namespace NetworkDesigner.UI
                 altV.text = p.y.ToString("#,0") + " m";
                 xV.text = p.x.ToString("#,0") + " m";
                 zV.text = p.z.ToString("#,0") + " m";
+
+                float len = TerrainRouteTool.TotalLength;
+                routeV.text = TerrainRouteTool.PointCount > 1
+                    ? (len >= 1000f ? (len / 1000f).ToString("0.00") + " km" : len.ToString("0") + " m")
+                    : "—";
             });
         }
 

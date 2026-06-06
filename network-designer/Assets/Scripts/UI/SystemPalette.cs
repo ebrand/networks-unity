@@ -143,6 +143,13 @@ namespace NetworkDesigner.UI
             var markersClr = MakeButton("Clear Markers", () => ScaleMarkers.Clear());
             markersClr.style.marginTop = 6;
             body.Add(markersClr);
+            // Route tool: left-click drops points on the terrain, right-click removes the
+            // last; the draped length shows in the top-right HUD.
+            body.Add(ToggleRow("Route Tool (L/R click)", () => TerrainRouteTool.Active,
+                v => TerrainRouteTool.Active = v));
+            var routeClr = MakeButton("Clear Route", () => TerrainRouteTool.Clear());
+            routeClr.style.marginTop = 6;
+            body.Add(routeClr);
         }
 
         // --- Terrain Generator modal: style + seed + params with a live hill-shaded
