@@ -67,9 +67,15 @@ namespace NetworkDesigner.UI
         public bool IsOpen => _open.Contains(PaletteId);
         public static bool IsOpenId(string id) => _open.Contains(id);
         public void SetOpen(bool v) { if (v) _open.Add(PaletteId); else _open.Remove(PaletteId); }
-        // Radio toggle by id: open it exclusively, or close it if it's already open.
-        public static void ToggleExclusive(string id) => SetExclusive(IsOpenId(id) ? null : id);
-        // Open this palette exclusively and run its OnOpened hook (e.g. Rail → Build mode).
+        // Radio toggle by id: close it if open, else open it exclusively AND run its
+        // OnOpened hook (so the editing mode follows — e.g. Terrain→sculpt, Rail→Build).
+        public static void ToggleExclusive(string id)
+        {
+            if (IsOpenId(id)) { SetExclusive(null); return; }
+            PaletteBase p = _all.Find(x => x.PaletteId == id);
+            if (p != null) p.OpenExclusive(); else SetExclusive(id);
+        }
+        // Open this palette exclusively and run its OnOpened hook.
         public void OpenExclusive() { SetExclusive(PaletteId); OnOpened(); }
         protected virtual void OnOpened() { }
         // Radio behaviour: open exactly `id` (closing every other palette), or null = none.

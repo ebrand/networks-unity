@@ -20,6 +20,9 @@ namespace NetworkDesigner.UI
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);   // terrain green
         protected override float PanelWidth => 320f;
 
+        // Opening Terrain returns the cursor to the sculpt brush (exits rail/scatter).
+        protected override void OnOpened() => Designer.EnterSculptMode();
+
         protected override void BuildBody(VisualElement body)
         {
             // ---- BRUSH ----
@@ -71,7 +74,8 @@ namespace NetworkDesigner.UI
 
         void AddBrushButton(VisualElement body, string label, TerrainDesigner.BrushMode mode)
         {
-            var b = MakeButton(label, () => Designer.Brush = mode);
+            // Picking a brush always lands you in sculpt mode (exits any rail/scatter).
+            var b = MakeButton(label, () => { Designer.EnterSculptMode(); Designer.Brush = mode; });
             b.style.marginBottom = 6;
             body.Add(b);
             _sync.Add(() => StyleActive(b, Designer.Brush == mode));

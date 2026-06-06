@@ -273,6 +273,8 @@ namespace NetworkDesigner.Terrain
         bool _slopeEndValid;
         float _slopeGradePct;     // live grade % for the readout
         List<Vector2> _slopePath; // this frame's plan-centreline path A->end (null = straight)
+        bool _slopeCornerPending; // curve mode: a bend corner is armed (Shift+click after A)
+        Vector3 _slopeCorner;     // the armed bend corner (world)
         readonly List<RailPlanLayer.EdgeGrade> _planGrades = new List<RailPlanLayer.EdgeGrade>();
         // Rail auto-slope (Alt+click node A, then node B): grade the rail bed between two
         // rail nodes to a constant ramp, if the result stays within the rail's max grade.
@@ -881,6 +883,7 @@ namespace NetworkDesigner.Terrain
             DrawSpeedLabels();
             DrawDesignSpeedReadout();
             DrawCurveInspectLabels();
+            DrawSlopeCurveBadge();
             if (_lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
@@ -980,8 +983,11 @@ namespace NetworkDesigner.Terrain
                     GUILayout.Label(g > SlopeMaxGradePct
                         ? $"Grade {_slopeGradePct:0.0}% — OVER {SlopeMaxGradePct:0.0}%"
                         : $"Grade {_slopeGradePct:0.0}% / warn {SlopeMaxGradePct:0.0}%");
-                    GUILayout.Label(_slopeHasGuide ? "Aligned to rail 'straight'." : "Free direction.");
-                    GUILayout.Label("Left-click point B to grade. Right-click cancels.");
+                    GUILayout.Label(_slopeCornerPending ? "Curve: bend set — click B to grade."
+                        : _slopeHasGuide ? "Aligned to rail 'straight'." : "Free direction.");
+                    GUILayout.Label(_slopeCornerPending
+                        ? "Left-click B to grade the curve. Right-click cancels the bend."
+                        : "Left-click B to grade. Shift+click a bend = curve. Right-click cancels.");
                 }
                 else
                     GUILayout.Label("Move over terrain to set point B.");
@@ -1075,6 +1081,18 @@ namespace NetworkDesigner.Terrain
             Color col = new Color(1f, 0.88f, 0.2f);   // PAC yellow
             for (int i = 0; i < pos.Count && i < deg.Count; i++)
                 DrawWorldText(cam, s, pos[i], $"{deg[i]}°", col);
+        }
+
+        // Slope curve mode: a "CURVE" badge anchored at the armed bend, so it's obvious
+        // the next click grades a curve (and where the bend is). Only while armed.
+        void DrawSlopeCurveBadge()
+        {
+            if (!_slopeCornerPending || Brush != BrushMode.Slope) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            DrawWorldText(cam, s, _slopeCorner + new Vector3(0f, 2f, 0f), "◆ CURVE",
+                new Color(0.4f, 1f, 0.5f));
         }
 
         // The design speed of the active rail/plan layer, floating near the cursor so
@@ -1428,6 +1446,10 @@ namespace NetworkDesigner.Terrain
         public bool IsRailMode => IsRailBuildMode || IsRailPlanMode;
         // Default terrain (sculpt) mode: no line layer and no scatter layer active.
         public bool IsSculptMode => _lineActive == null && _active == null;
+        // Exit any line/scatter mode back to the terrain brush (used when a palette that
+        // implies sculpt — Terrain/System — is opened, so the cursor follows the palette).
+        public void EnterSculptMode()
+        { _lineActive = null; _active = null; _railConnectNodeA = -1; HideLinePreviews(); }
         // Grid overlay toggle (the G key path), exposed for the palette footer button.
         public void ToggleGrid() { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
 
@@ -1722,7 +1744,7 @@ namespace NetworkDesigner.Terrain
             if (Brush != BrushMode.Flatten) _flattenTargetPicked = false;
             // Slope arming is only valid while the Slope brush is the active tool.
             if (Brush != BrushMode.Slope || _active != null || _lineActive != null)
-            { _slopeArmed = false; _slopeHasGuide = false; }
+            { _slopeArmed = false; _slopeHasGuide = false; _slopeCornerPending = false; }
 
             // One hover raycast per frame (against the TerrainCollider), shared
             // by the brush cursor and the sculpt itself.
@@ -1739,6 +1761,9 @@ namespace NetworkDesigner.Terrain
             // so treat "cursor over a panel" as not-over-terrain — suppresses the brush
             // cursor, line preview, and the world-space design-speed readout over the UI.
             if (overTerrain && MouseOverActivePanel()) overTerrain = false;
+            // System palette is terrain-generation only — no live brush/slope/flatten cursor
+            // or input while it's open (it implies sculpt mode but isn't a brushing mode).
+            if (overTerrain && NetworkDesigner.UI.PaletteBase.IsOpenId("System")) overTerrain = false;
 
             // Flatten mode: remember the world elevation under the cursor for the HUD.
             _flattenCursorValid = Brush == BrushMode.Flatten && overTerrain
@@ -1754,6 +1779,19 @@ namespace NetworkDesigner.Terrain
             {
                 Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
                 Vector2 c2 = new Vector2(hit.point.x, hit.point.z);
+                if (_slopeCornerPending)
+                {
+                    // Curve mode: grade follows a bezier A -> corner -> cursor.
+                    Vector2 corner = new Vector2(_slopeCorner.x, _slopeCorner.z);
+                    _slopePath = SampleSlopeCurve(a2, corner, c2);
+                    _slopeEnd = new Vector3(c2.x, hit.point.y, c2.y);
+                    _slopeEndValid = true;
+                    GridFromWorld(_slopeEnd, out float cgx, out float cgz);
+                    float crun = PathLengthXZ(_slopePath);
+                    _slopeGradePct = crun > 1e-3f ? (HeightAtGrid(cgx, cgz) - _slopeElevA) / crun * 100f : 0f;
+                }
+                else
+                {
                 // B snaps onto the plan centreline first (ride the planned alignment),
                 // then a rail end/edge (same as rail placement), else onto the
                 // "straight" guide line through A. (All off when rail snap is disabled —
@@ -1782,6 +1820,7 @@ namespace NetworkDesigner.Terrain
                 GridFromWorld(_slopeEnd, out float sex, out float sez);
                 float run = Vector2.Distance(a2, c2);
                 _slopeGradePct = run > 1e-3f ? (HeightAtGrid(sex, sez) - _slopeElevA) / run * 100f : 0f;
+                }
             }
             // Before A is placed: if the hover cursor is on the plan, size the brush to
             // the corridor too, so the ring previews the right width ahead of the click.
@@ -1985,24 +2024,36 @@ namespace NetworkDesigner.Terrain
                             }
                         }
                     }
+                    else if ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
+                             && !_slopeCornerPending)
+                    {
+                        // Shift+click after A arms a bend corner -> the next click grades a
+                        // curve A -> corner -> B (instead of a straight A->B corridor).
+                        _slopeCorner = hit.point;
+                        _slopeCornerPending = true;
+                    }
                     else if (_slopeEndValid)
                     {
                         GridFromWorld(_slopeEnd, out float ex, out float ez);
                         float elevB = HeightAtGrid(ex, ez);
-                        // If both ends sit on the plan and the graph connects them, grade
-                        // the corridor ALONG the planned centreline (following curves);
-                        // otherwise fall back to the straight A→B corridor.
+                        // Grade ALONG the path when there is one — a manual bend (curve mode)
+                        // or a connected plan centreline — else the straight A→B corridor.
                         if (_slopePath != null)
                             ApplySlopeAlongPath(_slopePath, _slopeElevA, elevB, BrushRadius);
                         else
                             ApplySlope(_slopeA, _slopeEnd, _slopeElevA, elevB);
-                        _slopeArmed = false; _slopeHasGuide = false;
+                        _slopeArmed = false; _slopeHasGuide = false; _slopeCornerPending = false;
                         _dirtySince = Time.realtimeSinceStartup;
                         RebuildContours();
                         ConformScatterAndLines();
                     }
                 }
-                if (Input.GetMouseButtonDown(1)) { _slopeArmed = false; _slopeHasGuide = false; }
+                // Right-click cancels the bend first (back to A), then disarms.
+                if (Input.GetMouseButtonDown(1))
+                {
+                    if (_slopeCornerPending) _slopeCornerPending = false;
+                    else { _slopeArmed = false; _slopeHasGuide = false; }
+                }
                 return;
             }
 
@@ -2531,6 +2582,18 @@ namespace NetworkDesigner.Terrain
                 }
             }
             RebuildChunkRegion(minX, minZ, (maxX - minX) + 1, (maxZ - minZ) + 1);
+        }
+
+        // Slope curve mode: sample a bezier A -> corner -> B into a polyline the slope
+        // corridor follows (same path format the plan-centreline grading uses).
+        static List<Vector2> SampleSlopeCurve(Vector2 a, Vector2 corner, Vector2 b)
+        {
+            const float f = 0.55f;   // how strongly the curve leans toward the corner
+            Vector2 c1 = Vector2.Lerp(a, corner, f), c2 = Vector2.Lerp(b, corner, f);
+            var pts = new List<Vector2>();
+            const int n = 24;
+            for (int i = 0; i <= n; i++) pts.Add(LineGraph.Bezier(a, c1, c2, b, i / (float)n));
+            return pts;
         }
 
         // Slope tool, plan-aware: grade a corridor that FOLLOWS a polyline (the plan

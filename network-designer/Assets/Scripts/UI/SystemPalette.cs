@@ -18,6 +18,9 @@ namespace NetworkDesigner.UI
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);   // match Terrain palette
         protected override float PanelWidth => 300f;
 
+        // Opening System exits any rail/scatter mode (these are terrain-level operations).
+        protected override void OnOpened() => Designer.EnterSculptMode();
+
         protected override void BuildBody(VisualElement body)
         {
             // ---- TERRAIN ----
