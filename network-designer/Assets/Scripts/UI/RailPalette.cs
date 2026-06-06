@@ -75,42 +75,6 @@ namespace NetworkDesigner.UI
             body.Add(NumberRow("Parallels", "",
                 () => Designer.RailLayer.ParallelCount,
                 v => Designer.RailLayer.ParallelCount = Mathf.Max(1, Mathf.RoundToInt(v)), 1f, 8f, "0"));
-
-            body.Add(Divider());
-            body.Add(SectionLabel("TRAINS"));
-            var trainRow = HBox();
-            var spawn = MakeButton("Spawn Train", SpawnTrain);
-            var clearTrains = MakeButton("Clear", () => FindManager()?.ClearTrains());
-            spawn.style.marginRight = 6;
-            trainRow.Add(spawn); trainRow.Add(clearTrains);
-            body.Add(trainRow);
-            // Live on the running train (TrainManager pushes these each frame).
-            body.Add(NumberRow("Ride Height", "m",
-                () => { var m = FindManager(); return m != null ? m.RideHeight : 0f; },
-                v => FindOrCreateManager().RideHeight = v, -2f, 5f, "0.00"));
-            body.Add(NumberRow("Car Spacing", "m",
-                () => { var m = FindManager(); return m != null ? m.CarSpacing : 18f; },
-                v => FindOrCreateManager().CarSpacing = v, 4f, 80f, "0.#"));
         }
-
-        NetworkDesigner.Trains.TrainManager _tm;
-        NetworkDesigner.Trains.TrainManager FindManager()
-            => _tm != null ? _tm : (_tm = FindFirstObjectByType<NetworkDesigner.Trains.TrainManager>());
-
-        // Find the scene's TrainManager or make one (so Spawn / the tunables always work).
-        // With no prefabs assigned it spawns placeholder cubes until you set Locomotive/Wagon.
-        NetworkDesigner.Trains.TrainManager FindOrCreateManager()
-        {
-            var m = FindManager();
-            if (m == null)
-            {
-                m = _tm = new GameObject("TrainManager").AddComponent<NetworkDesigner.Trains.TrainManager>();
-                Debug.LogWarning("[RailPalette] Created a TrainManager — assign Locomotive_01 / " +
-                    "Wagon_01 prefabs on it for real trains (placeholder cubes until then).");
-            }
-            return m;
-        }
-
-        void SpawnTrain() => FindOrCreateManager().SpawnTestTrain();
     }
 }

@@ -14,7 +14,8 @@ namespace NetworkDesigner.UI
         public override string PaletteId => "Launcher";
         public override bool Toggleable => false;        // no button for itself
         protected override bool ShouldShow() => true;    // always visible
-        protected override bool AnchorBottom => true;    // bottom-left
+        protected override bool AnchorBottom => true;    // bottom-right (clear of the
+        protected override bool AnchorRight => true;     // top-left content palettes)
         protected override bool ShowFooter => false;     // footer lives on the open palette
         protected override float PanelWidth => 210f;
 

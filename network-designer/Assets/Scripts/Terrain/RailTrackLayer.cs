@@ -599,13 +599,14 @@ namespace NetworkDesigner.Terrain
         // World centerline of the LONGEST route between two endpoints (degree-1 nodes),
         // for a test train to run on. Y = rail top (bed + rail height). Falls back to the
         // longest route from node 0 when there are no endpoints (e.g. a closed loop).
-        // NOTE: bed Y follows the terrain (NodeBedY), not the graded/bridged bed — fine on
-        // at-grade track, approximate on deep cut/fill until we sample the true grade.
+        // Y is the LINEAR grade between node bed heights per edge — the same straight slope
+        // the rail mesh is built at — so the train rides the smooth graded bed rather than
+        // bobbing over the terrain bumps the rail bridges/fills over.
         public bool TryLongestRouteWorld(TerrainField field, out List<Vector3> world)
         {
             world = null;
             if (Graph == null || Graph.Nodes.Count < 2) return false;
-            List<Vector2> best = null; float bestLen = -1f;
+            List<int> best = null; float bestLen = -1f;
 
             var ends = new List<int>();
             for (int n = 0; n < Graph.Nodes.Count; n++) if (NodeDegree(n) == 1) ends.Add(n);
@@ -613,28 +614,60 @@ namespace NetworkDesigner.Terrain
             {
                 for (int i = 0; i < ends.Count; i++)
                     for (int j = i + 1; j < ends.Count; j++)
-                        if (TryCenterlinePath(ends[i], ends[j], out List<Vector2> p))
-                        { float L = PolyLenXZ(p); if (L > bestLen) { bestLen = L; best = p; } }
+                    {
+                        List<int> nodes = BfsNodePath(ends[i], ends[j]);
+                        float L = NodePathLenXZ(nodes);
+                        if (L > bestLen) { bestLen = L; best = nodes; }
+                    }
             }
             if (best == null)   // no connected endpoint pair (loop / single edge) — scan from 0
             {
                 for (int j = 1; j < Graph.Nodes.Count; j++)
-                    if (TryCenterlinePath(0, j, out List<Vector2> p))
-                    { float L = PolyLenXZ(p); if (L > bestLen) { bestLen = L; best = p; } }
+                {
+                    List<int> nodes = BfsNodePath(0, j);
+                    float L = NodePathLenXZ(nodes);
+                    if (L > bestLen) { bestLen = L; best = nodes; }
+                }
             }
             if (best == null || best.Count < 2) return false;
 
-            float lift = Mathf.Max(0f, RailHeight);
-            world = new List<Vector3>(best.Count);
-            for (int k = 0; k < best.Count; k++)
-                world.Add(new Vector3(best[k].x, NodeBedY(field, best[k]) + lift, best[k].y));
-            return true;
+            world = SampleNodePathGraded(field, best);
+            return world != null && world.Count >= 2;
         }
 
-        static float PolyLenXZ(List<Vector2> p)
+        // Sample the centerline of a node path into world points, Y = linear grade between
+        // the edge's two node bed heights (matches the rail build), lifted to the rail top.
+        List<Vector3> SampleNodePathGraded(TerrainField field, List<int> nodes)
         {
+            float lift = Mathf.Max(0f, RailHeight);
+            var pts = new List<Vector3>();
+            for (int k = 0; k < nodes.Count - 1; k++)
+            {
+                LineEdge e = FindEdge(nodes[k], nodes[k + 1]);
+                if (e == null) return null;
+                bool fwd = e.A == nodes[k];
+                Vector2 q0 = Graph.Nodes[e.A], q3 = Graph.Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = q3 - q0; q1 = q0 + d / 3f; q2 = q0 + d * (2f / 3f); }
+                float yA = NodeBedY(field, Graph.Nodes[nodes[k]]) + lift;
+                float yB = NodeBedY(field, Graph.Nodes[nodes[k + 1]]) + lift;
+                int steps = Mathf.Clamp(Mathf.CeilToInt(Vector2.Distance(q0, q3) / 2f), 1, 4000);
+                for (int s = (k == 0 ? 0 : 1); s <= steps; s++)
+                {
+                    float t = s / (float)steps;
+                    Vector2 xz = LineGraph.Bezier(q0, q1, q2, q3, fwd ? t : 1f - t);
+                    pts.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, t), xz.y));   // graded, not terrain
+                }
+            }
+            return pts;
+        }
+
+        float NodePathLenXZ(List<int> nodes)
+        {
+            if (nodes == null || nodes.Count < 2) return -1f;
             float len = 0f;
-            for (int i = 1; i < p.Count; i++) len += Vector2.Distance(p[i - 1], p[i]);
+            for (int i = 1; i < nodes.Count; i++)
+                len += Vector2.Distance(Graph.Nodes[nodes[i - 1]], Graph.Nodes[nodes[i]]);
             return len;
         }
 

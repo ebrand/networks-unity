@@ -807,7 +807,8 @@ namespace NetworkDesigner.Terrain
             // so the old always-on IMGUI status strip is gone.
             DrawBrushModeIcon();   // per-mode glyph beside the ring (sculpt modes only)
             bool sculptHud = (Brush == BrushMode.Slope || Brush == BrushMode.Flatten)
-                             && _lineActive == null && _active == null;
+                             && _lineActive == null && _active == null
+                             && NetworkDesigner.UI.PaletteBase.IsOpenId("Terrain");   // only with Terrain palette up
             if (_lineActive == null && _active == null && !sculptHud) return;
             Matrix4x4 prev = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
@@ -1453,10 +1454,10 @@ namespace NetworkDesigner.Terrain
         // Grid overlay toggle (the G key path), exposed for the palette footer button.
         public void ToggleGrid() { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
 
-        // Entering rail mode (L/K) opens the Rail palette exclusively (closing any other
-        // open palette); toggling back to sculpt returns to the default Terrain palette.
+        // Entering rail mode (L/K) opens the Rail palette exclusively; toggling back out of
+        // rail (L/K again) closes it to NO palette (a clean toggle), not the Terrain palette.
         void SyncPaletteToMode()
-            => NetworkDesigner.UI.PaletteBase.SetExclusive(IsRailMode ? "Rail" : "Terrain");
+            => NetworkDesigner.UI.PaletteBase.SetExclusive(IsRailMode ? "Rail" : null);
         // Switch to build (plan=false) or plan (plan=true). Radio-style: clicking the
         // mode you're already in is a no-op (use the L/K hotkeys to toggle back out).
         public void SetRailMode(bool plan)
@@ -1761,9 +1762,11 @@ namespace NetworkDesigner.Terrain
             // so treat "cursor over a panel" as not-over-terrain — suppresses the brush
             // cursor, line preview, and the world-space design-speed readout over the UI.
             if (overTerrain && MouseOverActivePanel()) overTerrain = false;
-            // System palette is terrain-generation only — no live brush/slope/flatten cursor
-            // or input while it's open (it implies sculpt mode but isn't a brushing mode).
-            if (overTerrain && NetworkDesigner.UI.PaletteBase.IsOpenId("System")) overTerrain = false;
+            // Sculpt tools (brush / slope / flatten) are live ONLY while the Terrain palette
+            // is open. In sculpt mode with no Terrain palette (none open, or System) there's
+            // no active terrain tool. (Rail/scatter set _lineActive/_active, so unaffected.)
+            if (overTerrain && _lineActive == null && _active == null
+                && !NetworkDesigner.UI.PaletteBase.IsOpenId("Terrain")) overTerrain = false;
 
             // Flatten mode: remember the world elevation under the cursor for the HUD.
             _flattenCursorValid = Brush == BrushMode.Flatten && overTerrain

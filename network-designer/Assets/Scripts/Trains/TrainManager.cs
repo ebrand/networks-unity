@@ -25,6 +25,26 @@ namespace NetworkDesigner.Trains
 
         readonly List<TrainAgent> _trains = new List<TrainAgent>();
 
+        const string PrefSpacing = "train.carSpacing";
+        const string PrefRide    = "train.rideHeight";
+
+        // The manager is often auto-spawned at runtime, so palette tweaks would vanish on
+        // stop. Persist the live tunables in PlayerPrefs: load on start, save when play
+        // ends — so spacing/ride-height survive across plays. (Inspector value is the
+        // initial default until a pref exists.)
+        void Awake()
+        {
+            if (PlayerPrefs.HasKey(PrefSpacing)) CarSpacing = PlayerPrefs.GetFloat(PrefSpacing);
+            if (PlayerPrefs.HasKey(PrefRide))    RideHeight = PlayerPrefs.GetFloat(PrefRide);
+        }
+
+        void OnDisable()
+        {
+            PlayerPrefs.SetFloat(PrefSpacing, CarSpacing);
+            PlayerPrefs.SetFloat(PrefRide, RideHeight);
+            PlayerPrefs.Save();
+        }
+
         // Push live tunables (spacing / ride height) to every running train each frame, so
         // adjusting them from the palette updates the train in place — no re-spawn needed.
         void Update()
