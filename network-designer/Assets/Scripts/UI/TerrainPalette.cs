@@ -15,7 +15,6 @@ namespace NetworkDesigner.UI
     {
         public override string PaletteId => "Terrain";
         public override string MenuLabel => "Terrain (N)";
-        protected override bool DefaultOpen => true;
         protected override string Title => "Terrain Operations";
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);   // terrain green
         protected override float PanelWidth => 320f;

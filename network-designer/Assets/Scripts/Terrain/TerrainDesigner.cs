@@ -969,7 +969,14 @@ namespace NetworkDesigner.Terrain
             }
             // DrawPalette returns true only on a pack create/update/delete — persist
             // the standalone packs file then (packs aren't part of the debounced save).
-            if (_active != null) { if (_active.DrawPalette()) { _dirtySince = Time.realtimeSinceStartup; SavePacks(); } return; }
+            // Scatter (IMGUI) palette — skipped while the UI Toolkit Scatter/Fence palette
+            // is open (it drives the same layer), so they don't both show.
+            if (_active != null)
+            {
+                if (!NetworkDesigner.UI.PaletteBase.IsOpenId("ScatterFence")
+                    && _active.DrawPalette()) { _dirtySince = Time.realtimeSinceStartup; SavePacks(); }
+                return;
+            }
 
             // Slope tool (brush 5) readout — no other panel is up in sculpt mode.
             if (Brush == BrushMode.Slope)
@@ -1119,7 +1126,7 @@ namespace NetworkDesigner.Terrain
                 Vector2 dir = cur - tail;
                 if (dir.sqrMagnitude > 1e-4f) { dir.Normalize(); anchor += new Vector3(dir.x, 0f, dir.y) * 10f; }
             }
-            DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col);
+            DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col, 0.75f, new Vector2(-15f, 0f));
         }
 
         // Curve-inspection readout for the hovered curve: leg distances + deflection angle
@@ -1192,17 +1199,23 @@ namespace NetworkDesigner.Terrain
         }
 
         // Plain centred text (no box) at a world position, in the given colour.
-        void DrawWorldText(Camera cam, float s, Vector3 world, string text, Color color)
+        void DrawWorldText(Camera cam, float s, Vector3 world, string text, Color color,
+                           float fontScale = 1f, Vector2 screenOffset = default)
         {
             Vector3 sp = cam.WorldToScreenPoint(world);
             if (sp.z <= 0f) return;
-            float mx = sp.x / s, my = (Screen.height - sp.y) / s;
+            float mx = sp.x / s + screenOffset.x, my = (Screen.height - sp.y) / s + screenOffset.y;
+            var style = GUI.skin.label;
+            int prevSize = style.fontSize;
+            if (!Mathf.Approximately(fontScale, 1f))
+                style.fontSize = Mathf.Max(1, Mathf.RoundToInt((prevSize > 0 ? prevSize : 12) * fontScale));
             var content = new GUIContent(text);
-            Vector2 size = GUI.skin.label.CalcSize(content);
+            Vector2 size = style.CalcSize(content);
             Color prev = GUI.color;
             GUI.color = color;
             GUI.Label(new Rect(mx - size.x * 0.5f, my - size.y * 0.5f, size.x + 2f, size.y), content);
             GUI.color = prev;
+            style.fontSize = prevSize;   // restore the shared style
         }
 
         // Speed-limit labels along each rail line (interrogate existing speeds). Shown
@@ -1451,6 +1464,19 @@ namespace NetworkDesigner.Terrain
         // implies sculpt — Terrain/System — is opened, so the cursor follows the palette).
         public void EnterSculptMode()
         { _lineActive = null; _active = null; _railConnectNodeA = -1; HideLinePreviews(); }
+
+        // --- Scatter/Fence palette hooks ---
+        public bool IsTreeMode  => ReferenceEquals(_active, TreeLayer);
+        public bool IsRockMode  => ReferenceEquals(_active, RockLayer);
+        public bool IsFenceMode => ReferenceEquals(_lineActive, FenceLayer);
+        public void EnterTreeMode()  { if (!IsTreeMode)  SetScatterMode(TreeLayer); }
+        public void EnterRockMode()  { if (!IsRockMode)  SetScatterMode(RockLayer); }
+        public void EnterFenceMode() { if (!IsFenceMode) SetLineMode(FenceLayer); }
+        // T/R/F enter scatter/fence + open the Scatter/Fence palette exclusively; toggling
+        // back out (key again) closes it to no palette.
+        void SyncScatterPalette()
+            => NetworkDesigner.UI.PaletteBase.SetExclusive(
+                   IsTreeMode || IsRockMode || IsFenceMode ? "ScatterFence" : null);
         // Grid overlay toggle (the G key path), exposed for the palette footer button.
         public void ToggleGrid() { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
 
@@ -1653,9 +1679,9 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha5)) Brush = BrushMode.Slope;
             // T/R/F toggle the active mode (mutually exclusive; press the same
             // key again to return to sculpt).
-            if (Input.GetKeyDown(KeyCode.T)) SetScatterMode(TreeLayer);
-            if (Input.GetKeyDown(KeyCode.R)) SetScatterMode(RockLayer);
-            if (Input.GetKeyDown(KeyCode.F)) SetLineMode(FenceLayer);
+            if (Input.GetKeyDown(KeyCode.T)) { SetScatterMode(TreeLayer); SyncScatterPalette(); }
+            if (Input.GetKeyDown(KeyCode.R)) { SetScatterMode(RockLayer); SyncScatterPalette(); }
+            if (Input.GetKeyDown(KeyCode.F)) { SetLineMode(FenceLayer); SyncScatterPalette(); }
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) { SetLineMode(RailLayer); SyncPaletteToMode(); }
             if (Input.GetKeyDown(KeyCode.K)) { SetLineMode(PlanLayer); SyncPaletteToMode(); }
@@ -1868,7 +1894,9 @@ namespace NetworkDesigner.Terrain
             // Brush outline sits at the SNAPPED placement point (cursorVis), so the
             // ring tracks where a node will actually land instead of the raw cursor —
             // matches the grid/rail snap in both sculpt and line modes.
-            UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis);
+            // The brush ring isn't meaningful while laying rail/lines (they have their own
+            // preview), so hide it in line modes — only show it in sculpt/scatter.
+            UpdateBrushCursor(ShowBrushCursor && overTerrain && _lineActive == null, cursorVis);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.

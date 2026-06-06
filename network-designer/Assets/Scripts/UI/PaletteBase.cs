@@ -353,6 +353,16 @@ namespace NetworkDesigner.UI
             return row;
         }
 
+        // A fixed-max-height vertical scroll box for long lists, so the rest of the body
+        // (controls above/below) stays put while the list scrolls inside it.
+        protected static ScrollView ScrollBox(float maxHeight)
+        {
+            var sv = new ScrollView(ScrollViewMode.Vertical);
+            sv.style.maxHeight = maxHeight;
+            sv.style.flexShrink = 0;
+            return sv;
+        }
+
         protected static VisualElement HBox()
         {
             var e = new VisualElement();

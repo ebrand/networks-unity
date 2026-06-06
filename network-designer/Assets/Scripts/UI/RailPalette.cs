@@ -36,12 +36,12 @@ namespace NetworkDesigner.UI
                 StyleActive(planBtn,  Designer.IsRailPlanMode);
             });
 
-            body.Add(NumberRow("Dgn Speed", "km/h",
+            body.Add(NumberRow("Dgn Speed (cmd)", "km/h",
                 () => Designer.RailLayer.SpeedLimitKmh, v => Designer.RailLayer.SpeedLimitKmh = v, 10f, 200f, "0"));
             body.Add(NumberRow("Max Grade", "deg",
                 () => Designer.RailLayer.MaxGradeDeg, v => Designer.RailLayer.MaxGradeDeg = v, 0.5f, 15f, "0.#"));
 
-            body.Add(ToggleRow("Force Grade",
+            body.Add(ToggleRow("Force Grade (B)",
                 () => Designer.RailLayer.OverrideGrade, v => Designer.RailLayer.OverrideGrade = v));
             body.Add(ToggleRow("Show Nodes",
                 () => Designer.RailLayer.ShowNodePucks, v => Designer.RailLayer.ShowNodePucks = v));
@@ -62,9 +62,13 @@ namespace NetworkDesigner.UI
             actRow.Add(carve); actRow.Add(bop);
             actRow.style.marginTop = 4;
             body.Add(actRow);
-            var clear = MakeButton("Clear Plan", () => Designer.ClearPlan());
-            clear.style.marginTop = 6;
-            body.Add(clear);
+            var clearRow = HBox();
+            var clearPlan = MakeButton("Clear Plan", () => Designer.ClearPlan());
+            var clearRail = MakeButton("Clear Rail", () => Designer.ClearRail());
+            clearPlan.style.marginRight = 6;
+            clearRow.Add(clearPlan); clearRow.Add(clearRail);
+            clearRow.style.marginTop = 6;
+            body.Add(clearRow);
 
             body.Add(Divider());
 
@@ -72,7 +76,7 @@ namespace NetworkDesigner.UI
                 () => Designer.RailLayer.ParallelEnabled, v => Designer.RailLayer.ParallelEnabled = v));
             body.Add(NumberRow("Spacing", "m",
                 () => Designer.RailLayer.ParallelSpacing, v => Designer.RailLayer.ParallelSpacing = v, 5f, 100f, "0.#"));
-            body.Add(NumberRow("Parallels", "",
+            body.Add(NumberRow("Parallels (opt)", "",
                 () => Designer.RailLayer.ParallelCount,
                 v => Designer.RailLayer.ParallelCount = Mathf.Max(1, Mathf.RoundToInt(v)), 1f, 8f, "0"));
         }

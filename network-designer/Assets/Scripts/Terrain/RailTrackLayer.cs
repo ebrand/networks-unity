@@ -387,8 +387,8 @@ namespace NetworkDesigner.Terrain
                 LineEdge ce = FindEdge(_chainTail, end);
                 if (ce != null) { ce.HasCurve = true; ce.ControlA = cc1; ce.ControlB = cc2; ce.SpeedLimit = SpeedLimitKmh; }
                 ExtendParallel(_chainTail, end, true, cc1, cc2);
-                _chainTail = end;
-                _cornerPending = false;
+                EndChain();   // auto-end after the edge: stop chaining (the node keeps its
+                              // edge so it isn't pruned); click it to resume a line.
                 Rebuild(field);
                 return;
             }
@@ -416,7 +416,7 @@ namespace NetworkDesigner.Terrain
             Graph.AddEdge(_chainTail, idx);
             TagEdge(_chainTail, idx);
             ExtendParallel(_chainTail, idx, false, Vector2.zero, Vector2.zero);
-            _chainTail = idx;
+            EndChain();   // auto-end after the edge (see curve branch).
             Rebuild(field);
         }
 

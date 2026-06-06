@@ -481,6 +481,23 @@ namespace NetworkDesigner.Terrain
 
         public List<TreePack> CollectPacks() => new List<TreePack>(_packs);
 
+        // --- pack access for the UI Toolkit Scatter/Fence palette + pack modal ---
+        public int ActivePack => _activePack;
+        public string ActivePackName =>
+            _activePack >= 0 && _activePack < _packs.Count && _packs[_activePack] != null
+                ? _packs[_activePack].Name : "";
+        public List<string> PackNames()
+        {
+            var names = new List<string>(_packs.Count);
+            for (int i = 0; i < _packs.Count; i++) names.Add(_packs[i] != null ? _packs[i].Name : "");
+            return names;
+        }
+        public void SelectPackByName(string name)
+        {
+            int idx = _packs.FindIndex(p => p != null && p.Name == name);
+            if (idx >= 0) ApplyPack(idx);
+        }
+
         // Replace the pack presets (e.g. from the standalone packs file, which is
         // authoritative over the terrain autosave so packs survive a terrain reset).
         public void SetPacks(List<TreePack> packs)
