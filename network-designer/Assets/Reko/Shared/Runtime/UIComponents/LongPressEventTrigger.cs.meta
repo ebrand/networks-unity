@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: c7b43afa1d8263c4cb21f45ea457c50c
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/Shared/Runtime/UIComponents/LongPressEventTrigger.cs
+  uploadId: 719103

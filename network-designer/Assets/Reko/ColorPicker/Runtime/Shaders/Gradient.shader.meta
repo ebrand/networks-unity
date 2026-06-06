@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: be404c5622bb8264e8ce1619517e7c73
+ShaderImporter:
+  externalObjects: {}
+  defaultTextures: []
+  nonModifiableTextures: []
+  preprocessorOverride: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Runtime/Shaders/Gradient.shader
+  uploadId: 719103

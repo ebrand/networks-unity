@@ -1,0 +1,18 @@
+{
+    "name": "Reko.Shared.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:ba86ae610304e5c4ea4addcbf472fd9a"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

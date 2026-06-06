@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: 1d9ec60deb8ccd247bb79b165aa568bd
+ShaderImporter:
+  externalObjects: {}
+  defaultTextures: []
+  nonModifiableTextures: []
+  preprocessorOverride: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Runtime/Shaders/Hue.shader
+  uploadId: 719103

@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 35e94567635ed61448e10b61be237dab
+PrefabImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Prefabs/ColorPalette/ColorPalette.prefab
+  uploadId: 719103

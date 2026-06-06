@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 811413caa7dabd54c88e5f798cfb2e69
+PrefabImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Prefabs/Components/HexInput.prefab
+  uploadId: 719103

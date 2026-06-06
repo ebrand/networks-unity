@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: e6609621856a460479966eb6c1873cf1
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Runtime/Scripts/ColorPicker/ColorOutput.cs
+  uploadId: 719103

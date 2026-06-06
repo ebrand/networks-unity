@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: dbece7df09b29e34e80595edfe79f45c
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Runtime/Scripts/Components/Slider2DCoordinate.cs
+  uploadId: 719103

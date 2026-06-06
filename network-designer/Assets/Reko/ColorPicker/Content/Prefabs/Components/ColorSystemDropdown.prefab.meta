@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: ef1b60fb24bd28b488a2d2aaaf579f9c
+PrefabImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Prefabs/Components/ColorSystemDropdown.prefab
+  uploadId: 719103

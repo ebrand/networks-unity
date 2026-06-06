@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 1319349587fa0db4f8322ceed6314985
+DefaultImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Samples/Demo.unity
+  uploadId: 719103

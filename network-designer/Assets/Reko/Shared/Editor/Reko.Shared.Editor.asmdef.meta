@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 1d65be749ddf93b4cb97325e8c2bd2a7
+AssemblyDefinitionImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/Shared/Editor/Reko.Shared.Editor.asmdef
+  uploadId: 719103

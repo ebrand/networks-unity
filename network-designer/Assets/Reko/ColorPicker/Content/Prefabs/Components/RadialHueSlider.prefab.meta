@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: dc5cfa679c49f6d419b82cfe33d5f34a
+PrefabImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Prefabs/Components/RadialHueSlider.prefab
+  uploadId: 719103

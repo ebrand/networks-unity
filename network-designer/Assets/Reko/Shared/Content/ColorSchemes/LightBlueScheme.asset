@@ -1,0 +1,24 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 56e3622bac5fd284b9ce110da6f9a5ab, type: 3}
+  m_Name: LightBlueScheme
+  m_EditorClassIdentifier: 
+  Background: {r: 0.79647017, g: 0.8238168, b: 0.85800004, a: 1}
+  OnBackground: {r: 0.06, g: 0.06, b: 0.06, a: 1}
+  PanelBackground: {r: 0.9137255, g: 0.94509804, b: 0.9843137, a: 1}
+  OnPanelBackground: {r: 0.15, g: 0.15, b: 0.15, a: 1}
+  Primary: {r: 0, g: 0.564, b: 0.752, a: 1}
+  OnPrimary: {r: 0.97199994, g: 0.97199994, b: 0.97199994, a: 1}
+  Secondary: {r: 1, g: 0.6862745, b: 0.38431376, a: 1}
+  OnSecondary: {r: 0.056999996, g: 0.056999996, b: 0.056999996, a: 1}
+  PrimaryVariant: {r: 0.603, g: 0.9017732, b: 1, a: 1}
+  SecondaryVariant: {r: 1, g: 0.8119745, b: 0.631, a: 1}

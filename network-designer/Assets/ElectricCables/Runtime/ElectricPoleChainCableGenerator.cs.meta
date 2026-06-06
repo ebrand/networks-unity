@@ -1,0 +1,9 @@
+fileFormatVersion: 2
+guid: 9c712b4de78174f4380383c47eba8256
+AssetOrigin:
+  serializedVersion: 1
+  productId: 164400
+  packageName: Polyzero Free Procedural Power Line Generator
+  packageVersion: 1.0
+  assetPath: Assets/Polyzero/ElectricCables/Runtime/ElectricPoleChainCableGenerator.cs
+  uploadId: 912116

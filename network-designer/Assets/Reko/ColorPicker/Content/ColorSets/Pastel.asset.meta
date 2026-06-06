@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 7535c6270231f914fb2c3b2dcbbd8864
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 11400000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/ColorSets/Pastel.asset
+  uploadId: 719103

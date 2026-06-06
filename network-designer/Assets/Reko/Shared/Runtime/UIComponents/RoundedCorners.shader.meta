@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: eb7f5b7331cece14eb3aa2138615777a
+ShaderImporter:
+  externalObjects: {}
+  defaultTextures: []
+  nonModifiableTextures: []
+  preprocessorOverride: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/Shared/Runtime/UIComponents/RoundedCorners.shader
+  uploadId: 719103

@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 221fbe07e6ecd8645bbe3f95282d8ec8
+PrefabImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Prefabs/Components/TextInputWithLabel.prefab
+  uploadId: 719103

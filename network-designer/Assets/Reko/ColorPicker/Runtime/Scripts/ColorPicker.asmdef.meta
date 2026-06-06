@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: e517a7901a5cce145b43f409bc5fd5b4
+AssemblyDefinitionImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Runtime/Scripts/ColorPicker.asmdef
+  uploadId: 719103

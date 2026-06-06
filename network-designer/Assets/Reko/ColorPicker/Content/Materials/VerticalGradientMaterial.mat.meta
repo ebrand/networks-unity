@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: abb3ea2527c2a1e4a8af5708bee56c8e
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Materials/VerticalGradientMaterial.mat
+  uploadId: 719103

@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: 67493d218b343184283d72fe7879db61
+PrefabImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Prefabs/Components/HueValueSlider.prefab
+  uploadId: 719103

@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: ee6c6848ff031364eb80d358585bfe39
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/Materials/HueMaterial.mat
+  uploadId: 719103

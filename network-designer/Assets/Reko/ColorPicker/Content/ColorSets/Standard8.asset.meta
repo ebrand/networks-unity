@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: d89cf0025ad33854ca61995b3dbaade3
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 11400000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 264955
+  packageName: Color Picker (uGUI)
+  packageVersion: 1.2.0
+  assetPath: Assets/Reko/ColorPicker/Content/ColorSets/Standard8.asset
+  uploadId: 719103
