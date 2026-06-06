@@ -135,6 +135,14 @@ namespace NetworkDesigner.UI
             var demClear = MakeButton("Clear DEM World", () => DemTerrainWorld.Clear());
             demClear.style.marginTop = 6;
             body.Add(demClear);
+            // Scale-check: drop known-size markers (1.8m person → 1km pole) on the surface
+            // below the camera. Descend to ground level to compare against the landscape.
+            var markers = MakeButton("Drop Scale Markers", () => ScaleMarkers.Drop());
+            markers.style.marginTop = 10;
+            body.Add(markers);
+            var markersClr = MakeButton("Clear Markers", () => ScaleMarkers.Clear());
+            markersClr.style.marginTop = 6;
+            body.Add(markersClr);
         }
 
         // --- Terrain Generator modal: style + seed + params with a live hill-shaded
