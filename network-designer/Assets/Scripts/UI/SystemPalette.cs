@@ -128,15 +128,25 @@ namespace NetworkDesigner.UI
             int si = layerNames.IndexOf("Cliff_Layer");
             if (si < 0) si = layerNames.IndexOf("Rock_Layer");
             if (si < 0) si = layerNames.Count > 1 ? 1 : 0;
+            int pi = layerNames.IndexOf("RockyGround_Layer");
+            if (pi < 0) pi = layerNames.IndexOf("Dirt_Layer");
+            if (pi < 0) pi = layerNames.IndexOf("GrassyRocks_Layer");
+            if (pi < 0) pi = fi;
+            int sbi = layerNames.IndexOf("Rock_Layer");
+            if (sbi < 0) sbi = layerNames.IndexOf("RockyGround_Layer");
+            if (sbi < 0) sbi = layerNames.IndexOf("GrassyRocks_Layer");
+            if (sbi < 0) sbi = si;
             var flatDd = GroundDropdown(layerNames, fi);
             var steepDd = GroundDropdown(layerNames, si);
+            var patchDd = GroundDropdown(layerNames, pi);    // flat macro-variation layer (breaks grass tiling)
+            var steepBDd = GroundDropdown(layerNames, sbi);  // steep macro-variation layer (breaks rock tiling)
             // Surface mode: 0 = satellite albedo, 1 = flat green, 2 = slope textures.
             int demMode = 0;
-            float demTexSize = 25f;   // texture repeat in metres (slope mode)
+            float demTexSize = 30f;   // texture repeat in metres (slope mode)
             float demLod = 5f;        // heightmap pixel error (lower = LOD detail farther out)
             void ApplyDemSurface()
             {
-                if (demMode == 2) DemTerrainWorld.SetTextured(flatDd.value, steepDd.value, 22f, 38f, demTexSize);
+                if (demMode == 2) DemTerrainWorld.SetTextured(flatDd.value, steepDd.value, patchDd.value, steepBDd.value, 22f, 38f, demTexSize);
                 else DemTerrainWorld.SetGreen(demMode == 1);
             }
             var surfRow = HBox(); surfRow.style.marginBottom = 6;
@@ -150,6 +160,8 @@ namespace NetworkDesigner.UI
             // Flat/Steep variant rows (only matter in Slope mode); changing re-applies live.
             body.Add(GroundRow("Flat", flatDd, () => { if (demMode == 2) ApplyDemSurface(); }));
             body.Add(GroundRow("Steep", steepDd, () => { if (demMode == 2) ApplyDemSurface(); }));
+            body.Add(GroundRow("Steep B", steepBDd, () => { if (demMode == 2) ApplyDemSurface(); }));
+            body.Add(GroundRow("Patch", patchDd, () => { if (demMode == 2) ApplyDemSurface(); }));
             // Texture repeat (m/tile) — live, no slope recompute.
             body.Add(SliderRow("Tex Size", () => demTexSize,
                 v => { demTexSize = v; if (demMode == 2) DemTerrainWorld.SetTextureTiling(v); }, 2f, 200f, "0"));
@@ -205,17 +217,35 @@ namespace NetworkDesigner.UI
             float grassDensity = 40f;   // max grass instances per detail cell (lush vs sparse)
             float grassDist = 350f;     // metres the grass draws out to
             float grassSize = 1.3f;     // clump scale (bigger → clumps overlap into a carpet)
+            float accents = 6f;         // sparse bush/flower sprinkle (0 = grass only)
             body.Add(SliderRow("Grass Density", () => grassDensity, v => grassDensity = v, 4f, 160f, "0"));
-            body.Add(SliderRow("Grass Size", () => grassSize, v => grassSize = v, 0.5f, 3f, "0.0"));
+            body.Add(SliderRow("Grass Size", () => grassSize, v => grassSize = v, 0.5f, 10f, "0.0"));
             body.Add(SliderRow("Grass Dist", () => grassDist,
                 v => { grassDist = v; DemTerrainWorld.SetGrassViewDistance(v); }, 100f, 1000f, "0"));
+            body.Add(SliderRow("Accents (bush/flower)", () => accents, v => accents = v, 0f, 20f, "0"));
             var grassDetail = MakeButton("Grass Detail (apply)",
-                () => DemTerrainWorld.SetGrassDetail(22f, 38f, 1024, grassDist, Mathf.RoundToInt(grassDensity), 3, grassSize));
+                () => DemTerrainWorld.SetGrassDetail(22f, 38f, 1024, grassDist, Mathf.RoundToInt(grassDensity), 3, grassSize, accents));
             grassDetail.style.marginTop = 6;
             body.Add(grassDetail);
             var grassDetailClr = MakeButton("Clear Detail", () => DemTerrainWorld.ClearGrassDetail());
             grassDetailClr.style.marginTop = 6;
             body.Add(grassDetailClr);
+
+            // Cinematic lighting: drop in one of the pack's URP post-processing profiles + a
+            // punchier sun. Biggest single visual upgrade (color grading, AO, tonemapping).
+            var profiles = DemLighting.ListProfiles();
+            int dbi = profiles.IndexOf(DemLighting.Custom); if (dbi < 0) dbi = profiles.Count > 0 ? 0 : -1;
+            var ppDd = GroundDropdown(profiles, dbi);
+            float sunInt = 1.1f;
+            body.Add(GroundRow("Look", ppDd, () => { }));
+            body.Add(SliderRow("Sun", () => sunInt, v => sunInt = v, 0.3f, 2.5f, "0.0"));
+            var lightBtn = MakeButton("Apply Lighting",
+                () => { if (ppDd.value != null) DemLighting.Apply(ppDd.value, sunInt); });
+            lightBtn.style.marginTop = 6;
+            body.Add(lightBtn);
+            var lightClr = MakeButton("Clear Lighting", () => DemLighting.Clear());
+            lightClr.style.marginTop = 6;
+            body.Add(lightClr);
         }
 
         // A ground-variant dropdown (full-width, shrinkable) preset to an index.

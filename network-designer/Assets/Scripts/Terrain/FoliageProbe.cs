@@ -111,7 +111,7 @@ namespace NetworkDesigner.Terrain
 
         // Make sure exactly one TTFE Global Controller is in the scene so the grass shaders
         // get their wind/season globals (otherwise they render with default/zero globals).
-        static void EnsureController()
+        public static void EnsureController()
         {
             if (GameObject.Find("(TTFE) GLOBAL CONTROLLER") != null) return;
             // any object whose name starts with the controller is good enough; also check by type-ish name

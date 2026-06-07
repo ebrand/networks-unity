@@ -34,8 +34,9 @@ namespace NetworkDesigner.Terrain
         static UnityEngine.Terrain[,] _grid;
         static TerrainLayer[,] _albedo;   // per-tile draped imagery (null if none)
         static TerrainLayer _green;       // shared flat-green layer
-        static TerrainLayer _ground, _rock;  // runtime copies of the flat + steep TerrainLayers
-        static string _flatVar, _steepVar;   // which TerrainLayer assets are loaded
+        static TerrainLayer _ground, _rock, _patch, _rock2;   // runtime copies: grass, cliff, earth-patch, rock-variant
+        static string _flatVar, _steepVar, _patchVar, _rock2Var; // which TerrainLayer assets are loaded
+        static bool _macroActive;                     // last SetTextured used the 4-layer anti-tiling blend
         static GameObject _detailHolder;     // hidden parent for runtime grass detail-mesh prototypes
 
         // City folders under Assets/Heightmaps/Highres that contain DEM tiles.
@@ -116,15 +117,24 @@ namespace NetworkDesigner.Terrain
             return list;
         }
 
+        // Slope texturing with anti-tiling. When patch+steepB are given (the default), uses a
+        // 4-layer blend — grass/earth on flats, cliff/rock-variant on steeps — each pair mixed
+        // by low-frequency world-space noise so NEITHER the meadow nor the cliffs read as a
+        // repeating texture. Four layers = URP terrain's single-pass limit, so no extra cost.
         public static void SetTextured(string flatVariant, string steepVariant,
+                                       string patchVariant = null, string steepBVariant = null,
                                        float slopeLow = 22f, float slopeHigh = 38f,
-                                       float tileSizeMeters = 25f, int alphaRes = 256)
+                                       float tileSizeMeters = 30f, int alphaRes = 256)
         {
             if (_grid == null) return;
-            EnsureTextureLayers(flatVariant, steepVariant, tileSizeMeters);
-            // Keep each layer's authored tileSize (the pack tunes it) — the Tex Size slider
-            // overrides it live via SetTextureTiling if you want to change it.
-            var layers = new[] { _ground, _rock };
+            bool macro = !string.IsNullOrEmpty(patchVariant) && !string.IsNullOrEmpty(steepBVariant);
+            _macroActive = macro;
+            EnsureTextureLayers(flatVariant, steepVariant, macro ? patchVariant : null,
+                                macro ? steepBVariant : null, tileSizeMeters);
+            // macro layers: 0 grass, 1 earth, 2 cliff, 3 rock-variant. plain: 0 grass, 1 rock.
+            var layers = macro ? new[] { _ground, _patch, _rock, _rock2 } : new[] { _ground, _rock };
+            int nLayers = layers.Length;
+
             int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
             for (int r = 0; r < rows; r++)
                 for (int c = 0; c < cols; c++)
@@ -135,7 +145,9 @@ namespace NetworkDesigner.Terrain
                     td.terrainLayers = layers;
                     if (td.alphamapResolution != alphaRes) td.alphamapResolution = alphaRes;
                     int res = td.alphamapResolution;
-                    var a = new float[res, res, 2];
+                    Vector3 origin = t.transform.position;   // world origin → noise continuous across tiles
+                    float sx = td.size.x, sz = td.size.z;
+                    var a = new float[res, res, nLayers];
                     for (int j = 0; j < res; j++)
                     {
                         float v = res > 1 ? (float)j / (res - 1) : 0f;
@@ -143,13 +155,38 @@ namespace NetworkDesigner.Terrain
                         {
                             float u = res > 1 ? (float)i / (res - 1) : 0f;
                             float rock = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(slopeLow, slopeHigh, td.GetSteepness(u, v)));
-                            a[j, i, 0] = 1f - rock;   // grass
-                            a[j, i, 1] = rock;        // rock
+                            float groundTotal = 1f - rock;
+                            if (macro)
+                            {
+                                float wx = origin.x + u * sx, wz = origin.z + v * sz;
+                                // flats: grass↔earth; steeps: cliff↔rock-variant. Different
+                                // freqs/offsets so the two blends don't share a pattern. Only
+                                // compute the blend that actually has weight here (most cells
+                                // are purely one or the other) — unset channels stay 0.
+                                if (groundTotal > 0.001f)
+                                {
+                                    float nFlat = Mathf.PerlinNoise(wx * 0.0055f, wz * 0.0055f) * 0.65f
+                                                + Mathf.PerlinNoise(wx * 0.017f + 100f, wz * 0.017f + 100f) * 0.35f;
+                                    float patchMix = Mathf.SmoothStep(0.42f, 0.62f, nFlat);
+                                    a[j, i, 0] = groundTotal * (1f - patchMix);   // grass
+                                    a[j, i, 1] = groundTotal * patchMix;          // earth/dry patch
+                                }
+                                if (rock > 0.001f)
+                                {
+                                    float nSteep = Mathf.PerlinNoise(wx * 0.0090f + 530f, wz * 0.0090f + 530f) * 0.6f
+                                                 + Mathf.PerlinNoise(wx * 0.026f + 900f, wz * 0.026f + 900f) * 0.4f;
+                                    float rockMix = Mathf.SmoothStep(0.40f, 0.60f, nSteep);
+                                    a[j, i, 2] = rock * (1f - rockMix);           // cliff
+                                    a[j, i, 3] = rock * rockMix;                  // rock variant
+                                }
+                            }
+                            else { a[j, i, 0] = groundTotal; a[j, i, 1] = rock; }
                         }
                     }
                     td.SetAlphamaps(0, 0, a);
                 }
-            Debug.Log($"[DemTerrainWorld] slope textures applied (rock {slopeLow:0}-{slopeHigh:0}°).");
+            Debug.Log($"[DemTerrainWorld] slope textures applied (rock {slopeLow:0}-{slopeHigh:0}°"
+                      + (macro ? $", 4-layer macro blend)." : ")."));
         }
 
         // Geometry LOD across all tiles: heightmapPixelError (LOWER = mesh stays detailed
@@ -170,11 +207,10 @@ namespace NetworkDesigner.Terrain
         // blend — just updates the shared layers and pokes each tile to refresh.
         public static void SetTextureTiling(float meters)
         {
-            meters = Mathf.Max(0.5f, meters);
-            if (_ground != null) _ground.tileSize = new Vector2(meters, meters);
-            if (_rock != null) _rock.tileSize = new Vector2(meters, meters);
+            ApplyTileSizes(meters);   // keeps the per-layer offset frequencies
             if (_grid == null || _ground == null) return;
-            var layers = new[] { _ground, _rock };
+            var layers = (_macroActive && _patch != null && _rock2 != null)
+                ? new[] { _ground, _patch, _rock, _rock2 } : new[] { _ground, _rock };
             foreach (var t in _grid)
                 if (t != null && t.terrainData != null) t.terrainData.terrainLayers = layers;
         }
@@ -188,28 +224,47 @@ namespace NetworkDesigner.Terrain
         // material and we pivot to a streamed prefab scatterer instead.
         public static void SetGrassDetail(float slopeLow = 22f, float slopeHigh = 38f,
                                           int detailRes = 1024, float viewDistance = 350f,
-                                          int maxPerCell = 40, int maxPrototypes = 3,
-                                          float sizeScale = 1.3f)
+                                          int maxPerCell = 40, int maxGrass = 3,
+                                          float sizeScale = 1.3f, float accents = 6f)
         {
             if (_grid == null) { Debug.LogWarning("[DemTerrainWorld] build a DEM world first."); return; }
-            var protos = BuildGrassPrototypes(maxPrototypes);
-            if (protos.Length == 0) { Debug.LogWarning("[DemTerrainWorld] no grass prefabs found for detail layer."); return; }
+            FoliageProbe.EnsureController();   // wind globals for the TTFE grass shader (no sway without it)
 
-            var dp = new DetailPrototype[protos.Length];
-            for (int p = 0; p < protos.Length; p++)
+            EnsureDetailHolder();
+            var grass = LoadPrototypes(GrassFolder, Mathf.Max(1, maxGrass), GrassScore);
+            if (grass.Length == 0) { Debug.LogWarning("[DemTerrainWorld] no grass prefabs found for detail layer."); return; }
+            // Sparse accents — a couple of bush + flower types interspersed to break up the grass.
+            bool useAccents = accents > 0.001f;
+            var bush = useAccents ? LoadPrototypes(BushFolder, 2, AccentScore) : System.Array.Empty<GameObject>();
+            var flower = useAccents ? LoadPrototypes(FlowerFolder, 2, AccentScore) : System.Array.Empty<GameObject>();
+            int nG = grass.Length, nB = bush.Length, nF = flower.Length;
+
+            var all = new System.Collections.Generic.List<GameObject>(nG + nB + nF);
+            all.AddRange(grass); all.AddRange(bush); all.AddRange(flower);
+
+            var dp = new DetailPrototype[all.Count];
+            for (int p = 0; p < all.Count; p++)
+            {
+                // per-kind scale: grass uses the Grass Size slider; bushes chunkier; flowers small.
+                float lo, hiW, hiH;
+                if (p < nG) { lo = 1.0f * sizeScale; hiW = 1.7f * sizeScale; hiH = 1.5f * sizeScale; }
+                else if (p < nG + nB) { lo = 1.0f; hiW = 1.8f; hiH = 1.7f; }   // bushes
+                else { lo = 0.7f; hiW = 1.2f; hiH = 1.1f; }                    // flowers
                 dp[p] = new DetailPrototype
                 {
-                    prototype = protos[p],
+                    prototype = all[p],
                     usePrototypeMesh = true,
                     useInstancing = true,                       // render the prototype's own material
                     renderMode = DetailRenderMode.VertexLit,    // required when instancing meshes
-                    // Bigger, varied clumps so neighbours OVERLAP into a carpet instead of
-                    // reading as isolated dots from any height (scale multipliers on the mesh).
-                    minWidth = 1.0f * sizeScale, maxWidth = 1.7f * sizeScale,
-                    minHeight = 1.0f * sizeScale, maxHeight = 1.5f * sizeScale,
+                    minWidth = lo, maxWidth = hiW,
+                    minHeight = lo, maxHeight = hiH,
                     noiseSpread = 0.3f,
                     healthyColor = Color.white, dryColor = Color.white,
                 };
+            }
+
+            int bushPer1000 = Mathf.RoundToInt(accents * 8f);      // ~sparse shrubs
+            int flowerPer1000 = Mathf.RoundToInt(accents * 14f);   // a few more flower clusters
 
             int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
             for (int r = 0; r < rows; r++)
@@ -231,12 +286,23 @@ namespace NetworkDesigner.Terrain
                         for (int i = 0; i < res; i++)
                         {
                             float u = res > 1 ? (float)i / (res - 1) : 0f;
-                            float rock = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(slopeLow, slopeHigh, td.GetSteepness(u, v)));
-                            int count = Mathf.RoundToInt(maxPerCell * (1f - rock));
-                            if (count <= 0) continue;
-                            int layer = ((i * 73856093) ^ (j * 19349663)) % dp.Length;   // spread variety across prototypes
-                            if (layer < 0) layer += dp.Length;
-                            maps[layer][j, i] = count;          // detail layer is indexed [z, x] like the alphamap
+                            float ground = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(slopeLow, slopeHigh, td.GetSteepness(u, v)));
+                            if (ground <= 0.001f) continue;       // bare on the steeps
+
+                            int count = Mathf.RoundToInt(maxPerCell * ground);
+                            if (count > 0)
+                            {
+                                int gl = (((i * 73856093) ^ (j * 19349663)) & 0x7fffffff) % nG;   // spread grass variety
+                                maps[gl][j, i] = count;
+                            }
+                            // Sparse accents, only on flatter ground (not the slope fringe).
+                            if (useAccents && ground > 0.5f)
+                            {
+                                int hb = (((i * 92837111) ^ (j * 689287499)) & 0x7fffffff) % 1000;
+                                if (nB > 0 && hb < bushPer1000) maps[nG + (hb % nB)][j, i] = 1;
+                                int hf = (((i * 283923481) ^ (j * 198491317)) & 0x7fffffff) % 1000;
+                                if (nF > 0 && hf < flowerPer1000) maps[nG + nB + (hf % nF)][j, i] = 1 + (hf % 3);
+                            }
                         }
                     }
                     for (int p = 0; p < dp.Length; p++) td.SetDetailLayer(0, 0, p, maps[p]);
@@ -244,8 +310,7 @@ namespace NetworkDesigner.Terrain
                     t.detailObjectDistance = Mathf.Clamp(viewDistance, 0f, 1000f);
                     t.detailObjectDensity = 1f;
                 }
-            Debug.Log($"[DemTerrainWorld] grass DETAIL applied: {dp.Length} prototype(s), res {detailRes}, view {viewDistance:0}m. " +
-                      "If the grass looks FLAT/untextured, the TTFE material isn't instancing as a detail mesh → pivot to streamed scatter.");
+            Debug.Log($"[DemTerrainWorld] foliage detail applied: {nG} grass + {nB} bush + {nF} flower prototype(s), res {detailRes}, view {viewDistance:0}m.");
         }
 
         public static void ClearGrassDetail()
@@ -299,33 +364,51 @@ namespace NetworkDesigner.Terrain
         // Detail prototypes need a plain MeshFilter+MeshRenderer GameObject (the grass prefabs
         // are LODGroups), so we lift LOD0's mesh + material into a hidden holder and enable GPU
         // instancing on MATERIAL COPIES (never mutate the pack assets). Grass-named prefabs first.
-        static GameObject[] BuildGrassPrototypes(int max)
+        const string VegRoot = "Assets/Toby Fredson/Rocky Hills Environment - Whitebark Pine/RHEWP_Demo/Prefabs/Prefabs_Vegetation";
+        const string GrassFolder = VegRoot + "/PV_Grass";
+        const string BushFolder = VegRoot + "/PV_Bushes";
+        const string FlowerFolder = VegRoot + "/PV_Flowers";
+
+        // Prefer the FULL GREEN grass: "Clump"/"Grass", reject "Dry" (pale tan dots) and sparse weeds.
+        static int GrassScore(string p)
+        {
+            int s = 0;
+            if (p.IndexOf("Clump", System.StringComparison.OrdinalIgnoreCase) >= 0) s += 4;
+            if (p.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0) s += 2;
+            if (p.IndexOf("Dry", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 5;
+            if (p.IndexOf("Shot", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 2;
+            if (p.IndexOf("Stalk", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 2;
+            if (p.IndexOf("Plants", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 3;
+            return s;
+        }
+
+        // For bushes/flowers: just avoid the dry/dead variants so accents stay green/colourful.
+        static int AccentScore(string p)
+        {
+            int s = 0;
+            if (p.IndexOf("Dry", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 5;
+            if (p.IndexOf("Dead", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 5;
+            return s;
+        }
+
+        static void EnsureDetailHolder()
         {
             CleanupDetailHolder();
-            var list = new System.Collections.Generic.List<GameObject>();
-#if UNITY_EDITOR
             _detailHolder = new GameObject("DemDetailProtos") { hideFlags = HideFlags.HideAndDontSave };
             _detailHolder.SetActive(false);
+        }
 
-            const string folder = "Assets/Toby Fredson/Rocky Hills Environment - Whitebark Pine/RHEWP_Demo/Prefabs/Prefabs_Vegetation/PV_Grass";
+        // Load up to `max` detail-mesh prototypes from a vegetation folder, best-scored first.
+        // Detail prototypes need a plain MeshFilter+MeshRenderer GameObject (the prefabs are
+        // LODGroups), so BuildSingleMeshProto lifts LOD0 into the hidden holder.
+        static GameObject[] LoadPrototypes(string folder, int max, System.Func<string, int> score)
+        {
+            var list = new System.Collections.Generic.List<GameObject>();
+#if UNITY_EDITOR
             var paths = new System.Collections.Generic.List<string>();
             foreach (string guid in UnityEditor.AssetDatabase.FindAssets("t:Prefab", new[] { folder }))
                 paths.Add(UnityEditor.AssetDatabase.GUIDToAssetPath(guid));
-            // Pick the FULL GREEN grass: prefer "Clump"/"Grass" (lush tufts), reject "Dry" (pale
-            // tan → reads as washed-out dots) and "Shot"/"Stalk"/"Plants" (sparse weeds).
-            paths.Sort((x, y) => Score(y) - Score(x));
-            int Score(string p)
-            {
-                int s = 0;
-                if (p.IndexOf("Clump", System.StringComparison.OrdinalIgnoreCase) >= 0) s += 4;
-                if (p.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0) s += 2;
-                if (p.IndexOf("Dry", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 5;
-                if (p.IndexOf("Shot", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 2;
-                if (p.IndexOf("Stalk", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 2;
-                if (p.IndexOf("Plants", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 3;
-                return s;
-            }
-
+            if (score != null) paths.Sort((x, y) => score(y) - score(x));
             foreach (string path in paths)
             {
                 if (list.Count >= max) break;
@@ -374,10 +457,24 @@ namespace NetworkDesigner.Terrain
             _detailHolder = null;
         }
 
-        static void EnsureTextureLayers(string flat, string steep, float tileSize)
+        static void EnsureTextureLayers(string flat, string steep, string patch, string steepB, float tileSize)
         {
             if (_ground == null || _flatVar != flat) { _ground = CloneLayer(flat); _flatVar = flat; }
             if (_rock == null || _steepVar != steep) { _rock = CloneLayer(steep); _steepVar = steep; }
+            if (patch != null && (_patch == null || _patchVar != patch)) { _patch = CloneLayer(patch); _patchVar = patch; }
+            if (steepB != null && (_rock2 == null || _rock2Var != steepB)) { _rock2 = CloneLayer(steepB); _rock2Var = steepB; }
+            ApplyTileSizes(tileSize);
+        }
+
+        // Explicit, DIFFERENT tile sizes per layer so no two repeats line up — and rock tiles
+        // larger (its features are bigger; small tiles made the cliffs read as obvious repeats).
+        static void ApplyTileSizes(float m)
+        {
+            m = Mathf.Max(0.5f, m);
+            if (_ground != null) _ground.tileSize = new Vector2(m, m);
+            if (_patch != null) _patch.tileSize = new Vector2(m * 1.6f, m * 1.6f);
+            if (_rock != null) _rock.tileSize = new Vector2(m * 2.2f, m * 2.2f);
+            if (_rock2 != null) _rock2.tileSize = new Vector2(m * 3.3f, m * 3.3f);
         }
 
         // Runtime COPY of a named TerrainLayer asset (so tile-size tweaks don't mutate the
