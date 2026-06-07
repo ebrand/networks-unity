@@ -359,8 +359,12 @@ namespace NetworkDesigner.Terrain
         {
             if (_grid == null || radius <= 0f) return;
             float r2 = radius * radius;
-            foreach (var t in _grid)
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            var edited = new System.Collections.Generic.List<(int, int)>();
+            for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
             {
+                var t = _grid[r, c];
                 if (t == null || t.terrainData == null) continue;
                 var td = t.terrainData;
                 Vector3 o = t.transform.position;
@@ -407,8 +411,48 @@ namespace NetworkDesigner.Terrain
                         val = Mathf.Clamp01(val);
                         if (val != hm[zz, xx]) { hm[zz, xx] = val; changed = true; }
                     }
-                if (changed) td.SetHeights(x0, z0, hm);
+                if (changed) { td.SetHeights(x0, z0, hm); edited.Add((r, c)); }
             }
+            // Reconcile shared tile edges so brushes (esp. Smooth, which averages within a tile)
+            // don't crack open seams between grid blocks. All DEM tiles share the same height
+            // normalization, so averaging the shared edge values is exact.
+            foreach (var (r, c) in edited)
+            {
+                StitchEast(r, c); StitchEast(r, c - 1);     // shared columns (±X)
+                StitchSouth(r, c); StitchSouth(r - 1, c);   // shared rows (±Z)
+            }
+        }
+
+        // Average the shared COLUMN between [r,c] (its +X edge) and [r,c+1] (its -X edge).
+        static void StitchEast(int r, int c)
+        {
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            if (r < 0 || r >= rows || c < 0 || c + 1 >= cols) return;
+            var L = _grid[r, c]; var R = _grid[r, c + 1];
+            if (L == null || R == null || L.terrainData == null || R.terrainData == null) return;
+            int res = L.terrainData.heightmapResolution;
+            if (R.terrainData.heightmapResolution != res) return;
+            var lc = L.terrainData.GetHeights(res - 1, 0, 1, res);   // [z,1]
+            var rc = R.terrainData.GetHeights(0, 0, 1, res);
+            for (int z = 0; z < res; z++) { float a = 0.5f * (lc[z, 0] + rc[z, 0]); lc[z, 0] = a; rc[z, 0] = a; }
+            L.terrainData.SetHeights(res - 1, 0, lc);
+            R.terrainData.SetHeights(0, 0, rc);
+        }
+
+        // Average the shared ROW between [r,c] (its -Z edge, z=0) and [r+1,c] (its +Z edge, z=res-1).
+        static void StitchSouth(int r, int c)
+        {
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            if (r < 0 || r + 1 >= rows || c < 0 || c >= cols) return;
+            var N = _grid[r, c]; var S = _grid[r + 1, c];
+            if (N == null || S == null || N.terrainData == null || S.terrainData == null) return;
+            int res = N.terrainData.heightmapResolution;
+            if (S.terrainData.heightmapResolution != res) return;
+            var nr = N.terrainData.GetHeights(0, 0, res, 1);          // [1,res] row z=0
+            var sr = S.terrainData.GetHeights(0, res - 1, res, 1);    // row z=res-1
+            for (int x = 0; x < res; x++) { float a = 0.5f * (nr[0, x] + sr[0, x]); nr[0, x] = a; sr[0, x] = a; }
+            N.terrainData.SetHeights(0, 0, nr);
+            S.terrainData.SetHeights(0, res - 1, sr);
         }
 
         // Average of a (2k+1)² box around (x,z), clamped to the sub-array.
