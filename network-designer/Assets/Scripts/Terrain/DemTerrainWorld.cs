@@ -32,6 +32,9 @@ namespace NetworkDesigner.Terrain
         // Live state for the surface mode (albedo / flat-green / slope-textured), kept so we
         // can swap without rebuilding.
         static UnityEngine.Terrain[,] _grid;
+        static GameObject _root;          // the world root — held directly (Find can't see it when hidden)
+        public static GameObject Root => _root;
+        public static bool Building;      // true while Build() runs (blocks the main thread) — drives the loading overlay
         static TerrainLayer[,] _albedo;   // per-tile draped imagery (null if none)
         static TerrainLayer _green;       // shared flat-green layer
         static TerrainLayer _ground, _rock, _patch, _rock2;   // runtime copies: grass, cliff, earth-patch, rock-variant
@@ -65,7 +68,8 @@ namespace NetworkDesigner.Terrain
             _grid = null; _albedo = null; _green = null;
             CleanupDetailHolder();
 
-            var existing = GameObject.Find(RootName);
+            var existing = _root != null ? _root : GameObject.Find(RootName);
+            _root = null;
             if (existing != null)
             {
                 if (Application.isPlaying) Object.Destroy(existing);
@@ -345,6 +349,21 @@ namespace NetworkDesigner.Terrain
                 Debug.LogWarning("[DemTerrainWorld] no DEM surface under the camera's XZ.");
         }
 
+        // Re-situate the camera for the DEM context: a tilted overview centred on the world,
+        // backed off enough to read the landscape (not the whole 73km from orbit). Used when
+        // switching to / loading the DEM backend.
+        public static void FrameCamera()
+        {
+            if (_grid == null) return;
+            var fly = Object.FindFirstObjectByType<NetworkDesigner.Designer.FlyCameraController>();
+            if (fly == null) { DropCameraToSurface(); return; }
+            WireCameraToDem();
+            float cx = WorldWidthX * 0.5f, cz = WorldLengthZ * 0.5f;
+            Vector3 center = new Vector3(cx, SampleHeight(cx, cz), cz);
+            float span = Mathf.Clamp(Mathf.Max(WorldWidthX, WorldLengthZ) * 0.3f, 8000f, 30000f);
+            fly.Frame(center, span);   // Pitch 35°, backs off ~span*0.8 looking at centre
+        }
+
         public enum SculptMode { Raise, Lower, Smooth, Flatten }
 
         // Brush-edit the DEM Unity Terrain heights at a world point, across tile seams. Every
@@ -423,6 +442,20 @@ namespace NetworkDesigner.Terrain
             }
         }
 
+        // Reconcile EVERY adjacent tile pair's shared edge — used after a build so the tiny
+        // edge mismatches (from resampling 1016-wide edge tiles to 1025) don't show as seams.
+        public static void StitchAllSeams()
+        {
+            if (_grid == null) return;
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                {
+                    StitchEast(r, c);    // (r,c) | (r,c+1)
+                    StitchSouth(r, c);   // (r,c) | (r+1,c)
+                }
+        }
+
         // Average the shared COLUMN between [r,c] (its +X edge) and [r,c+1] (its -X edge).
         static void StitchEast(int r, int c)
         {
@@ -468,6 +501,13 @@ namespace NetworkDesigner.Terrain
 
         // ── Surface queries (for ITerrainSurface / network draping onto the DEM) ───────────
         public static bool HasWorld => _grid != null;
+
+        // Show/hide the whole DEM world (all tiles + their colliders) without rebuilding it —
+        // used by the Low-Poly/DEM backend toggle. Heightmap sampling still works while hidden.
+        public static void SetVisible(bool on)
+        {
+            if (_root != null && _root.activeSelf != on) _root.SetActive(on);
+        }
 
         static UnityEngine.Terrain FirstTile()
         {
@@ -711,7 +751,7 @@ namespace NetworkDesigner.Terrain
             }
 
             float range = Mathf.Max(1f, normTo - normFrom);
-            var root = new GameObject(RootName);
+            var root = _root = new GameObject(RootName);
             var grid = new UnityEngine.Terrain[rows, cols];
             _grid = grid; _albedo = new TerrainLayer[rows, cols];   // for the live albedo/green toggle
 
@@ -749,6 +789,7 @@ namespace NetworkDesigner.Terrain
                 }
 
             ApplyAlbedo(dir, grid, rows, cols, tileX, tileZ);
+            StitchAllSeams();    // reconcile shared tile edges so seams don't show on load
             WireCameraToDem();   // make the camera's clamp/speed-damping follow the DEM surface
 
             Debug.Log($"[DemTerrainWorld] built {tiles.Count} tiles ({rows}x{cols}), " +

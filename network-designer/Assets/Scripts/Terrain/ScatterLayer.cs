@@ -375,44 +375,30 @@ namespace NetworkDesigner.Terrain
             if (budget <= 0) return false;
             if (budget > 60) budget = 60;
 
-            float r2 = brushRadius * brushRadius;
-            int reach = Mathf.CeilToInt(brushRadius / s) + 1;
-            int ccx = Mathf.FloorToInt(center.x / s);
-            int ccz = Mathf.FloorToInt(center.z / s);
-
-            _candKey.Clear();
-            _candPos.Clear();
-            for (int gz = ccz - reach; gz <= ccz + reach; gz++)
-                for (int gx = ccx - reach; gx <= ccx + reach; gx++)
-                {
-                    long key = CellKey(gx, gz);
-                    if (_byCell.TryGetValue(key, out List<PlacedTree> occ) && occ.Count > 0) continue;
-                    CellPoint(gx, gz, s, out float px, out float pz);
-                    float dx = px - center.x, dz = pz - center.z;
-                    if (dx * dx + dz * dz > r2) continue;
-                    // Skip faces steeper than the limit (>= 89 deg = no limit).
-                    if (MaxSlopeDeg < 89f && field.SampleSlopeDegrees(px, pz) > MaxSlopeDeg) continue;
-                    // Skip cells below the water surface (+ shoreline margin).
-                    if (AvoidWater && field.SampleHeight(px, pz) < waterLevel + WaterlineMargin) continue;
-                    _candKey.Add(key);
-                    _candPos.Add(new Vector2(px, pz));
-                }
-            if (_candKey.Count == 0) return false;
-
+            // Place by RANDOMLY SAMPLING points in the brush disc rather than scanning every cell
+            // — cost is O(budget), independent of brush radius. The old full scan was O((r/s)^2),
+            // which on the DEM meant hundreds of thousands of height samples per frame on a big brush.
             float lo = Mathf.Min(ScaleRange.x, ScaleRange.y);
             float hi = Mathf.Max(ScaleRange.x, ScaleRange.y);
-            int place = Mathf.Min(budget, _candKey.Count);
-            for (int i = 0; i < place; i++)
+            int placed = 0;
+            int tries = budget * 10;   // attempts to find empty/valid cells before giving up this frame
+            for (int t = 0; t < tries && placed < budget; t++)
             {
-                int j = UnityEngine.Random.Range(i, _candKey.Count);
-                (_candKey[i], _candKey[j]) = (_candKey[j], _candKey[i]);
-                (_candPos[i], _candPos[j]) = (_candPos[j], _candPos[i]);
-                Vector2 p = _candPos[i];
-                Spawn(field, RandomPrefab(), _candKey[i], p.x, p.y,
+                float ang = UnityEngine.Random.value * Mathf.PI * 2f;
+                float rad = brushRadius * Mathf.Sqrt(UnityEngine.Random.value);   // uniform over the disc
+                int gx = Mathf.FloorToInt((center.x + Mathf.Cos(ang) * rad) / s);
+                int gz = Mathf.FloorToInt((center.z + Mathf.Sin(ang) * rad) / s);
+                long key = CellKey(gx, gz);
+                if (_byCell.TryGetValue(key, out List<PlacedTree> occ) && occ.Count > 0) continue;  // cell taken
+                CellPoint(gx, gz, s, out float px, out float pz);
+                if (MaxSlopeDeg < 89f && field.SampleSlopeDegrees(px, pz) > MaxSlopeDeg) continue;   // too steep
+                if (AvoidWater && field.SampleHeight(px, pz) < waterLevel + WaterlineMargin) continue; // underwater
+                Spawn(field, RandomPrefab(), key, px, pz,
                       UnityEngine.Random.Range(0f, 360f), UnityEngine.Random.Range(lo, hi));
+                placed++;
             }
-            _accum -= place;
-            return true;
+            _accum -= placed;
+            return placed > 0;
         }
 
         // The first item to claim a cell keeps it.

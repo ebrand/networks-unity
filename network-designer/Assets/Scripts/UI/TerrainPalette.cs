@@ -35,13 +35,20 @@ namespace NetworkDesigner.UI
             void SetBackend(int b)
             {
                 _backend = b;
-                Designer.SculptDem = b == 1;   // the shared brush sculpts the DEM in DEM mode
+                Designer.SetActiveBackend(b == 1);   // route all tools + show only the active terrain
                 lowBox.style.display = b == 0 ? DisplayStyle.Flex : DisplayStyle.None;
                 demBox.style.display = b == 1 ? DisplayStyle.Flex : DisplayStyle.None;
             }
+            // Flipping reframes the camera onto the (very different-scale) active terrain.
+            void Flip(int b)
+            {
+                SetBackend(b);
+                if (b == 1 && DemTerrainWorld.HasWorld) DemTerrainWorld.FrameCamera();
+                else if (b == 0) Designer.ResetCamera();
+            }
             var toggleRow = HBox();
-            var lowBtn = MakeButton("Low-Poly", () => SetBackend(0));
-            var demBtn = MakeButton("DEM", () => SetBackend(1));
+            var lowBtn = MakeButton("Low-Poly", () => Flip(0));
+            var demBtn = MakeButton("DEM", () => Flip(1));
             lowBtn.style.marginRight = 6;
             toggleRow.Add(lowBtn); toggleRow.Add(demBtn);
             toggleRow.style.marginBottom = 10;
@@ -71,39 +78,13 @@ namespace NetworkDesigner.UI
             body.Add(SliderRow("Radius", () => Designer.BrushRadius, v => Designer.BrushRadius = v,
                 0.5f, Mathf.Max(1f, Designer.MaxBrushRadius), "0"));
             body.Add(SliderRow("Strength", () => Designer.BrushStrength, v => Designer.BrushStrength = v, 0f, 100f, "0"));
-            body.Add(SliderRow("Falloff", () => Designer.BrushFalloff, v => Designer.BrushFalloff = v, 0f, 1f, "0.00"));
             body.Add(Divider());
         }
 
         // ───────────────────────── Low-poly chunked-mesh terrain ─────────────────────────
         void BuildLowPoly(VisualElement body)
         {
-            // ---- GRID ---- (changes need ApplyTerrainMaterial to hit the shader)
-            body.Add(Divider());
-            body.Add(SectionLabel("GRID"));
-            body.Add(SliderRow("Strength", () => Designer.GridStrength,
-                v => { Designer.GridStrength = v; Designer.ApplyTerrainMaterial(); }, 0f, 1f, "0.00"));
-            body.Add(SliderRow("Line", () => Designer.GridLineWidth,
-                v => { Designer.GridLineWidth = v; Designer.ApplyTerrainMaterial(); }, 0.5f, 4f, "0.0"));
-            body.Add(NumberRow("Spacing", "m", () => Designer.GridSpacing,
-                v => { Designer.GridSpacing = v; Designer.ApplyTerrainMaterial(); }, 1f, 100f, "0.#"));
-            body.Add(NumberRow("Major", "", () => Designer.GridMajorEvery,
-                v => { Designer.GridMajorEvery = v; Designer.ApplyTerrainMaterial(); }, 1f, 100f, "0"));
-
-            // ---- WATER ---- (changes need ApplyWater)
-            body.Add(Divider());
-            body.Add(SectionLabel("WATER"));
-            body.Add(ToggleRow("Show Water",
-                () => Designer.ShowWater, v => { Designer.ShowWater = v; Designer.ApplyWater(); }));
-            body.Add(SliderRow("Level", () => Designer.WaterLevel,
-                v => { Designer.WaterLevel = v; Designer.ApplyWater(); }, -50f, 300f, "0.0"));
-            body.Add(SliderRow("Alpha", () => Designer.WaterColor.a,
-                v => { Color c = Designer.WaterColor; c.a = v; Designer.WaterColor = c; Designer.ApplyWater(); }, 0.05f, 1f, "0.00"));
-            body.Add(SliderRow("Smooth", () => Designer.WaterSmoothness,
-                v => { Designer.WaterSmoothness = v; Designer.ApplyWater(); }, 0f, 1f, "0.00"));
-
             // ---- HEIGHTMAP ----
-            body.Add(Divider());
             body.Add(SectionLabel("HEIGHTMAP"));
             body.Add(DropdownRow(() => Designer.ListHeightmapFiles(),
                 () => Designer.HeightmapFile, v => Designer.HeightmapFile = v));
@@ -115,10 +96,21 @@ namespace NetworkDesigner.UI
             hmLoad.style.marginTop = 4;
             body.Add(hmLoad);
 
-            // ---- GENERATE (procedural terrain) ----
+            // ---- GRID ---- (changes need ApplyTerrainMaterial to hit the shader)
             body.Add(Divider());
-            body.Add(SectionLabel("GENERATE"));
-            body.Add(MakeButton("Terrain Generator…", () => OpenGeneratorModal()));
+            body.Add(SectionLabel("GRID"));
+            body.Add(SliderRow("Strength", () => Designer.GridStrength,
+                v => { Designer.GridStrength = v; Designer.ApplyTerrainMaterial(); }, 0f, 1f, "0.00"));
+            body.Add(SliderRow("Line", () => Designer.GridLineWidth,
+                v => { Designer.GridLineWidth = v; Designer.ApplyTerrainMaterial(); }, 0.5f, 4f, "0.0"));
+
+            // ---- WATER ---- (changes need ApplyWater)
+            body.Add(Divider());
+            body.Add(SectionLabel("WATER"));
+            body.Add(ToggleRow("Show Water",
+                () => Designer.ShowWater, v => { Designer.ShowWater = v; Designer.ApplyWater(); }));
+            body.Add(SliderRow("Level", () => Designer.WaterLevel,
+                v => { Designer.WaterLevel = v; Designer.ApplyWater(); }, -50f, 300f, "0.0"));
         }
 
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
@@ -127,7 +119,7 @@ namespace NetworkDesigner.UI
             body.Add(SectionLabel("DEM WORLD (Unity Terrain)"));
             // Pick a city → it loads/builds that DEM. (Save/manage comes later.) -500..9000m
             // covers all land; tile size is auto-derived from the filename lat/lon.
-            const float demTile = 10000f, demFrom = -500f, demTo = 9000f, demLod = 5f;
+            const float demTile = 10000f, demFrom = -500f, demTo = 9000f, demLod = 2f;  // pixel error: lower = more detail
             int demMode = 1;   // 0 = Albedo, 1 = Flat green (default), 2 = Slope textures
             void ApplyDemSurface()
             {
@@ -139,12 +131,10 @@ namespace NetworkDesigner.UI
             var cityLbl = new Label("City"); cityLbl.style.color = Ink; cityLbl.style.minWidth = 40; cityLbl.style.flexShrink = 0;
             var demCity = new DropdownField { choices = DemTerrainWorld.ListWorlds() };   // unselected → pick to load
             demCity.style.flexGrow = 1; demCity.style.flexShrink = 1; demCity.style.minWidth = 0;
+            // Build blocks the main thread for a few seconds; run it from a coroutine so the
+            // "Loading DEM…" overlay paints a frame BEFORE we block (otherwise no feedback).
             demCity.RegisterValueChangedCallback(_ =>
-            {
-                DemTerrainWorld.Build(demCity.value, demTile, demFrom, demTo);
-                ApplyDemSurface();
-                DemTerrainWorld.SetTerrainLod(demLod);
-            });
+                StartCoroutine(LoadDem(demCity.value, demTile, demFrom, demTo, demLod, ApplyDemSurface)));
             cityRow.Add(cityLbl); cityRow.Add(demCity);
             body.Add(cityRow);
 
@@ -156,6 +146,12 @@ namespace NetworkDesigner.UI
             surfDd.RegisterValueChangedCallback(_ => { demMode = surfDd.index; ApplyDemSurface(); });
             surfRow.Add(surfLbl); surfRow.Add(surfDd);
             body.Add(surfRow);
+
+            // ---- WATER ---- (a flat plane at a chosen elevation — floods coasts/valleys)
+            body.Add(Divider());
+            body.Add(SectionLabel("WATER"));
+            body.Add(ToggleRow("Show Water", () => DemWater.Show, v => { DemWater.Show = v; DemWater.Apply(); }));
+            body.Add(SliderRow("Level", () => DemWater.Level, v => { DemWater.Level = v; DemWater.Apply(); }, -50f, 3000f, "0"));
 
             // ---- LIGHTING ----
             body.Add(Divider());
@@ -173,6 +169,25 @@ namespace NetworkDesigner.UI
             var lightClr = MakeButton("Clear Lighting", () => DemLighting.Clear());
             lightClr.style.marginTop = 6;
             body.Add(lightClr);
+        }
+
+        // Load a DEM world with a "Loading…" overlay: flag it, yield so the overlay paints,
+        // THEN run the blocking Build (decode + 100 tiles), then settle surface/water/camera.
+        System.Collections.IEnumerator LoadDem(string city, float tile, float from, float to, float lod, System.Action applySurface)
+        {
+            DemTerrainWorld.Building = true;
+            yield return null;           // let the overlay render before we block the main thread
+            yield return null;
+            try
+            {
+                DemTerrainWorld.Build(city, tile, from, to);
+                applySurface();
+                DemTerrainWorld.SetTerrainLod(lod);
+                DemWater.Apply();
+                Designer.SetActiveBackend(true);
+                DemTerrainWorld.FrameCamera();
+            }
+            finally { DemTerrainWorld.Building = false; }   // never leave the overlay stuck
         }
 
         void AddBrushButton(VisualElement body, string label, TerrainDesigner.BrushMode mode)

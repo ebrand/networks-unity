@@ -89,9 +89,11 @@ namespace NetworkDesigner.Terrain
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
-        // When true (Terrain palette on the DEM backend), the brush sculpts the DEM Unity
-        // Terrain instead of the low-poly field. Set by the Terrain palette's Low-Poly/DEM toggle.
-        public bool SculptDem;
+        // The active terrain backend (Terrain palette's Low-Poly/DEM toggle). When DEM (and a DEM
+        // world is built), EVERY tool — sculpt, rail, scatter, fences, placeables, the brush ring —
+        // targets the DEM, and the low-poly terrain is hidden; otherwise everything targets the
+        // low-poly field. Set via SetActiveBackend (which also flips terrain visibility).
+        public bool DemBackend = true;
         float _demFlattenY;   // DEM Flatten target (world Y under the cursor at stroke start)
         [Tooltip("Brush radius in metres. Resize live with [ (smaller) and ] (larger).")]
         public float BrushRadius = 10f;
@@ -309,9 +311,20 @@ namespace NetworkDesigner.Terrain
         public TerrainField Field => _field;
 
         DemTerrainSurface _demSurf;
-        // The surface the line tools (rail/road/fence) read & drape onto: the DEM Unity Terrain
-        // when one is built, else the low-poly field. Lets the same tools work on either backend.
-        ITerrainSurface Surf => DemTerrainWorld.HasWorld ? (_demSurf ??= new DemTerrainSurface()) : (ITerrainSurface)_field;
+        // The active surface every ground-reading tool uses: the DEM when it's the selected backend
+        // AND built, else the low-poly field. Driven by the Low-Poly/DEM toggle (DemBackend).
+        ITerrainSurface Surf => (DemBackend && DemTerrainWorld.HasWorld) ? (_demSurf ??= new DemTerrainSurface()) : (ITerrainSurface)_field;
+
+        // Flip the active terrain backend: route all tools (via Surf/DemBackend) and show only the
+        // active terrain. Low-poly stays visible until a DEM is actually built, so DEM mode with no
+        // world isn't an empty scene. Heightmap sampling works on the DEM even while it's hidden.
+        public void SetActiveBackend(bool dem)
+        {
+            DemBackend = dem;
+            bool hasDem = DemTerrainWorld.HasWorld;
+            if (_chunkRoot != null) _chunkRoot.SetActive(!(dem && hasDem));
+            DemTerrainWorld.SetVisible(dem);
+        }
 
         [Header("Scene lighting")]
         [Tooltip("On Start, if the scene has no SceneAmbiance, create one that " +
@@ -821,6 +834,14 @@ namespace NetworkDesigner.Terrain
         // Palette IMGUI for the active scatter layer, or a hint for linework.
         void OnGUI()
         {
+            // Loading overlay (drawn before the early-return below, in real screen space).
+            if (DemTerrainWorld.Building)
+            {
+                float bw = 300f, bh = 76f;
+                var box = new GUIStyle(GUI.skin.box)
+                { fontSize = 18, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+                GUI.Box(new Rect((Screen.width - bw) * 0.5f, (Screen.height - bh) * 0.5f, bw, bh), "Loading DEM…", box);
+            }
             // Mode/sub-mode + snap now live in the UI Toolkit palette footer (RailPalette),
             // so the old always-on IMGUI status strip is gone.
             DrawBrushModeIcon();   // per-mode glyph beside the ring (sculpt modes only)
@@ -2147,7 +2168,7 @@ namespace NetworkDesigner.Terrain
 
             // The SAME brush sculpts the DEM when it's the active backend (Slope is low-poly
             // only). Raise/Lower/Smooth/Flatten map 1:1 onto DemTerrainWorld.SculptMode.
-            if (SculptDem && DemTerrainWorld.HasWorld)
+            if (DemBackend && DemTerrainWorld.HasWorld)
             {
                 if (Brush != BrushMode.Slope)
                 {
