@@ -436,25 +436,27 @@ namespace NetworkDesigner.Terrain
         public bool Erase(Vector3 center, float brushRadius)
         {
             EnsureRoot(); // re-adopt post-reload survivors so they're erasable
-            // Scan the full placed list (not just current-spacing buckets) so the
-            // brush removes ANY item in range — including ones placed under a
-            // different pack's spacing, which live in differently-keyed buckets.
-            float r2 = brushRadius * brushRadius;
+            // Scan the full placed list (so the brush also removes items placed under a different
+            // spacing), but use the CACHED Data.Position (managed) instead of transform.position (a
+            // native call per item), and COMPACT in a single pass instead of O(n) RemoveAt per hit.
+            float r2 = brushRadius * brushRadius, cx = center.x, cz = center.z;
             bool any = false;
-            for (int i = _placed.Count - 1; i >= 0; i--)
+            int w = 0;
+            for (int i = 0; i < _placed.Count; i++)
             {
                 PlacedTree t = _placed[i];
-                if (t == null) { _placed.RemoveAt(i); continue; }
-                Vector3 p = t.transform.position;
-                float dx = p.x - center.x, dz = p.z - center.z;
+                if (t == null) continue;                                  // drop a destroyed survivor
+                float dx = t.Data.Position.x - cx, dz = t.Data.Position.y - cz;  // Position = world XZ
                 if (dx * dx + dz * dz <= r2)
                 {
                     RemoveFromCell(t);
                     DestroySafe(t.gameObject);
-                    _placed.RemoveAt(i);
                     any = true;
+                    continue;                                             // remove (don't keep)
                 }
+                _placed[w++] = t;                                         // keep
             }
+            if (w < _placed.Count) _placed.RemoveRange(w, _placed.Count - w);
             return any;
         }
 

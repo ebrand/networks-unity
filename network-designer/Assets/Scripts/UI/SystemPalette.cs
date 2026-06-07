@@ -86,6 +86,15 @@ namespace NetworkDesigner.UI
             body.Add(SectionLabel("CAMERA"));
             body.Add(SliderRow("Speed", () => Designer.CameraSpeed,
                 v => Designer.CameraSpeed = v, 5f, 50000f, "0"));
+
+            // ---- AUTOSAVE ---- (snapshots the scene a debounce after each edit; the snapshot
+            // touches the terrain + every placed tree on the main thread, so on big scatter
+            // worlds it hitches — turn it off or raise the debounce to avoid the periodic lag.)
+            body.Add(Divider());
+            body.Add(SectionLabel("AUTOSAVE"));
+            body.Add(ToggleRow("Autosave", () => Designer.Autosave, v => Designer.Autosave = v));
+            body.Add(NumberRow("Debounce", "s", () => Designer.AutosaveDebounceSeconds,
+                v => Designer.AutosaveDebounceSeconds = Mathf.Max(0.5f, v), 0.5f, 60f, "0.#"));
         }
     }
 }

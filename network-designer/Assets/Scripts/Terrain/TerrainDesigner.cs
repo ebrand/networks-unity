@@ -217,8 +217,9 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Where the terrain is saved. Empty → project_root/TerrainAutosave.json " +
                  "in the Editor, persistentDataPath in a Player build.")]
         public string AutosavePath = "";
-        [Tooltip("Seconds of no sculpting before the terrain is written to disk.")]
-        public float AutosaveDebounceSeconds = 1f;
+        [Tooltip("Seconds of no editing before the scene is snapshotted to disk. Higher = the " +
+                 "main-thread snapshot (terrain + all placed objects) hitches less often.")]
+        public float AutosaveDebounceSeconds = 5f;
 
         TerrainField _field;
         float _dirtySince = -1f; // realtime when last edited; -1 = clean
