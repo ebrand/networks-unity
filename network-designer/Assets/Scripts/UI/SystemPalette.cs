@@ -122,13 +122,45 @@ namespace NetworkDesigner.UI
             // covers all land on Earth at ~0.14m precision). Tile size is auto-derived from
             // the filename lat/lon, so demTile is only a fallback. Norm boxes removed.
             const float demTile = 10000f, demFrom = -500f, demTo = 9000f;
-            bool demAlbedo = true;
-            body.Add(ToggleRow("Albedo", () => demAlbedo,
-                v => { demAlbedo = v; DemTerrainWorld.SetGreen(!v); }));   // live: albedo imagery vs flat green
+            // Slope-texture pickers: which TerrainLayer for flat ground vs steep rock/cliff.
+            var layerNames = DemTerrainWorld.ListTerrainLayers();
+            int fi = layerNames.IndexOf("Grass_Layer"); if (fi < 0) fi = layerNames.Count > 0 ? 0 : -1;
+            int si = layerNames.IndexOf("Cliff_Layer");
+            if (si < 0) si = layerNames.IndexOf("Rock_Layer");
+            if (si < 0) si = layerNames.Count > 1 ? 1 : 0;
+            var flatDd = GroundDropdown(layerNames, fi);
+            var steepDd = GroundDropdown(layerNames, si);
+            // Surface mode: 0 = satellite albedo, 1 = flat green, 2 = slope textures.
+            int demMode = 0;
+            float demTexSize = 25f;   // texture repeat in metres (slope mode)
+            float demLod = 5f;        // heightmap pixel error (lower = LOD detail farther out)
+            void ApplyDemSurface()
+            {
+                if (demMode == 2) DemTerrainWorld.SetTextured(flatDd.value, steepDd.value, 22f, 38f, demTexSize);
+                else DemTerrainWorld.SetGreen(demMode == 1);
+            }
+            var surfRow = HBox(); surfRow.style.marginBottom = 6;
+            var surfLbl = new Label("Surface"); surfLbl.style.color = Ink; surfLbl.style.minWidth = 56; surfLbl.style.flexShrink = 0;
+            var surfDd = new DropdownField { choices = new List<string> { "Albedo", "Flat green", "Slope textures" } };
+            surfDd.index = 0;
+            surfDd.style.flexGrow = 1; surfDd.style.flexShrink = 1; surfDd.style.minWidth = 0;
+            surfDd.RegisterValueChangedCallback(_ => { demMode = surfDd.index; ApplyDemSurface(); });
+            surfRow.Add(surfLbl); surfRow.Add(surfDd);
+            body.Add(surfRow);
+            // Flat/Steep variant rows (only matter in Slope mode); changing re-applies live.
+            body.Add(GroundRow("Flat", flatDd, () => { if (demMode == 2) ApplyDemSurface(); }));
+            body.Add(GroundRow("Steep", steepDd, () => { if (demMode == 2) ApplyDemSurface(); }));
+            // Texture repeat (m/tile) — live, no slope recompute.
+            body.Add(SliderRow("Tex Size", () => demTexSize,
+                v => { demTexSize = v; if (demMode == 2) DemTerrainWorld.SetTextureTiling(v); }, 2f, 200f, "0"));
+            // Geometry LOD: lower = terrain mesh stays detailed farther (costs FPS). Live.
+            body.Add(SliderRow("LOD Err", () => demLod,
+                v => { demLod = v; DemTerrainWorld.SetTerrainLod(v); }, 1f, 30f, "0.#"));
             var demBuild = MakeButton("Build DEM World", () =>
             {
                 DemTerrainWorld.Build(demCity.value, demTile, demFrom, demTo);
-                DemTerrainWorld.SetGreen(!demAlbedo);   // honor the toggle on (re)build
+                ApplyDemSurface();   // honor the chosen surface mode on (re)build
+                DemTerrainWorld.SetTerrainLod(demLod);   // honor the LOD setting on (re)build
             });
             demBuild.style.marginTop = 4;
             body.Add(demBuild);
@@ -150,6 +182,25 @@ namespace NetworkDesigner.UI
             var routeClr = MakeButton("Clear Route", () => TerrainRouteTool.Clear());
             routeClr.style.marginTop = 6;
             body.Add(routeClr);
+        }
+
+        // A ground-variant dropdown (full-width, shrinkable) preset to an index.
+        DropdownField GroundDropdown(List<string> choices, int index)
+        {
+            var dd = new DropdownField { choices = choices };
+            if (index >= 0 && index < choices.Count) dd.SetValueWithoutNotify(choices[index]);
+            dd.style.flexGrow = 1; dd.style.flexShrink = 1; dd.style.minWidth = 0;
+            return dd;
+        }
+
+        // A labelled row wrapping a ground dropdown; onChange fires when the value changes.
+        VisualElement GroundRow(string label, DropdownField dd, System.Action onChange)
+        {
+            var row = HBox(); row.style.marginBottom = 4;
+            var l = new Label(label); l.style.color = Sub; l.style.minWidth = 56; l.style.flexShrink = 0;
+            dd.RegisterValueChangedCallback(_ => onChange());
+            row.Add(l); row.Add(dd);
+            return row;
         }
 
         // --- Terrain Generator modal: style + seed + params with a live hill-shaded

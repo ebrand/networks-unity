@@ -29,10 +29,13 @@ namespace NetworkDesigner.Terrain
         public const string BaseRel = "Heightmaps/Highres";   // Assets/Heightmaps/Highres/<City>/
         const int Res = 1025;   // Unity heightmap resolution per tile (2^10 + 1)
 
-        // Live state for the albedo/flat-green toggle (kept so we can swap without rebuilding).
+        // Live state for the surface mode (albedo / flat-green / slope-textured), kept so we
+        // can swap without rebuilding.
         static UnityEngine.Terrain[,] _grid;
         static TerrainLayer[,] _albedo;   // per-tile draped imagery (null if none)
         static TerrainLayer _green;       // shared flat-green layer
+        static TerrainLayer _ground, _rock;  // runtime copies of the flat + steep TerrainLayers
+        static string _flatVar, _steepVar;   // which TerrainLayer assets are loaded
 
         // City folders under Assets/Heightmaps/Highres that contain DEM tiles.
         public static List<string> ListWorlds()
@@ -91,6 +94,118 @@ namespace NetworkDesigner.Terrain
             tex.SetPixel(0, 0, new Color(0.32f, 0.5f, 0.24f, 0f));   // alpha 0 = matte (terrain reads diffuse alpha as smoothness)
             tex.Apply();
             _green = new TerrainLayer { diffuseTexture = tex, tileSize = new Vector2(64f, 64f), smoothness = 0f, metallic = 0f };
+        }
+
+        // Slope-based texturing: two tiling layers (grass on flatter ground, rock on steeper),
+        // blended per-tile by a control map computed from terrain steepness. slopeLow..slopeHigh
+        // (degrees) is the rock transition band. Heavier than the toggle (computes splatmaps) —
+        // a few seconds over 100 tiles.
+        // Ground-pack variant folders (groundN) under Assets/Textures/ground_vol1.
+        // Every TerrainLayer asset in the project (e.g. the Rocky Hills pack's Grass/Cliff/
+        // Rock layers), by name — for the Flat/Steep slope-texture pickers.
+        public static List<string> ListTerrainLayers()
+        {
+            var list = new List<string>();
+#if UNITY_EDITOR
+            foreach (string guid in UnityEditor.AssetDatabase.FindAssets("t:TerrainLayer"))
+                list.Add(Path.GetFileNameWithoutExtension(UnityEditor.AssetDatabase.GUIDToAssetPath(guid)));
+#endif
+            list.Sort();
+            return list;
+        }
+
+        public static void SetTextured(string flatVariant, string steepVariant,
+                                       float slopeLow = 22f, float slopeHigh = 38f,
+                                       float tileSizeMeters = 25f, int alphaRes = 256)
+        {
+            if (_grid == null) return;
+            EnsureTextureLayers(flatVariant, steepVariant, tileSizeMeters);
+            // Keep each layer's authored tileSize (the pack tunes it) — the Tex Size slider
+            // overrides it live via SetTextureTiling if you want to change it.
+            var layers = new[] { _ground, _rock };
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                {
+                    var t = _grid[r, c];
+                    if (t == null || t.terrainData == null) continue;
+                    var td = t.terrainData;
+                    td.terrainLayers = layers;
+                    if (td.alphamapResolution != alphaRes) td.alphamapResolution = alphaRes;
+                    int res = td.alphamapResolution;
+                    var a = new float[res, res, 2];
+                    for (int j = 0; j < res; j++)
+                    {
+                        float v = res > 1 ? (float)j / (res - 1) : 0f;
+                        for (int i = 0; i < res; i++)
+                        {
+                            float u = res > 1 ? (float)i / (res - 1) : 0f;
+                            float rock = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(slopeLow, slopeHigh, td.GetSteepness(u, v)));
+                            a[j, i, 0] = 1f - rock;   // grass
+                            a[j, i, 1] = rock;        // rock
+                        }
+                    }
+                    td.SetAlphamaps(0, 0, a);
+                }
+            Debug.Log($"[DemTerrainWorld] slope textures applied (rock {slopeLow:0}-{slopeHigh:0}°).");
+        }
+
+        // Geometry LOD across all tiles: heightmapPixelError (LOWER = mesh stays detailed
+        // farther out, but more triangles → costs FPS) + how far textures stay sharp.
+        public static void SetTerrainLod(float pixelError, float basemapDistance = 8000f)
+        {
+            if (_grid == null) return;
+            pixelError = Mathf.Clamp(pixelError, 1f, 200f);
+            foreach (var t in _grid)
+                if (t != null)
+                {
+                    t.heightmapPixelError = pixelError;
+                    t.basemapDistance = Mathf.Max(0f, basemapDistance);
+                }
+        }
+
+        // Live-change the texture repeat (metres per tile) without recomputing the slope
+        // blend — just updates the shared layers and pokes each tile to refresh.
+        public static void SetTextureTiling(float meters)
+        {
+            meters = Mathf.Max(0.5f, meters);
+            if (_ground != null) _ground.tileSize = new Vector2(meters, meters);
+            if (_rock != null) _rock.tileSize = new Vector2(meters, meters);
+            if (_grid == null || _ground == null) return;
+            var layers = new[] { _ground, _rock };
+            foreach (var t in _grid)
+                if (t != null && t.terrainData != null) t.terrainData.terrainLayers = layers;
+        }
+
+        static void EnsureTextureLayers(string flat, string steep, float tileSize)
+        {
+            if (_ground == null || _flatVar != flat) { _ground = CloneLayer(flat); _flatVar = flat; }
+            if (_rock == null || _steepVar != steep) { _rock = CloneLayer(steep); _steepVar = steep; }
+        }
+
+        // Runtime COPY of a named TerrainLayer asset (so tile-size tweaks don't mutate the
+        // shared asset). Keeps the pack's authored diffuse/normal/mask/smoothness.
+        static TerrainLayer CloneLayer(string layerName)
+        {
+            TerrainLayer asset = LoadTerrainLayer(layerName);
+            if (asset != null) return Object.Instantiate(asset);
+            var t = new Texture2D(1, 1, TextureFormat.RGBA32, false);   // fallback solid (no asset found)
+            t.SetPixel(0, 0, new Color(0.32f, 0.5f, 0.24f, 0f)); t.Apply();
+            return new TerrainLayer { diffuseTexture = t, tileSize = new Vector2(25f, 25f), smoothness = 0f, metallic = 0f };
+        }
+
+        static TerrainLayer LoadTerrainLayer(string layerName)
+        {
+#if UNITY_EDITOR
+            if (string.IsNullOrEmpty(layerName)) return null;
+            foreach (string guid in UnityEditor.AssetDatabase.FindAssets("t:TerrainLayer"))
+            {
+                string p = UnityEditor.AssetDatabase.GUIDToAssetPath(guid);
+                if (Path.GetFileNameWithoutExtension(p) == layerName)
+                    return UnityEditor.AssetDatabase.LoadAssetAtPath<TerrainLayer>(p);
+            }
+#endif
+            return null;
         }
 
         // folder: absolute or Assets-relative path to the *_tile_<row>_<col>.png set.
@@ -158,7 +273,9 @@ namespace NetworkDesigner.Terrain
                 go.transform.SetParent(root.transform, false);
                 // row 0 = north → highest Z (north = +Z); col → +X (east).
                 go.transform.position = new Vector3(col * tileX, normFrom, (rows - 1 - row) * tileZ);
-                grid[row, col] = go.GetComponent<UnityEngine.Terrain>();
+                var terrain = go.GetComponent<UnityEngine.Terrain>();
+                terrain.basemapDistance = 8000f;   // keep splat/textures sharp out to ~8km (texture LOD)
+                grid[row, col] = terrain;
             }
 
             // Stitch LOD/heights across seams (left=-X, top=+Z, right=+X, bottom=-Z).

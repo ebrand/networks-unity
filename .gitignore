@@ -113,3 +113,7 @@ network-designer/Assets/icons/
 # out of git; only the per-city norm memory is tracked (re-download tiles as needed).
 network-designer/Assets/Heightmaps/Highres/*
 !network-designer/Assets/Heightmaps/Highres/dem_norms.txt
+
+# Purchased Unity environment pack (Rocky Hills + Toby Foliage Engine) — 2.3GB,
+# re-importable from the Asset Store, kept out of git.
+network-designer/Assets/Toby Fredson/
