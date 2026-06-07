@@ -195,7 +195,10 @@ namespace NetworkDesigner.Placeables
         {
             point = default;
             Ray ray = cam.ScreenPointToRay(Input.mousePosition);
-            if (Physics.Raycast(ray, out RaycastHit hit, 100000f) && hit.collider is MeshCollider)
+            // Low-poly mesh terrain, OR the DEM Unity-Terrain (TerrainCollider) when one's built.
+            if (Physics.Raycast(ray, out RaycastHit hit, 100000f)
+                && (hit.collider is MeshCollider
+                    || (NetworkDesigner.Terrain.DemTerrainWorld.HasWorld && hit.collider is TerrainCollider)))
             { point = hit.point; return true; }
             return false;
         }
