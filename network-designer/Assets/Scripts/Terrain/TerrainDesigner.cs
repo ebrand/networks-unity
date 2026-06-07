@@ -89,6 +89,10 @@ namespace NetworkDesigner.Terrain
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
+        // When true (Terrain palette on the DEM backend), the brush sculpts the DEM Unity
+        // Terrain instead of the low-poly field. Set by the Terrain palette's Low-Poly/DEM toggle.
+        public bool SculptDem;
+        float _demFlattenY;   // DEM Flatten target (world Y under the cursor at stroke start)
         [Tooltip("Brush radius in metres. Resize live with [ (smaller) and ] (larger).")]
         public float BrushRadius = 10f;
         [Tooltip("Brush resize speed (metres/second, while [ or ] is held).")]
@@ -2118,6 +2122,7 @@ namespace NetworkDesigner.Terrain
             {
                 GridFromWorld(hit.point, out float pfx, out float pfz);
                 _flattenTarget = HeightAtGrid(pfx, pfz);
+                _demFlattenY = hit.point.y;
                 _flattenTargetPicked = true;
                 _hasFlattenTarget = true;
             }
@@ -2136,7 +2141,21 @@ namespace NetworkDesigner.Terrain
             {
                 GridFromWorld(hit.point, out float cfx, out float cfz);
                 _flattenTarget = HeightAtGrid(cfx, cfz);
+                _demFlattenY = hit.point.y;
                 _hasFlattenTarget = true;
+            }
+
+            // The SAME brush sculpts the DEM when it's the active backend (Slope is low-poly
+            // only). Raise/Lower/Smooth/Flatten map 1:1 onto DemTerrainWorld.SculptMode.
+            if (SculptDem && DemTerrainWorld.HasWorld)
+            {
+                if (Brush != BrushMode.Slope)
+                {
+                    DemTerrainWorld.Sculpt(hit.point, BrushRadius, BrushStrength, Time.deltaTime,
+                                           (DemTerrainWorld.SculptMode)(int)Brush, _demFlattenY);
+                    _dirtySince = Time.realtimeSinceStartup;
+                }
+                return;   // don't touch the low-poly field / chunk meshes
             }
 
             // Sculpt the field, then push ONLY the brush-affected heightmap
@@ -2212,7 +2231,7 @@ namespace NetworkDesigner.Terrain
                 float ang = (i / (float)n) * Mathf.PI * 2f;
                 float wx = worldCenter.x + Mathf.Cos(ang) * radius;
                 float wz = worldCenter.z + Mathf.Sin(ang) * radius;
-                float wy = _field.SampleHeight(wx, wz) + BrushCursorLift;
+                float wy = Surf.SampleHeight(wx, wz) + BrushCursorLift;   // drape on the ACTIVE surface (DEM or low-poly)
                 _ring.Add(new Vector3(wx, wy, wz));
             }
 
