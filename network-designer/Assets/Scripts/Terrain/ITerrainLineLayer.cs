@@ -13,18 +13,18 @@ namespace NetworkDesigner.Terrain
 
         // Editing (chain drawing): add a node at a world hit and connect from the
         // last; end the current chain; undo the last node; delete the nearest.
-        void AddNode(TerrainField field, Vector3 hit);
+        void AddNode(ITerrainSurface field, Vector3 hit);
         void EndChain();
-        void RemoveLastNode(TerrainField field);
-        bool DeleteNearNode(TerrainField field, Vector3 hit, float radius);
+        void RemoveLastNode(ITerrainSurface field);
+        bool DeleteNearNode(ITerrainSurface field, Vector3 hit, float radius);
 
         // Ghost placement preview at the cursor; hide it when leaving the mode.
-        void UpdatePreview(TerrainField field, Vector3 cursor, bool show);
+        void UpdatePreview(ITerrainSurface field, Vector3 cursor, bool show);
         void HidePreview();
 
         // (Re)generate the rendered result from the graph; wipe the graph.
-        void Rebuild(TerrainField field);
-        void ClearAll(TerrainField field);
+        void Rebuild(ITerrainSurface field);
+        void ClearAll(ITerrainSurface field);
 
         // Persistence (the node/edge graph; geometry is regenerated on load).
         LineGraphSave CollectData();

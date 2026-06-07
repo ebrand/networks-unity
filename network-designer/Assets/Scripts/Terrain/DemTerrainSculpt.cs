@@ -48,7 +48,10 @@ namespace NetworkDesigner.Terrain
 
         void Update()
         {
-            if (!Active) { Hide(); return; }
+            // Only sculpt in its own context — the System palette (where the sculpt controls
+            // live) must be open. Otherwise switching to Rail/etc. would leave it flattening
+            // the ground under your placement clicks and drawing a stray brush ring.
+            if (!Active || !NetworkDesigner.UI.PaletteBase.IsOpenId("System")) { Hide(); return; }
             if (NetworkDesigner.UI.PaletteBase.PointerOverUI || NetworkDesigner.UI.PaletteBase.ModalOpen) { Hide(); return; }
             var cam = Camera.main != null ? Camera.main : FindFirstObjectByType<Camera>();
             if (cam == null) return;

@@ -466,6 +466,47 @@ namespace NetworkDesigner.Terrain
             return n > 0 ? sum / n : s[z, x];
         }
 
+        // ── Surface queries (for ITerrainSurface / network draping onto the DEM) ───────────
+        public static bool HasWorld => _grid != null;
+
+        static UnityEngine.Terrain FirstTile()
+        {
+            if (_grid == null) return null;
+            foreach (var t in _grid) if (t != null) return t;
+            return null;
+        }
+
+        // Ground world-Y at a world XZ — O(1) tile lookup + Unity's bilinear Terrain.SampleHeight.
+        public static float SampleHeight(float x, float z)
+        {
+            if (_grid == null) return 0f;
+            var any = FirstTile(); if (any == null) return 0f;
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            float tileX = any.terrainData.size.x, tileZ = any.terrainData.size.z;
+            if (tileX <= 0f || tileZ <= 0f) return any.transform.position.y;
+            int col = Mathf.Clamp(Mathf.FloorToInt(x / tileX), 0, cols - 1);
+            int row = Mathf.Clamp((rows - 1) - Mathf.FloorToInt(z / tileZ), 0, rows - 1);   // row0 = +Z (north)
+            var t = _grid[row, col] ?? any;
+            return t.transform.position.y + t.SampleHeight(new Vector3(x, 0f, z));
+        }
+
+        // Slope in degrees via a 2 m central difference.
+        public static float SampleSlopeDegrees(float x, float z)
+        {
+            if (_grid == null) return 0f;
+            const float e = 2f;
+            float dx = (SampleHeight(x + e, z) - SampleHeight(x - e, z)) / (2f * e);
+            float dz = (SampleHeight(x, z + e) - SampleHeight(x, z - e)) / (2f * e);
+            return Mathf.Atan(Mathf.Sqrt(dx * dx + dz * dz)) * Mathf.Rad2Deg;
+        }
+
+        public static Vector3 WorldOrigin
+        {
+            get { var t = FirstTile(); return t != null ? new Vector3(0f, t.transform.position.y, 0f) : Vector3.zero; }
+        }
+        public static float WorldWidthX { get { var t = FirstTile(); return t != null ? t.terrainData.size.x * _grid.GetLength(1) : 0f; } }
+        public static float WorldLengthZ { get { var t = FirstTile(); return t != null ? t.terrainData.size.z * _grid.GetLength(0) : 0f; } }
+
         // Point the fly camera's terrain-aware clamp + speed-damping at the DEM surface (it's
         // wired to the low-poly terrain by default, which reads Y≈0 here → no slowdown near the
         // real surface). Raycast-based so it works regardless of tile heights.

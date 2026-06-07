@@ -183,7 +183,7 @@ namespace NetworkDesigner.Terrain
 
         // ---- editing (unconstrained: it's a plan, so no grade/radius refusal) ----
 
-        public void AddNode(TerrainField field, Vector3 hit)
+        public void AddNode(ITerrainSurface field, Vector3 hit)
         {
             Vector2 p = new Vector2(hit.x, hit.z);
             if (_chainTail < 0)
@@ -505,7 +505,7 @@ namespace NetworkDesigner.Terrain
         // terrain slope tool to ride the planned alignment. False if none in range.
         // Per-edge grade (endpoint-to-endpoint, sampled from the CURRENT terrain) with a
         // midpoint world position to anchor a floating label. Over = exceeds MaxGradeDeg.
-        public void CollectEdgeGrades(TerrainField field, List<EdgeGrade> outList)
+        public void CollectEdgeGrades(ITerrainSurface field, List<EdgeGrade> outList)
         {
             outList.Clear();
             if (Graph == null || field == null) return;
@@ -531,7 +531,7 @@ namespace NetworkDesigner.Terrain
         // True when EVERY plan edge's endpoint-to-endpoint grade is within MaxGradeDeg on
         // the current terrain — i.e. a grade-limited rail can sit on the whole centreline.
         // overEdges = count of segments that exceed it. False (and 0) on an empty plan.
-        public bool AllEdgesBuildable(TerrainField field, out int overEdges)
+        public bool AllEdgesBuildable(ITerrainSurface field, out int overEdges)
         {
             overEdges = 0;
             if (Graph == null || field == null || Graph.Edges.Count == 0) return false;
@@ -665,7 +665,7 @@ namespace NetworkDesigner.Terrain
             return rev;
         }
 
-        public void RemoveLastNode(TerrainField field)
+        public void RemoveLastNode(ITerrainSurface field)
         {
             if (_cornerPending) { _cornerPending = false; return; }
             if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return;
@@ -674,7 +674,7 @@ namespace NetworkDesigner.Terrain
             Rebuild(field);
         }
 
-        public bool DeleteNearNode(TerrainField field, Vector3 hit, float radius)
+        public bool DeleteNearNode(ITerrainSurface field, Vector3 hit, float radius)
         {
             int n = Graph.NearestNode(new Vector2(hit.x, hit.z), radius);
             if (n < 0) return false;
@@ -707,7 +707,7 @@ namespace NetworkDesigner.Terrain
             else { Vector2 d = q3 - q0; q1 = q0 + d / 3f; q2 = q0 + d * (2f / 3f); }
         }
 
-        public void Rebuild(TerrainField field)
+        public void Rebuild(ITerrainSurface field)
         {
             EnsureRender();
             _verts.Clear(); _idx.Clear(); _cols.Clear();
@@ -726,7 +726,7 @@ namespace NetworkDesigner.Terrain
         // One planned edge: the track centreline(s) + the two dashed corridor edges,
         // draped onto the terrain. With analysis on, the track line(s) are coloured by
         // section (cut/fill/bridge/tunnel/over-grade); else everything is the plan colour.
-        void EmitEdge(TerrainField field, LineEdge e)
+        void EmitEdge(ITerrainSurface field, LineEdge e)
         {
             GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
             float hw = Mathf.Max(0.5f, CorridorWidth * 0.5f);
@@ -794,7 +794,7 @@ namespace NetworkDesigner.Terrain
         // A track line offset `lateral` from the centreline, coloured per section by
         // how the terrain deviates from the straight grade-limited bed (eA -> eB).
         // accumulate = tally section lengths into the summary (once per edge).
-        void EmitAnalyzedTrack(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
+        void EmitAnalyzedTrack(ITerrainSurface field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
                                float eA, float eB, bool overGrade, float lateral, bool accumulate)
         {
             float chord = Vector2.Distance(q0, q3);
@@ -837,11 +837,11 @@ namespace NetworkDesigner.Terrain
 
         // Drape a polyline offset `lateral` metres to the side of the bezier onto the
         // terrain. dashed = emit every other segment (corridor edges). One uniform colour.
-        void EmitOffsetLine(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
+        void EmitOffsetLine(ITerrainSurface field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
                             float lateral, bool dashed, Color32 col)
             => EmitOffsetLine(field, q0, q1, q2, q3, lateral, dashed, _verts, _idx, _cols, col);
 
-        void EmitOffsetLine(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
+        void EmitOffsetLine(ITerrainSurface field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3,
                             float lateral, bool dashed, List<Vector3> verts, List<int> idx,
                             List<Color32> cols = null, Color32 col = default)
         {
@@ -898,7 +898,7 @@ namespace NetworkDesigner.Terrain
 
         // ---- placement preview ----
 
-        public void UpdatePreview(TerrainField field, Vector3 cursor, bool show)
+        public void UpdatePreview(ITerrainSurface field, Vector3 cursor, bool show)
         {
             EnsurePreview();
             _pvMr.enabled = show;
@@ -974,7 +974,7 @@ namespace NetworkDesigner.Terrain
                 _pvMat.color = LastPreviewTooTight ? new Color(1f, 0.25f, 0.2f, 0.95f) : PlanColor;
         }
 
-        void EmitPendingEdge(TerrainField field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3)
+        void EmitPendingEdge(ITerrainSurface field, Vector2 q0, Vector2 q1, Vector2 q2, Vector2 q3)
         {
             if (Tracks >= 2)
             {
@@ -988,14 +988,14 @@ namespace NetworkDesigner.Terrain
         }
 
         // Draped world midpoint of an A->B leg (label anchor), lifted clear of the line.
-        Vector3 LegMid(TerrainField field, Vector2 a, Vector2 b)
+        Vector3 LegMid(ITerrainSurface field, Vector2 a, Vector2 b)
         {
             Vector2 m = (a + b) * 0.5f;
             float y = (field != null ? field.SampleHeight(m.x, m.y) : 0f) + Lift + 1.5f;
             return new Vector3(m.x, y, m.y);
         }
 
-        void DrawRing(TerrainField field, Vector2 c, float r)
+        void DrawRing(ITerrainSurface field, Vector2 c, float r)
         {
             const int n = 20;
             Vector3 prev = default;
@@ -1013,7 +1013,7 @@ namespace NetworkDesigner.Terrain
         // The equal-leg symmetry ring around the bend as two SOLID translucent arcs:
         // YELLOW where ending the curve there is a real buildable turn for the design
         // speed (deflection + radius), RED otherwise (near-straight centre and too-tight).
-        void BuildSymRing(TerrainField field, Vector2 start, Vector2 bend)
+        void BuildSymRing(ITerrainSurface field, Vector2 start, Vector2 bend)
         {
             EnsureSymRing();
             _symV.Clear(); _symIdx.Clear(); _symCol.Clear();
@@ -1063,7 +1063,7 @@ namespace NetworkDesigner.Terrain
             _symMr.enabled = true;
         }
 
-        Vector3 RingPt(TerrainField field, Vector2 c, float radius, float angle)
+        Vector3 RingPt(ITerrainSurface field, Vector2 c, float radius, float angle)
         {
             float x = c.x + Mathf.Cos(angle) * radius, z = c.y + Mathf.Sin(angle) * radius;
             return new Vector3(x, (field != null ? field.SampleHeight(x, z) : 0f) + Lift, z);
@@ -1084,7 +1084,7 @@ namespace NetworkDesigner.Terrain
         // While positioning the bend: draw the guide leg into the coloured overlay — RED
         // until the first leg is long enough for a real turn at this speed — and mark the
         // min-leg target.
-        void BuildMinLegGuide(TerrainField field, Vector2 start, Vector2 cur)
+        void BuildMinLegGuide(ITerrainSurface field, Vector2 start, Vector2 cur)
         {
             EnsureSymRing();
             _symV.Clear(); _symIdx.Clear(); _symCol.Clear();
@@ -1105,7 +1105,7 @@ namespace NetworkDesigner.Terrain
             _symMr.enabled = true;
         }
 
-        void SymDashedLine(TerrainField field, Vector2 a, Vector2 b, Color32 col)
+        void SymDashedLine(ITerrainSurface field, Vector2 a, Vector2 b, Color32 col)
         {
             float len = Vector2.Distance(a, b);
             if (len < 1e-4f) return;
@@ -1120,7 +1120,7 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        void SymCircle(TerrainField field, Vector2 c, float r, Color32 col)
+        void SymCircle(ITerrainSurface field, Vector2 c, float r, Color32 col)
         {
             const int n = 18; Vector3 prev = default;
             for (int i = 0; i <= n; i++)
@@ -1183,7 +1183,7 @@ namespace NetworkDesigner.Terrain
             _inspMr.sharedMaterials = new[] { _inspMat, _inspMat };
         }
 
-        public void RebuildCurveInspect(TerrainField field, Vector3 cursorW, bool show)
+        public void RebuildCurveInspect(ITerrainSurface field, Vector3 cursorW, bool show)
         {
             EnsureCurveInspect();
             bool on = show && ShowCurveInspect && field != null && Graph != null && Graph.Edges.Count > 0;
@@ -1220,7 +1220,7 @@ namespace NetworkDesigner.Terrain
             _inspMesh.RecalculateBounds();
         }
 
-        Vector3 InspLift(TerrainField field, Vector2 p, float lift)
+        Vector3 InspLift(ITerrainSurface field, Vector2 p, float lift)
         {
             float y = field != null ? field.SampleHeight(p.x, p.y) : 0f;
             return new Vector3(p.x, y + lift, p.y);
@@ -1243,7 +1243,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // Dash each segment with a bounded for-loop (no growing phase accumulator).
-        void InspDashedPolyline(TerrainField field, List<Vector2> pts, float lift, Color32 col)
+        void InspDashedPolyline(ITerrainSurface field, List<Vector2> pts, float lift, Color32 col)
         {
             const float dash = 2.5f, gap = 1.8f, period = dash + gap;
             for (int i = 0; i + 1 < pts.Count; i++)
@@ -1258,7 +1258,7 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        void InspDashedSeg(TerrainField field, Vector2 a, Vector2 b, float lift, Color32 col)
+        void InspDashedSeg(ITerrainSurface field, Vector2 a, Vector2 b, float lift, Color32 col)
         {
             _boxL.Clear(); _boxL.Add(a); _boxL.Add(b);
             InspDashedPolyline(field, _boxL, lift, col);
@@ -1270,7 +1270,7 @@ namespace NetworkDesigner.Terrain
             else { Vector2 d = E - S; c1 = S + d / 3f; c2 = S + d * (2f / 3f); }
         }
 
-        void EmitCurveBox(TerrainField field, Vector2 S, Vector2 c1, Vector2 c2, Vector2 E,
+        void EmitCurveBox(ITerrainSurface field, Vector2 S, Vector2 c1, Vector2 c2, Vector2 E,
                           float halfW, float lift, bool filled, bool hatched, Color32 fill, Color32 outline, Color32 hatch)
         {
             const int N = 20;
@@ -1330,7 +1330,7 @@ namespace NetworkDesigner.Terrain
             return (p - (a + ab * t)).sqrMagnitude;
         }
 
-        void EmitHoverDetails(TerrainField field, int ei, float lift)
+        void EmitHoverDetails(ITerrainSurface field, int ei, float lift)
         {
             LineEdge e = Graph.Edges[ei];
             Vector2 S = Graph.Nodes[e.A], E = Graph.Nodes[e.B];
@@ -1398,7 +1398,7 @@ namespace NetworkDesigner.Terrain
             return true;
         }
 
-        public void ClearAll(TerrainField field)
+        public void ClearAll(ITerrainSurface field)
         {
             _graph = new LineGraph();
             _chainTail = -1; _cornerPending = false;

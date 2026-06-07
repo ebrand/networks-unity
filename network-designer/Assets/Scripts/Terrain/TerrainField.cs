@@ -13,7 +13,9 @@ using NetworkDesigner.Model; // PlacedTreeData
 namespace NetworkDesigner.Terrain
 {
     [Serializable]
-    public class TerrainField
+    // Implements ITerrainSurface so it can be passed wherever a ground surface is read
+    // (rail/road draping etc.) interchangeably with a DEM Unity-Terrain surface.
+    public class TerrainField : ITerrainSurface
     {
         public int ColumnsX = 64;          // vertex count along X (>= 2)
         public int RowsZ = 64;             // vertex count along Z (>= 2)
@@ -35,6 +37,7 @@ namespace NetworkDesigner.Terrain
         public int VertexCount => ColumnsX * RowsZ;
         public float WidthX => (ColumnsX - 1) * CellSize;
         public float LengthZ => (RowsZ - 1) * CellSize;
+        Vector3 ITerrainSurface.Origin => Origin;   // Origin is a field; expose it for the interface
 
         public bool InRange(int x, int z) => x >= 0 && x < ColumnsX && z >= 0 && z < RowsZ;
         public int Index(int x, int z) => z * ColumnsX + x;

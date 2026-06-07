@@ -17,13 +17,11 @@ namespace NetworkDesigner.UI
         protected override bool AnchorBottom => true;    // bottom-right (clear of the
         protected override bool AnchorRight => true;     // top-left content palettes)
         protected override bool ShowFooter => false;     // footer lives on the open palette
-        protected override float PanelWidth => 210f;
+        protected override float PanelWidth => 76f;   // slim: buttons are just hotkey labels
 
         protected override void BuildBody(VisualElement body)
         {
-            body.Add(SectionLabel("PALETTES"));
-            // One toggle button per other (toggleable) palette. All palettes have
-            // registered in Awake by the time this Start-time body build runs.
+            // One thin toggle button per other (toggleable) palette, labelled with its hotkey.
             foreach (var p in All)
             {
                 if (!p.Toggleable) continue;
@@ -31,7 +29,9 @@ namespace NetworkDesigner.UI
                 // Radio: open this one (closing the others, running its OnOpened hook),
                 // or close it if it's already open. Same path as the N/Y/L/K hotkeys.
                 var b = MakeButton(pal.MenuLabel, () => ToggleExclusive(pal.PaletteId));
-                b.style.marginBottom = 6;
+                b.style.height = 22;            // thin
+                b.style.fontSize = 12;
+                b.style.marginBottom = 4;
                 body.Add(b);
                 _sync.Add(() => StyleActive(b, pal.IsOpen));
             }

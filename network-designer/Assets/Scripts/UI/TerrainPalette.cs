@@ -14,7 +14,7 @@ namespace NetworkDesigner.UI
     public class TerrainPalette : PaletteBase
     {
         public override string PaletteId => "Terrain";
-        public override string MenuLabel => "Terrain (N)";
+        public override string MenuLabel => "N";
         protected override string Title => "Terrain";
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);   // terrain green
         protected override float PanelWidth => 320f;

@@ -11,6 +11,7 @@ namespace NetworkDesigner.UI
     public class SpikePalette : PaletteBase
     {
         public override string PaletteId => "Spike";
+        public override string MenuLabel => "X";
         protected override string Title => "Spike";
         protected override Color Accent => new Color(0.72f, 0.5f, 0.95f);   // purple = scratch
         protected override float PanelWidth => 300f;

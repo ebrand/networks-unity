@@ -89,7 +89,7 @@ namespace NetworkDesigner.Terrain
         // ---- editing ----
 
         // Add a node at a world hit; connect from the chain tail (chain drawing).
-        public void AddNode(TerrainField field, Vector3 hit)
+        public void AddNode(ITerrainSurface field, Vector3 hit)
         {
             int idx = Graph.AddNode(new Vector2(hit.x, hit.z));
             if (_chainTail >= 0) Graph.AddEdge(_chainTail, idx);
@@ -99,7 +99,7 @@ namespace NetworkDesigner.Terrain
 
         public void EndChain() { _chainTail = -1; }
 
-        public void ClearAll(TerrainField field)
+        public void ClearAll(ITerrainSurface field)
         {
             Graph.Clear();
             _chainTail = -1;
@@ -107,7 +107,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // Remove the most-recently-added node + its edges (simple undo).
-        public void RemoveLastNode(TerrainField field)
+        public void RemoveLastNode(ITerrainSurface field)
         {
             int last = Graph.Nodes.Count - 1;
             if (last < 0) return;
@@ -130,7 +130,7 @@ namespace NetworkDesigner.Terrain
 
         // ---- rendering ----
 
-        public void Rebuild(TerrainField field)
+        public void Rebuild(ITerrainSurface field)
         {
             // With a parent override (cable generator), destroy IMMEDIATELY so the
             // generator doesn't see the old + new poles together when we poke it
@@ -178,7 +178,7 @@ namespace NetworkDesigner.Terrain
         static readonly float[] _cum = new float[SubSteps + 1];
         const int SubSteps = 48;
 
-        void PlaceAlongEdge(TerrainField field, LineEdge e,
+        void PlaceAlongEdge(ITerrainSurface field, LineEdge e,
                             Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3,
                             float s, HashSet<int> postedNodes)
         {
@@ -212,7 +212,7 @@ namespace NetworkDesigner.Terrain
                 Spawn(field, p3, LineGraph.BezierTangent(p0, p1, p2, p3, 1f));
         }
 
-        void Spawn(TerrainField field, Vector2 xz, Vector2 tangent)
+        void Spawn(ITerrainSurface field, Vector2 xz, Vector2 tangent)
         {
             float y = (Conform && field != null ? field.SampleHeight(xz.x, xz.y) : 0f) + VerticalOffset;
             float yaw = (tangent.sqrMagnitude > 1e-6f
@@ -227,7 +227,7 @@ namespace NetworkDesigner.Terrain
 
         // Delete the nearest node (and its edges) within `radius` of a world hit.
         // Returns true if one was removed.
-        public bool DeleteNearNode(TerrainField field, Vector3 hit, float radius)
+        public bool DeleteNearNode(ITerrainSurface field, Vector3 hit, float radius)
         {
             int n = Graph.NearestNode(new Vector2(hit.x, hit.z), radius);
             if (n < 0) return false;
@@ -243,7 +243,7 @@ namespace NetworkDesigner.Terrain
         public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; }
 
         // Ghost puck at the cursor + a dashed line for the pending edge.
-        public void UpdatePreview(TerrainField field, Vector3 cursor, bool show)
+        public void UpdatePreview(ITerrainSurface field, Vector3 cursor, bool show)
         {
             EnsurePreview();
             _pvMr.enabled = show;
@@ -292,7 +292,7 @@ namespace NetworkDesigner.Terrain
             _pvMesh.RecalculateBounds();
         }
 
-        static Vector3 Conformed(TerrainField field, float x, float z, float lift)
+        static Vector3 Conformed(ITerrainSurface field, float x, float z, float lift)
             => new Vector3(x, (field != null ? field.SampleHeight(x, z) : 0f) + lift, z);
 
         void AddSeg(Vector3 a, Vector3 b)
@@ -302,7 +302,7 @@ namespace NetworkDesigner.Terrain
             _pvIdx.Add(s); _pvIdx.Add(s + 1);
         }
 
-        void EmitDashed(TerrainField field, Vector3 a, Vector3 b, float dash, float gap, float lift)
+        void EmitDashed(ITerrainSurface field, Vector3 a, Vector3 b, float dash, float gap, float lift)
         {
             Vector3 d = b - a;
             float len = d.magnitude;

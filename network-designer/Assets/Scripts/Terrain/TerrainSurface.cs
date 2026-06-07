@@ -50,4 +50,16 @@ namespace NetworkDesigner.Terrain
         public float WidthX => _field.WidthX;
         public float LengthZ => _field.LengthZ;
     }
+
+    // Surface over the DEM Unity-Terrain grid. Forwards to DemTerrainWorld's tile-aware
+    // sampling, so the same rail/road consumers drape onto real-world terrain when handed
+    // this instead of a low-poly field.
+    public sealed class DemTerrainSurface : ITerrainSurface
+    {
+        public float SampleHeight(float worldX, float worldZ) => DemTerrainWorld.SampleHeight(worldX, worldZ);
+        public float SampleSlopeDegrees(float worldX, float worldZ) => DemTerrainWorld.SampleSlopeDegrees(worldX, worldZ);
+        public Vector3 Origin => DemTerrainWorld.WorldOrigin;
+        public float WidthX => DemTerrainWorld.WorldWidthX;
+        public float LengthZ => DemTerrainWorld.WorldLengthZ;
+    }
 }

@@ -16,7 +16,7 @@ namespace NetworkDesigner.UI
     public class ScatterFencePalette : PaletteBase
     {
         public override string PaletteId => "ScatterFence";
-        public override string MenuLabel => "Scatter/Fence";
+        public override string MenuLabel => "T/R/F";
         protected override string Title => "Scatter/Fence";
         protected override Color Accent => new Color(0.55f, 0.8f, 0.45f);   // foliage green
         protected override float PanelWidth => 360f;

@@ -13,6 +13,7 @@ namespace NetworkDesigner.UI
     public class PlaceablesPalette : PaletteBase
     {
         public override string PaletteId => "Placeables";
+        public override string MenuLabel => "O";   // hotkey O = Objects/placeables
         protected override string Title => "Placeables";
         protected override Color Accent => new Color(0.95f, 0.66f, 0.32f);   // orange
         protected override float PanelWidth => 280f;
