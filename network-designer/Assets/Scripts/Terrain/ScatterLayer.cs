@@ -364,7 +364,7 @@ namespace NetworkDesigner.Terrain
 
         // Fill unoccupied lattice cells under the brush. Returns true if anything
         // was placed (host marks dirty). No neighbour scan; rate-limited.
-        public bool Paint(TerrainField field, Vector3 center, float dt, float brushRadius,
+        public bool Paint(ITerrainSurface field, Vector3 center, float dt, float brushRadius,
             float waterLevel = float.NegativeInfinity)
         {
             if (field == null || Prefabs == null || Prefabs.Count == 0) return false;
@@ -416,7 +416,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // The first item to claim a cell keeps it.
-        PlacedTree Spawn(TerrainField field, GameObject prefab, long cellKey,
+        PlacedTree Spawn(ITerrainSurface field, GameObject prefab, long cellKey,
                          float wx, float wz, float rotY, float scale)
         {
             if (prefab == null) return null;
@@ -572,7 +572,7 @@ namespace NetworkDesigner.Terrain
             if (packs != null) _packs.AddRange(packs);
         }
 
-        public void SpawnPending(TerrainField field)
+        public void SpawnPending(ITerrainSurface field)
         {
             if (_pending == null) return;
             foreach (PlacedTreeData d in _pending)
@@ -595,7 +595,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // Re-seat every placed item onto the (possibly changed) surface.
-        public void ConformToSurface(TerrainField field)
+        public void ConformToSurface(ITerrainSurface field)
         {
             if (field == null) return;
             for (int i = 0; i < _placed.Count; i++)

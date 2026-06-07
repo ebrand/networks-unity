@@ -382,8 +382,8 @@ namespace NetworkDesigner.Terrain
             LoadPacks(); // standalone pack library wins over any packs from the autosave
 
             BuildAllChunks();
-            TreeLayer.SpawnPending(_field); // scatter from the save (heights now known)
-            RockLayer.SpawnPending(_field);
+            TreeLayer.SpawnPending(Surf); // scatter from the save (heights now known)
+            RockLayer.SpawnPending(Surf);
             FenceLayer.Rebuild(Surf);     // linework from the save
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
@@ -1417,8 +1417,8 @@ namespace NetworkDesigner.Terrain
 
             // Rebuild the mesh + re-conform everything to the carved surface.
             BuildAllChunks();
-            TreeLayer.ConformToSurface(_field);
-            RockLayer.ConformToSurface(_field);
+            TreeLayer.ConformToSurface(Surf);
+            RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
@@ -2031,7 +2031,7 @@ namespace NetworkDesigner.Terrain
             {
                 bool overPanel = MouseOverActivePanel();
                 if (!overPanel && overTerrain && Input.GetMouseButton(0)
-                    && _active.Paint(_field, hit.point, Time.deltaTime, BrushRadius,
+                    && _active.Paint(Surf, hit.point, Time.deltaTime, BrushRadius,
                                      ShowWater ? WaterLevel : float.NegativeInfinity))
                     _dirtySince = Time.realtimeSinceStartup;
                 if (!overPanel && overTerrain && Input.GetMouseButton(1)
@@ -2179,8 +2179,8 @@ namespace NetworkDesigner.Terrain
         void ConformScatterAndLines()
         {
             if (_field == null) return;
-            TreeLayer.ConformToSurface(_field);
-            RockLayer.ConformToSurface(_field);
+            TreeLayer.ConformToSurface(Surf);
+            RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf); // re-drape the survey lines onto the new surface
@@ -2786,8 +2786,8 @@ namespace NetworkDesigner.Terrain
             EnsureField(forceRebuild: true);     // new grid (flat) when the size/cell changed
             _chunkMesh = null; _chunkCol = null; // force full recreate + sweep old chunks
             BuildAllChunks();
-            TreeLayer.ConformToSurface(_field);
-            RockLayer.ConformToSurface(_field);
+            TreeLayer.ConformToSurface(Surf);
+            RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
@@ -2817,8 +2817,8 @@ namespace NetworkDesigner.Terrain
             if (_field == null) EnsureField(forceRebuild: true);
             System.Array.Clear(_field.Heights, 0, _field.Heights.Length);
             BuildAllChunks();
-            TreeLayer.ConformToSurface(_field);   // re-settle everything onto the flat ground
-            RockLayer.ConformToSurface(_field);
+            TreeLayer.ConformToSurface(Surf);   // re-settle everything onto the flat ground
+            RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
@@ -2861,8 +2861,8 @@ namespace NetworkDesigner.Terrain
         {
             _chunkMesh = null; _chunkCol = null;
             BuildAllChunks();
-            TreeLayer.ConformToSurface(_field);
-            RockLayer.ConformToSurface(_field);
+            TreeLayer.ConformToSurface(Surf);
+            RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
@@ -2936,8 +2936,8 @@ namespace NetworkDesigner.Terrain
             // orphans) so the mesh can't lag behind the new heights or stack up.
             _chunkMesh = null; _chunkCol = null;
             BuildAllChunks();
-            TreeLayer.ConformToSurface(_field);
-            RockLayer.ConformToSurface(_field);
+            TreeLayer.ConformToSurface(Surf);
+            RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf); // re-place linework on the new surface
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
@@ -3225,8 +3225,8 @@ namespace NetworkDesigner.Terrain
             _chunkMesh = null; _chunkCol = null; // grid may have changed -> recreate chunks
             LoadPacks(); // standalone pack library wins over autosave packs
             BuildAllChunks();
-            TreeLayer.SpawnPending(_field);
-            RockLayer.SpawnPending(_field);
+            TreeLayer.SpawnPending(Surf);
+            RockLayer.SpawnPending(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
