@@ -345,6 +345,83 @@ namespace NetworkDesigner.Terrain
                 Debug.LogWarning("[DemTerrainWorld] no DEM surface under the camera's XZ.");
         }
 
+        public enum SculptMode { Raise, Lower, Smooth, Flatten }
+
+        // Brush-edit the DEM Unity Terrain heights at a world point, across tile seams. Every
+        // overlapping tile processes the SAME world positions, so a shared seam pixel gets the
+        // same delta/target on both sides → raise/lower/flatten stay seamless (smooth can drift
+        // a hair at borders, it only sees same-tile neighbours). strength is metres/sec for
+        // raise/lower (and the approach speed for flatten/smooth); targetY is the world height
+        // for Flatten. Edits are IN-MEMORY (the runtime TerrainData) — rebuild/Clear resets,
+        // and the source DEM PNGs are never touched. NOTE: the slope textures + grass density
+        // were computed from the OLD shape, so re-apply them after big edits.
+        public static void Sculpt(Vector3 world, float radius, float strength, float dt, SculptMode mode, float targetY)
+        {
+            if (_grid == null || radius <= 0f) return;
+            float r2 = radius * radius;
+            foreach (var t in _grid)
+            {
+                if (t == null || t.terrainData == null) continue;
+                var td = t.terrainData;
+                Vector3 o = t.transform.position;
+                float sx = td.size.x, sz = td.size.z, sy = td.size.y;
+                if (sx <= 0f || sz <= 0f || sy <= 0f) continue;
+                if (world.x + radius < o.x || world.x - radius > o.x + sx) continue;   // AABB reject
+                if (world.z + radius < o.z || world.z - radius > o.z + sz) continue;
+
+                int res = td.heightmapResolution;
+                float ppX = (res - 1) / sx, ppZ = (res - 1) / sz;   // heightmap pixels per metre
+                int x0 = Mathf.Clamp(Mathf.FloorToInt((world.x - radius - o.x) * ppX), 0, res - 1);
+                int x1 = Mathf.Clamp(Mathf.CeilToInt((world.x + radius - o.x) * ppX), 0, res - 1);
+                int z0 = Mathf.Clamp(Mathf.FloorToInt((world.z - radius - o.z) * ppZ), 0, res - 1);
+                int z1 = Mathf.Clamp(Mathf.CeilToInt((world.z + radius - o.z) * ppZ), 0, res - 1);
+                int w = x1 - x0 + 1, h = z1 - z0 + 1;
+                if (w <= 0 || h <= 0) continue;
+
+                float[,] hm = td.GetHeights(x0, z0, w, h);   // [z, x], normalized 0..1
+                // Smooth samples a WIDE box from the ORIGINAL heights (a copy) so it averages
+                // real terrain features, not pixel neighbours / already-smoothed values.
+                float[,] src = mode == SculptMode.Smooth ? (float[,])hm.Clone() : null;
+                int kernel = Mathf.Clamp(Mathf.RoundToInt(radius * ppX * 0.25f), 2, 12);  // box radius in pixels
+                float stepNorm = (strength * dt * 3f) / sy;   // raise/lower gain so it has real punch
+                float targetNorm = Mathf.Clamp01((targetY - o.y) / sy);
+                float blendF = Mathf.Clamp01(strength * dt * 0.12f);   // flatten approach
+                float blendS = Mathf.Clamp01(strength * dt * 0.7f);    // smooth approach (stronger + wide kernel)
+                bool changed = false;
+                for (int zz = 0; zz < h; zz++)
+                    for (int xx = 0; xx < w; xx++)
+                    {
+                        float wx = o.x + (x0 + xx) / ppX, wz = o.z + (z0 + zz) / ppZ;
+                        float dx = wx - world.x, dz = wz - world.z, d2 = dx * dx + dz * dz;
+                        if (d2 > r2) continue;
+                        float fall = 1f - Mathf.Sqrt(d2) / radius;
+                        fall = fall * fall * (3f - 2f * fall);   // smoothstep falloff
+                        float val = hm[zz, xx];
+                        switch (mode)
+                        {
+                            case SculptMode.Raise: val += stepNorm * fall; break;
+                            case SculptMode.Lower: val -= stepNorm * fall; break;
+                            case SculptMode.Flatten: val = Mathf.Lerp(val, targetNorm, blendF * fall); break;
+                            case SculptMode.Smooth: val = Mathf.Lerp(val, BoxAvg(src, xx, zz, w, h, kernel), blendS * fall); break;
+                        }
+                        val = Mathf.Clamp01(val);
+                        if (val != hm[zz, xx]) { hm[zz, xx] = val; changed = true; }
+                    }
+                if (changed) td.SetHeights(x0, z0, hm);
+            }
+        }
+
+        // Average of a (2k+1)² box around (x,z), clamped to the sub-array.
+        static float BoxAvg(float[,] s, int x, int z, int w, int h, int k)
+        {
+            int xa = Mathf.Max(0, x - k), xb = Mathf.Min(w - 1, x + k);
+            int za = Mathf.Max(0, z - k), zb = Mathf.Min(h - 1, z + k);
+            float sum = 0f; int n = 0;
+            for (int zz = za; zz <= zb; zz++)
+                for (int xx = xa; xx <= xb; xx++) { sum += s[zz, xx]; n++; }
+            return n > 0 ? sum / n : s[z, x];
+        }
+
         // Point the fly camera's terrain-aware clamp + speed-damping at the DEM surface (it's
         // wired to the low-poly terrain by default, which reads Y≈0 here → no slowdown near the
         // real surface). Raycast-based so it works regardless of tile heights.

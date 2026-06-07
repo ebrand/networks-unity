@@ -195,6 +195,19 @@ namespace NetworkDesigner.UI
             routeClr.style.marginTop = 6;
             body.Add(routeClr);
 
+            // Terrain sculpting on the DEM Unity Terrain (left-drag). Edits are in-memory —
+            // rebuilding the world resets them; re-apply Slope textures / Grass after big edits.
+            body.Add(ToggleRow("Sculpt Terrain (L-drag)", () => DemTerrainSculpt.Active, v => DemTerrainSculpt.Active = v));
+            var sculptDd = new DropdownField { choices = new List<string> { "Raise", "Lower", "Smooth", "Flatten" }, index = 0 };
+            sculptDd.style.flexGrow = 1; sculptDd.style.flexShrink = 1; sculptDd.style.minWidth = 0;
+            sculptDd.RegisterValueChangedCallback(_ => DemTerrainSculpt.Mode = (DemTerrainWorld.SculptMode)sculptDd.index);
+            var sculptRow = HBox(); sculptRow.style.marginBottom = 4;
+            var sculptLbl = new Label("Brush"); sculptLbl.style.color = Sub; sculptLbl.style.minWidth = 56; sculptLbl.style.flexShrink = 0;
+            sculptRow.Add(sculptLbl); sculptRow.Add(sculptDd);
+            body.Add(sculptRow);
+            body.Add(SliderRow("Radius", () => DemTerrainSculpt.Radius, v => DemTerrainSculpt.Radius = v, 10f, 500f, "0"));
+            body.Add(SliderRow("Strength", () => DemTerrainSculpt.Strength, v => DemTerrainSculpt.Strength = v, 1f, 40f, "0"));
+
             // Foliage proof-of-life: spawn the TTFE Global Controller + scatter a patch of
             // real PV_Grass prefabs where the camera is looking, to judge the look before
             // committing to a scaled placement approach.
