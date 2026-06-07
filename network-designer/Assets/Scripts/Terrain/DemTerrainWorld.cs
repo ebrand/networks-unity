@@ -187,8 +187,9 @@ namespace NetworkDesigner.Terrain
         // mesh? If the grass comes out FLAT/untextured, detail instancing isn't honoring the
         // material and we pivot to a streamed prefab scatterer instead.
         public static void SetGrassDetail(float slopeLow = 22f, float slopeHigh = 38f,
-                                          int detailRes = 512, float viewDistance = 350f,
-                                          int maxPerCell = 40, int maxPrototypes = 3)
+                                          int detailRes = 1024, float viewDistance = 350f,
+                                          int maxPerCell = 40, int maxPrototypes = 3,
+                                          float sizeScale = 1.3f)
         {
             if (_grid == null) { Debug.LogWarning("[DemTerrainWorld] build a DEM world first."); return; }
             var protos = BuildGrassPrototypes(maxPrototypes);
@@ -202,7 +203,10 @@ namespace NetworkDesigner.Terrain
                     usePrototypeMesh = true,
                     useInstancing = true,                       // render the prototype's own material
                     renderMode = DetailRenderMode.VertexLit,    // required when instancing meshes
-                    minWidth = 1f, maxWidth = 1f, minHeight = 1f, maxHeight = 1f,
+                    // Bigger, varied clumps so neighbours OVERLAP into a carpet instead of
+                    // reading as isolated dots from any height (scale multipliers on the mesh).
+                    minWidth = 1.0f * sizeScale, maxWidth = 1.7f * sizeScale,
+                    minHeight = 1.0f * sizeScale, maxHeight = 1.5f * sizeScale,
                     noiseSpread = 0.3f,
                     healthyColor = Color.white, dryColor = Color.white,
                 };
@@ -307,13 +311,20 @@ namespace NetworkDesigner.Terrain
             var paths = new System.Collections.Generic.List<string>();
             foreach (string guid in UnityEditor.AssetDatabase.FindAssets("t:Prefab", new[] { folder }))
                 paths.Add(UnityEditor.AssetDatabase.GUIDToAssetPath(guid));
-            // prefer prefabs with "Grass" in the name so the patch reads as a meadow, not dry weeds
-            paths.Sort((x, y) =>
+            // Pick the FULL GREEN grass: prefer "Clump"/"Grass" (lush tufts), reject "Dry" (pale
+            // tan → reads as washed-out dots) and "Shot"/"Stalk"/"Plants" (sparse weeds).
+            paths.Sort((x, y) => Score(y) - Score(x));
+            int Score(string p)
             {
-                bool gx = x.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0;
-                bool gy = y.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0;
-                return gx == gy ? string.CompareOrdinal(x, y) : (gx ? -1 : 1);
-            });
+                int s = 0;
+                if (p.IndexOf("Clump", System.StringComparison.OrdinalIgnoreCase) >= 0) s += 4;
+                if (p.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0) s += 2;
+                if (p.IndexOf("Dry", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 5;
+                if (p.IndexOf("Shot", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 2;
+                if (p.IndexOf("Stalk", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 2;
+                if (p.IndexOf("Plants", System.StringComparison.OrdinalIgnoreCase) >= 0) s -= 3;
+                return s;
+            }
 
             foreach (string path in paths)
             {

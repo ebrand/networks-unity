@@ -204,11 +204,13 @@ namespace NetworkDesigner.UI
             // distance is a cheap live change.
             float grassDensity = 40f;   // max grass instances per detail cell (lush vs sparse)
             float grassDist = 350f;     // metres the grass draws out to
+            float grassSize = 1.3f;     // clump scale (bigger → clumps overlap into a carpet)
             body.Add(SliderRow("Grass Density", () => grassDensity, v => grassDensity = v, 4f, 160f, "0"));
+            body.Add(SliderRow("Grass Size", () => grassSize, v => grassSize = v, 0.5f, 3f, "0.0"));
             body.Add(SliderRow("Grass Dist", () => grassDist,
                 v => { grassDist = v; DemTerrainWorld.SetGrassViewDistance(v); }, 100f, 1000f, "0"));
             var grassDetail = MakeButton("Grass Detail (apply)",
-                () => DemTerrainWorld.SetGrassDetail(22f, 38f, 512, grassDist, Mathf.RoundToInt(grassDensity)));
+                () => DemTerrainWorld.SetGrassDetail(22f, 38f, 1024, grassDist, Mathf.RoundToInt(grassDensity), 3, grassSize));
             grassDetail.style.marginTop = 6;
             body.Add(grassDetail);
             var grassDetailClr = MakeButton("Clear Detail", () => DemTerrainWorld.ClearGrassDetail());
