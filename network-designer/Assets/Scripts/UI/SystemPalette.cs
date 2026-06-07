@@ -182,6 +182,16 @@ namespace NetworkDesigner.UI
             var routeClr = MakeButton("Clear Route", () => TerrainRouteTool.Clear());
             routeClr.style.marginTop = 6;
             body.Add(routeClr);
+
+            // Foliage proof-of-life: spawn the TTFE Global Controller + scatter a patch of
+            // real PV_Grass prefabs where the camera is looking, to judge the look before
+            // committing to a scaled placement approach.
+            var grass = MakeButton("Grass Patch (look here)", () => FoliageProbe.Spawn());
+            grass.style.marginTop = 10;
+            body.Add(grass);
+            var grassClr = MakeButton("Clear Grass", () => FoliageProbe.Clear());
+            grassClr.style.marginTop = 6;
+            body.Add(grassClr);
         }
 
         // A ground-variant dropdown (full-width, shrinkable) preset to an index.
