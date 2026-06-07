@@ -317,13 +317,13 @@ namespace NetworkDesigner.Terrain
         ITerrainSurface Surf => (DemBackend && DemTerrainWorld.HasWorld) ? (_demSurf ??= new DemTerrainSurface()) : (ITerrainSurface)_field;
 
         // Flip the active terrain backend: route all tools (via Surf/DemBackend) and show only the
-        // active terrain. Low-poly stays visible until a DEM is actually built, so DEM mode with no
-        // world isn't an empty scene. Heightmap sampling works on the DEM even while it's hidden.
+        // active terrain. The low-poly world is hidden whenever DEM is the active backend (even
+        // before a world is loaded — you'll see empty sky until you pick a city, which is fine).
+        // Heightmap sampling works on the DEM even while it's hidden.
         public void SetActiveBackend(bool dem)
         {
             DemBackend = dem;
-            bool hasDem = DemTerrainWorld.HasWorld;
-            if (_chunkRoot != null) _chunkRoot.SetActive(!(dem && hasDem));
+            if (_chunkRoot != null) _chunkRoot.SetActive(!dem);
             DemTerrainWorld.SetVisible(dem);
         }
 
