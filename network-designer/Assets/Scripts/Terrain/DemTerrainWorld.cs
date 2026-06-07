@@ -36,6 +36,7 @@ namespace NetworkDesigner.Terrain
         static TerrainLayer _green;       // shared flat-green layer
         static TerrainLayer _ground, _rock;  // runtime copies of the flat + steep TerrainLayers
         static string _flatVar, _steepVar;   // which TerrainLayer assets are loaded
+        static GameObject _detailHolder;     // hidden parent for runtime grass detail-mesh prototypes
 
         // City folders under Assets/Heightmaps/Highres that contain DEM tiles.
         public static List<string> ListWorlds()
@@ -61,6 +62,7 @@ namespace NetworkDesigner.Terrain
                     if (l != null && l.diffuseTexture != null) Object.DestroyImmediate(l.diffuseTexture);
             if (_green != null && _green.diffuseTexture != null) Object.DestroyImmediate(_green.diffuseTexture);
             _grid = null; _albedo = null; _green = null;
+            CleanupDetailHolder();
 
             var existing = GameObject.Find(RootName);
             if (existing != null)
@@ -175,6 +177,190 @@ namespace NetworkDesigner.Terrain
             var layers = new[] { _ground, _rock };
             foreach (var t in _grid)
                 if (t != null && t.terrainData != null) t.terrainData.terrainLayers = layers;
+        }
+
+        // ── Path A: grass via Unity Terrain DETAIL meshes ───────────────────────────────
+        // Scatter the pack's grass as terrain details (GPU-instanced, auto-LOD/culled by
+        // Unity) so it scales to the whole world for free, with density driven by the same
+        // slope map SetTextured uses (lush on flat ground, thinning out into rock on steeps).
+        // The open question this answers: does the TTFE (Amplify) material render as a detail
+        // mesh? If the grass comes out FLAT/untextured, detail instancing isn't honoring the
+        // material and we pivot to a streamed prefab scatterer instead.
+        public static void SetGrassDetail(float slopeLow = 22f, float slopeHigh = 38f,
+                                          int detailRes = 512, float viewDistance = 350f,
+                                          int maxPerCell = 40, int maxPrototypes = 3)
+        {
+            if (_grid == null) { Debug.LogWarning("[DemTerrainWorld] build a DEM world first."); return; }
+            var protos = BuildGrassPrototypes(maxPrototypes);
+            if (protos.Length == 0) { Debug.LogWarning("[DemTerrainWorld] no grass prefabs found for detail layer."); return; }
+
+            var dp = new DetailPrototype[protos.Length];
+            for (int p = 0; p < protos.Length; p++)
+                dp[p] = new DetailPrototype
+                {
+                    prototype = protos[p],
+                    usePrototypeMesh = true,
+                    useInstancing = true,                       // render the prototype's own material
+                    renderMode = DetailRenderMode.VertexLit,    // required when instancing meshes
+                    minWidth = 1f, maxWidth = 1f, minHeight = 1f, maxHeight = 1f,
+                    noiseSpread = 0.3f,
+                    healthyColor = Color.white, dryColor = Color.white,
+                };
+
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                {
+                    var t = _grid[r, c];
+                    if (t == null || t.terrainData == null) continue;
+                    var td = t.terrainData;
+                    td.SetDetailResolution(detailRes, 32);      // also clears existing layers
+                    td.detailPrototypes = dp;
+
+                    int res = td.detailResolution;
+                    var maps = new int[dp.Length][,];
+                    for (int p = 0; p < dp.Length; p++) maps[p] = new int[res, res];
+
+                    for (int j = 0; j < res; j++)
+                    {
+                        float v = res > 1 ? (float)j / (res - 1) : 0f;
+                        for (int i = 0; i < res; i++)
+                        {
+                            float u = res > 1 ? (float)i / (res - 1) : 0f;
+                            float rock = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(slopeLow, slopeHigh, td.GetSteepness(u, v)));
+                            int count = Mathf.RoundToInt(maxPerCell * (1f - rock));
+                            if (count <= 0) continue;
+                            int layer = ((i * 73856093) ^ (j * 19349663)) % dp.Length;   // spread variety across prototypes
+                            if (layer < 0) layer += dp.Length;
+                            maps[layer][j, i] = count;          // detail layer is indexed [z, x] like the alphamap
+                        }
+                    }
+                    for (int p = 0; p < dp.Length; p++) td.SetDetailLayer(0, 0, p, maps[p]);
+
+                    t.detailObjectDistance = Mathf.Clamp(viewDistance, 0f, 1000f);
+                    t.detailObjectDensity = 1f;
+                }
+            Debug.Log($"[DemTerrainWorld] grass DETAIL applied: {dp.Length} prototype(s), res {detailRes}, view {viewDistance:0}m. " +
+                      "If the grass looks FLAT/untextured, the TTFE material isn't instancing as a detail mesh → pivot to streamed scatter.");
+        }
+
+        public static void ClearGrassDetail()
+        {
+            if (_grid != null)
+                foreach (var t in _grid)
+                    if (t != null && t.terrainData != null) t.terrainData.detailPrototypes = new DetailPrototype[0];
+            CleanupDetailHolder();
+        }
+
+        // Cheap live tweak: how far grass details draw (no density remap). On these huge tiles
+        // grass only ever renders within this radius of the camera, so it caps both how far you
+        // see grass AND the instance count on screen.
+        public static void SetGrassViewDistance(float meters)
+        {
+            if (_grid == null) return;
+            meters = Mathf.Clamp(meters, 0f, 1000f);
+            foreach (var t in _grid) if (t != null) t.detailObjectDistance = meters;
+        }
+
+        // Teleport the camera straight down to just above the DEM surface at its current XZ, so
+        // you can actually inspect ground-level detail without hand-flying down from kilometres up.
+        public static void DropCameraToSurface()
+        {
+            var cam = Camera.main != null ? Camera.main : Object.FindFirstObjectByType<Camera>();
+            if (cam == null) { Debug.LogWarning("[DemTerrainWorld] no camera."); return; }
+            WireCameraToDem();
+            Vector3 p = cam.transform.position;
+            if (Physics.Raycast(new Vector3(p.x, 12000f, p.z), Vector3.down, out RaycastHit hit, 30000f))
+                cam.transform.position = new Vector3(p.x, hit.point.y + 5f, p.z);
+            else
+                Debug.LogWarning("[DemTerrainWorld] no DEM surface under the camera's XZ.");
+        }
+
+        // Point the fly camera's terrain-aware clamp + speed-damping at the DEM surface (it's
+        // wired to the low-poly terrain by default, which reads Y≈0 here → no slowdown near the
+        // real surface). Raycast-based so it works regardless of tile heights.
+        static void WireCameraToDem()
+        {
+            var fly = Object.FindFirstObjectByType<NetworkDesigner.Designer.FlyCameraController>();
+            if (fly != null) fly.GroundHeight = DemGroundHeight;
+        }
+
+        static float DemGroundHeight(Vector3 p)
+        {
+            return Physics.Raycast(new Vector3(p.x, 12000f, p.z), Vector3.down, out RaycastHit hit, 30000f)
+                ? hit.point.y : 0f;
+        }
+
+        // Build up to `max` single-mesh detail prototypes from the pack's PV_Grass LOD prefabs.
+        // Detail prototypes need a plain MeshFilter+MeshRenderer GameObject (the grass prefabs
+        // are LODGroups), so we lift LOD0's mesh + material into a hidden holder and enable GPU
+        // instancing on MATERIAL COPIES (never mutate the pack assets). Grass-named prefabs first.
+        static GameObject[] BuildGrassPrototypes(int max)
+        {
+            CleanupDetailHolder();
+            var list = new System.Collections.Generic.List<GameObject>();
+#if UNITY_EDITOR
+            _detailHolder = new GameObject("DemDetailProtos") { hideFlags = HideFlags.HideAndDontSave };
+            _detailHolder.SetActive(false);
+
+            const string folder = "Assets/Toby Fredson/Rocky Hills Environment - Whitebark Pine/RHEWP_Demo/Prefabs/Prefabs_Vegetation/PV_Grass";
+            var paths = new System.Collections.Generic.List<string>();
+            foreach (string guid in UnityEditor.AssetDatabase.FindAssets("t:Prefab", new[] { folder }))
+                paths.Add(UnityEditor.AssetDatabase.GUIDToAssetPath(guid));
+            // prefer prefabs with "Grass" in the name so the patch reads as a meadow, not dry weeds
+            paths.Sort((x, y) =>
+            {
+                bool gx = x.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0;
+                bool gy = y.IndexOf("Grass", System.StringComparison.OrdinalIgnoreCase) >= 0;
+                return gx == gy ? string.CompareOrdinal(x, y) : (gx ? -1 : 1);
+            });
+
+            foreach (string path in paths)
+            {
+                if (list.Count >= max) break;
+                var prefab = UnityEditor.AssetDatabase.LoadAssetAtPath<GameObject>(path);
+                var proto = prefab != null ? BuildSingleMeshProto(prefab) : null;
+                if (proto != null) list.Add(proto);
+            }
+#endif
+            return list.ToArray();
+        }
+
+        // Lift LOD0's mesh + (instancing-enabled copies of) its materials into a plain GameObject.
+        static GameObject BuildSingleMeshProto(GameObject prefab)
+        {
+            MeshFilter mf = null; MeshRenderer mr = null;
+            var lod = prefab.GetComponentInChildren<LODGroup>();
+            if (lod != null)
+            {
+                var lods = lod.GetLODs();
+                if (lods.Length > 0)
+                    foreach (var rend in lods[0].renderers)
+                        if (rend is MeshRenderer m) { mr = m; mf = m.GetComponent<MeshFilter>(); break; }
+            }
+            if (mf == null) { mf = prefab.GetComponentInChildren<MeshFilter>(); mr = mf != null ? mf.GetComponent<MeshRenderer>() : null; }
+            if (mf == null || mf.sharedMesh == null || mr == null) return null;
+
+            var go = new GameObject("proto_" + prefab.name);
+            go.transform.SetParent(_detailHolder.transform, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mf.sharedMesh;
+            var src = mr.sharedMaterials;
+            var mats = new Material[src.Length];
+            for (int i = 0; i < src.Length; i++)
+            {
+                mats[i] = src[i] != null ? Object.Instantiate(src[i]) : null;
+                if (mats[i] != null) mats[i].enableInstancing = true;   // detail instancing needs it
+            }
+            go.AddComponent<MeshRenderer>().sharedMaterials = mats;
+            return go;
+        }
+
+        static void CleanupDetailHolder()
+        {
+            if (_detailHolder == null) return;
+            if (Application.isPlaying) Object.Destroy(_detailHolder);
+            else Object.DestroyImmediate(_detailHolder);
+            _detailHolder = null;
         }
 
         static void EnsureTextureLayers(string flat, string steep, float tileSize)
@@ -293,6 +479,7 @@ namespace NetworkDesigner.Terrain
                 }
 
             ApplyAlbedo(dir, grid, rows, cols, tileX, tileZ);
+            WireCameraToDem();   // make the camera's clamp/speed-damping follow the DEM surface
 
             Debug.Log($"[DemTerrainWorld] built {tiles.Count} tiles ({rows}x{cols}), " +
                       $"tile {tileX:0}x{tileZ:0}m → world {tileX * cols / 1000f:0.#}x{tileZ * rows / 1000f:0.#}km, " +
