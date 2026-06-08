@@ -80,6 +80,9 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Spacing (m) at which the terrain elevation is sampled along an edge " +
                  "to check the per-section grade — the 'every N metres' resolution.")]
         public float GradeSampleStep = 10f;
+        [Tooltip("Width (m) of the roadbed carved/filled by 'Grade Corridor' on the DEM — " +
+                 "the terrain is flattened to the rail's graded ground line across this width.")]
+        public float GradeCorridorWidth = 14f;
         [Tooltip("Override: ignore the grade limit and DON'T truncate — build the " +
                  "whole edge across whatever terrain it crosses (deep fills become " +
                  "bridges automatically). For 'the terrain's whacked, span it anyway'. " +
@@ -2152,6 +2155,31 @@ namespace NetworkDesigner.Terrain
                             if (j >= 0 && j <= n && !tun[j]) emit = true;
                         }
                     if (emit) outXZBed.Add(new Vector3(xzA[i].x, bedA[i], xzA[i].y));
+                }
+            }
+        }
+
+        // Sample EVERY edge's centreline (bezier) at ~`step` metres, emitting world XZ + the
+        // graded GROUND target Y (linear between the two nodes' ground elevations). For DEM
+        // cut/fill grading: flatten the terrain to this line under the corridor so the rail,
+        // when re-draped, sits on a roadbed at its routed grade (both cut and fill).
+        public void CollectGradeTargets(ITerrainSurface field, float step, List<Vector3> outXZGround)
+        {
+            if (Graph == null) return;
+            float s = Mathf.Max(1f, step);
+            foreach (LineEdge e in Graph.Edges)
+            {
+                Vector2 q0 = Graph.Nodes[e.A], q3 = Graph.Nodes[e.B], q1, q2;
+                if (e.HasCurve) { q1 = e.ControlA; q2 = e.ControlB; }
+                else { Vector2 d = q3 - q0; q1 = q0 + d / 3f; q2 = q0 + d * (2f / 3f); }
+                float yA = GroundY(field, q0), yB = GroundY(field, q3);
+                float chord = Vector2.Distance(q0, q3);
+                int n = Mathf.Max(2, Mathf.CeilToInt(chord / s));
+                for (int i = 0; i <= n; i++)
+                {
+                    float u = i / (float)n;
+                    Vector2 xz = LineGraph.Bezier(q0, q1, q2, q3, u);
+                    outXZGround.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, u), xz.y));
                 }
             }
         }

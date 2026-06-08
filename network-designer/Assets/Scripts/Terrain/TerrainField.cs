@@ -112,6 +112,9 @@ namespace NetworkDesigner.Terrain
         public Vector3 CamPos;             // camera world position
         public float CamYaw;               // fly-camera yaw / pitch (its look state)
         public float CamPitch;
+        public bool DemBackend;            // v8+: was the DEM backend active at save time
+        public string DemCity;             // v8+: loaded DEM city (empty if none) — reloaded on restore
+        public DemTerrainWorld.Edits DemEdits; // v9+: sparse DEM sculpt/carve height diff (null if none)
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by

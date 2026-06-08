@@ -76,7 +76,7 @@ namespace NetworkDesigner.Terrain
 
         [Header("Water")]
         [Tooltip("Show a flat water surface; terrain below the water level reads as submerged.")]
-        public bool ShowWater = true;
+        public bool ShowWater = false;
         [Tooltip("World height (Y) of the water surface. Raise it to flood low ground.")]
         public float WaterLevel = 5f;
         [Tooltip("Water colour (alpha < 1 = see-through to the bed below).")]
@@ -95,6 +95,19 @@ namespace NetworkDesigner.Terrain
         // low-poly field. Set via SetActiveBackend (which also flips terrain visibility).
         public bool DemBackend = true;
         float _demFlattenY;   // DEM Flatten target (world Y under the cursor at stroke start)
+        [Tooltip("DEM terrain LOD: Unity heightmap pixel error. LOWER = more detail (denser mesh, " +
+                 "heavier); HIGHER = coarser/faster. Applied live to a loaded DEM and on load.")]
+        public float DemLodPixelError = 2f;
+        // Tunable entry point: set the DEM LOD and apply it live if a world is loaded.
+        public float DemLod
+        {
+            get => DemLodPixelError;
+            set
+            {
+                DemLodPixelError = Mathf.Max(1f, value);
+                if (DemTerrainWorld.HasWorld) DemTerrainWorld.SetTerrainLod(DemLodPixelError);
+            }
+        }
         [Tooltip("Brush radius in metres. Resize live with [ (smaller) and ] (larger).")]
         public float BrushRadius = 10f;
         [Tooltip("Brush resize speed (metres/second, while [ or ] is held).")]
@@ -229,6 +242,15 @@ namespace NetworkDesigner.Terrain
         bool _havePendingCam;
         Vector3 _pendingCamPos;
         float _pendingCamYaw, _pendingCamPitch;
+        // DEM backend + city staged from the save; consumed in Start to reload the world.
+        bool _pendingDemBackend;
+        string _pendingDemCity;
+        DemTerrainWorld.Edits _pendingDemEdits;   // sparse sculpt/carve diff, applied after the DEM builds
+        // The DEM city to fall back to when switching to DEM with no world built — the one
+        // loaded this session if any, else the one remembered from the save. Lets the palette
+        // auto-reload the last city even when we restarted in low-poly (so it's not "gone").
+        public string LastDemCity => !string.IsNullOrEmpty(DemTerrainWorld.CurrentCity)
+            ? DemTerrainWorld.CurrentCity : _pendingDemCity;
         // Last sampled camera pose, to detect movement (which marks dirty so the
         // debounced autosave captures the new vantage, not just terrain edits).
         bool _haveLastCam;
@@ -312,9 +334,13 @@ namespace NetworkDesigner.Terrain
         public TerrainField Field => _field;
 
         DemTerrainSurface _demSurf;
+        ChunkSurface _chunkSurf;
+        int _minimapW = 6;   // chunk minimap half-extent (± chunks shown); scroll over the map zooms
         // The active surface every ground-reading tool uses: the DEM when it's the selected backend
         // AND built, else the low-poly field. Driven by the Low-Poly/DEM toggle (DemBackend).
-        ITerrainSurface Surf => (DemBackend && DemTerrainWorld.HasWorld) ? (_demSurf ??= new DemTerrainSurface()) : (ITerrainSurface)_field;
+        ITerrainSurface Surf => ChunkWorld.Active ? (_chunkSurf ??= new ChunkSurface())
+            : (DemBackend && DemTerrainWorld.HasWorld) ? (_demSurf ??= new DemTerrainSurface())
+            : (ITerrainSurface)_field;
 
         // Flip the active terrain backend: route all tools (via Surf/DemBackend) and show only the
         // active terrain. The low-poly world is hidden whenever DEM is the active backend (even
@@ -325,6 +351,147 @@ namespace NetworkDesigner.Terrain
             DemBackend = dem;
             if (_chunkRoot != null) _chunkRoot.SetActive(!dem);
             DemTerrainWorld.SetVisible(dem);
+            // The low-poly water plane is a standalone GameObject (not under _chunkRoot),
+            // so hide it explicitly on DEM; on return to low-poly let ApplyWater honour ShowWater.
+            if (dem) { if (_waterGo != null) _waterGo.SetActive(false); }
+            else ApplyWater();
+        }
+
+        // Blocking DEM build + activate, used by the Start restore (the Terrain palette has
+        // its own coroutine variant with a loading overlay). Params mirror the palette's
+        // demTile/demFrom/demTo/demLod constants — keep them in sync.
+        public void LoadDemWorld(string city)
+        {
+            if (string.IsNullOrEmpty(city)) return;
+            DemTerrainWorld.Build(city, 10000f, -500f, 9000f);
+            DemTerrainWorld.SetGreen(true);     // Flat green (the palette's default surface)
+            DemTerrainWorld.SetTerrainLod(DemLodPixelError);
+            DemWater.Apply();
+            SetActiveBackend(true);             // hides low-poly + its water, shows the DEM
+        }
+
+        // ── Chunk-streaming test world (flat, no DEM data) ───────────────────────────────────
+        // Stands up the streaming chunk world: hides the other terrains, drops the camera over
+        // the flat plane, and starts ChunkWorld + a ChunkStreamer that keeps a 5×5 bubble loaded
+        // around the camera. Sculpt edits persist per-chunk under <save>/ChunkEdits, so an edit
+        // made far away survives the chunk unloading and returns when you fly back.
+        public void StartChunkTest()
+        {
+            if (ChunkWorld.Active) return;
+            if (_chunkRoot != null) _chunkRoot.SetActive(false);   // hide low-poly mesh terrain
+            DemTerrainWorld.SetVisible(false);                     // hide the DEM
+            if (_waterGo != null) _waterGo.SetActive(false);
+            string dir = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(ResolveAutosavePath())), "ChunkEdits");
+            ChunkWorld.Begin(dir);
+
+            FlyCameraController fly = ResolveFly();
+            Vector3 camXz = fly != null ? fly.transform.position : Vector3.zero;
+            if (fly != null)
+            {
+                fly.transform.position = new Vector3(camXz.x, 250f, camXz.z);   // above the y=0 plane
+                fly.Pitch = 35f;
+                fly.transform.rotation = Quaternion.Euler(35f, fly.Yaw, 0f);
+                // Point the altitude-damping clamp at the CHUNK surface (else it reads the hidden
+                // low-poly/DEM and pins speed to the minimum → crawl). And pick a pace suited to
+                // 1 km chunks; the System-palette Camera Speed still overrides this live.
+                fly.GroundHeight = p => ChunkWorld.SampleHeight(p.x, p.z);
+                fly.MoveSpeed = Mathf.Max(fly.MoveSpeed, 200f);
+            }
+            var streamer = FindFirstObjectByType<ChunkStreamer>();
+            if (streamer == null) streamer = new GameObject("ChunkStreamer").AddComponent<ChunkStreamer>();
+            streamer.Cam = ChunkCam();
+            ChunkWorld.Tick(ChunkCam(), eager: true);   // load the view footprint now
+            Debug.Log($"[ChunkTest] started — {ChunkWorld.LoadedCount} chunks resident.");
+        }
+
+        // The camera the chunk streamer / screen-space LOD reads (footprint + on-screen size).
+        Camera ChunkCam() => PickCamera != null ? PickCamera : Camera.main;
+
+        public void StopChunkTest()
+        {
+            if (!ChunkWorld.Active) return;
+            ChunkWorld.End();   // saves every dirty chunk
+            var streamer = FindFirstObjectByType<ChunkStreamer>();
+            if (streamer != null) Destroy(streamer.gameObject);
+            SetActiveBackend(DemBackend);   // restore the previous backend's visibility
+            // Re-point the camera altitude clamp at the now-active surface.
+            FlyCameraController fly = ResolveFly();
+            if (fly != null) fly.GroundHeight = WorldGroundHeight;
+            if (DemBackend && DemTerrainWorld.HasWorld) DemTerrainWorld.WireCameraToDem();
+            Debug.Log("[ChunkTest] stopped.");
+        }
+
+        public bool ChunkTestActive => ChunkWorld.Active;
+        public bool ChunkShowGrid { get => ChunkWorld.ShowGrid; set => ChunkWorld.SetGrid(value); }
+        public bool ChunkLockBubble { get => ChunkWorld.LockBubble; set => ChunkWorld.LockBubble = value; }
+
+        // Live bubble radius (resident = (2r+1)²): tunable so you can sweep 5×5→7×7→9×9… in
+        // session and find where synchronous loading falls over. Setting it re-streams now.
+        public float ChunkRadius
+        {
+            get => ChunkWorld.Radius;
+            set
+            {
+                int r = Mathf.Clamp(Mathf.RoundToInt(value), 1, 32);
+                if (r == ChunkWorld.Radius) return;
+                ChunkWorld.Radius = r;
+                if (ChunkWorld.Active)
+                {
+                    ChunkWorld.Tick(ChunkCam(), eager: true);
+                }
+            }
+        }
+
+        // Invisible preload rings beyond the visible radius (the streaming buffer). Re-streams.
+        public float ChunkPreloadDepth
+        {
+            get => ChunkWorld.PreloadDepth;
+            set
+            {
+                int d = Mathf.Clamp(Mathf.RoundToInt(value), 0, 6);
+                if (d == ChunkWorld.PreloadDepth) return;
+                ChunkWorld.PreloadDepth = d;
+                if (ChunkWorld.Active)
+                {
+                    ChunkWorld.Tick(ChunkCam(), eager: true);
+                }
+            }
+        }
+
+        // Chunks loaded per frame while streaming (0 = unlimited). Lower = smoother but slower to
+        // fill; the preload depth is the buffer that lets a low budget keep up as you move.
+        public float ChunkBudget
+        {
+            get => ChunkWorld.Budget;
+            set => ChunkWorld.Budget = Mathf.Clamp(Mathf.RoundToInt(value), 0, 32);
+        }
+
+        // Screen-space LOD quality: target screen PIXELS per terrain vertex. Lower = finer/denser
+        // (more triangles), higher = coarser/cheaper. Drives the per-chunk resolution from zoom.
+        public float ChunkPixelsPerVertex
+        {
+            get => ChunkWorld.PixelsPerVertex;
+            set => ChunkWorld.PixelsPerVertex = Mathf.Clamp(value, 1.5f, 24f);
+        }
+
+        // Chunk heightmap resolution (must be 2ⁿ+1). The biggest per-chunk SetHeights-cost lever:
+        // 129 ≈ 8 m/sample (fastest), 257 ≈ 4 m, 513 ≈ 2 m (sharpest sculpt). Rebuilds the bubble.
+        public float ChunkRes
+        {
+            get => ChunkWorld.Res;
+            set
+            {
+                int[] valid = { 129, 257, 513, 1025 };   // NEAR (ring-0) res; LOD steps it down outward
+                int r = valid[0];
+                foreach (int v in valid) if (Mathf.Abs(v - value) < Mathf.Abs(r - value)) r = v;
+                if (r == ChunkWorld.Res) return;
+                ChunkWorld.SetResolution(r);
+                if (ChunkWorld.Active)
+                {
+                    ChunkWorld.Tick(ChunkCam(), eager: true);
+                }
+            }
         }
 
         [Header("Scene lighting")]
@@ -396,6 +563,24 @@ namespace NetworkDesigner.Terrain
             LoadPacks(); // standalone pack library wins over any packs from the autosave
 
             BuildAllChunks();
+
+            // Restore the active backend the save was taken in. If it was a DEM world,
+            // rebuild that city from its heightmaps NOW (before draping the saved objects)
+            // so rails/scatter conform to the DEM, not the hidden low-poly field. Falls
+            // back to low-poly if the city folder is gone (or the save predates v8).
+            bool restoringDem = _pendingDemBackend
+                && !string.IsNullOrEmpty(_pendingDemCity)
+                && DemTerrainWorld.ListWorlds().Contains(_pendingDemCity);
+            if (restoringDem)
+            {
+                LoadDemWorld(_pendingDemCity);
+                // Re-apply saved sculpt/carve onto the rebuilt tiles (same city only), BEFORE
+                // draping objects so trees/rails conform to the restored terrain shape.
+                if (_pendingDemEdits != null && _pendingDemEdits.City == _pendingDemCity)
+                    DemTerrainWorld.ApplyEdits(_pendingDemEdits);
+            }
+            else SetActiveBackend(false); // ensure low-poly is shown + DEM hidden
+
             TreeLayer.SpawnPending(Surf); // scatter from the save (heights now known)
             RockLayer.SpawnPending(Surf);
             FenceLayer.Rebuild(Surf);     // linework from the save
@@ -403,12 +588,16 @@ namespace NetworkDesigner.Terrain
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
             RebuildContours();
-            ApplyWater();
+            if (!DemBackend) ApplyWater(); // low-poly water only; DEM water handled by LoadDemWorld
 
             // Stand up scene services, sized to the actual terrain.
             if (AutoLighting) EnsureAmbiance();
             if (AutoCameraControl) EnsureCameraControl();
             if (AutoTuning) EnsureTuning();
+
+            // The DEM wires the camera's terrain-aware clamp during Build, but the fly
+            // camera may not have existed yet then — re-point it now that it does.
+            if (restoringDem && DemTerrainWorld.HasWorld) DemTerrainWorld.WireCameraToDem();
 
             // Restore the saved camera pose, after the fly camera exists (it would
             // otherwise sit at the framed default EnsureCameraControl picked).
@@ -849,7 +1038,7 @@ namespace NetworkDesigner.Terrain
             bool sculptHud = (Brush == BrushMode.Slope || Brush == BrushMode.Flatten)
                              && _lineActive == null && _active == null
                              && NetworkDesigner.UI.PaletteBase.IsOpenId("Terrain");   // only with Terrain palette up
-            if (_lineActive == null && _active == null && !sculptHud) return;
+            if (_lineActive == null && _active == null && !sculptHud && !ChunkWorld.Active) return;
             Matrix4x4 prev = GUI.matrix;
             GUI.matrix = Matrix4x4.Scale(new Vector3(UiScale, UiScale, 1f));
             DrawPanels();
@@ -925,6 +1114,8 @@ namespace NetworkDesigner.Terrain
             DrawDesignSpeedReadout();
             DrawCurveInspectLabels();
             DrawSlopeCurveBadge();
+            DrawSlopeGradeReadout();
+            DrawChunkMinimap();
             if (ShowModeHud && _lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
@@ -1018,29 +1209,9 @@ namespace NetworkDesigner.Terrain
                 return;
             }
 
-            // Slope tool (brush 5) readout — no other panel is up in sculpt mode.
-            if (Brush == BrushMode.Slope)
-            {
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, 132f), GUI.skin.box);
-                GUILayout.Label("Slope tool (5)");
-                if (!_slopeArmed)
-                    GUILayout.Label("Left-click point A (start elevation).\nNear rail? It snaps to the track 'straight'.");
-                else if (_slopeEndValid)
-                {
-                    float g = Mathf.Abs(_slopeGradePct);
-                    GUILayout.Label(g > SlopeMaxGradePct
-                        ? $"Grade {_slopeGradePct:0.0}% — OVER {SlopeMaxGradePct:0.0}%"
-                        : $"Grade {_slopeGradePct:0.0}% / warn {SlopeMaxGradePct:0.0}%");
-                    GUILayout.Label(_slopeCornerPending ? "Curve: bend set — click B to grade."
-                        : _slopeHasGuide ? "Aligned to rail 'straight'." : "Free direction.");
-                    GUILayout.Label(_slopeCornerPending
-                        ? "Left-click B to grade the curve. Right-click cancels the bend."
-                        : "Left-click B to grade. Shift+click a bend = curve. Right-click cancels.");
-                }
-                else
-                    GUILayout.Label("Move over terrain to set point B.");
-                GUILayout.EndArea();
-            }
+            // (The slope tool's readout now floats at the cursor — grade %/max via
+            // DrawSlopeGradeReadout, legs/angle/guides via DrawSlopeCurveBadge — so no
+            // upper-right box.)
 
             // Flatten tool (4): a small HUD beside the cursor with the elevation under
             // it, plus the picked target height once you've right-clicked (eyedropper).
@@ -1133,14 +1304,112 @@ namespace NetworkDesigner.Terrain
 
         // Slope curve mode: a "CURVE" badge anchored at the armed bend, so it's obvious
         // the next click grades a curve (and where the bend is). Only while armed.
+        // Top-right chunk minimap (chunk-test mode only): a north-up grid centred on the
+        // camera's chunk. Loaded chunks gray (blue flash for the freshly-streamed ones), visited-
+        // but-unloaded chunks pink, the active chunk outlined with a heading arrow.
+        void DrawChunkMinimap()
+        {
+            if (!ChunkWorld.Active) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            Vector3 cp = cam.transform.position;
+            Vector2Int active = ChunkWorld.ChunkAt(cp.x, cp.z);
+
+            int W = _minimapW;               // ± chunks shown (scroll over the map to zoom)
+            float map = 190f, cell = map / (2 * W + 1);
+            float left = Vw - map - 12f, top = 12f;
+            Color prevCol = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.4f);
+            GUI.DrawTexture(new Rect(left - 5f, top - 5f, map + 10f, map + 24f), Texture2D.whiteTexture);
+
+            float now = Time.realtimeSinceStartup;
+            for (int dz = -W; dz <= W; dz++)
+                for (int dx = -W; dx <= W; dx++)
+                {
+                    var c = new Vector2Int(active.x + dx, active.y + dz);
+                    float cx = left + (dx + W) * cell, cy = top + (W - dz) * cell;   // +Z (north) = up
+                    Color col;
+                    if (ChunkWorld.IsLoaded(c))
+                    {
+                        float lt = ChunkWorld.LoadedAt(c);
+                        if (lt >= 0f && now - lt < 1.2f) col = new Color(0.30f, 0.55f, 1f, 0.95f);   // fresh — flash
+                        else
+                        {
+                            int lvl = ChunkWorld.LodLevelOf(c);                 // LOD ring: near bright → far dim
+                            float b = Mathf.Clamp01(0.85f - Mathf.Max(0, lvl) * 0.18f);
+                            col = new Color(b, b, b, 0.85f);
+                        }
+                    }
+                    else if (ChunkWorld.WasVisited(c)) col = new Color(0.86f, 0.55f, 0.55f, 0.7f);   // pink
+                    else col = new Color(0.5f, 0.5f, 0.5f, 0.12f);
+                    GUI.color = col;
+                    GUI.DrawTexture(new Rect(cx + 0.5f, cy + 0.5f, cell - 1f, cell - 1f), Texture2D.whiteTexture);
+                }
+
+            // Active chunk outline + heading arrow.
+            float ax = left + W * cell, ay = top + W * cell;
+            GUI.color = Color.black;
+            const float bw = 2f;
+            GUI.DrawTexture(new Rect(ax, ay, cell, bw), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(ax, ay + cell - bw, cell, bw), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(ax, ay, bw, cell), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(ax + cell - bw, ay, bw, cell), Texture2D.whiteTexture);
+            Vector3 fwd = cam.transform.forward; fwd.y = 0f;
+            if (fwd.sqrMagnitude > 1e-4f)
+            {
+                float headingDeg = Mathf.Atan2(fwd.x, fwd.z) * Mathf.Rad2Deg;   // 0 = +Z (up)
+                Vector2 ctr = new Vector2(ax + cell * 0.5f, ay + cell * 0.5f);
+                Matrix4x4 prevM = GUI.matrix;
+                GUIUtility.RotateAroundPivot(headingDeg, ctr);
+                GUI.color = new Color(0.1f, 0.1f, 0.1f, 1f);
+                GUI.DrawTexture(new Rect(ctr.x - 1.5f, ctr.y - cell * 0.42f, 3f, cell * 0.55f), Texture2D.whiteTexture);
+                GUI.DrawTexture(new Rect(ctr.x - 4f, ctr.y - cell * 0.42f, 8f, 5f), Texture2D.whiteTexture);
+                GUI.matrix = prevM;
+            }
+
+            GUI.color = Color.white;
+            GUI.Label(new Rect(left, top + map + 3f, map, 18f), $"chunk {active.x},{active.y}   loaded {ChunkWorld.LoadedCount}");
+            GUI.color = prevCol;
+        }
+
+        // Slope tool: live grade % + the max, floating just above the B cursor (so you read
+        // it where you're working, not only in the corner box). Red when over the max.
+        void DrawSlopeGradeReadout()
+        {
+            if (Brush != BrushMode.Slope || !_slopeArmed || !_slopeEndValid) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            bool over = Mathf.Abs(_slopeGradePct) > SlopeMaxGradePct;
+            Color col = over ? new Color(1f, 0.4f, 0.35f) : new Color(0.55f, 1f, 0.6f);
+            Vector3 anchor = new Vector3(_slopeEnd.x, SlopeElevAtWorld(_slopeEnd) + 3.5f, _slopeEnd.z);
+            DrawWorldText(cam, s, anchor, $"{_slopeGradePct:0.0}%  /  max {SlopeMaxGradePct:0.0}%", col,
+                          1.1f, new Vector2(0f, -14f));
+        }
+
+        // Slope curve (shift) mode: the bend marker, the two leg lengths, and the deflection
+        // angle at the corner — the same guidance the rail curve tool gives. (The dashed
+        // extension guides through the corner are drawn into the cursor mesh, AppendSlopeOverlay.)
         void DrawSlopeCurveBadge()
         {
             if (!_slopeCornerPending || Brush != BrushMode.Slope) return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
             float s = Mathf.Max(0.25f, UiScale);
-            DrawWorldText(cam, s, _slopeCorner + new Vector3(0f, 2f, 0f), "◆ CURVE",
-                new Color(0.4f, 1f, 0.5f));
+            Color col = new Color(0.4f, 1f, 0.5f);
+            Vector2 a2 = new Vector2(_slopeA.x, _slopeA.z);
+            Vector2 cor = new Vector2(_slopeCorner.x, _slopeCorner.z);
+            Vector2 b2 = _slopeEndValid ? new Vector2(_slopeEnd.x, _slopeEnd.z) : cor;
+            DrawWorldText(cam, s, ToWorldXZ(cor, 2f), "◆ CURVE", col);
+            float legA = Vector2.Distance(a2, cor), legB = Vector2.Distance(cor, b2);
+            if (legA > 0.5f) DrawWorldText(cam, s, ToWorldXZ((a2 + cor) * 0.5f, 2f), $"{legA:0} m", col);
+            if (_slopeEndValid && legB > 0.5f)
+            {
+                DrawWorldText(cam, s, ToWorldXZ((cor + b2) * 0.5f, 2f), $"{legB:0} m", col);
+                Vector2 inDir = cor - a2, outDir = b2 - cor;
+                if (inDir.sqrMagnitude > 1e-4f && outDir.sqrMagnitude > 1e-4f)
+                    DrawWorldText(cam, s, ToWorldXZ(cor, 3.5f), $"{Vector2.Angle(inDir, outDir):0}°", col);
+            }
         }
 
         // The design speed of the active rail/plan layer, floating near the cursor so
@@ -1217,7 +1486,7 @@ namespace NetworkDesigner.Terrain
 
         Vector3 ToWorldXZ(Vector2 xz, float lift)
         {
-            float y = _field != null ? _field.SampleHeight(xz.x, xz.y) : 0f;
+            float y = Surf != null ? Surf.SampleHeight(xz.x, xz.y) : 0f;   // drape on the ACTIVE surface
             return new Vector3(xz.x, y + lift, xz.y);
         }
 
@@ -1450,6 +1719,33 @@ namespace NetworkDesigner.Terrain
             _dirtySince = Time.realtimeSinceStartup;
         }
 
+        // DEM cut/fill grading: flatten the terrain under the rail centreline to the rail's
+        // routed ground line (both cut AND fill), forming a roadbed at the design grade. Drives
+        // the DEM Sculpt Flatten primitive per centreline sample, then re-stitches seams and
+        // re-drapes objects/rail onto the new shape. DESTRUCTIVE (no auto-undo); DEM only.
+        public void GradeRailCorridorDem()
+        {
+            if (!DemTerrainWorld.HasWorld) { Debug.LogWarning("[Grade] No DEM world loaded — grading is DEM-only."); return; }
+            var targets = new List<Vector3>();
+            RailLayer.CollectGradeTargets(Surf, RailLayer.GradeSampleStep, targets);
+            if (targets.Count == 0) { Debug.LogWarning("[Grade] No rail to grade."); return; }
+            float halfW = Mathf.Max(2f, RailLayer.GradeCorridorWidth * 0.5f);
+            float innerFrac = 1f - Mathf.Clamp01(BrushFalloff);   // plateau: flat roadbed, feathered edge
+            // One-shot flatten of the whole roadbed to the grade line (cut AND fill).
+            foreach (Vector3 p in targets)
+                DemTerrainWorld.FlattenStamp(p, halfW, innerFrac, p.y);
+            DemTerrainWorld.StitchAllSeams();
+            // Re-conform everything to the carved surface + re-drape the rail on its new bed.
+            TreeLayer.ConformToSurface(Surf);
+            RockLayer.ConformToSurface(Surf);
+            FenceLayer.Rebuild(Surf);
+            PowerLineLayer.Rebuild(Surf);
+            RailLayer.Rebuild(Surf);
+            PlanLayer.Rebuild(Surf);
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[Grade] Flattened {targets.Count} corridor samples to the rail grade line.");
+        }
+
         // Box-blur the carved cells (CutSmoothPasses) to round the coarse-grid wall
         // steps, writing ONLY affected cells (untouched terrain is read but never
         // modified, so the cut blends into its surroundings at the edge). The flat
@@ -1647,7 +1943,7 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = cam.GetComponent<FlyCameraController>();
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
-            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll();
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap();
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
             if (fresh) FrameFly(fly);
@@ -1670,6 +1966,19 @@ namespace NetworkDesigner.Terrain
         // where Shift is the curve modifier). Camera ignores the wheel then.
         bool ShiftBrushScroll() => _lineActive == null
             && (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift));
+
+        // True when the cursor is over the chunk minimap (real pixels — Input.mousePosition is
+        // bottom-left origin; the map is drawn top-right in UiScale-scaled GUI space). Used to
+        // route the scroll wheel to minimap zoom and to keep the camera from moving meanwhile.
+        bool MouseOverMinimap()
+        {
+            if (!ChunkWorld.Active) return false;
+            float ui = Mathf.Max(0.25f, UiScale);
+            float rx0 = Screen.width - 202f * ui, rx1 = Screen.width - 12f * ui;
+            float ry0 = 12f * ui, ry1 = 202f * ui;
+            float mx = Input.mousePosition.x, my = Screen.height - Input.mousePosition.y;
+            return mx >= rx0 && mx <= rx1 && my >= ry0 && my <= ry1;
+        }
 
         // URP render scale — the biggest lever for fill-rate-bound (high-res /
         // full-screen) rendering. Set at runtime on the pipeline asset (in-memory,
@@ -1761,6 +2070,13 @@ namespace NetworkDesigner.Terrain
                 if (notches != 0)
                     BrushRadius = Mathf.Clamp(BrushRadius * Mathf.Pow(1.1f, notches), 0.5f, MaxBrushRadius);
             }
+            // Wheel over the chunk minimap zooms it (camera is suppressed via ScrollSuppressor):
+            // scroll up = fewer chunks (zoom in), down = more landscape (zoom out).
+            if (ChunkWorld.Active && MouseOverMinimap())
+            {
+                int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
+                if (notches != 0) _minimapW = Mathf.Clamp(_minimapW - notches, 2, 24);
+            }
             if (Input.GetKeyDown(KeyCode.G))
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
@@ -1829,7 +2145,7 @@ namespace NetworkDesigner.Terrain
                 // so the line tools can place/drape onto whichever surface is active.
                 overTerrain = Physics.Raycast(ray, out hit, 100000f)
                               && (hit.collider is MeshCollider
-                                  || (DemTerrainWorld.HasWorld && hit.collider is TerrainCollider));
+                                  || ((DemTerrainWorld.HasWorld || ChunkWorld.Active) && hit.collider is TerrainCollider));
             }
             // The raycast passes THROUGH the UI Toolkit palette to the terrain behind it,
             // so treat "cursor over a panel" as not-over-terrain — suppresses the brush
@@ -1862,9 +2178,8 @@ namespace NetworkDesigner.Terrain
                     _slopePath = SampleSlopeCurve(a2, corner, c2);
                     _slopeEnd = new Vector3(c2.x, hit.point.y, c2.y);
                     _slopeEndValid = true;
-                    GridFromWorld(_slopeEnd, out float cgx, out float cgz);
                     float crun = PathLengthXZ(_slopePath);
-                    _slopeGradePct = crun > 1e-3f ? (HeightAtGrid(cgx, cgz) - _slopeElevA) / crun * 100f : 0f;
+                    _slopeGradePct = crun > 1e-3f ? (SlopeElevAtWorld(_slopeEnd) - _slopeElevA) / crun * 100f : 0f;
                 }
                 else
                 {
@@ -1893,9 +2208,8 @@ namespace NetworkDesigner.Terrain
                 if (!SlopeDisableRailSnap && PlanLayer != null
                     && PlanLayer.TryPathBetween(a2, c2, SlopeGuideDetectRadius, out List<Vector2> spath))
                     _slopePath = spath;
-                GridFromWorld(_slopeEnd, out float sex, out float sez);
                 float run = Vector2.Distance(a2, c2);
-                _slopeGradePct = run > 1e-3f ? (HeightAtGrid(sex, sez) - _slopeElevA) / run * 100f : 0f;
+                _slopeGradePct = run > 1e-3f ? (SlopeElevAtWorld(_slopeEnd) - _slopeElevA) / run * 100f : 0f;
                 }
             }
             // Before A is placed: if the hover cursor is on the plan, size the brush to
@@ -2072,9 +2386,8 @@ namespace NetworkDesigner.Terrain
                 {
                     if (!_slopeArmed)
                     {
-                        GridFromWorld(hit.point, out float ax, out float az);
                         _slopeA = hit.point;
-                        _slopeElevA = HeightAtGrid(ax, az);
+                        _slopeElevA = SlopeElevAtWorld(_slopeA);
                         _slopeArmed = true;
                         // Network-aware: snap A onto rail the SAME way the rail tool
                         // does — nearest node (edge END) first, then nearest edge point,
@@ -2091,8 +2404,7 @@ namespace NetworkDesigner.Terrain
                             if (TrySlopeSnap(a2, out Vector2 snapA, out Vector2 snapDir, out bool onPlan))
                             {
                                 _slopeA = new Vector3(snapA.x, hit.point.y, snapA.y);
-                                GridFromWorld(_slopeA, out float rax, out float raz);
-                                _slopeElevA = HeightAtGrid(rax, raz);
+                                _slopeElevA = SlopeElevAtWorld(_slopeA);
                                 a2 = snapA;
                                 // The "straight" guide is the heading at the snapped A.
                                 if (snapDir.sqrMagnitude > 1e-6f) { _slopeGuideDir = snapDir; _slopeHasGuide = true; }
@@ -2113,14 +2425,21 @@ namespace NetworkDesigner.Terrain
                     }
                     else if (_slopeEndValid)
                     {
-                        GridFromWorld(_slopeEnd, out float ex, out float ez);
-                        float elevB = HeightAtGrid(ex, ez);
+                        float elevB = SlopeElevAtWorld(_slopeEnd);
+                        bool dem = DemBackend && DemTerrainWorld.HasWorld;
                         // Grade ALONG the path when there is one — a manual bend (curve mode)
                         // or a connected plan centreline — else the straight A→B corridor.
+                        // On the DEM, route to the Flatten-primitive variants.
                         if (_slopePath != null)
-                            ApplySlopeAlongPath(_slopePath, _slopeElevA, elevB, BrushRadius);
+                        {
+                            if (dem) ApplySlopeAlongPathDem(_slopePath, _slopeElevA, elevB, BrushRadius);
+                            else ApplySlopeAlongPath(_slopePath, _slopeElevA, elevB, BrushRadius);
+                        }
                         else
-                            ApplySlope(_slopeA, _slopeEnd, _slopeElevA, elevB);
+                        {
+                            if (dem) ApplySlopeDem(_slopeA, _slopeEnd, _slopeElevA, elevB);
+                            else ApplySlope(_slopeA, _slopeEnd, _slopeElevA, elevB);
+                        }
                         _slopeArmed = false; _slopeHasGuide = false; _slopeCornerPending = false;
                         _dirtySince = Time.realtimeSinceStartup;
                         RebuildContours();
@@ -2165,6 +2484,18 @@ namespace NetworkDesigner.Terrain
                 _flattenTarget = HeightAtGrid(cfx, cfz);
                 _demFlattenY = hit.point.y;
                 _hasFlattenTarget = true;
+            }
+
+            // Chunk-test world wins when active: same brush, streamed flat chunks.
+            if (ChunkWorld.Active)
+            {
+                if (Brush != BrushMode.Slope)
+                {
+                    ChunkWorld.Sculpt(hit.point, BrushRadius, BrushStrength, Time.deltaTime,
+                                      (DemTerrainWorld.SculptMode)(int)Brush, _demFlattenY);
+                    _dirtySince = Time.realtimeSinceStartup;
+                }
+                return;
             }
 
             // The SAME brush sculpts the DEM when it's the active backend (Slope is low-poly
@@ -2300,6 +2631,23 @@ namespace NetworkDesigner.Terrain
                 EmitDrapedDashed(a2 - perp, e2 - perp, dash, gap);
             }
             AppendRing(a2, 0.9f); // start marker
+            // Curve (shift) mode: dashed extension guides through the bend corner along each
+            // leg, plus a corner marker — so you can read the tangents/angle while placing B.
+            if (_slopeCornerPending)
+            {
+                Vector2 cor = new Vector2(_slopeCorner.x, _slopeCorner.z);
+                const float gl = 80f;
+                Vector2 inDir = cor - a2;
+                if (inDir.sqrMagnitude > 1e-4f)
+                { inDir.Normalize(); EmitDrapedDashed(cor - inDir * gl, cor + inDir * gl, dash, gap); }
+                if (_slopeEndValid)
+                {
+                    Vector2 outDir = e2 - cor;
+                    if (outDir.sqrMagnitude > 1e-4f)
+                    { outDir.Normalize(); EmitDrapedDashed(cor - outDir * gl, cor + outDir * gl, dash, gap); }
+                }
+                AppendRing(cor, 0.9f); // bend marker
+            }
         }
 
         // A draped, dashed line between two XZ points (sampled to the terrain).
@@ -2314,8 +2662,8 @@ namespace NetworkDesigner.Terrain
                 float e0 = pos, e1 = Mathf.Min(pos + (dash > 0f ? dash : 1f), len);
                 Vector2 p0 = a2 + dir * e0, p1 = a2 + dir * e1;
                 int s = _cursorVerts.Count;
-                _cursorVerts.Add(new Vector3(p0.x, _field.SampleHeight(p0.x, p0.y) + BrushCursorLift, p0.y));
-                _cursorVerts.Add(new Vector3(p1.x, _field.SampleHeight(p1.x, p1.y) + BrushCursorLift, p1.y));
+                _cursorVerts.Add(new Vector3(p0.x, Surf.SampleHeight(p0.x, p0.y) + BrushCursorLift, p0.y));
+                _cursorVerts.Add(new Vector3(p1.x, Surf.SampleHeight(p1.x, p1.y) + BrushCursorLift, p1.y));
                 _cursorIdx.Add(s); _cursorIdx.Add(s + 1);
             }
         }
@@ -2329,7 +2677,7 @@ namespace NetworkDesigner.Terrain
             {
                 float ang = i / (float)n * Mathf.PI * 2f;
                 float wx = c.x + Mathf.Cos(ang) * r, wz = c.y + Mathf.Sin(ang) * r;
-                Vector3 cur = new Vector3(wx, _field.SampleHeight(wx, wz) + BrushCursorLift, wz);
+                Vector3 cur = new Vector3(wx, Surf.SampleHeight(wx, wz) + BrushCursorLift, wz);
                 if (i > 0) { int s = _cursorVerts.Count; _cursorVerts.Add(prev); _cursorVerts.Add(cur); _cursorIdx.Add(s); _cursorIdx.Add(s + 1); }
                 prev = cur;
             }
@@ -2503,8 +2851,8 @@ namespace NetworkDesigner.Terrain
                     tan.Normalize();
                     Vector2 perp = new Vector2(-tan.y, tan.x) * halfW;
                     Vector2 lft = path[i] + perp, rgt = path[i] - perp;
-                    _fillVerts.Add(new Vector3(lft.x, _field.SampleHeight(lft.x, lft.y) + BrushCursorLift, lft.y));
-                    _fillVerts.Add(new Vector3(rgt.x, _field.SampleHeight(rgt.x, rgt.y) + BrushCursorLift, rgt.y));
+                    _fillVerts.Add(new Vector3(lft.x, Surf.SampleHeight(lft.x, lft.y) + BrushCursorLift, lft.y));
+                    _fillVerts.Add(new Vector3(rgt.x, Surf.SampleHeight(rgt.x, rgt.y) + BrushCursorLift, rgt.y));
                 }
                 for (int i = 0; i < n - 1; i++)
                 {
@@ -2634,6 +2982,67 @@ namespace NetworkDesigner.Terrain
         // ramp bed), feathering to the existing terrain only near the side edges
         // (BrushFalloff controls how wide that feather is). The ends meet the terrain
         // cleanly because elevA/elevB were sampled there.
+        // Elevation under a world XZ for the slope tool — the DEM surface when it's active,
+        // else the low-poly grid. Lets the two-click ramp read real heights on the DEM.
+        float SlopeElevAtWorld(Vector3 world)
+        {
+            if (DemBackend && DemTerrainWorld.HasWorld) return Surf.SampleHeight(world.x, world.z);
+            GridFromWorld(world, out float fx, out float fz);
+            return HeightAtGrid(fx, fz);
+        }
+
+        // DEM slope: flatten a straight corridor A→B to a linear elevation ramp (cut + fill)
+        // via the Sculpt Flatten primitive — the DEM analogue of ApplySlope (which edits the
+        // low-poly field). halfW = BrushRadius; samples spaced ≤ radius so the discs overlap.
+        void ApplySlopeDem(Vector3 aWorld, Vector3 bWorld, float elevA, float elevB)
+        {
+            if (!DemTerrainWorld.HasWorld) return;
+            Vector2 a = new Vector2(aWorld.x, aWorld.z), b = new Vector2(bWorld.x, bWorld.z);
+            float L = Vector2.Distance(a, b);
+            if (L < 1e-3f) return;
+            float halfW = Mathf.Max(2f, BrushRadius);
+            float innerFrac = 1f - Mathf.Clamp01(BrushFalloff);   // plateau: full-flat width, then feather
+            int n = Mathf.Max(2, Mathf.CeilToInt(L / Mathf.Max(1f, halfW)));
+            for (int i = 0; i <= n; i++)
+            {
+                float u = i / (float)n;
+                Vector2 p = Vector2.Lerp(a, b, u);
+                float target = Mathf.Lerp(elevA, elevB, u);
+                DemTerrainWorld.FlattenStamp(new Vector3(p.x, target, p.y), halfW, innerFrac, target);
+            }
+            DemTerrainWorld.StitchAllSeams();
+        }
+
+        // DEM slope, path-aware: flatten a corridor that FOLLOWS a polyline to a ramp by
+        // arc-length — the DEM analogue of ApplySlopeAlongPath (bend/curve + plan centreline).
+        void ApplySlopeAlongPathDem(List<Vector2> path, float elevA, float elevB, float halfWidth)
+        {
+            if (!DemTerrainWorld.HasWorld || path == null || path.Count < 2) return;
+            float halfW = Mathf.Max(2f, halfWidth);
+            float total = 0f;
+            for (int i = 1; i < path.Count; i++) total += Vector2.Distance(path[i - 1], path[i]);
+            if (total < 1e-3f) return;
+            float spacing = Mathf.Max(1f, halfW);
+            float innerFrac = 1f - Mathf.Clamp01(BrushFalloff);   // plateau: full-flat width, then feather
+            float walked = 0f;
+            for (int i = 1; i < path.Count; i++)
+            {
+                Vector2 s = path[i - 1], e = path[i];
+                float segLen = Vector2.Distance(s, e);
+                if (segLen < 1e-4f) continue;
+                int steps = Mathf.Max(1, Mathf.CeilToInt(segLen / spacing));
+                for (int k = 0; k <= steps; k++)
+                {
+                    float t = k / (float)steps;
+                    Vector2 p = Vector2.Lerp(s, e, t);
+                    float target = Mathf.Lerp(elevA, elevB, Mathf.Clamp01((walked + t * segLen) / total));
+                    DemTerrainWorld.FlattenStamp(new Vector3(p.x, target, p.y), halfW, innerFrac, target);
+                }
+                walked += segLen;
+            }
+            DemTerrainWorld.StitchAllSeams();
+        }
+
         void ApplySlope(Vector3 aWorld, Vector3 bWorld, float elevA, float elevB)
         {
             if (_field == null) return;
@@ -3115,6 +3524,9 @@ namespace NetworkDesigner.Terrain
 
         void OnDisable()
         {
+            // Persist any unsaved chunk edits FIRST (before Unity teardown can destroy the
+            // chunk tiles out from under GetHeights). Best-effort; save-on-unload covers the rest.
+            if (ChunkWorld.Active) ChunkWorld.SaveAll();
             // Let any in-flight async write finish so the file isn't half-written.
             try { _saveTask?.Wait(3000); } catch { /* ignore */ }
             // Flush synchronously when Play stops / disabled. Always write (not just
@@ -3161,10 +3573,36 @@ namespace NetworkDesigner.Terrain
             try
             {
                 var data = new PacksFile { TreePacks = TreeLayer.CollectPacks(), RockPacks = RockLayer.CollectPacks() };
-                System.IO.File.WriteAllText(ResolvePacksPath(),
+                // GUARD: never clobber a saved pack library with an EMPTY set. Packs vanishing was
+                // traced to this — if the in-memory packs are empty (e.g. they were never loaded
+                // this session, or an editor domain reload reset them) and we save, the standalone
+                // file gets overwritten with 0 packs. Skip the write unless we have something, OR
+                // the file is already empty (so a legitimate delete-all still persists).
+                bool empty = (data.TreePacks == null || data.TreePacks.Count == 0)
+                          && (data.RockPacks == null || data.RockPacks.Count == 0);
+                string path = ResolvePacksPath();
+                if (empty && PacksFileHasContent(path))
+                {
+                    Debug.LogWarning("[TerrainDesigner] SavePacks skipped — refusing to overwrite saved packs with 0 packs.");
+                    return;
+                }
+                System.IO.File.WriteAllText(path,
                     JsonConvert.SerializeObject(data, Formatting.Indented, TerrainJsonSettings));
             }
             catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Packs save failed: {ex.Message}"); }
+        }
+
+        // True if the standalone packs file exists and holds at least one tree/rock pack.
+        bool PacksFileHasContent(string path)
+        {
+            try
+            {
+                if (!System.IO.File.Exists(path)) return false;
+                var d = JsonConvert.DeserializeObject<PacksFile>(System.IO.File.ReadAllText(path), TerrainJsonSettings);
+                return d != null && ((d.TreePacks != null && d.TreePacks.Count > 0)
+                                  || (d.RockPacks != null && d.RockPacks.Count > 0));
+            }
+            catch { return false; }
         }
 
         // Load the standalone packs file; it's authoritative over any packs that came
@@ -3178,8 +3616,11 @@ namespace NetworkDesigner.Terrain
                 var data = JsonConvert.DeserializeObject<PacksFile>(
                     System.IO.File.ReadAllText(path), TerrainJsonSettings);
                 if (data == null) return;
-                TreeLayer.SetPacks(data.TreePacks);
-                RockLayer.SetPacks(data.RockPacks);
+                // Only OVERRIDE with the standalone file when it actually has packs — an empty
+                // or null list must not wipe packs already loaded from the autosave (the file is
+                // authoritative only when populated).
+                if (data.TreePacks != null && data.TreePacks.Count > 0) TreeLayer.SetPacks(data.TreePacks);
+                if (data.RockPacks != null && data.RockPacks.Count > 0) RockLayer.SetPacks(data.RockPacks);
             }
             catch (System.Exception ex) { Debug.LogWarning($"[TerrainDesigner] Packs load failed: {ex.Message}"); }
         }
@@ -3379,6 +3820,12 @@ namespace NetworkDesigner.Terrain
                 CamPos = camPos,
                 CamYaw = camYaw,
                 CamPitch = camPitch,
+                // Only treat us as "on DEM" if a world is actually built; a DemBackend
+                // flag with no world would restore to an empty low-poly fallback anyway.
+                DemBackend = DemBackend && DemTerrainWorld.HasWorld,
+                DemCity = DemTerrainWorld.CurrentCity ?? "",
+                // Sparse DEM sculpt/carve diff (only when a DEM world is built).
+                DemEdits = DemTerrainWorld.HasWorld ? DemTerrainWorld.ExportEdits() : null,
             };
         }
 
@@ -3451,7 +3898,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(7); // version (7 added the rail-planning survey graph)
+                    w.Write(9); // version (9 added the sparse DEM sculpt/carve height diff)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -3469,6 +3916,24 @@ namespace NetworkDesigner.Terrain
                     w.Write(save.HasCamera);                // v5+
                     w.Write(save.CamPos.x); w.Write(save.CamPos.y); w.Write(save.CamPos.z);
                     w.Write(save.CamYaw); w.Write(save.CamPitch);
+                    w.Write(save.DemBackend);               // v8+
+                    w.Write(save.DemCity ?? "");            // v8+
+                    // v9+: sparse DEM sculpt/carve diff
+                    var de = save.DemEdits;
+                    bool hasEdits = de != null && de.Tiles != null && de.Tiles.Count > 0;
+                    w.Write(hasEdits);
+                    if (hasEdits)
+                    {
+                        w.Write(de.City ?? "");
+                        w.Write(de.Tiles.Count);
+                        foreach (var te in de.Tiles)
+                        {
+                            int en = Mathf.Min(te.Idx?.Length ?? 0, te.H?.Length ?? 0);
+                            w.Write(te.R); w.Write(te.C); w.Write(en);
+                            for (int i = 0; i < en; i++) w.Write(te.Idx[i]);
+                            for (int i = 0; i < en; i++) w.Write(te.H[i]);
+                        }
+                    }
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -3581,6 +4046,9 @@ namespace NetworkDesigner.Terrain
                 _pendingCamPos = save.CamPos;
                 _pendingCamYaw = save.CamYaw;
                 _pendingCamPitch = save.CamPitch;
+                _pendingDemBackend = save.DemBackend;
+                _pendingDemCity = save.DemCity;
+                _pendingDemEdits = save.DemEdits;
                 return f;
             }
             catch (System.Exception ex)
@@ -3628,6 +4096,31 @@ namespace NetworkDesigner.Terrain
                     s.CamPitch = r.ReadSingle();
                 }
                 else s.HasCamera = false;
+                if (version >= 8) // DEM backend + city for mode restore
+                {
+                    s.DemBackend = r.ReadBoolean();
+                    s.DemCity = r.ReadString();
+                }
+                if (version >= 9) // sparse DEM sculpt/carve diff
+                {
+                    if (r.ReadBoolean())
+                    {
+                        var de = new DemTerrainWorld.Edits { City = r.ReadString() };
+                        int tc = r.ReadInt32();
+                        de.Tiles = new List<DemTerrainWorld.TileEdit>(tc);
+                        for (int ti = 0; ti < tc; ti++)
+                        {
+                            var te = new DemTerrainWorld.TileEdit { R = r.ReadInt32(), C = r.ReadInt32() };
+                            int en = r.ReadInt32();
+                            te.Idx = new int[en];
+                            for (int i = 0; i < en; i++) te.Idx[i] = r.ReadInt32();
+                            te.H = new float[en];
+                            for (int i = 0; i < en; i++) te.H[i] = r.ReadSingle();
+                            de.Tiles.Add(te);
+                        }
+                        s.DemEdits = de;
+                    }
+                }
                 return s;
             }
             catch { return null; }

@@ -35,7 +35,12 @@ namespace NetworkDesigner.Terrain
         static GameObject _root;          // the world root — held directly (Find can't see it when hidden)
         public static GameObject Root => _root;
         public static bool Building;      // true while Build() runs (blocks the main thread) — drives the loading overlay
+        public static string CurrentCity { get; private set; }   // city of the loaded world (null when none) — for autosave/restore
         static TerrainLayer[,] _albedo;   // per-tile draped imagery (null if none)
+        // Per-tile set of EDITED heightmap sample indices (z*res + x), for sparse-diff
+        // persistence of sculpt/carve edits. Keyed by flat tile index (r*cols + c); lazily
+        // allocated so only sculpted tiles cost anything. Reset on Clear(); re-marked on import.
+        static Dictionary<int, HashSet<int>> _dirty;
         static TerrainLayer _green;       // shared flat-green layer
         static TerrainLayer _ground, _rock, _patch, _rock2;   // runtime copies: grass, cliff, earth-patch, rock-variant
         static string _flatVar, _steepVar, _patchVar, _rock2Var; // which TerrainLayer assets are loaded
@@ -66,6 +71,8 @@ namespace NetworkDesigner.Terrain
                     if (l != null && l.diffuseTexture != null) Object.DestroyImmediate(l.diffuseTexture);
             if (_green != null && _green.diffuseTexture != null) Object.DestroyImmediate(_green.diffuseTexture);
             _grid = null; _albedo = null; _green = null;
+            CurrentCity = null;
+            _dirty = null; _lastEdits = null;   // fresh world → no recorded edits
             CleanupDetailHolder();
 
             var existing = _root != null ? _root : GameObject.Find(RootName);
@@ -411,6 +418,7 @@ namespace NetworkDesigner.Terrain
                 float blendF = Mathf.Clamp01(strength * dt * 0.12f);   // flatten approach
                 float blendS = Mathf.Clamp01(strength * dt * 0.7f);    // smooth approach (stronger + wide kernel)
                 bool changed = false;
+                HashSet<int> dirtySet = null;   // this tile's edited-sample set (lazy)
                 for (int zz = 0; zz < h; zz++)
                     for (int xx = 0; xx < w; xx++)
                     {
@@ -428,7 +436,12 @@ namespace NetworkDesigner.Terrain
                             case SculptMode.Smooth: val = Mathf.Lerp(val, BoxAvg(src, xx, zz, w, h, kernel), blendS * fall); break;
                         }
                         val = Mathf.Clamp01(val);
-                        if (val != hm[zz, xx]) { hm[zz, xx] = val; changed = true; }
+                        if (val != hm[zz, xx])
+                        {
+                            hm[zz, xx] = val; changed = true;
+                            if (dirtySet == null) dirtySet = DirtySetFor(r, c, cols);   // for persistence
+                            dirtySet.Add((z0 + zz) * res + (x0 + xx));
+                        }
                     }
                 if (changed) { td.SetHeights(x0, z0, hm); edited.Add((r, c)); }
             }
@@ -440,6 +453,149 @@ namespace NetworkDesigner.Terrain
                 StitchEast(r, c); StitchEast(r, c - 1);     // shared columns (±X)
                 StitchSouth(r, c); StitchSouth(r - 1, c);   // shared rows (±Z)
             }
+        }
+
+        // One-shot flatten with an inner PLATEAU: within innerFrac*radius the terrain is set
+        // fully to targetY; from there to radius it feathers (smoothstep) back to original. Unlike
+        // Sculpt (gradual, peak-at-centre), this hits the target in ONE call across the whole
+        // plateau — for the slope tool / grading where the entire swath should be flat. innerFrac=1
+        // = hard-flatten the full disc. Records dirty samples; caller StitchAllSeams() afterwards.
+        public static void FlattenStamp(Vector3 world, float radius, float innerFrac, float targetY)
+        {
+            if (_grid == null || radius <= 0f) return;
+            float r2 = radius * radius;
+            float inner = Mathf.Clamp01(innerFrac) * radius;
+            float band = Mathf.Max(1e-3f, radius - inner);
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+            {
+                var t = _grid[r, c];
+                if (t == null || t.terrainData == null) continue;
+                var td = t.terrainData;
+                Vector3 o = t.transform.position;
+                float sx = td.size.x, sz = td.size.z, sy = td.size.y;
+                if (sx <= 0f || sz <= 0f || sy <= 0f) continue;
+                if (world.x + radius < o.x || world.x - radius > o.x + sx) continue;
+                if (world.z + radius < o.z || world.z - radius > o.z + sz) continue;
+                int res = td.heightmapResolution;
+                float ppX = (res - 1) / sx, ppZ = (res - 1) / sz;
+                int x0 = Mathf.Clamp(Mathf.FloorToInt((world.x - radius - o.x) * ppX), 0, res - 1);
+                int x1 = Mathf.Clamp(Mathf.CeilToInt((world.x + radius - o.x) * ppX), 0, res - 1);
+                int z0 = Mathf.Clamp(Mathf.FloorToInt((world.z - radius - o.z) * ppZ), 0, res - 1);
+                int z1 = Mathf.Clamp(Mathf.CeilToInt((world.z + radius - o.z) * ppZ), 0, res - 1);
+                int w = x1 - x0 + 1, h = z1 - z0 + 1;
+                if (w <= 0 || h <= 0) continue;
+                float targetNorm = Mathf.Clamp01((targetY - o.y) / sy);
+                float[,] hm = td.GetHeights(x0, z0, w, h);
+                bool changed = false;
+                HashSet<int> dirtySet = null;
+                for (int zz = 0; zz < h; zz++)
+                    for (int xx = 0; xx < w; xx++)
+                    {
+                        float wx = o.x + (x0 + xx) / ppX, wz = o.z + (z0 + zz) / ppZ;
+                        float dx = wx - world.x, dz = wz - world.z, d2 = dx * dx + dz * dz;
+                        if (d2 > r2) continue;
+                        float wgt = 1f;
+                        if (d2 > inner * inner)
+                            wgt = 1f - Mathf.SmoothStep(0f, 1f, (Mathf.Sqrt(d2) - inner) / band);
+                        float val = Mathf.Clamp01(Mathf.Lerp(hm[zz, xx], targetNorm, wgt));
+                        if (val != hm[zz, xx])
+                        {
+                            hm[zz, xx] = val; changed = true;
+                            if (dirtySet == null) dirtySet = DirtySetFor(r, c, cols);
+                            dirtySet.Add((z0 + zz) * res + (x0 + xx));
+                        }
+                    }
+                if (changed) td.SetHeights(x0, z0, hm);
+            }
+        }
+
+        // Get (lazily create) the edited-sample set for tile (r,c).
+        static HashSet<int> DirtySetFor(int r, int c, int cols)
+        {
+            if (_dirty == null) _dirty = new Dictionary<int, HashSet<int>>();
+            int tile = r * cols + c;
+            if (!_dirty.TryGetValue(tile, out var set)) _dirty[tile] = set = new HashSet<int>();
+            return set;
+        }
+
+        // ── Sculpt/carve persistence (sparse height diff) ───────────────────────────────────
+        // A sample edit set is captured per tile (DirtySetFor, marked in Sculpt). On save we
+        // read the CURRENT height at each edited sample (so stitched/over-painted values are
+        // exact); on load we write them back and re-stitch. Sparse: cost ∝ edits, not world.
+        [System.Serializable]
+        public class TileEdit { public int R, C; public int[] Idx; public float[] H; }
+        [System.Serializable]
+        public class Edits { public string City; public List<TileEdit> Tiles; }
+
+        static Edits _lastEdits;   // last good export — teardown fallback (tiles destroyed before save)
+
+        // Snapshot the recorded edits as a sparse per-tile diff (null if none). Main thread:
+        // reads TerrainData. Cost = one full-tile GetHeights per EDITED tile (a handful).
+        public static Edits ExportEdits()
+        {
+            if (_dirty == null || _dirty.Count == 0) return null;   // genuinely no edits
+            if (_grid != null)
+            {
+                int cols = _grid.GetLength(1);
+                var outTiles = new List<TileEdit>();
+                foreach (var kv in _dirty)
+                {
+                    int r = kv.Key / cols, c = kv.Key % cols;
+                    if (r < 0 || r >= _grid.GetLength(0) || c < 0 || c >= cols) continue;
+                    var t = _grid[r, c];
+                    if (t == null || t.terrainData == null || kv.Value.Count == 0) continue;
+                    var td = t.terrainData;
+                    int res = td.heightmapResolution;
+                    float[,] all = td.GetHeights(0, 0, res, res);   // [z, x]
+                    var idx = new int[kv.Value.Count];
+                    var hs = new float[kv.Value.Count];
+                    int i = 0;
+                    foreach (int s in kv.Value)
+                    {
+                        int z = s / res, x = s % res;
+                        if (z < 0 || z >= res || x < 0 || x >= res) continue;
+                        idx[i] = s; hs[i] = all[z, x]; i++;
+                    }
+                    if (i == 0) continue;
+                    if (i < idx.Length) { System.Array.Resize(ref idx, i); System.Array.Resize(ref hs, i); }
+                    outTiles.Add(new TileEdit { R = r, C = c, Idx = idx, H = hs });
+                }
+                if (outTiles.Count > 0) { _lastEdits = new Edits { City = CurrentCity, Tiles = outTiles }; return _lastEdits; }
+            }
+            // Teardown guard: we DO have recorded edits but couldn't read them live (Play-stop
+            // destroyed the tiles before this save) — fall back to the last good export so we
+            // don't clobber the autosave with zero edits.
+            return _lastEdits;
+        }
+
+        // Re-apply a saved sparse diff onto the freshly-built tiles, then re-stitch seams.
+        // Re-marks the samples dirty so a later save re-captures them (edits accumulate).
+        public static void ApplyEdits(Edits edits)
+        {
+            if (_grid == null || edits == null || edits.Tiles == null) return;
+            int rows = _grid.GetLength(0), cols = _grid.GetLength(1);
+            foreach (var te in edits.Tiles)
+            {
+                if (te == null || te.R < 0 || te.R >= rows || te.C < 0 || te.C >= cols) continue;
+                var t = _grid[te.R, te.C];
+                if (t == null || t.terrainData == null) continue;
+                var td = t.terrainData;
+                int res = td.heightmapResolution;
+                float[,] all = td.GetHeights(0, 0, res, res);
+                int n = Mathf.Min(te.Idx?.Length ?? 0, te.H?.Length ?? 0);
+                var set = DirtySetFor(te.R, te.C, cols);
+                for (int i = 0; i < n; i++)
+                {
+                    int s = te.Idx[i]; int z = s / res, x = s % res;
+                    if (z < 0 || z >= res || x < 0 || x >= res) continue;
+                    all[z, x] = Mathf.Clamp01(te.H[i]);
+                    set.Add(s);
+                }
+                td.SetHeights(0, 0, all);
+            }
+            StitchAllSeams();   // reconcile shared edges (idempotent for already-averaged values)
         }
 
         // Reconcile EVERY adjacent tile pair's shared edge — used after a build so the tiny
@@ -550,7 +706,7 @@ namespace NetworkDesigner.Terrain
         // Point the fly camera's terrain-aware clamp + speed-damping at the DEM surface (it's
         // wired to the low-poly terrain by default, which reads Y≈0 here → no slowdown near the
         // real surface). Raycast-based so it works regardless of tile heights.
-        static void WireCameraToDem()
+        public static void WireCameraToDem()
         {
             var fly = Object.FindFirstObjectByType<NetworkDesigner.Designer.FlyCameraController>();
             if (fly != null) fly.GroundHeight = DemGroundHeight;
@@ -737,6 +893,7 @@ namespace NetworkDesigner.Terrain
             if (tiles.Count == 0) { Debug.LogError("[DemTerrainWorld] no files matched *_tile_<row>_<col>.png"); return null; }
 
             Clear();
+            CurrentCity = folder;   // remember which city this is, for autosave/restore
             int rows = maxRow + 1, cols = maxCol + 1;
 
             // Derive the REAL per-tile ground size from the filename lat/lon span, so the

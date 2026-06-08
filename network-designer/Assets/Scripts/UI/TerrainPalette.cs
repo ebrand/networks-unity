@@ -23,46 +23,25 @@ namespace NetworkDesigner.UI
         protected override float PanelWidth => 320f;
 
         // Opening Terrain returns the cursor to the sculpt brush (exits rail/scatter).
-        protected override void OnOpened() => Designer.EnterSculptMode();
-
-        int _backend = 1;   // 0 = Low-Poly, 1 = DEM (the current focus)
+        protected override void OnOpened()
+        {
+            Designer.EnterSculptMode();
+            // DEM-only palette: if a DEM world is built but we somehow aren't on it, make
+            // it the active backend (low-poly is kept in code but no longer offered here).
+            if (DemTerrainWorld.HasWorld && !Designer.DemBackend)
+            {
+                Designer.SetActiveBackend(true);
+                DemTerrainWorld.FrameCamera();
+            }
+        }
 
         protected override void BuildBody(VisualElement body)
         {
-            // ---- BACKEND TOGGLE ----
-            var lowBox = new VisualElement();
-            var demBox = new VisualElement();
-            void SetBackend(int b)
-            {
-                _backend = b;
-                Designer.SetActiveBackend(b == 1);   // route all tools + show only the active terrain
-                lowBox.style.display = b == 0 ? DisplayStyle.Flex : DisplayStyle.None;
-                demBox.style.display = b == 1 ? DisplayStyle.Flex : DisplayStyle.None;
-            }
-            // Flipping reframes the camera onto the (very different-scale) active terrain.
-            void Flip(int b)
-            {
-                SetBackend(b);
-                if (b == 1 && DemTerrainWorld.HasWorld) DemTerrainWorld.FrameCamera();
-                else if (b == 0) Designer.ResetCamera();
-            }
-            var toggleRow = HBox();
-            var lowBtn = MakeButton("Low-Poly", () => Flip(0));
-            var demBtn = MakeButton("DEM", () => Flip(1));
-            lowBtn.style.marginRight = 6;
-            toggleRow.Add(lowBtn); toggleRow.Add(demBtn);
-            toggleRow.style.marginBottom = 10;
-            body.Add(toggleRow);
-            _sync.Add(() => { StyleActive(lowBtn, _backend == 0); StyleActive(demBtn, _backend == 1); });
-
-            // Shared sculpt brush — acts on whichever backend the toggle selects.
+            // DEM is the only terrain the palette offers now. The low-poly backend and its
+            // controls (BuildLowPoly) are kept in code — just not exposed here. The shared
+            // sculpt brush acts on the DEM; the DEM world controls follow.
             BuildBrush(body);
-
-            body.Add(lowBox);
-            body.Add(demBox);
-            BuildLowPoly(lowBox);
-            BuildDem(demBox);
-            SetBackend(_backend);
+            BuildDem(body);
         }
 
         // ───────────────────────── Shared sculpt brush (both backends) ───────────────────
@@ -73,11 +52,15 @@ namespace NetworkDesigner.UI
             AddBrushButton(body, "Lower (2)",   TerrainDesigner.BrushMode.Lower);
             AddBrushButton(body, "Smooth (3)",  TerrainDesigner.BrushMode.Smooth);
             AddBrushButton(body, "Flatten (4)", TerrainDesigner.BrushMode.Flatten);
-            AddBrushButton(body, "Slope (5)",   TerrainDesigner.BrushMode.Slope);   // low-poly only
+            AddBrushButton(body, "Slope (5)",   TerrainDesigner.BrushMode.Slope);   // two-click ramp
 
             body.Add(SliderRow("Radius", () => Designer.BrushRadius, v => Designer.BrushRadius = v,
                 0.5f, Mathf.Max(1f, Designer.MaxBrushRadius), "0"));
             body.Add(SliderRow("Strength", () => Designer.BrushStrength, v => Designer.BrushStrength = v, 0f, 100f, "0"));
+            // Edge feather for Slope (5) + Grade Corridor: 0 = flatten the WHOLE swath flat,
+            // 1 = only the centreline, smoothly feathered to the edge. (Freehand brushes keep
+            // their own built-in falloff.)
+            body.Add(SliderRow("Falloff", () => Designer.BrushFalloff, v => Designer.BrushFalloff = v, 0f, 1f, "0.00"));
             body.Add(Divider());
         }
 
@@ -119,33 +102,22 @@ namespace NetworkDesigner.UI
             body.Add(SectionLabel("DEM WORLD (Unity Terrain)"));
             // Pick a city → it loads/builds that DEM. (Save/manage comes later.) -500..9000m
             // covers all land; tile size is auto-derived from the filename lat/lon.
-            const float demTile = 10000f, demFrom = -500f, demTo = 9000f, demLod = 2f;  // pixel error: lower = more detail
-            int demMode = 1;   // 0 = Albedo, 1 = Flat green (default), 2 = Slope textures
-            void ApplyDemSurface()
-            {
-                if (demMode == 2) DemTerrainWorld.SetTextured("Grass_Layer", "Cliff_Layer", "RockyGround_Layer", "Rock_Layer", 22f, 38f, 30f);
-                else DemTerrainWorld.SetGreen(demMode == 1);
-            }
+            const float demTile = 10000f, demFrom = -500f, demTo = 9000f;  // LOD lives in Designer.DemLodPixelError (tunable)
+            // Surface is fixed to Flat green (Albedo / Slope-texture modes retired from the UI).
+            void ApplyDemSurface() => DemTerrainWorld.SetGreen(true);
 
             var cityRow = HBox(); cityRow.style.marginBottom = 6;
             var cityLbl = new Label("City"); cityLbl.style.color = Ink; cityLbl.style.minWidth = 40; cityLbl.style.flexShrink = 0;
             var demCity = new DropdownField { choices = DemTerrainWorld.ListWorlds() };   // unselected → pick to load
             demCity.style.flexGrow = 1; demCity.style.flexShrink = 1; demCity.style.minWidth = 0;
+            // Reflect the loaded/remembered city without re-triggering a load.
+            if (!string.IsNullOrEmpty(Designer.LastDemCity)) demCity.SetValueWithoutNotify(Designer.LastDemCity);
             // Build blocks the main thread for a few seconds; run it from a coroutine so the
             // "Loading DEM…" overlay paints a frame BEFORE we block (otherwise no feedback).
             demCity.RegisterValueChangedCallback(_ =>
-                StartCoroutine(LoadDem(demCity.value, demTile, demFrom, demTo, demLod, ApplyDemSurface)));
+                StartCoroutine(LoadDem(demCity.value, demTile, demFrom, demTo, Designer.DemLodPixelError, ApplyDemSurface)));
             cityRow.Add(cityLbl); cityRow.Add(demCity);
             body.Add(cityRow);
-
-            var surfRow = HBox(); surfRow.style.marginBottom = 6;
-            var surfLbl = new Label("Surface"); surfLbl.style.color = Ink; surfLbl.style.minWidth = 56; surfLbl.style.flexShrink = 0;
-            var surfDd = new DropdownField { choices = new List<string> { "Albedo", "Flat green", "Slope textures" } };
-            surfDd.index = 1;   // Flat green
-            surfDd.style.flexGrow = 1; surfDd.style.flexShrink = 1; surfDd.style.minWidth = 0;
-            surfDd.RegisterValueChangedCallback(_ => { demMode = surfDd.index; ApplyDemSurface(); });
-            surfRow.Add(surfLbl); surfRow.Add(surfDd);
-            body.Add(surfRow);
 
             // ---- WATER ---- (a flat plane at a chosen elevation — floods coasts/valleys)
             body.Add(Divider());

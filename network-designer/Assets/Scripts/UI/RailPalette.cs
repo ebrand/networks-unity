@@ -41,6 +41,8 @@ namespace NetworkDesigner.UI
                 () => Designer.RailLayer.SpeedLimitKmh, v => Designer.RailLayer.SpeedLimitKmh = v, 10f, 200f, "0"));
             body.Add(NumberRow("Max Grade", "deg",
                 () => Designer.RailLayer.MaxGradeDeg, v => Designer.RailLayer.MaxGradeDeg = v, 0.5f, 15f, "0.#"));
+            body.Add(NumberRow("Grade Bed", "m",
+                () => Designer.RailLayer.GradeCorridorWidth, v => Designer.RailLayer.GradeCorridorWidth = v, 2f, 60f, "0"));
 
             body.Add(ToggleRow("Force Grade (B)",
                 () => Designer.RailLayer.OverrideGrade, v => Designer.RailLayer.OverrideGrade = v));
@@ -63,6 +65,10 @@ namespace NetworkDesigner.UI
             actRow.Add(carve); actRow.Add(bop);
             actRow.style.marginTop = 4;
             body.Add(actRow);
+            // DEM cut/fill grading: carve+fill a roadbed under the rail to its routed grade.
+            var grade = MakeButton("Grade Corridor (DEM)", () => Designer.GradeRailCorridorDem());
+            grade.style.marginTop = 4;
+            body.Add(grade);
             var clearRow = HBox();
             var clearPlan = MakeButton("Clear Plan", () => Designer.ClearPlan());
             var clearRail = MakeButton("Clear Rail", () => Designer.ClearRail());

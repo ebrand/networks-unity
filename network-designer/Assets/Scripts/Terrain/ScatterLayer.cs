@@ -516,11 +516,21 @@ namespace NetworkDesigner.Terrain
 
         // ---- save / load / conform ----
 
+        List<PlacedTreeData> _lastData;   // last good collect — teardown fallback (see below)
+
         public List<PlacedTreeData> CollectData()
         {
             var list = new List<PlacedTreeData>(_placed.Count);
             foreach (PlacedTree t in _placed)
                 if (t != null && t.Data != null) list.Add(t.Data);
+            // Teardown guard: on Play-stop Unity may destroy the tree GameObjects BEFORE
+            // the designer's final OnDisable save runs. _placed still holds the (now
+            // Unity-null) component refs, so the live collect comes back bogus-empty and
+            // would clobber the autosave with zero trees. If we still TRACK trees but the
+            // live collect is empty, fall back to the last good snapshot instead.
+            if (list.Count == 0 && _placed.Count > 0 && _lastData != null && _lastData.Count > 0)
+                return _lastData;
+            _lastData = list;
             return list;
         }
 

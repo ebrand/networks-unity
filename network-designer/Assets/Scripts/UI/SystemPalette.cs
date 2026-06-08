@@ -95,6 +95,21 @@ namespace NetworkDesigner.UI
             body.Add(ToggleRow("Autosave", () => Designer.Autosave, v => Designer.Autosave = v));
             body.Add(NumberRow("Debounce", "s", () => Designer.AutosaveDebounceSeconds,
                 v => Designer.AutosaveDebounceSeconds = Mathf.Max(0.5f, v), 0.5f, 60f, "0.#"));
+
+            // ---- CHUNK TEST ---- (streaming flat-chunk world: roam + sculpt far apart; edits
+            // persist per chunk under <save>/ChunkEdits. No DEM data yet — proving the streamer.)
+            body.Add(Divider());
+            body.Add(SectionLabel("CHUNK TEST (flat)"));
+            body.Add(ToggleRow("Streaming chunks", () => Designer.ChunkTestActive,
+                v => { if (v) Designer.StartChunkTest(); else Designer.StopChunkTest(); }));
+            body.Add(ToggleRow("Grid (1km/100m)", () => Designer.ChunkShowGrid, v => Designer.ChunkShowGrid = v));
+            body.Add(ToggleRow("Lock bubble (hold Space)", () => Designer.ChunkLockBubble, v => Designer.ChunkLockBubble = v));
+            // Tunable here too (the React panel only connects in the editor, not in a build).
+            body.Add(SliderRow("Detail (px/vert)", () => Designer.ChunkPixelsPerVertex, v => Designer.ChunkPixelsPerVertex = v, 1.5f, 24f, "0.0"));
+            body.Add(SliderRow("Near Res", () => Designer.ChunkRes, v => Designer.ChunkRes = v, 129f, 1025f, "0"));
+            body.Add(SliderRow("Max chunks", () => Designer.ChunkRadius, v => Designer.ChunkRadius = v, 1f, 32f, "0"));
+            body.Add(SliderRow("Preload", () => Designer.ChunkPreloadDepth, v => Designer.ChunkPreloadDepth = v, 0f, 6f, "0"));
+            body.Add(SliderRow("Budget", () => Designer.ChunkBudget, v => Designer.ChunkBudget = v, 1f, 32f, "0"));
         }
     }
 }

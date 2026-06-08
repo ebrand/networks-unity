@@ -117,3 +117,6 @@ network-designer/Assets/Heightmaps/Highres/*
 # Purchased Unity environment pack (Rocky Hills + Toby Foliage Engine) — 2.3GB,
 # re-importable from the Asset Store, kept out of git.
 network-designer/Assets/Toby Fredson/
+
+# Runtime per-chunk sculpt saves (chunk-streaming test)
+network-designer/ChunkEdits/

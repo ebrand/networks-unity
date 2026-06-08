@@ -157,6 +157,37 @@ namespace NetworkDesigner.Terrain
                 () => t.BrushResizeRate, v => t.BrushResizeRate = v, 1f, 100f,
                 description: "How fast the radius changes while you hold [ or ].");
 
+            // --- DEM world ---
+            TuningRegistry.RegisterFloat("terrain.demLod", "DEM", "LOD (pixel error)",
+                () => t.DemLod, v => t.DemLod = v, 1f, 20f, 0.5f,
+                description: "DEM terrain detail: Unity heightmap pixel error. LOWER = denser mesh / more detail (heavier); HIGHER = coarser / faster. Applies live to a loaded DEM, and on load.");
+
+            // --- Chunk-streaming test world ---
+            TuningRegistry.RegisterFloat("terrain.chunkRadius", "Chunk", "Bubble radius (chunks)",
+                () => t.ChunkRadius, v => t.ChunkRadius = v, 1f, 10f, 1f,
+                description: "VISIBLE chunk radius (rendered) = (2r+1)²: r2 = 5×5/25, r3 = 7×7/49, r4 = 9×9/81. " +
+                             "Re-streams on change.");
+            TuningRegistry.RegisterFloat("terrain.chunkPreload", "Chunk", "Preload depth (rings)",
+                () => t.ChunkPreloadDepth, v => t.ChunkPreloadDepth = v, 0f, 6f, 1f,
+                description: "Extra rings loaded-but-INVISIBLE beyond the visible radius — the streaming " +
+                             "buffer. As you move, these flip visible instantly while a new outer ring loads " +
+                             "in the background. Deeper = more headroom for fast movement, but more resident memory.");
+            TuningRegistry.RegisterFloat("terrain.chunkBudget", "Chunk", "Load budget (chunks/frame)",
+                () => t.ChunkBudget, v => t.ChunkBudget = v, 1f, 32f, 1f,
+                description: "How many chunks may load per frame while streaming. Lower = smoother (no hitch) " +
+                             "but fills slower; the preload depth must be deep enough that a low budget keeps " +
+                             "up with your speed, or you'll see pop-in at the visible edge.");
+            TuningRegistry.RegisterFloat("terrain.chunkDetail", "Chunk", "Detail (px/vertex)",
+                () => t.ChunkPixelsPerVertex, v => t.ChunkPixelsPerVertex = v, 1.5f, 24f, 0.5f,
+                description: "Screen-space LOD quality: target screen pixels per terrain vertex. LOWER = " +
+                             "finer/denser mesh (more triangles), HIGHER = coarser/cheaper. Each chunk's " +
+                             "resolution is derived from this + how big it is on screen, so zooming drives LOD.");
+            TuningRegistry.RegisterFloat("terrain.chunkRes", "Chunk", "Near res (2ⁿ+1)",
+                () => t.ChunkRes, v => t.ChunkRes = v, 129f, 1025f, 1f,
+                description: "Per-chunk heightmap resolution; snaps to 129 / 257 / 513 / 1025. The BIGGEST " +
+                             "per-chunk load-cost lever (SetHeights scales with Res²): 129 ≈ 8 m/sample (fastest), " +
+                             "513 ≈ 2 m (sharpest sculpt). Rebuilds the bubble; edits saved at another Res are dropped.");
+
             // --- Heightmap import ---
             TuningRegistry.RegisterSelect("terrain.heightmapPick", "Heightmap", "Pick from Heightmaps/",
                 () => t.HeightmapFile, v => t.HeightmapFile = v, () => t.ListHeightmapFiles(),
