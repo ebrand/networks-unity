@@ -547,9 +547,9 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterBool("plan.gradeLabels", "Rail plan", "Grade labels",
                 () => t.PlanLayer.ShowGradeLabels, v => t.PlanLayer.ShowGradeLabels = v,
                 description: "Float a grade-% label over each plan segment (current terrain) while editing the plan or slope-grading — reads the natural grade before earthworks, the achieved grade after. Red = over max grade.");
-            TuningRegistry.RegisterFloat("plan.maxGrade", "Rail plan", "Analysis max grade (deg)",
-                () => t.PlanLayer.MaxGradeDeg, v => { t.PlanLayer.MaxGradeDeg = v; t.RebuildPlan(); }, 0.5f, 15f,
-                description: "An edge whose endpoint-to-endpoint grade exceeds this is flagged OVER-GRADE (red) — can't connect at grade; needs a reroute/switchback. 5 deg ~ 8.7%.");
+            TuningRegistry.RegisterFloat("plan.maxGrade", "Rail plan", "Max grade (%)",
+                () => t.PlanLayer.MaxGradePercent, v => { t.PlanLayer.MaxGradePercent = v; t.RebuildPlan(); }, 0.5f, 10f, 0.1f,
+                description: "Ruling grade: an edge whose endpoint-to-endpoint grade exceeds this %% is flagged OVER-GRADE (red) — too steep to connect at grade; develop the line / switchback. 2.2% is steep mountain mainline.");
             TuningRegistry.RegisterFloat("plan.atGradeBand", "Rail plan", "At-grade band (m)",
                 () => t.PlanLayer.AtGradeBand, v => { t.PlanLayer.AtGradeBand = v; t.RebuildPlan(); }, 0f, 5f,
                 description: "Cut/fill within this much of the graded bed reads as buildable at-grade (green).");

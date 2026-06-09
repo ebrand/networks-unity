@@ -85,10 +85,10 @@ namespace NetworkDesigner.Terrain
                  "cut = dashed, fill = double-dashed; bridge = cyan, tunnel = purple, " +
                  "over-grade = red. Off = plain survey lines.")]
         public bool ShowAnalysis = true;
-        [Tooltip("Max grade (deg) for the analysis. An edge whose endpoint-to-endpoint " +
-                 "grade exceeds this is flagged OVER-GRADE (red) — can't be connected " +
-                 "at grade; needs a reroute/switchback. 5 deg ~ 8.7%.")]
-        public float MaxGradeDeg = 5f;
+        [Tooltip("Max rail grade (%) for the analysis. An edge whose endpoint-to-endpoint " +
+                 "grade exceeds this is flagged OVER-GRADE (red) — too steep to connect at " +
+                 "grade; develop the line / switchback. 2.2% is steep mountain mainline.")]
+        public float MaxGradePercent = 2.2f;
         [Tooltip("Cut/fill within this band (m) of the graded bed reads as buildable " +
                  "at-grade (solid plan line).")]
         public float AtGradeBand = 0.6f;
@@ -504,12 +504,12 @@ namespace NetworkDesigner.Terrain
         // Snap onto the nearest plan edge within maxDist + its heading there — for the
         // terrain slope tool to ride the planned alignment. False if none in range.
         // Per-edge grade (endpoint-to-endpoint, sampled from the CURRENT terrain) with a
-        // midpoint world position to anchor a floating label. Over = exceeds MaxGradeDeg.
+        // midpoint world position to anchor a floating label. Over = exceeds MaxGradePercent.
         public void CollectEdgeGrades(ITerrainSurface field, List<EdgeGrade> outList)
         {
             outList.Clear();
             if (Graph == null || field == null) return;
-            float maxPct = Mathf.Tan(Mathf.Max(0.1f, MaxGradeDeg) * Mathf.Deg2Rad) * 100f;
+            float maxPct = Mathf.Max(0.1f, MaxGradePercent);
             foreach (LineEdge e in Graph.Edges)
             {
                 GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
@@ -528,14 +528,14 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        // True when EVERY plan edge's endpoint-to-endpoint grade is within MaxGradeDeg on
+        // True when EVERY plan edge's endpoint-to-endpoint grade is within MaxGradePercent on
         // the current terrain — i.e. a grade-limited rail can sit on the whole centreline.
         // overEdges = count of segments that exceed it. False (and 0) on an empty plan.
         public bool AllEdgesBuildable(ITerrainSurface field, out int overEdges)
         {
             overEdges = 0;
             if (Graph == null || field == null || Graph.Edges.Count == 0) return false;
-            float maxPct = Mathf.Tan(Mathf.Max(0.1f, MaxGradeDeg) * Mathf.Deg2Rad) * 100f;
+            float maxPct = Mathf.Max(0.1f, MaxGradePercent);
             foreach (LineEdge e in Graph.Edges)
             {
                 GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
@@ -734,7 +734,7 @@ namespace NetworkDesigner.Terrain
             {
                 float L = ApproxArcLength(q0, q1, q2, q3);
                 float eA = field.SampleHeight(q0.x, q0.y), eB = field.SampleHeight(q3.x, q3.y);
-                float maxPct = Mathf.Tan(Mathf.Max(0.1f, MaxGradeDeg) * Mathf.Deg2Rad) * 100f;
+                float maxPct = Mathf.Max(0.1f, MaxGradePercent);
                 bool overGrade = L > 1e-3f && Mathf.Abs(eB - eA) / L * 100f > maxPct;
                 if (Tracks >= 2)
                 {
@@ -742,6 +742,12 @@ namespace NetworkDesigner.Terrain
                     EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, -TrackGap * 0.5f, false);
                 }
                 else EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, 0f, true);
+                // CROSS-SLOPE bench cut/fill on the corridor edges: terrain at each edge vs the bench
+                // (the bed eA→eB at that station). On a sidehill the uphill edge reads as CUT (dashed),
+                // the downhill edge as FILL (double-dashed); deep cut → tunnel/wall (purple), deep fill
+                // → bridge/trestle (cyan). This shows the bench's cut-and-fill balance across the corridor.
+                EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, hw, false);
+                EmitAnalyzedTrack(field, q0, q1, q2, q3, eA, eB, overGrade, -hw, false);
             }
             else
             {
@@ -752,10 +758,10 @@ namespace NetworkDesigner.Terrain
                     EmitOffsetLine(field, q0, q1, q2, q3, -TrackGap * 0.5f, false, c);
                 }
                 else EmitOffsetLine(field, q0, q1, q2, q3, 0f, false, c);
+                // Plain corridor boundary (dashed) when analysis is off.
+                EmitOffsetLine(field, q0, q1, q2, q3, hw, true, PlanColor);
+                EmitOffsetLine(field, q0, q1, q2, q3, -hw, true, PlanColor);
             }
-            // Corridor edges always stay the plain plan colour (dashed).
-            EmitOffsetLine(field, q0, q1, q2, q3, hw, true, PlanColor);
-            EmitOffsetLine(field, q0, q1, q2, q3, -hw, true, PlanColor);
         }
 
         // Approx arc length of a cubic bezier (chord averaged with the control polygon).

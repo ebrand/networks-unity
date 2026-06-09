@@ -1849,7 +1849,7 @@ namespace NetworkDesigner.Terrain
             if (status > 0)
             {
                 Debug.LogWarning($"[Plan→Rail] {status} segment(s) exceed the plan's max grade "
-                    + $"({PlanLayer.MaxGradeDeg:0.0}°). Grade them (red) before building.");
+                    + $"({PlanLayer.MaxGradePercent:0.0}%). Grade them (red) before building.");
                 return;
             }
             int added = RailLayer.AppendGraph(PlanLayer.Graph, RailLayer.SpeedLimitKmh, Surf);
