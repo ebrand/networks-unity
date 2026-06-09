@@ -42,6 +42,12 @@ namespace NetworkDesigner.Terrain
         public static int RecenterDeadband = 2;   // re-center the bubble only after the look-point moves this many chunks (anti-thrash on look-around)
         public static int ColliderRadius = 32;    // CAP on collider coverage (Chebyshev from centre); default covers the whole bubble, so everything you see is sculptable. Lower it only to save physics memory on huge stress bubbles.
         public static bool Skirts = true;         // perimeter skirt walls hide LOD-seam cracks; off → drop 0 (degenerate, no walls)
+        // ── Topo contour overlay (per-pixel shader; a 2nd renderer over each chunk mesh) ──
+        public static bool ShowContours = false;
+        public static float ContourMinor = 1f;     // minor isoline spacing (m)
+        public static float ContourMajorEvery = 10f; // every Nth minor is a thicker major (→ 10 m)
+        public static float ContourStrength = 0.55f; // line opacity 0..1
+        static Material _contourMat;
         const string RootName = "ChunkWorld";
         public static float AmpMeters = 0f;       // max terrain height (multi-octave); 0 = flat
         static readonly int[] ResLevels = { 65, 129, 257, 513, 1025 };
@@ -59,6 +65,7 @@ namespace NetworkDesigner.Terrain
             public MeshCollider Mc;
             public Mesh Mesh;
             public Vector2Int Coord;   // this chunk's grid coordinate (for collider-distance gating)
+            public GameObject ContourGo; // child renderer drawing the contour-overlay shader over this mesh
             public JobHandle BakeHandle; // in-flight async collision-bake (valid only while BakePending)
             public bool BakePending;   // a BakeMeshJob is baking this chunk's collider on a worker thread
             public float[] H;          // render heights at LodRes (= source DEM/proc + Edit)
@@ -540,6 +547,57 @@ namespace NetworkDesigner.Terrain
             foreach (var kv in _chunks) { BuildMesh(kv.Value); CookCollider(kv.Value, true); }
         }
 
+        // ── Topo contour overlay ─────────────────────────────────────────────────────────────
+        // Per-pixel shader drawn as a 2nd renderer over each chunk's mesh (shared — auto-updates on
+        // rebuild). Purely visual; nothing baked. Returns null if the shader isn't in the project.
+        static Material ContourMat()
+        {
+            if (_contourMat == null)
+            {
+                var sh = Shader.Find("NetworkDesigner/ContourOverlay");
+                if (sh == null) { Debug.LogWarning("[ChunkWorld] ContourOverlay shader not found."); return null; }
+                _contourMat = new Material(sh) { name = "ContourOverlay" };
+                ApplyContourParams();
+            }
+            return _contourMat;
+        }
+
+        static void ApplyContourParams()
+        {
+            if (_contourMat == null) return;
+            _contourMat.SetFloat("_MinorInterval", Mathf.Max(0.05f, ContourMinor));
+            _contourMat.SetFloat("_MajorEvery", Mathf.Max(1f, ContourMajorEvery));
+            _contourMat.SetFloat("_Strength", Mathf.Clamp01(ContourStrength));
+        }
+
+        static void EnsureContourChild(Chunk ch)
+        {
+            if (ch.ContourGo != null || ch.Go == null) return;
+            var mat = ContourMat(); if (mat == null) return;
+            var go = new GameObject("Contour");
+            go.transform.SetParent(ch.Go.transform, false);   // local 0 → same world transform as the chunk
+            go.AddComponent<MeshFilter>().sharedMesh = ch.Mesh;   // SHARED → follows mesh rebuilds for free
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            ch.ContourGo = go;
+        }
+
+        public static void SetContours(bool on)
+        {
+            ShowContours = on;
+            if (on && ContourMat() == null) { ShowContours = false; return; }   // shader missing → no-op
+            foreach (var kv in _chunks)
+            {
+                if (on) EnsureContourChild(kv.Value);
+                if (kv.Value.ContourGo != null) kv.Value.ContourGo.SetActive(on);
+            }
+        }
+
+        public static void SetContourMinor(float m) { ContourMinor = Mathf.Clamp(m, 0.1f, 1000f); ApplyContourParams(); }
+        public static void SetContourStrength(float s) { ContourStrength = Mathf.Clamp01(s); ApplyContourParams(); }
+
         // ── Load / unload / LOD rebuild ──────────────────────────────────────────────────────
         static void LoadChunk(Vector2Int c)
         {
@@ -558,6 +616,7 @@ namespace NetworkDesigner.Terrain
             ch.Mf = go.AddComponent<MeshFilter>(); ch.Mf.sharedMesh = ch.Mesh;
             ch.Mr = go.AddComponent<MeshRenderer>(); ch.Mr.sharedMaterial = _mat;
             ch.Mc = go.AddComponent<MeshCollider>(); CookCollider(ch, true);   // only cooks if near the centre
+            if (ShowContours) EnsureContourChild(ch);   // 2nd renderer for the topo overlay
 
             _chunks[c] = ch;
             _everLoaded.Add(c);

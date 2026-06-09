@@ -522,6 +522,11 @@ namespace NetworkDesigner.Terrain
         public Color ChunkWaterColor { get => ChunkOverlays.WaterColor; set => ChunkOverlays.SetWaterColor(value); }
         public float ChunkWaterSmoothness { get => ChunkOverlays.WaterSmoothness; set => ChunkOverlays.SetWaterSmoothness(value); }
         public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
+        // Topographic contour lines over the loaded terrain (J hotkey too).
+        // Topo contours render via the per-pixel overlay SHADER (ChunkWorld.SetContours).
+        public bool ChunkContours { get => ChunkWorld.ShowContours; set => ChunkWorld.SetContours(value); }
+        public float ChunkContourInterval { get => ChunkWorld.ContourMinor; set => ChunkWorld.SetContourMinor(value); }
+        public float ChunkContourStrength { get => ChunkWorld.ContourStrength; set => ChunkWorld.SetContourStrength(value); }
         // Force the bubble to the FULL Radius regardless of zoom (streams in over frames). Heavy:
         // (2·Radius+1)² chunks — e.g. Radius 40 = 6,561. Following the camera; overrides Lock while on.
         public bool ChunkFillRadius
@@ -2275,6 +2280,8 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.M) && ChunkWorld.Active) ChunkLockBubble = !ChunkLockBubble;
             // V toggles the corner minimap / 3D relief diorama.
             if (Input.GetKeyDown(KeyCode.V) && ChunkWorld.Active) _showMinimap = !_showMinimap;
+            // J toggles topographic contour lines over the terrain.
+            if (Input.GetKeyDown(KeyCode.J) && ChunkWorld.Active) ChunkContours = !ChunkContours;
             // Cmd + mouse wheel: nudge the shared design speed ±10 km/h per notch while in
             // rail/plan mode — set it without leaving the plan. The camera ignores the wheel
             // while Cmd is held (see ScrollSuppressor in the camera setup).

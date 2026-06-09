@@ -36,6 +36,11 @@ namespace NetworkDesigner.UI
             body.Add(ToggleRow("Grid (1km/100m)", () => Designer.ChunkShowGrid, v => Designer.ChunkShowGrid = v));
             body.Add(ToggleRow("Lock bubble (hold Space)", () => Designer.ChunkLockBubble, v => Designer.ChunkLockBubble = v));
             body.Add(ToggleRow("Local build grid", () => Designer.ChunkLocalGrid, v => Designer.ChunkLocalGrid = v));
+            body.Add(ToggleRow("Topo contours (J)", () => Designer.ChunkContours, v => Designer.ChunkContours = v));
+            body.Add(SliderRow("Minor interval (m)", () => Designer.ChunkContourInterval,
+                v => Designer.ChunkContourInterval = v, 1f, 100f, "0", 1f));
+            body.Add(SliderRow("Topo strength", () => Designer.ChunkContourStrength,
+                v => Designer.ChunkContourStrength = v, 0.05f, 1f, "0.00", 0.05f));
             // Full-screen top-down map to trim empty/ocean chunks out of the streamed set (DEM worlds).
             var trimBtn = MakeButton("Trim map (empty chunks)…", () =>
             {

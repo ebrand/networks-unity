@@ -90,5 +90,29 @@ namespace NetworkDesigner
             if (sh == null) sh = Shader.Find("Sprites/Default"); // last-ditch
             return new Material(sh) { name = name, color = color };
         }
+
+        // Unlit, alpha-blended (color.a = opacity). Mirrors CreateLitTransparent's URP setup, minus lighting.
+        public static Material CreateUnlitTransparent(Color color, string name = "UnlitTransparent")
+        {
+            Material m;
+            if (Srp)
+            {
+                m = new Material(Shader.Find("Universal Render Pipeline/Unlit")) { name = name };
+                m.SetFloat("_Surface", 1f);   // 0 = Opaque, 1 = Transparent
+                m.SetFloat("_Blend", 0f);     // 0 = Alpha
+                m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+                m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+                m.SetFloat("_ZWrite", 0f);
+                m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+            }
+            else
+            {
+                m = new Material(Shader.Find("Unlit/Transparent")) { name = name };
+            }
+            m.renderQueue = 3000;
+            m.color = color;
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", color);
+            return m;
+        }
     }
 }

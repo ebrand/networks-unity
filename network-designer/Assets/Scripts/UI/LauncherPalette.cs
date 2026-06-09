@@ -36,9 +36,9 @@ namespace NetworkDesigner.UI
                 _sync.Add(() => StyleActive(b, pal.IsOpen));
             }
 
-            // Bubble-lock toggle (chunk worlds only): freeze the streaming set so you can sculpt in
-            // peace. Highlighted when locked. Hotkey: M (see TerrainDesigner.Update).
-            var lockBtn = MakeButton("🔓", () => Designer.ChunkLockBubble = !Designer.ChunkLockBubble);
+            // Chunk-world toggles (shown only in a chunk world, highlighted when on).
+            // Bubble-lock (🫧): 🔒 locked / 🔓 streaming. Hotkey M.
+            var lockBtn = MakeButton("🫧🔓", () => Designer.ChunkLockBubble = !Designer.ChunkLockBubble);
             lockBtn.style.height = 22;
             lockBtn.style.fontSize = 15;
             lockBtn.style.marginTop = 6;
@@ -49,10 +49,29 @@ namespace NetworkDesigner.UI
                 lockBtn.style.display = active ? DisplayStyle.Flex : DisplayStyle.None;
                 if (active)
                 {
-                    lockBtn.text = Designer.ChunkLockBubble ? "🔒" : "🔓";   // closed = locked, open = streaming
+                    lockBtn.text = Designer.ChunkLockBubble ? "🫧🔒" : "🫧🔓";   // closed = locked, open = streaming
                     StyleActive(lockBtn, Designer.ChunkLockBubble);
                 }
             });
+
+            // Grid (1 km/100 m) and Topo contours (J) toggles below the lock.
+            ChunkToggle("▦", () => Designer.ChunkShowGrid, v => Designer.ChunkShowGrid = v);
+            ChunkToggle("〰", () => Designer.ChunkContours, v => Designer.ChunkContours = v);
+
+            void ChunkToggle(string icon, System.Func<bool> get, System.Action<bool> set)
+            {
+                var b = MakeButton(icon, () => set(!get()));
+                b.style.height = 22;
+                b.style.fontSize = 15;
+                b.style.marginTop = 4;
+                body.Add(b);
+                _sync.Add(() =>
+                {
+                    bool active = Designer.ChunkTestActive;
+                    b.style.display = active ? DisplayStyle.Flex : DisplayStyle.None;
+                    if (active) StyleActive(b, get());
+                });
+            }
         }
     }
 }
