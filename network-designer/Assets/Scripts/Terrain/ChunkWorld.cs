@@ -9,16 +9,27 @@
 //     Radius. Zoom out → bigger footprint, more (coarse) chunks; zoom in → fewer (fine) chunks.
 //
 // Heights are a per-chunk world-Y float[] at that chunk's LOD res (regenerated from the source — DEM
-// or procedural — on LOD change). Sculpts are stored as a LOD-INDEPENDENT per-chunk DELTA that is
-// bilinear-resampled onto whatever resolution a chunk rebuilds at, so edits don't pop in/out as the
-// LOD flips. SEAMS: no skirts yet → small cracks at LOD boundaries (next polish step).
+// or procedural — on LOD change). Sculpts are stored as a LOD-INDEPENDENT absolute-override (Abs + Op,
+// render H = lerp(DEM, Abs, Op)) bilinear-resampled onto whatever res a chunk rebuilds at, so edits
+// don't pop in/out as the LOD flips. SEAMS: perimeter skirts (Skirts) hide LOD-boundary cracks; Smooth
+// averages the global surface across seams so a stroke can't tear shared edges apart.
 
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
+using Unity.Jobs;
 
 namespace NetworkDesigner.Terrain
 {
+    // Bakes a mesh's collision cooking on a WORKER thread (Physics.BakeMesh is thread-safe). After it
+    // completes, assigning the (now pre-cooked) mesh to a MeshCollider on the main thread is nearly
+    // free — so streaming a chunk no longer hitches the frame on synchronous collision cooking.
+    struct BakeMeshJob : IJob
+    {
+        public int MeshId;
+        public void Execute() => Physics.BakeMesh(MeshId, false);   // false = concave (terrain)
+    }
+
     public static class ChunkWorld
     {
         public const float ChunkSize = 1000f;
@@ -28,6 +39,9 @@ namespace NetworkDesigner.Terrain
         public static bool FillRadius = false;    // force the bubble to the FULL Radius (ignore the view footprint)
         public static int PreloadDepth = 1;       // margin chunks beyond the view footprint
         public static int Budget = 4;             // chunk builds/rebuilds per frame
+        public static int RecenterDeadband = 2;   // re-center the bubble only after the look-point moves this many chunks (anti-thrash on look-around)
+        public static int ColliderRadius = 3;     // cook MeshColliders only within this Chebyshev radius of the centre; far chunks skip the (expensive) cook
+        public static bool Skirts = true;         // perimeter skirt walls hide LOD-seam cracks; off → drop 0 (degenerate, no walls)
         const string RootName = "ChunkWorld";
         public static float AmpMeters = 0f;       // max terrain height (multi-octave); 0 = flat
         static readonly int[] ResLevels = { 65, 129, 257, 513, 1025 };
@@ -44,6 +58,9 @@ namespace NetworkDesigner.Terrain
             public MeshRenderer Mr;
             public MeshCollider Mc;
             public Mesh Mesh;
+            public Vector2Int Coord;   // this chunk's grid coordinate (for collider-distance gating)
+            public JobHandle BakeHandle; // in-flight async collision-bake (valid only while BakePending)
+            public bool BakePending;   // a BakeMeshJob is baking this chunk's collider on a worker thread
             public float[] H;          // render heights at LodRes (= source DEM/proc + Edit)
             public int LodRes;
             public float[] Abs;        // edited ABSOLUTE surface at EditRes (the height you sculpted)
@@ -59,6 +76,7 @@ namespace NetworkDesigner.Terrain
         static string _editDir;
         static Camera _cam;
         static readonly Dictionary<Vector2Int, Chunk> _chunks = new Dictionary<Vector2Int, Chunk>();
+        static readonly HashSet<Vector2Int> _excluded = new HashSet<Vector2Int>();   // trimmed-away chunks (map editor); never streamed
         static readonly HashSet<Vector2Int> _everLoaded = new HashSet<Vector2Int>();
         static readonly Dictionary<Vector2Int, float> _loadTime = new Dictionary<Vector2Int, float>();
         static readonly List<Vector2Int> _pending = new List<Vector2Int>();
@@ -99,11 +117,63 @@ namespace NetworkDesigner.Terrain
         public static bool WasVisited(Vector2Int c) => _everLoaded.Contains(c);
         public static float LoadedAt(Vector2Int c) => _loadTime.TryGetValue(c, out float t) ? t : -1f;
 
+        // ── Chunk exclusions (map-trim editor) ───────────────────────────────────────────────
+        public static int ExcludedCount => _excluded.Count;
+        public static bool IsExcluded(Vector2Int c) => _excluded.Contains(c);
+
+        // Replace the whole exclusion set, drop any now-excluded resident chunks, persist, and re-stream
+        // the trimmed map. Called when the map editor commits its selection.
+        public static void ApplyExclusions(IEnumerable<Vector2Int> coords)
+        {
+            _excluded.Clear();
+            if (coords != null) foreach (var c in coords) _excluded.Add(c);
+            List<Vector2Int> drop = null;
+            foreach (var c in _chunks.Keys) if (_excluded.Contains(c)) (drop ??= new List<Vector2Int>()).Add(c);
+            if (drop != null) for (int i = 0; i < drop.Count; i++) UnloadChunk(drop[i]);
+            SaveExclusions();
+            if (Active && _cam != null) Tick(_cam, eager: true);   // re-stream the trimmed set now
+        }
+
+        static string ExclusionsFile => string.IsNullOrEmpty(_editDir) ? null : Path.Combine(_editDir, "_excluded.bin");
+
+        static void SaveExclusions()
+        {
+            string path = ExclusionsFile; if (path == null) return;
+            try
+            {
+                using var ms = new MemoryStream(_excluded.Count * 8 + 8);
+                using (var w = new BinaryWriter(ms))
+                {
+                    w.Write(0x43584c31);   // "CXL1"
+                    w.Write(_excluded.Count);
+                    foreach (var c in _excluded) { w.Write(c.x); w.Write(c.y); }
+                }
+                File.WriteAllBytes(path, ms.ToArray());
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[ChunkWorld] save exclusions failed: {ex.Message}"); }
+        }
+
+        static void LoadExclusions()
+        {
+            _excluded.Clear();
+            string path = ExclusionsFile; if (path == null || !File.Exists(path)) return;
+            try
+            {
+                using var ms = new MemoryStream(File.ReadAllBytes(path));
+                using var r = new BinaryReader(ms);
+                if (r.ReadInt32() != 0x43584c31) return;
+                int n = r.ReadInt32();
+                for (int i = 0; i < n; i++) { int x = r.ReadInt32(), y = r.ReadInt32(); _excluded.Add(new Vector2Int(x, y)); }
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[ChunkWorld] load exclusions failed: {ex.Message}"); }
+        }
+
         public static void Begin(string editDir)
         {
             if (Active) return;
             _editDir = editDir;
             try { if (!string.IsNullOrEmpty(_editDir)) Directory.CreateDirectory(_editDir); } catch { }
+            LoadExclusions();   // restore this map's trimmed-chunk set
             _root = new GameObject(RootName);
             if (_mat == null) _mat = NetworkDesigner.PipelineMaterials.CreateLitMatte(Color.white, "ChunkGround");
             ApplyGridMaterial();
@@ -116,6 +186,7 @@ namespace NetworkDesigner.Terrain
         public static void End()
         {
             if (!Active) return;
+            CompleteAllBakes();   // no worker thread may be reading a mesh we're about to destroy
             foreach (var kv in _chunks) SaveChunkEdits(kv.Key);
             if (_root != null) { if (Application.isPlaying) Object.Destroy(_root); else Object.DestroyImmediate(_root); }
             _root = null; _chunks.Clear();
@@ -147,7 +218,7 @@ namespace NetworkDesigner.Terrain
                 FillHeights(kv.Key, ch.H, ch.LodRes);
                 OverlayEdit(ch);   // re-apply the absolute-override sculpt onto the fresh DEM heights
                 BuildMesh(ch);
-                if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+                CookCollider(ch, true);
             }
         }
 
@@ -307,7 +378,15 @@ namespace NetworkDesigner.Terrain
                      : Mathf.Clamp(Mathf.CeilToInt(halfExtent / ChunkSize) + Mathf.Max(0, PreloadDepth), 1, Mathf.Max(1, Radius));
 
             bool zoomChanged = _lastDist < 0f || Mathf.Abs(dist - _lastDist) / Mathf.Max(1f, _lastDist) > 0.1f;
-            bool footChanged = center != _center || foot != _lastFoot;
+            // DEADBAND: ignore look-point drift under RecenterDeadband chunks so panning the camera
+            // around at altitude doesn't thrash the bubble (cull+load+collider-cook) every chunk. The
+            // PreloadDepth margin covers the lag so no gap shows at the leading edge. A foot (zoom) change
+            // always recomputes immediately.
+            // (_center starts at int.MinValue — the uninitialized sentinel; Cheb on it overflows Mathf.Abs,
+            // so treat that as "changed" before doing any distance arithmetic.)
+            bool footChanged = _center.x == int.MinValue
+                            || Cheb(center, _center) >= Mathf.Max(1, RecenterDeadband)
+                            || foot != _lastFoot;
             // STREAMING (or eager): re-centre the resident set on the view → cull + load + re-LOD.
             // FROZEN (locked): keep the resident set put; only re-LOD the existing chunks as you
             // pan/zoom (refine where you look). New chunks never load, nothing culls.
@@ -315,6 +394,7 @@ namespace NetworkDesigner.Terrain
             {
                 _center = center; _lastFoot = foot; _lastDist = dist; _lastLodCenter = center;
                 Recompute(center, foot);
+                RefreshColliders();   // cook colliders that entered the near radius, drop those that left
             }
             else if (zoomChanged || center != _lastLodCenter)
             {
@@ -334,6 +414,8 @@ namespace NetworkDesigner.Terrain
                 else { int want = DesiredRes(c); if (_chunks[c].LodRes != want) RebuildLod(c, want); }
                 done++;
             }
+
+            ProcessBakes();   // assign any async collision bakes that finished this frame (off-thread → no hitch)
         }
 
         // Re-LOD the EXISTING resident set only (no cull/load) — for the frozen bubble as you
@@ -346,11 +428,16 @@ namespace NetworkDesigner.Terrain
             _pending.Sort((a, b) => Cheb(b, center).CompareTo(Cheb(a, center)));
         }
 
+        // A chunk may stream if it's not user-trimmed and (in a DEM world) actually inside the mosaic —
+        // so the flat procedural apron beyond the DEM data never loads.
+        static bool Streamable(Vector2Int c)
+            => !_excluded.Contains(c) && (!DemChunkSource.Active || DemChunkSource.CoversChunk(c));
+
         static void Recompute(Vector2Int center, int foot)
         {
             List<Vector2Int> cull = null;
             foreach (var c in _chunks.Keys)
-                if (Mathf.Abs(c.x - center.x) > foot || Mathf.Abs(c.y - center.y) > foot)
+                if (Mathf.Abs(c.x - center.x) > foot || Mathf.Abs(c.y - center.y) > foot || !Streamable(c))
                     (cull ??= new List<Vector2Int>()).Add(c);
             if (cull != null) for (int i = 0; i < cull.Count; i++) UnloadChunk(cull[i]);
 
@@ -359,17 +446,96 @@ namespace NetworkDesigner.Terrain
                 for (int dx = -foot; dx <= foot; dx++)
                 {
                     var c = new Vector2Int(center.x + dx, center.y + dz);
+                    if (!Streamable(c)) continue;                         // trimmed / outside DEM coverage: never load
                     if (!_chunks.ContainsKey(c)) _pending.Add(c);
                     else if (_chunks[c].LodRes != DesiredRes(c)) _pending.Add(c);
                 }
             _pending.Sort((a, b) => Cheb(b, center).CompareTo(Cheb(a, center)));
         }
 
+        // ── Collider gating ──────────────────────────────────────────────────────────────────
+        // MeshCollider cooking is the biggest per-load hitch, and you only ever click/sculpt/raycast
+        // near where you're looking. So only chunks within ColliderRadius of the centre carry a cooked
+        // collision mesh; the rest keep the component but a null sharedMesh (no cook, no physics cost).
+        static bool NeedsCollider(Vector2Int c) => Cheb(c, _center) <= Mathf.Max(0, ColliderRadius);
+
+        // Kick an async collision bake for this chunk on a worker thread (must finish before the mesh is
+        // mutated or destroyed — see BuildMesh/UnloadChunk). ProcessBakes assigns the result on completion.
+        static void ScheduleBake(Chunk ch)
+        {
+            if (ch.Mc == null || ch.Mesh == null) return;
+            if (ch.BakePending) ch.BakeHandle.Complete();   // never overlap two bakes of the same mesh
+            ch.BakeHandle = new BakeMeshJob { MeshId = ch.Mesh.GetInstanceID() }.Schedule();
+            ch.BakePending = true;
+        }
+
+        // Decide this chunk's collider. Near → (re)bake async; far → drop it. geometryChanged is true
+        // after a BuildMesh (the collision is stale and must re-bake); false on a plain re-centre refresh
+        // (only newly-near chunks without a collider need a bake — idempotent, no redundant cooking).
+        static void CookCollider(Chunk ch, bool geometryChanged)
+        {
+            if (ch.Mc == null) return;
+            if (!NeedsCollider(ch.Coord))
+            {
+                if (ch.BakePending) { ch.BakeHandle.Complete(); ch.BakePending = false; }
+                if (ch.Mc.sharedMesh != null) ch.Mc.sharedMesh = null;
+                return;
+            }
+            if (geometryChanged || (ch.Mc.sharedMesh == null && !ch.BakePending)) ScheduleBake(ch);
+        }
+
+        // Assign a freshly-baked mesh to the collider (cheap — uses the cached bake). Null→set forces the
+        // collider to re-read even when it already referenced the same mesh object. MUST be called while
+        // the mesh still matches the bake (before any new BuildMesh mutates it), or it re-cooks on the spot.
+        static void AssignBakedCollider(Chunk ch)
+        {
+            if (ch.Mc != null && NeedsCollider(ch.Coord)) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+        }
+
+        // Per-frame: any finished bake → assign the pre-cooked mesh on the main thread (cheap, no hitch).
+        static void ProcessBakes()
+        {
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value;
+                if (!ch.BakePending || !ch.BakeHandle.IsCompleted) continue;
+                ch.BakeHandle.Complete();
+                ch.BakePending = false;
+                AssignBakedCollider(ch);
+            }
+        }
+
+        // Drain all in-flight bakes (shutdown / before bulk teardown) so no worker thread touches a mesh
+        // we're about to destroy.
+        static void CompleteAllBakes()
+        {
+            foreach (var kv in _chunks)
+                if (kv.Value.BakePending) { kv.Value.BakeHandle.Complete(); kv.Value.BakePending = false; }
+        }
+
+        // After a re-centre, refresh collider membership: bake chunks that just entered the near radius,
+        // drop those that left. Only the boundary ring changes, so this is cheap.
+        static void RefreshColliders()
+        {
+            foreach (var kv in _chunks) CookCollider(kv.Value, false);
+        }
+
+        // Re-cook all colliders to the current ColliderRadius (after the tunable changes).
+        public static void RefreshCollidersNow() { if (Active) RefreshColliders(); }
+
+        // Rebuild every resident chunk's mesh (cheap vs RefillAll — no DEM re-derive), e.g. when the
+        // Skirts toggle flips. Re-cooks near colliders too since the mesh changed.
+        public static void RebuildAllMeshes()
+        {
+            if (!Active) return;
+            foreach (var kv in _chunks) { BuildMesh(kv.Value); CookCollider(kv.Value, true); }
+        }
+
         // ── Load / unload / LOD rebuild ──────────────────────────────────────────────────────
         static void LoadChunk(Vector2Int c)
         {
             int res = DesiredRes(c);
-            var ch = new Chunk { H = new float[res * res], LodRes = res };
+            var ch = new Chunk { H = new float[res * res], LodRes = res, Coord = c };
             FillHeights(c, ch.H, res);
             LoadEdit(c, ch);        // loads the sculpt delta at its native res
             OverlayEdit(ch);        // render it at this chunk's res (resampled copy)
@@ -382,7 +548,7 @@ namespace NetworkDesigner.Terrain
             BuildMesh(ch);
             ch.Mf = go.AddComponent<MeshFilter>(); ch.Mf.sharedMesh = ch.Mesh;
             ch.Mr = go.AddComponent<MeshRenderer>(); ch.Mr.sharedMaterial = _mat;
-            ch.Mc = go.AddComponent<MeshCollider>(); ch.Mc.sharedMesh = ch.Mesh;
+            ch.Mc = go.AddComponent<MeshCollider>(); CookCollider(ch, true);   // only cooks if near the centre
 
             _chunks[c] = ch;
             _everLoaded.Add(c);
@@ -398,12 +564,13 @@ namespace NetworkDesigner.Terrain
             FillHeights(c, ch.H, newRes);
             OverlayEdit(ch);   // re-render the edit at the new res from the FULL-FIDELITY ch.Abs/ch.Op
             BuildMesh(ch);
-            if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+            CookCollider(ch, true);
         }
 
         static void UnloadChunk(Vector2Int c)
         {
             if (!_chunks.TryGetValue(c, out var ch)) return;
+            if (ch.BakePending) { ch.BakeHandle.Complete(); ch.BakePending = false; }   // don't destroy a mesh mid-bake
             SaveChunkEdits(c);
             if (ch.Go != null) { if (Application.isPlaying) Object.Destroy(ch.Go); else Object.DestroyImmediate(ch.Go); }
             if (ch.Mesh != null) { if (Application.isPlaying) Object.Destroy(ch.Mesh); else Object.DestroyImmediate(ch.Mesh); }
@@ -486,6 +653,9 @@ namespace NetworkDesigner.Terrain
 
         static void BuildMesh(Chunk ch)
         {
+            // A bake job may be reading this mesh on a worker thread — finish it before we mutate it, and
+            // assign its result first so the collider tracks 1 frame behind (not frozen) across a stroke.
+            if (ch.BakePending) { ch.BakeHandle.Complete(); ch.BakePending = false; AssignBakedCollider(ch); }
             int res = ch.LodRes; float sp = ChunkSize / (res - 1);
             var (verts, tris, uvs) = Buffers(res);
             var perim = Perim(res);
@@ -498,8 +668,9 @@ namespace NetworkDesigner.Terrain
                 }
             // Skirt top ring = the perimeter verts; bottom ring = top − drop. Drop is deeper at coarse
             // LODs (bigger cell → bigger possible seam mismatch); floored at 10 m so high-res chunks
-            // still cover small cracks.
-            float drop = Mathf.Max(10f, sp * SkirtFactor);
+            // still cover small cracks. Skirts off → drop 0: the walls collapse to zero-area (invisible)
+            // without touching the cached buffers, so it's a clean runtime toggle.
+            float drop = Skirts ? Mathf.Max(10f, sp * SkirtFactor) : 0f;
             int topBase = res * res, botBase = res * res + perim.Length;
             for (int e = 0; e < perim.Length; e++)
             {
@@ -649,7 +820,7 @@ namespace NetworkDesigner.Terrain
                             changed = true;
                         }
                     }
-                if (changed) { ch.EditDirty = true; BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
+                if (changed) { ch.EditDirty = true; BuildMesh(ch); CookCollider(ch, true); }
             }
         }
 
@@ -709,7 +880,7 @@ namespace NetworkDesigner.Terrain
                             changed = true;
                         }
                     }
-                if (changed) { ch.EditDirty = true; BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
+                if (changed) { ch.EditDirty = true; BuildMesh(ch); CookCollider(ch, true); }
             }
         }
 
@@ -777,7 +948,7 @@ namespace NetworkDesigner.Terrain
             {
                 var ch = _chunks[touched[i]];
                 BuildMesh(ch);
-                if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+                CookCollider(ch, true);
             }
         }
 
@@ -851,7 +1022,7 @@ namespace NetworkDesigner.Terrain
             {
                 var ch = _chunks[touched[i]];
                 BuildMesh(ch);
-                if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+                CookCollider(ch, true);
             }
         }
 

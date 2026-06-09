@@ -198,6 +198,18 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterBool("terrain.chunkLock", "Chunk", "Lock bubble (hold Space)",
                 () => t.ChunkLockBubble, v => t.ChunkLockBubble = v,
                 description: "Freeze the resident set: pan/zoom freely, no cull/load. Hold Space to reposition.");
+            TuningRegistry.RegisterBool("terrain.chunkSkirts", "Chunk", "Skirts (hide LOD cracks)",
+                () => t.ChunkSkirts, v => t.ChunkSkirts = v,
+                description: "Perimeter skirt walls that fill the thin gaps where chunks at different LODs meet. " +
+                             "Off rebuilds the resident meshes flat — toggle it to A/B whether cracks return.");
+            TuningRegistry.RegisterFloat("terrain.chunkColliderRadius", "Chunk", "Collider radius (chunks)",
+                () => t.ChunkColliderRadius, v => t.ChunkColliderRadius = v, 0f, 12f, 1f,
+                description: "Only chunks within this many chunks of the bubble centre get a cooked MeshCollider " +
+                             "(cooking is the main load hitch). Must cover where you sculpt/click — 3 = a 7×7 core.");
+            TuningRegistry.RegisterFloat("terrain.chunkRecenter", "Chunk", "Re-center deadband (chunks)",
+                () => t.ChunkRecenterDeadband, v => t.ChunkRecenterDeadband = v, 1f, 8f, 1f,
+                description: "Re-center the bubble only after the look-point drifts this many chunks. Higher = less " +
+                             "load/cull churn when panning around at altitude, at the cost of a laggier leading edge.");
             // (Water controls live in the "Water" group — they drive the chunk water when active.)
             TuningRegistry.RegisterBool("terrain.chunkLocalGrid", "Chunk", "Local build grid",
                 () => t.ChunkLocalGrid, v => t.ChunkLocalGrid = v,

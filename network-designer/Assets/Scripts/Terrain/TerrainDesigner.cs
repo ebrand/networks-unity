@@ -482,6 +482,25 @@ namespace NetworkDesigner.Terrain
         }
         public bool ChunkShowGrid { get => ChunkWorld.ShowGrid; set => ChunkWorld.SetGrid(value); }
         public bool ChunkLockBubble { get => ChunkWorld.LockBubble; set => ChunkWorld.LockBubble = value; }
+        // Perimeter skirts (hide LOD-seam cracks). Toggling rebuilds resident chunk meshes.
+        public bool ChunkSkirts
+        {
+            get => ChunkWorld.Skirts;
+            set { if (value != ChunkWorld.Skirts) { ChunkWorld.Skirts = value; ChunkWorld.RebuildAllMeshes(); } }
+        }
+        // Only chunks within this Chebyshev radius of the bubble centre get a cooked MeshCollider
+        // (collider cooking is the main per-load hitch; far chunks are never clicked/sculpted).
+        public float ChunkColliderRadius
+        {
+            get => ChunkWorld.ColliderRadius;
+            set { int r = Mathf.Clamp(Mathf.RoundToInt(value), 0, 50); if (r != ChunkWorld.ColliderRadius) { ChunkWorld.ColliderRadius = r; ChunkWorld.RefreshCollidersNow(); } }
+        }
+        // Re-center the bubble only after the look-point drifts this many chunks (anti-thrash on look-around).
+        public float ChunkRecenterDeadband
+        {
+            get => ChunkWorld.RecenterDeadband;
+            set => ChunkWorld.RecenterDeadband = Mathf.Clamp(Mathf.RoundToInt(value), 1, 8);
+        }
         // Water plane at a configurable sea level (m), and a fine local build/sculpt grid that follows the view.
         public bool ChunkShowWater { get => ChunkOverlays.ShowWater; set => ChunkOverlays.SetWater(value); }
         public float ChunkWaterLevel { get => ChunkOverlays.WaterLevel; set => ChunkOverlays.SetWaterLevel(value); }
@@ -1417,7 +1436,10 @@ namespace NetworkDesigner.Terrain
                 GUI.DrawTexture(new Rect(dleft - 5f, dtop - 5f, dm + 10f, dm + 24f), Texture2D.whiteTexture);
                 GUI.color = Color.white;
                 GUI.DrawTexture(new Rect(dleft, dtop, dm, dm), diorama.Texture, ScaleMode.ScaleToFit, false);
-                GUI.Label(new Rect(dleft, dtop + dm + 3f, dm, 18f), $"chunk {active.x},{active.y}   loaded {ChunkWorld.LoadedCount}");
+                int totX = Mathf.Max(1, Mathf.RoundToInt(DemChunkSource.WorldWidthX / ChunkWorld.ChunkSize));
+                int totZ = Mathf.Max(1, Mathf.RoundToInt(DemChunkSource.WorldLengthZ / ChunkWorld.ChunkSize));
+                GUI.Label(new Rect(dleft, dtop + dm + 3f, dm, 18f),
+                          $"chunk {active.x},{active.y}   loaded {ChunkWorld.LoadedCount} / {totX * totZ}  ({totX}×{totZ})");
                 GUI.color = pc;
                 return;
             }
@@ -1711,6 +1733,9 @@ namespace NetworkDesigner.Terrain
         // PanelRect is stored in the unscaled virtual-screen space.
         bool MouseOverActivePanel()
         {
+            // The full-screen map trimmer is a modal overlay — treat it like a panel so sculpt/look/scroll
+            // are all gated while it's open.
+            if (ChunkMapEditor.IsOpen) return true;
             // UI Toolkit palette swallows its own events, but the legacy Input polling
             // used by the camera/tools is blind to it — so gate on its hover flag too.
             if (NetworkDesigner.UI.PaletteBase.PointerOverUI) return true;
@@ -2131,6 +2156,7 @@ namespace NetworkDesigner.Terrain
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
             fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap();
             fly.LookSuppressor = () => MouseOverActivePanel();
+            fly.InputSuppressor = () => ChunkMapEditor.IsOpen;   // freeze the camera while the map trimmer is open
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
             if (fresh) FrameFly(fly);
         }

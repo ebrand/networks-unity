@@ -25,6 +25,26 @@ namespace NetworkDesigner.UI
         string _selectedRegion;
         readonly List<VisualElement> _tiles = new List<VisualElement>();
         static readonly Dictionary<string, Texture2D> _previewCache = new Dictionary<string, Texture2D>();
+        bool _heldModal;   // whether we're currently holding the global modal ref-count
+
+        // While the picker is visible, hold ModalOpen so typing a game name doesn't fire tool/brush
+        // hotkeys and the world underneath stays inert.
+        protected override void Update()
+        {
+            base.Update();
+            bool shown = ShouldShow();
+            if (shown != _heldModal)
+            {
+                if (shown) PushModal(); else PopModal();
+                _heldModal = shown;
+            }
+        }
+
+        protected override void OnDisable()
+        {
+            base.OnDisable();
+            if (_heldModal) { PopModal(); _heldModal = false; }   // don't leak the ref-count
+        }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoSpawn()

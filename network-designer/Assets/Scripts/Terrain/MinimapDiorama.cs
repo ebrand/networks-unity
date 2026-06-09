@@ -142,7 +142,7 @@ namespace NetworkDesigner.Terrain
             _marker.transform.position = FarOffset;
             _marker.layer = Layer;
             _marker.AddComponent<MeshFilter>().sharedMesh = new Mesh { name = "BubbleMarker" };
-            _markerMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 0.9f, 0.15f, 0.4f), 0f, "MinimapBubble");
+            _markerMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 0.88f, 0.1f, 0.6f), 0f, "MinimapBubble");
             var mr = _marker.AddComponent<MeshRenderer>();
             mr.sharedMaterial = _markerMat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -178,18 +178,37 @@ namespace NetworkDesigner.Terrain
             _cam.farClipPlane = DioramaSpan * 8f;
             _cam.targetTexture = _rt;
 
-            // Frame the whole diorama from above and to the south (–Z), tilted ~50° down.
+            OrientCamera(_track);   // initial framing (then re-oriented each LateUpdate to the camera heading)
+        }
+
+        // Orbit the diorama camera around the relief by the play camera's heading, so the play camera's
+        // forward always points "into/up" the minimap. Keeps the minimap's orientation locked to where
+        // you're actually facing instead of fixed north-up. Runs even mid-bake (only needs the spans).
+        void OrientCamera(Camera cam)
+        {
+            if (_cam == null) return;
             float span = Mathf.Max(_spanX, _spanZ);
             Vector3 center = FarOffset + new Vector3(_spanX * 0.5f, span * 0.10f, _spanZ * 0.5f);
-            Vector3 eye = center + new Vector3(0f, span * 1.05f, -span * 0.95f);
+            float headingDeg = 0f;
+            if (cam != null)
+            {
+                Vector3 f = cam.transform.forward; f.y = 0f;
+                if (f.sqrMagnitude > 1e-4f) headingDeg = Mathf.Atan2(f.x, f.z) * Mathf.Rad2Deg;   // 0 = +Z
+            }
+            // Base eye sits south & above (heading 0 → north-up, matching the old fixed framing); rotating
+            // the offset by the heading swings the viewpoint so forward ends up away-from-viewer (up).
+            Vector3 off = Quaternion.Euler(0f, headingDeg, 0f) * new Vector3(0f, span * 1.05f, -span * 0.95f);
+            Vector3 eye = center + off;
             _cam.transform.position = eye;
             _cam.transform.rotation = Quaternion.LookRotation((center - eye).normalized, Vector3.up);
         }
 
         void LateUpdate()
         {
-            if (_marker == null || !DemChunkSource.Active || _relief == null) return;
             Camera cam = _track != null ? _track : Camera.main;
+            OrientCamera(cam);   // keep the diorama heading synced to the play camera, even while baking
+
+            if (_marker == null || !DemChunkSource.Active || _relief == null) return;
             if (cam == null) { if (_marker.activeSelf) _marker.SetActive(false); return; }
             // Size from the resident bubble (how much is loaded)…
             if (!ChunkWorld.TryLoadedBounds(out _, out float sx, out float sz))

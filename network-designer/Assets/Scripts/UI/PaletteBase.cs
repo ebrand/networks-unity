@@ -32,6 +32,10 @@ namespace NetworkDesigner.UI
         // stacked over another modal doesn't clear it early when the top one closes.
         public static bool ModalOpen => _modalDepth > 0;
         static int _modalDepth;
+        // Public ref-count hooks so a full-screen modal palette (e.g. the startup game-picker) can hold
+        // ModalOpen while it's visible — suppressing hotkeys/sculpt/camera underneath it.
+        public static void PushModal() => _modalDepth++;
+        public static void PopModal() => _modalDepth = Mathf.Max(0, _modalDepth - 1);
 
         public TerrainDesigner Designer;
         [Tooltip("Optional themed PanelSettings. If empty, the palette finds one " +

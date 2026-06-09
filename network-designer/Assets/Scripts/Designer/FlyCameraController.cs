@@ -59,6 +59,8 @@ namespace NetworkDesigner.Designer
         public System.Func<bool> ScrollSuppressor;
         // Set true to swallow middle-mouse look this frame (e.g. dragging over a UI panel).
         public System.Func<bool> LookSuppressor;
+        // Set true to swallow ALL camera input this frame (look/zoom/move) — e.g. a full-screen modal.
+        public System.Func<bool> InputSuppressor;
 
         public float Yaw;
         public float Pitch = 35f;
@@ -75,10 +77,11 @@ namespace NetworkDesigner.Designer
 
         void Update()
         {
-            HandleLook();
+            bool blocked = InputSuppressor != null && InputSuppressor();
+            if (!blocked) HandleLook();
             ApplyLook();
-            HandleZoomScroll();
-            HandleMove();
+            if (!blocked) HandleZoomScroll();
+            if (!blocked) HandleMove();
             ApplyZoom();
             ClampAltitude();
             ApplyCamera();
