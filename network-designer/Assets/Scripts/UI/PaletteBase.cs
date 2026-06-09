@@ -68,6 +68,7 @@ namespace NetworkDesigner.UI
         protected virtual Color Accent => Amber;         // top rule + active toggle color
         protected virtual float PanelWidth => 300f;
         protected virtual bool AnchorRight => false;     // right edge instead of left
+        protected virtual bool Centered => false;        // dead-centre on screen (ignores Anchor*)
         protected virtual bool AnchorBottom => false;    // bottom edge instead of top
         protected virtual bool ShowFooter => true;       // mode/Grid/Snap footer
         // Footer mode/sub labels. Default = the live editing mode (right for Terrain/Rail);
@@ -189,8 +190,18 @@ namespace NetworkDesigner.UI
             _panel = new VisualElement();
             _panel.style.position = Position.Absolute;
             _panel.style.width = PanelWidth;
-            if (AnchorBottom) _panel.style.bottom = 16; else _panel.style.top = 16;
-            if (AnchorRight) _panel.style.right = 16; else _panel.style.left = 16;
+            if (Centered)
+            {
+                // Dead-centre on screen (translate by half its own size — resolution-independent).
+                _panel.style.left = Length.Percent(50);
+                _panel.style.top = Length.Percent(50);
+                _panel.style.translate = new Translate(Length.Percent(-50), Length.Percent(-50), 0);
+            }
+            else
+            {
+                if (AnchorBottom) _panel.style.bottom = 16; else _panel.style.top = 16;
+                if (AnchorRight) _panel.style.right = 16; else _panel.style.left = 16;
+            }
             _panel.style.maxHeight = Mathf.Max(300f, Screen.height - 32f);   // tall palettes scroll
             Pad(_panel, 14, 14, 12, 16);
             _panel.style.backgroundColor = PanelBg;
@@ -296,7 +307,7 @@ namespace NetworkDesigner.UI
         }
 
         protected VisualElement SliderRow(string label, Func<float> get, Action<float> set,
-                                          float min, float max, string fmt = "0.#")
+                                          float min, float max, string fmt = "0.#", float step = 0f)
         {
             var row = HBox();
             row.style.marginBottom = 8;
@@ -307,7 +318,13 @@ namespace NetworkDesigner.UI
             s.style.flexGrow = 1; s.style.marginLeft = 4; s.style.marginRight = 6;
             var val = new Label(get().ToString(fmt));
             val.style.color = Sub; val.style.minWidth = 36; val.style.unityTextAlign = TextAnchor.MiddleRight;
-            s.RegisterValueChangedCallback(e => { set(e.newValue); val.text = e.newValue.ToString(fmt); });
+            // step > 0 snaps the handle itself to discrete increments (so it moves N at a time).
+            s.RegisterValueChangedCallback(e =>
+            {
+                float v = step > 0f ? Mathf.Round(e.newValue / step) * step : e.newValue;
+                if (step > 0f && !Mathf.Approximately(v, e.newValue)) s.SetValueWithoutNotify(v);
+                set(v); val.text = v.ToString(fmt);
+            });
             _sync.Add(() => { float g = get(); s.SetValueWithoutNotify(Mathf.Clamp(g, min, max)); val.text = g.ToString(fmt); });
             row.Add(s); row.Add(val);
             return row;

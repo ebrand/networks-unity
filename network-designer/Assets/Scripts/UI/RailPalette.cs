@@ -65,8 +65,8 @@ namespace NetworkDesigner.UI
             actRow.Add(carve); actRow.Add(bop);
             actRow.style.marginTop = 4;
             body.Add(actRow);
-            // DEM cut/fill grading: carve+fill a roadbed under the rail to its routed grade.
-            var grade = MakeButton("Grade Corridor (DEM)", () => Designer.GradeRailCorridorDem());
+            // Cut/fill grading: carve+fill a roadbed under the rail to its routed grade (chunk world or DEM).
+            var grade = MakeButton("Grade Corridor (cut/fill)", () => Designer.GradeRailCorridor());
             grade.style.marginTop = 4;
             body.Add(grade);
             var clearRow = HBox();

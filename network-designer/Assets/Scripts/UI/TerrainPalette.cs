@@ -98,7 +98,7 @@ namespace NetworkDesigner.UI
                 v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { Designer.ShowWater = v; Designer.ApplyWater(); } }));
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : Designer.WaterLevel,
-                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, -50f, 1000f, "0"));
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, 0f, 100f, "0", 1f));
         }
 
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
@@ -133,7 +133,7 @@ namespace NetworkDesigner.UI
                 v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { DemWater.Show = v; DemWater.Apply(); } }));
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : DemWater.Level,
-                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, -50f, 3000f, "0"));
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, 0f, 100f, "0", 1f));
 
             // ---- LIGHTING ----
             body.Add(Divider());

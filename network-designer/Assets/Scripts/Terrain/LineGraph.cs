@@ -46,6 +46,15 @@ namespace NetworkDesigner.Terrain
 
         public void Clear() { Nodes.Clear(); Edges.Clear(); }
 
+        // Remove a single edge by index, KEEPING both endpoint nodes — for chopping a gap mid-line
+        // (split twice, then delete the middle edge to leave the two nodes for a bridge, etc.).
+        public bool RemoveEdgeAt(int edgeIndex)
+        {
+            if (edgeIndex < 0 || edgeIndex >= Edges.Count) return false;
+            Edges.RemoveAt(edgeIndex);
+            return true;
+        }
+
         // Remove a node and every edge touching it, fixing up the indices of
         // edges that referenced higher-numbered nodes.
         public void RemoveNode(int idx)

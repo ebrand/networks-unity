@@ -198,13 +198,7 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterBool("terrain.chunkLock", "Chunk", "Lock bubble (hold Space)",
                 () => t.ChunkLockBubble, v => t.ChunkLockBubble = v,
                 description: "Freeze the resident set: pan/zoom freely, no cull/load. Hold Space to reposition.");
-            TuningRegistry.RegisterBool("terrain.chunkWater", "Chunk", "Water plane",
-                () => t.ChunkShowWater, v => t.ChunkShowWater = v,
-                description: "A transparent water plane across the whole block at the sea-level below.");
-            TuningRegistry.RegisterFloat("terrain.chunkWaterLevel", "Chunk", "Water level (m)",
-                () => t.ChunkWaterLevel, v => t.ChunkWaterLevel = v, -100f, 1000f, 5f,
-                description: "World height of the water plane. DEM heights are real metres, so 0 ≈ sea level " +
-                             "(this Astoria block ranges about -29 to 959 m).");
+            // (Water controls live in the "Water" group — they drive the chunk water when active.)
             TuningRegistry.RegisterBool("terrain.chunkLocalGrid", "Chunk", "Local build grid",
                 () => t.ChunkLocalGrid, v => t.ChunkLocalGrid = v,
                 description: "Drops a fine ~10 m / 50 m grid patch where you're looking, draped on the terrain, for " +
@@ -217,6 +211,10 @@ namespace NetworkDesigner.Terrain
                 () => t.SeaDrop, v => t.SeaDrop = v, 0f, 200f, 1f,
                 description: "Sea brush (6): how far below the clicked height to flatten the flooded area — sink the " +
                              "flat DEM ocean below the water plane so it stops z-fighting.");
+            TuningRegistry.RegisterFloat("terrain.batterRatio", "Chunk", "Slope tool: batter 1:N",
+                () => t.BatterRatio, v => t.BatterRatio = v, 0.5f, 8f, 0.5f,
+                description: "Slope tool (5) side-slope steepness, 1 vertical : N horizontal. The batter daylights " +
+                             "into the terrain (cut/fill), so the smoothing extent grows with depth. 2 = 1:2 gentle, 1 = 1:1 steep.");
             TuningRegistry.RegisterFloat("terrain.chunkDemNormMin", "Chunk", "DEM range min (m)",
                 () => t.ChunkDemNormMin, v => t.ChunkDemNormMin = v, -1000f, 4000f, 50f,
                 description: "Elevation that 16-bit value 0 decodes to. MUST match the range the DEM PNGs were " +
@@ -598,22 +596,27 @@ namespace NetworkDesigner.Terrain
                 () => t.RockTextureScale, v => { t.RockTextureScale = v; t.ApplyTerrainMaterial(); }, 0.01f, 1f,
                 description: "Tiling of the optional triplanar rock texture (lower = larger features). Only visible if a Rock Texture is assigned.");
 
-            // --- Water ---
+            // --- Water --- (drives the CHUNK water plane when the chunk world is active, else low-poly)
             TuningRegistry.RegisterBool("water.on", "Water", "Show water",
-                () => t.ShowWater, v => { t.ShowWater = v; t.ApplyWater(); },
+                () => t.ChunkTestActive ? t.ChunkShowWater : t.ShowWater,
+                v => { if (t.ChunkTestActive) t.ChunkShowWater = v; else { t.ShowWater = v; t.ApplyWater(); } },
                 description: "Show a flat water surface across the map; terrain below the level reads as submerged.");
             TuningRegistry.RegisterFloat("water.level", "Water", "Level (m)",
-                () => t.WaterLevel, v => { t.WaterLevel = v; t.ApplyWater(); }, -50f, 300f,
-                description: "World height of the water surface. Raise it to flood low ground / fill a gorge.");
+                () => t.ChunkTestActive ? t.ChunkWaterLevel : t.WaterLevel,
+                v => { if (t.ChunkTestActive) t.ChunkWaterLevel = v; else { t.WaterLevel = v; t.ApplyWater(); } }, -50f, 1000f, 1f,
+                description: "World height of the water surface (chunk water snaps to whole metres; 0 ≈ sea level). " +
+                             "Raise it to flood low ground / fill a gorge.");
             TuningRegistry.RegisterColor("water.color", "Water", "Color",
-                () => t.WaterColor, v => { t.WaterColor = v; t.ApplyWater(); },
+                () => t.ChunkTestActive ? t.ChunkWaterColor : t.WaterColor,
+                v => { if (t.ChunkTestActive) t.ChunkWaterColor = v; else { t.WaterColor = v; t.ApplyWater(); } },
                 description: "Water colour. Its alpha controls transparency (lower = see the bed through it).");
             TuningRegistry.RegisterFloat("water.alpha", "Water", "Alpha (transparency)",
-                () => t.WaterColor.a,
-                v => { Color c = t.WaterColor; c.a = v; t.WaterColor = c; t.ApplyWater(); }, 0.05f, 1f,
+                () => (t.ChunkTestActive ? t.ChunkWaterColor : t.WaterColor).a,
+                v => { if (t.ChunkTestActive) { Color cc = t.ChunkWaterColor; cc.a = v; t.ChunkWaterColor = cc; } else { Color c = t.WaterColor; c.a = v; t.WaterColor = c; t.ApplyWater(); } }, 0.05f, 1f,
                 description: "Water transparency — lower = clearer (see the bed through it), 1 = opaque. (Same as the colour's alpha channel; min 0.05 so it isn't reset by the 0-alpha guard.)");
             TuningRegistry.RegisterFloat("water.smoothness", "Water", "Smoothness",
-                () => t.WaterSmoothness, v => { t.WaterSmoothness = v; t.ApplyWater(); }, 0f, 1f,
+                () => t.ChunkTestActive ? t.ChunkWaterSmoothness : t.WaterSmoothness,
+                v => { if (t.ChunkTestActive) t.ChunkWaterSmoothness = v; else { t.WaterSmoothness = v; t.ApplyWater(); } }, 0f, 1f,
                 description: "Surface gloss — higher gives more of a reflective sheen.");
 
             // --- World grid ---

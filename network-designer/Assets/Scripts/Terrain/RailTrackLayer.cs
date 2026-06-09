@@ -812,6 +812,18 @@ namespace NetworkDesigner.Terrain
             return true;
         }
 
+        // Chop the rail edge nearest `hit` (within maxDist), KEEPING its nodes — so you can split a
+        // line twice and remove the middle segment to leave a gap (e.g. for a bridge). No orphan prune.
+        public bool DeleteEdgeNear(ITerrainSurface field, Vector3 hit, float maxDist)
+        {
+            if (Graph == null) return false;
+            if (!Graph.NearestPointOnEdge(new Vector2(hit.x, hit.z), maxDist, out int ei, out _, out _)) return false;
+            if (!Graph.RemoveEdgeAt(ei)) return false;
+            _cornerPending = false; ResetParallel();
+            Rebuild(field);
+            return true;
+        }
+
         // Remove any node left with no edges (e.g. the far end of a just-deleted segment),
         // keeping the active chain tail (a fresh, not-yet-connected start node).
         void PruneOrphanNodes()

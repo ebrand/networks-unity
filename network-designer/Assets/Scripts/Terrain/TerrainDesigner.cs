@@ -93,6 +93,8 @@ namespace NetworkDesigner.Terrain
         // clicked height and flattens it to (clicked height − SeaDrop). Carves the flat DEM ocean.
         public float SeaTolerance = 3f;
         public float SeaDrop = 5f;
+        // Slope-tool side-slope batter, 1 : BatterRatio (vertical : horizontal). 2 = 1:2 (gentle), 1 = 1:1 (steep).
+        public float BatterRatio = 2f;
         // Measure tool (7): click A, click B → straight-line distance tooltip; A→cursor rubber-bands.
         Vector3 _measA, _measB, _measCursor;
         bool _measHasA, _measHasB;
@@ -253,6 +255,7 @@ namespace NetworkDesigner.Terrain
         bool _pendingDemBackend;
         string _pendingDemCity;
         DemTerrainWorld.Edits _pendingDemEdits;   // sparse sculpt/carve diff, applied after the DEM builds
+        bool _pendingWaterOn; float _pendingWaterLevel;   // chunk water staged from the save; applied in LoadGame
         // The DEM city to fall back to when switching to DEM with no world built — the one
         // loaded this session if any, else the one remembered from the save. Lets the palette
         // auto-reload the last city even when we restarted in low-poly (so it's not "gone").
@@ -482,6 +485,8 @@ namespace NetworkDesigner.Terrain
         // Water plane at a configurable sea level (m), and a fine local build/sculpt grid that follows the view.
         public bool ChunkShowWater { get => ChunkOverlays.ShowWater; set => ChunkOverlays.SetWater(value); }
         public float ChunkWaterLevel { get => ChunkOverlays.WaterLevel; set => ChunkOverlays.SetWaterLevel(value); }
+        public Color ChunkWaterColor { get => ChunkOverlays.WaterColor; set => ChunkOverlays.SetWaterColor(value); }
+        public float ChunkWaterSmoothness { get => ChunkOverlays.WaterSmoothness; set => ChunkOverlays.SetWaterSmoothness(value); }
         public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
         // Force the bubble to the FULL Radius regardless of zoom (streams in over frames). Heavy:
         // (2·Radius+1)² chunks — e.g. Radius 40 = 6,561. Following the camera; overrides Lock while on.
@@ -1238,7 +1243,7 @@ namespace NetworkDesigner.Terrain
                 }
                 if (_lineActive is RailTrackLayer rt)
                 {
-                    GUILayout.Label("Click a rail edge: insert node (chop).\nClick a node puck: branch from it.");
+                    GUILayout.Label("Click a rail edge: insert node (split).\nShift+right-click an edge: remove it (keep nodes).\nClick a node puck: branch from it.");
                     if (rt.PreviewBrakeValid)
                         GUILayout.Label($"Decel {rt.PreviewBrakeVIn:0}→{rt.PreviewBrakeVNew:0} km/h over {rt.PreviewBrakeDist:0} m\nalong this line (then {rt.PreviewBrakeVNew:0}-radius curves OK)");
                     if (rt.PreviewBrakeReqRadius > 0f)
@@ -1300,7 +1305,14 @@ namespace NetworkDesigner.Terrain
                 Vector2 m = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y) / s;
                 string txt = $"Elev {_flattenCursorElev:0.0} m";
                 if (_flattenTargetPicked)
-                    txt += $"\nTarget {(_field != null ? _field.Origin.y + _flattenTarget : _flattenTarget):0.0} m";
+                {
+                    // Chunk/DEM backends flatten to _demFlattenY (the real hit-point height); only the
+                    // low-poly field uses the grid-sampled _flattenTarget. Show whichever is in play.
+                    float shownTarget = (ChunkWorld.Active || (DemBackend && DemTerrainWorld.HasWorld))
+                        ? _demFlattenY
+                        : (_field != null ? _field.Origin.y + _flattenTarget : _flattenTarget);
+                    txt += $"\nTarget {shownTarget:0.0} m";
+                }
                 var content = new GUIContent(txt);
                 Vector2 size = GUI.skin.box.CalcSize(content);
                 GUI.Box(new Rect(m.x + 18f, m.y + 2f, size.x + 8f, size.y + 4f), content);
@@ -1874,6 +1886,27 @@ namespace NetworkDesigner.Terrain
         // routed ground line (both cut AND fill), forming a roadbed at the design grade. Drives
         // the DEM Sculpt Flatten primitive per centreline sample, then re-stitches seams and
         // re-drapes objects/rail onto the new shape. DESTRUCTIVE (no auto-undo); DEM only.
+        // Cut/fill the terrain to the laid rail's grade line. Routes to the streaming chunk world
+        // (writing the LOD-independent edit overlay) when it's active, else the DEM backend.
+        public void GradeRailCorridor()
+        {
+            if (ChunkWorld.Active)
+            {
+                var targets = new List<Vector3>();
+                RailLayer.CollectGradeTargets(Surf, RailLayer.GradeSampleStep, targets);
+                if (targets.Count == 0) { Debug.LogWarning("[Grade] No rail to grade."); return; }
+                float halfW = Mathf.Max(2f, RailLayer.GradeCorridorWidth * 0.5f);
+                float innerFrac = 1f - Mathf.Clamp01(BrushFalloff);
+                ChunkWorld.GradeCorridor(targets, halfW, innerFrac);
+                RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+                ConformScatterAndLines();   // re-settle scatter/fences onto the carved bed
+                _dirtySince = Time.realtimeSinceStartup;
+                Debug.Log($"[Grade] Graded {targets.Count} corridor samples (chunk world).");
+                return;
+            }
+            GradeRailCorridorDem();
+        }
+
         public void GradeRailCorridorDem()
         {
             if (!DemTerrainWorld.HasWorld) { Debug.LogWarning("[Grade] No DEM world loaded — grading is DEM-only."); return; }
@@ -2506,6 +2539,10 @@ namespace NetworkDesigner.Terrain
                     // An armed auto-slope / connect cancels first (right-click backs out).
                     if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }
                     else if (_railSlopeNodeA >= 0) _railSlopeNodeA = -1;
+                    // Shift+right-click on a rail edge CHOPS that edge, keeping its nodes (gap for a bridge).
+                    else if ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) && overTerrain
+                             && _lineActive is RailTrackLayer railEd && railEd.DeleteEdgeNear(Surf, hit.point, 4f))
+                        _dirtySince = Time.realtimeSinceStartup;
                     else DeleteOrEndChain(hit, overTerrain);
                 }
                 if (Input.GetKeyDown(KeyCode.Backspace))
@@ -2581,19 +2618,25 @@ namespace NetworkDesigner.Terrain
                     else if (_slopeEndValid)
                     {
                         float elevB = SlopeElevAtWorld(_slopeEnd);
-                        bool dem = DemBackend && DemTerrainWorld.HasWorld;
-                        // Grade ALONG the path when there is one — a manual bend (curve mode)
-                        // or a connected plan centreline — else the straight A→B corridor.
-                        // On the DEM, route to the Flatten-primitive variants.
-                        if (_slopePath != null)
+                        // Grade ALONG the path when there is one — a manual bend (curve mode) or a
+                        // connected plan centreline — else the straight A→B corridor.
+                        if (ChunkWorld.Active)
                         {
-                            if (dem) ApplySlopeAlongPathDem(_slopePath, _slopeElevA, elevB, BrushRadius);
-                            else ApplySlopeAlongPath(_slopePath, _slopeElevA, elevB, BrushRadius);
+                            ApplySlopeChunk(_slopePath, _slopeA, _slopeEnd, _slopeElevA, elevB, BrushRadius);
                         }
                         else
                         {
-                            if (dem) ApplySlopeDem(_slopeA, _slopeEnd, _slopeElevA, elevB);
-                            else ApplySlope(_slopeA, _slopeEnd, _slopeElevA, elevB);
+                            bool dem = DemBackend && DemTerrainWorld.HasWorld;   // else the legacy low-poly variants
+                            if (_slopePath != null)
+                            {
+                                if (dem) ApplySlopeAlongPathDem(_slopePath, _slopeElevA, elevB, BrushRadius);
+                                else ApplySlopeAlongPath(_slopePath, _slopeElevA, elevB, BrushRadius);
+                            }
+                            else
+                            {
+                                if (dem) ApplySlopeDem(_slopeA, _slopeEnd, _slopeElevA, elevB);
+                                else ApplySlope(_slopeA, _slopeEnd, _slopeElevA, elevB);
+                            }
                         }
                         _slopeArmed = false; _slopeHasGuide = false; _slopeCornerPending = false;
                         _dirtySince = Time.realtimeSinceStartup;
@@ -2717,6 +2760,7 @@ namespace NetworkDesigner.Terrain
             RockLayer.ConformToSurface(Surf);
             FenceLayer.Rebuild(Surf);
             PowerLineLayer.Rebuild(Surf);
+            RailLayer.Rebuild(Surf);  // re-drape the rail too (load-restore onto the chunk surface; follows sculpts)
             PlanLayer.Rebuild(Surf); // re-drape the survey lines onto the new surface
         }
 
@@ -3167,7 +3211,8 @@ namespace NetworkDesigner.Terrain
         // else the low-poly grid. Lets the two-click ramp read real heights on the DEM.
         float SlopeElevAtWorld(Vector3 world)
         {
-            if (DemBackend && DemTerrainWorld.HasWorld) return Surf.SampleHeight(world.x, world.z);
+            // Chunk world OR DEM: read the ACTIVE surface (Surf). Only the legacy low-poly path uses the field grid.
+            if (ChunkWorld.Active || (DemBackend && DemTerrainWorld.HasWorld)) return Surf.SampleHeight(world.x, world.z);
             GridFromWorld(world, out float fx, out float fz);
             return HeightAtGrid(fx, fz);
         }
@@ -3222,6 +3267,56 @@ namespace NetworkDesigner.Terrain
                 walked += segLen;
             }
             DemTerrainWorld.StitchAllSeams();
+        }
+
+        // Slope tool in the CHUNK world: grade a corridor to a LINEAR ramp from elevA (path/A start) to
+        // elevB (end) by arc-length. Builds rail-bed-style targets and reuses ChunkWorld.GradeCorridor,
+        // so it cut/fills and writes the LOD-independent edit overlay. Path = plan centreline / bend, else straight.
+        void ApplySlopeChunk(List<Vector2> path, Vector3 aWorld, Vector3 bWorld, float elevA, float elevB, float halfWidth)
+        {
+            float halfW = Mathf.Max(2f, halfWidth);
+            float innerFrac = 1f - Mathf.Clamp01(BrushFalloff);
+            float spacing = Mathf.Max(1f, halfW * 0.5f);
+            var targets = new List<Vector3>();
+            if (path != null && path.Count >= 2)
+            {
+                float total = 0f;
+                for (int i = 1; i < path.Count; i++) total += Vector2.Distance(path[i - 1], path[i]);
+                if (total < 1e-3f) return;
+                float walked = 0f;
+                for (int i = 1; i < path.Count; i++)
+                {
+                    Vector2 s = path[i - 1], e = path[i];
+                    float segLen = Vector2.Distance(s, e);
+                    if (segLen < 1e-4f) continue;
+                    int steps = Mathf.Max(1, Mathf.CeilToInt(segLen / spacing));
+                    for (int k = 0; k <= steps; k++)
+                    {
+                        float t = k / (float)steps;
+                        Vector2 p = Vector2.Lerp(s, e, t);
+                        float frac = Mathf.Clamp01((walked + t * segLen) / total);
+                        targets.Add(new Vector3(p.x, Mathf.Lerp(elevA, elevB, frac), p.y));
+                    }
+                    walked += segLen;
+                }
+            }
+            else
+            {
+                Vector2 a = new Vector2(aWorld.x, aWorld.z), b = new Vector2(bWorld.x, bWorld.z);
+                float L = Vector2.Distance(a, b);
+                if (L < 1e-3f) return;
+                int n = Mathf.Max(2, Mathf.CeilToInt(L / spacing));
+                for (int i = 0; i <= n; i++)
+                {
+                    float u = i / (float)n;
+                    Vector2 p = Vector2.Lerp(a, b, u);
+                    targets.Add(new Vector3(p.x, Mathf.Lerp(elevA, elevB, u), p.y));
+                }
+            }
+            if (targets.Count == 0) return;
+            // Flat/ramped BED of width 2·halfW along the path, with daylighting batters at 1:BatterRatio.
+            ChunkWorld.GradeBatter(targets, halfW, BatterRatio);
+            RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
         }
 
         void ApplySlope(Vector3 aWorld, Vector3 bWorld, float elevA, float elevB)
@@ -3969,6 +4064,68 @@ namespace NetworkDesigner.Terrain
             return true;
         }
 
+        // --- Games (DEM-based saved games; the startup modal drives these) ---------------------
+        // A game = a folder under Games/<name>/ with a manifest (DEM set + decode range), an object
+        // snapshot (autosave.json) and its terrain sculpt edits (ChunkEditsDem/). Pointing
+        // AutosavePath at the game's autosave.json routes BOTH the snapshot and the chunk-edit dir
+        // into the game folder, so autosave then saves THIS game with no further plumbing.
+        public List<string> ListGames() => GameManager.ListGames();
+        public List<string> ListDemSets() => DemTerrainWorld.ListWorlds();
+        public string LastGame => GameManager.Last;
+        public bool HasGame(string name) => GameManager.Exists(name);
+        public float DefaultNormMin => DemChunkSource.NormMin;
+        public float DefaultNormMax => DemChunkSource.NormMax;
+
+        public void NewGame(string name, string demSet, float min, float max)
+        {
+            if (!GameManager.Create(name, demSet, min, max)) { Debug.LogWarning("[Game] create failed (name/DEM set?)"); return; }
+            LoadGame(name);
+        }
+
+        public void LoadGame(string name)
+        {
+            var info = GameManager.Read(name);
+            if (info == null) { Debug.LogWarning($"[Game] not found / unreadable: {name}"); return; }
+            // Route autosave (object snapshot + chunk edits) into THIS game's folder.
+            AutosavePath = GameManager.AutosaveFile(name);
+            // Decode range from the manifest — never the −500/3500 mismatch again.
+            DemChunkSource.NormMin = info.NormMin; DemChunkSource.NormMax = info.NormMax;
+
+            if (ChunkWorld.Active) StopChunkTest();
+            // Restore the object build (rail / scatter / fences / power) from this game's snapshot if it
+            // exists (new games have none yet). The low-poly field rides along but gets hidden by
+            // StartChunkDem below, which runs LAST so the chunk world ends up on top.
+            TerrainField loaded = TryLoadTerrainFrom(AutosavePath);   // stages the saved camera into _pendingCam*
+            // Grab the saved camera pose BEFORE ApplyLoadedField consumes it — we re-apply it after
+            // StartChunkDem (which would otherwise frame the DEM centre).
+            bool haveCam = loaded != null && _havePendingCam;
+            Vector3 camPos = _pendingCamPos; float camYaw = _pendingCamYaw, camPitch = _pendingCamPitch;
+            if (loaded != null) ApplyLoadedField(loaded);
+            // Load this game's DEM into the chunk world; its chunk edits auto-apply from the game folder.
+            StartChunkDem(info.DemSet);
+            // Move the camera to where it was saved AND stream the chunks around it FIRST — so the
+            // rail/scatter re-drape below samples the loaded surface at THEIR location, not the
+            // DEM-centre chunks StartChunkDem parked on (otherwise rail drapes onto y=0 → underground).
+            if (haveCam)
+            {
+                ApplyCameraPose(camPos, camYaw, camPitch);
+                ChunkWorld.Tick(ChunkCam(), eager: true);
+            }
+            // Re-settle the restored objects onto the now-loaded DEM surface at their real positions.
+            if (loaded != null) ConformScatterAndLines();
+            // Restore the saved water plane (toggle + level) for this game.
+            if (loaded != null) { ChunkOverlays.SetWaterLevel(_pendingWaterLevel); ChunkOverlays.SetWater(_pendingWaterOn); }
+            GameManager.SetActive(name);
+            Debug.Log($"[Game] loaded “{name}” (DEM {info.DemSet}, range {info.NormMin:0}..{info.NormMax:0}).");
+        }
+
+        public void ContinueLastGame()
+        {
+            string last = GameManager.Last;
+            if (GameManager.Exists(last)) LoadGame(last);
+            else Debug.LogWarning("[Game] no last game to continue.");
+        }
+
         // Snapshot the current field + trees + packs into an owned, immutable
         // payload safe to serialize off the main thread. Main-thread only.
         TerrainSave BuildSnapshot()
@@ -4007,6 +4164,9 @@ namespace NetworkDesigner.Terrain
                 DemCity = DemTerrainWorld.CurrentCity ?? "",
                 // Sparse DEM sculpt/carve diff (only when a DEM world is built).
                 DemEdits = DemTerrainWorld.HasWorld ? DemTerrainWorld.ExportEdits() : null,
+                // Chunk water plane state.
+                WaterOn = ChunkOverlays.ShowWater,
+                WaterLevel = ChunkOverlays.WaterLevel,
             };
         }
 
@@ -4079,7 +4239,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(9); // version (9 added the sparse DEM sculpt/carve height diff)
+                    w.Write(10); // version (10 added the chunk water plane state)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -4115,6 +4275,9 @@ namespace NetworkDesigner.Terrain
                             for (int i = 0; i < en; i++) w.Write(te.H[i]);
                         }
                     }
+                    // v10+: chunk water plane
+                    w.Write(save.WaterOn);
+                    w.Write(save.WaterLevel);
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -4230,6 +4393,8 @@ namespace NetworkDesigner.Terrain
                 _pendingDemBackend = save.DemBackend;
                 _pendingDemCity = save.DemCity;
                 _pendingDemEdits = save.DemEdits;
+                _pendingWaterOn = save.WaterOn;
+                _pendingWaterLevel = save.WaterLevel;
                 return f;
             }
             catch (System.Exception ex)
@@ -4301,6 +4466,11 @@ namespace NetworkDesigner.Terrain
                         }
                         s.DemEdits = de;
                     }
+                }
+                if (version >= 10) // chunk water plane
+                {
+                    s.WaterOn = r.ReadBoolean();
+                    s.WaterLevel = r.ReadSingle();
                 }
                 return s;
             }

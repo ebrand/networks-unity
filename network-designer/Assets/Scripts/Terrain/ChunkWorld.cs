@@ -8,9 +8,10 @@
 //   • Streaming: the resident set follows the camera's ground FOOTPRINT (+margin), capped at
 //     Radius. Zoom out → bigger footprint, more (coarse) chunks; zoom in → fewer (fine) chunks.
 //
-// Heights are a per-chunk world-Y float[] at that chunk's LOD res (regenerated procedurally on LOD
-// change — deterministic, seamless via global-node hashing). Sculpt edits persist per chunk,
-// res-tagged. SEAMS: no skirts yet → small cracks at LOD boundaries (next polish step).
+// Heights are a per-chunk world-Y float[] at that chunk's LOD res (regenerated from the source — DEM
+// or procedural — on LOD change). Sculpts are stored as a LOD-INDEPENDENT per-chunk DELTA that is
+// bilinear-resampled onto whatever resolution a chunk rebuilds at, so edits don't pop in/out as the
+// LOD flips. SEAMS: no skirts yet → small cracks at LOD boundaries (next polish step).
 
 using System.Collections.Generic;
 using System.IO;
@@ -43,8 +44,12 @@ namespace NetworkDesigner.Terrain
             public MeshRenderer Mr;
             public MeshCollider Mc;
             public Mesh Mesh;
-            public float[] H;
+            public float[] H;          // render heights at LodRes (= source DEM/proc + Edit)
             public int LodRes;
+            public float[] Abs;        // edited ABSOLUTE surface at EditRes (the height you sculpted)
+            public float[] Op;         // edit OPACITY 0..1 at EditRes — how much Abs overrides the DEM (feathered)
+            public int EditRes;        // resolution Abs/Op are stored at (never view-degraded)
+            public bool EditDirty;     // unsaved sculpt changes
         }
 
         public static bool ShowGrid = true;      // 1 km major / 100 m minor grid painted on the ground
@@ -54,7 +59,6 @@ namespace NetworkDesigner.Terrain
         static string _editDir;
         static Camera _cam;
         static readonly Dictionary<Vector2Int, Chunk> _chunks = new Dictionary<Vector2Int, Chunk>();
-        static readonly Dictionary<Vector2Int, HashSet<int>> _dirty = new Dictionary<Vector2Int, HashSet<int>>();
         static readonly HashSet<Vector2Int> _everLoaded = new HashSet<Vector2Int>();
         static readonly Dictionary<Vector2Int, float> _loadTime = new Dictionary<Vector2Int, float>();
         static readonly List<Vector2Int> _pending = new List<Vector2Int>();
@@ -65,6 +69,8 @@ namespace NetworkDesigner.Terrain
         static readonly Dictionary<int, Vector3[]> _vertsByRes = new Dictionary<int, Vector3[]>();
         static readonly Dictionary<int, int[]> _trisByRes = new Dictionary<int, int[]>();
         static readonly Dictionary<int, Vector2[]> _uvByRes = new Dictionary<int, Vector2[]>();
+        static readonly Dictionary<int, int[]> _perimByRes = new Dictionary<int, int[]>();
+        public static float SkirtFactor = 3f;    // skirt drop = vertexSpacing × this (min 10 m); hides LOD-seam cracks
 
         public static bool HasWorld => Active && _chunks.Count > 0;
         public static int LoadedCount => _chunks.Count;
@@ -112,7 +118,7 @@ namespace NetworkDesigner.Terrain
             if (!Active) return;
             foreach (var kv in _chunks) SaveChunkEdits(kv.Key);
             if (_root != null) { if (Application.isPlaying) Object.Destroy(_root); else Object.DestroyImmediate(_root); }
-            _root = null; _chunks.Clear(); _dirty.Clear();
+            _root = null; _chunks.Clear();
             _everLoaded.Clear(); _loadTime.Clear(); _pending.Clear();
             Active = false;
         }
@@ -139,9 +145,52 @@ namespace NetworkDesigner.Terrain
             {
                 var ch = kv.Value;
                 FillHeights(kv.Key, ch.H, ch.LodRes);
-                ApplyEditsToArray(kv.Key, ch.H, ch.LodRes);
+                OverlayEdit(ch);   // re-apply the absolute-override sculpt onto the fresh DEM heights
                 BuildMesh(ch);
                 if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+            }
+        }
+
+        // Overlay the chunk's ABSOLUTE edited surface onto its (freshly source-filled) render heights:
+        //   H = lerp(DEM, Abs, Op)
+        // resampling THROWAWAY copies of Abs/Op from EditRes to the render res. ch.Abs/ch.Op themselves
+        // are never mutated here, so repeated LOD/view changes can't degrade the edit, and because the
+        // edited core has Op≈1 the render shows YOUR surface — never the re-derived DEM detail at any zoom.
+        static void OverlayEdit(Chunk ch)
+        {
+            if (ch.Op == null || ch.Abs == null) return;
+            float[] a = ch.EditRes == ch.LodRes ? ch.Abs : ResampleGrid(ch.Abs, ch.EditRes, ch.LodRes);
+            float[] o = ch.EditRes == ch.LodRes ? ch.Op : ResampleGrid(ch.Op, ch.EditRes, ch.LodRes);
+            int n = Mathf.Min(ch.H.Length, Mathf.Min(a.Length, o.Length));
+            for (int i = 0; i < n; i++)
+            {
+                float op = o[i];
+                if (op <= 0f) continue;
+                ch.H[i] = Mathf.Lerp(ch.H[i], a[i], op > 1f ? 1f : op);
+            }
+        }
+
+        // Make ch.Abs/ch.Op live at `res` for an active sculpt at that res (allocating or resampling once).
+        // Resampling only happens when you actually sculpt at a new res — never on a plain view change.
+        // First allocation SEEDS Abs from the chunk's current heights (= DEM where unedited) so the
+        // absolute surface is coherent everywhere — Smooth's box-average can read unedited neighbours.
+        // Op starts all-zero (no override → render = DEM). Callers only ever pass res == ch.LodRes,
+        // so ch.H.Length == res*res and the seed Copy is exact.
+        static void EnsureEditRes(Chunk ch, int res)
+        {
+            if (ch.Op == null)
+            {
+                ch.Abs = new float[res * res];
+                ch.Op = new float[res * res];
+                if (ch.H != null && ch.H.Length == res * res)
+                    System.Array.Copy(ch.H, ch.Abs, res * res);
+                ch.EditRes = res;
+            }
+            else if (ch.EditRes != res)
+            {
+                ch.Abs = ResampleGrid(ch.Abs, ch.EditRes, res);
+                ch.Op = ResampleGrid(ch.Op, ch.EditRes, res);
+                ch.EditRes = res;
             }
         }
 
@@ -322,7 +371,8 @@ namespace NetworkDesigner.Terrain
             int res = DesiredRes(c);
             var ch = new Chunk { H = new float[res * res], LodRes = res };
             FillHeights(c, ch.H, res);
-            ApplyEditsToArray(c, ch.H, res);
+            LoadEdit(c, ch);        // loads the sculpt delta at its native res
+            OverlayEdit(ch);        // render it at this chunk's res (resampled copy)
 
             var go = new GameObject($"Chunk_{c.x}_{c.y}");
             go.transform.SetParent(_root.transform, false);
@@ -343,11 +393,10 @@ namespace NetworkDesigner.Terrain
         {
             if (!_chunks.TryGetValue(c, out var ch)) return;
             SaveChunkEdits(c);
-            _dirty.Remove(c);
             ch.LodRes = newRes;
             ch.H = new float[newRes * newRes];
             FillHeights(c, ch.H, newRes);
-            ApplyEditsToArray(c, ch.H, newRes);
+            OverlayEdit(ch);   // re-render the edit at the new res from the FULL-FIDELITY ch.Abs/ch.Op
             BuildMesh(ch);
             if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
         }
@@ -359,7 +408,6 @@ namespace NetworkDesigner.Terrain
             if (ch.Go != null) { if (Application.isPlaying) Object.Destroy(ch.Go); else Object.DestroyImmediate(ch.Go); }
             if (ch.Mesh != null) { if (Application.isPlaying) Object.Destroy(ch.Mesh); else Object.DestroyImmediate(ch.Mesh); }
             _chunks.Remove(c);
-            _dirty.Remove(c);
             // (DEM tiles are shared across chunks → freed by DemChunkSource's own LRU, not per-chunk.)
         }
 
@@ -507,13 +555,13 @@ namespace NetworkDesigner.Terrain
                 int z0 = Mathf.Clamp(Mathf.FloorToInt((world.z - radius - oz) / sp), 0, res - 1);
                 int z1 = Mathf.Clamp(Mathf.CeilToInt((world.z + radius - oz) / sp), 0, res - 1);
                 if (x1 < x0 || z1 < z0) continue;
-                float[] src = mode == DemTerrainWorld.SculptMode.Smooth ? (float[])ch.H.Clone() : null;
+                EnsureEditRes(ch, res);   // seed Abs from the live DEM heights before we read/smooth it
+                float[] src = mode == DemTerrainWorld.SculptMode.Smooth ? (float[])ch.Abs.Clone() : null;
                 int kernel = Mathf.Clamp(Mathf.RoundToInt(radius / sp * 0.25f), 2, 12);
                 float blendF = Mathf.Clamp01(strength * dt * 0.12f);
                 float blendS = Mathf.Clamp01(strength * dt * 0.7f);
                 float stepM = strength * dt * 3f;
                 bool changed = false;
-                HashSet<int> ds = null;
                 for (int zz = z0; zz <= z1; zz++)
                     for (int xx = x0; xx <= x1; xx++)
                     {
@@ -523,22 +571,28 @@ namespace NetworkDesigner.Terrain
                         float fall = 1f - Mathf.Sqrt(d2) / radius;
                         fall = fall * fall * (3f - 2f * fall);
                         int i = zz * res + xx;
-                        float val = ch.H[i];
+                        // Brushes edit the stored ABSOLUTE surface (Abs); Op tracks override coverage.
+                        float a = ch.Abs[i];
                         switch (mode)
                         {
-                            case DemTerrainWorld.SculptMode.Raise: val += stepM * fall; break;
-                            case DemTerrainWorld.SculptMode.Lower: val -= stepM * fall; break;
-                            case DemTerrainWorld.SculptMode.Flatten: val = Mathf.Lerp(val, targetY, blendF * fall); break;
-                            case DemTerrainWorld.SculptMode.Smooth: val = Mathf.Lerp(val, BoxAvg(src, xx, zz, res, kernel), blendS * fall); break;
+                            case DemTerrainWorld.SculptMode.Raise: a += stepM * fall; break;
+                            case DemTerrainWorld.SculptMode.Lower: a -= stepM * fall; break;
+                            case DemTerrainWorld.SculptMode.Flatten: a = Mathf.Lerp(a, targetY, blendF * fall); break;
+                            case DemTerrainWorld.SculptMode.Smooth: a = Mathf.Lerp(a, BoxAvg(src, xx, zz, res, kernel), blendS * fall); break;
                         }
-                        if (val != ch.H[i])
+                        // Coverage plateaus to 1 over the inner ~half of the brush (so the edited core
+                        // fully overrides DEM — no re-derived detail leak) and feathers the rim.
+                        float newOp = Mathf.Max(ch.Op[i], Mathf.Clamp01(fall * 2f));
+                        float newH = Mathf.Lerp(SourceAt(c, wx, wz), a, newOp);
+                        if (a != ch.Abs[i] || newOp != ch.Op[i] || newH != ch.H[i])
                         {
-                            ch.H[i] = val; changed = true;
-                            if (ds == null) ds = DirtySetFor(c);
-                            ds.Add(i);
+                            ch.Abs[i] = a;
+                            ch.Op[i] = newOp;
+                            ch.H[i] = newH;
+                            changed = true;
                         }
                     }
-                if (changed) { BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
+                if (changed) { ch.EditDirty = true; BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
             }
         }
 
@@ -580,7 +634,7 @@ namespace NetworkDesigner.Terrain
                 float ox = ck.x * ChunkSize, oz = ck.y * ChunkSize;
                 if (ox + ChunkSize < selX0 || ox > selX1 || oz + ChunkSize < selZ0 || oz > selZ1) continue;   // chunk outside bbox
                 int res = ch.LodRes; float sp = ChunkSize / (res - 1);
-                bool changed = false; HashSet<int> ds = null;
+                bool changed = false;
                 for (int z = 0; z < res; z++)
                     for (int x = 0; x < res; x++)
                     {
@@ -589,14 +643,16 @@ namespace NetworkDesigner.Terrain
                         if (!sel.Contains(cc)) continue;
                         int i = z * res + x;
                         if (Mathf.Abs(ch.H[i] - seedH) > tolerance) continue;   // don't carve land inside a sea cell
-                        if (ch.H[i] != target)
+                        if (ch.H[i] != target || ch.Op == null || ch.EditRes != res || ch.Op[i] < 1f)
                         {
-                            ch.H[i] = target; changed = true;
-                            if (ds == null) ds = DirtySetFor(ck);
-                            ds.Add(i);
+                            EnsureEditRes(ch, res);
+                            ch.Abs[i] = target;
+                            ch.Op[i] = 1f;          // full override — the carved sea bed replaces the DEM
+                            ch.H[i] = target;
+                            changed = true;
                         }
                     }
-                if (changed) { BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
+                if (changed) { ch.EditDirty = true; BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
             }
         }
 
@@ -607,6 +663,139 @@ namespace NetworkDesigner.Terrain
             float wx = (c.x + 0.5f) * cell, wz = (c.y + 0.5f) * cell;
             if (!_chunks.ContainsKey(ChunkOf(wx, wz))) return false;
             return Mathf.Abs(SampleHeight(wx, wz) - seedH) <= tol;
+        }
+
+        // ── Rail cut/fill: grade the terrain to a corridor of bed targets ───────────────────────
+        // Flatten the terrain to each (X, bedY, Z) target within ±halfWidth, with a flat plateau
+        // (innerFrac of the width) feathering out to the existing surface — i.e. cut where the ground
+        // is high, fill where it's low. Writes the LOD-independent edit overlay and rebuilds each
+        // touched chunk's mesh once. Re-drape the rail afterwards so it sits on its new bed.
+        public static void GradeCorridor(List<Vector3> targets, float halfWidth, float innerFrac)
+        {
+            if (!Active || targets == null || targets.Count == 0) return;
+            float r = Mathf.Max(0.5f, halfWidth), r2 = r * r;
+            float inner = Mathf.Clamp01(innerFrac) * r;
+            float band = Mathf.Max(1e-3f, r - inner);
+            var touched = new List<Vector2Int>();
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value; var c = kv.Key;
+                int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+                float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+                bool changed = false;
+                for (int ti = 0; ti < targets.Count; ti++)
+                {
+                    Vector3 t = targets[ti];
+                    if (t.x + r < ox || t.x - r > ox + ChunkSize || t.z + r < oz || t.z - r > oz + ChunkSize) continue;
+                    int x0 = Mathf.Clamp(Mathf.FloorToInt((t.x - r - ox) / sp), 0, res - 1);
+                    int x1 = Mathf.Clamp(Mathf.CeilToInt((t.x + r - ox) / sp), 0, res - 1);
+                    int z0 = Mathf.Clamp(Mathf.FloorToInt((t.z - r - oz) / sp), 0, res - 1);
+                    int z1 = Mathf.Clamp(Mathf.CeilToInt((t.z + r - oz) / sp), 0, res - 1);
+                    for (int zz = z0; zz <= z1; zz++)
+                        for (int xx = x0; xx <= x1; xx++)
+                        {
+                            float wx = ox + xx * sp, wz = oz + zz * sp;
+                            float dx = wx - t.x, dz = wz - t.z, d2 = dx * dx + dz * dz;
+                            if (d2 > r2) continue;
+                            float dist = Mathf.Sqrt(d2);
+                            float w = dist <= inner ? 1f : 1f - (dist - inner) / band;
+                            w = Mathf.Clamp01(w); w = w * w * (3f - 2f * w);   // smoothstep feather
+                            int i = zz * res + xx;
+                            EnsureEditRes(ch, res);   // need the absolute surface to flatten toward the bed
+                            float val = Mathf.Lerp(ch.Abs[i], t.y, w);   // pull the stored surface toward the bed
+                            float newOp = Mathf.Max(ch.Op[i], w);        // feathered rim blends back to DEM
+                            float newH = Mathf.Lerp(SourceAt(c, wx, wz), val, newOp);
+                            if (val != ch.Abs[i] || newOp != ch.Op[i] || newH != ch.H[i])
+                            {
+                                ch.Abs[i] = val;
+                                ch.Op[i] = newOp;
+                                ch.H[i] = newH;
+                                changed = true;
+                            }
+                        }
+                }
+                if (changed) { ch.EditDirty = true; touched.Add(c); }
+            }
+            for (int i = 0; i < touched.Count; i++)
+            {
+                var ch = _chunks[touched[i]];
+                BuildMesh(ch);
+                if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+            }
+        }
+
+        // ── Engineering corridor: flat bed + daylighting batters ────────────────────────────────
+        // A flat BED (±bedHalfWidth) follows the centreline targets (X, bedY, Z); beyond it the ground
+        // ramps at a BATTER of 1:batterN (1 vertical : N horizontal) until it DAYLIGHTS into the
+        // existing terrain — cut where the land's high, fill (embankment) where it's low. The batter
+        // extent is dynamic (deeper cut/fill → wider batter). Writes the LOD-independent edit overlay.
+        // O(verts × targets) — meant for short slope-tool spans, not the whole-network grade.
+        public static void GradeBatter(List<Vector3> targets, float bedHalfWidth, float batterN)
+        {
+            if (!Active || targets == null || targets.Count == 0) return;
+            float bed = Mathf.Max(0f, bedHalfWidth);
+            float n = Mathf.Max(0.25f, batterN);
+            const float maxRun = 120f;                       // cap the daylight search beyond the bed (m)
+            float reach = bed + maxRun, reach2 = reach * reach;
+            float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
+            for (int i = 0; i < targets.Count; i++)
+            {
+                var t = targets[i];
+                if (t.x < minX) minX = t.x; if (t.x > maxX) maxX = t.x;
+                if (t.z < minZ) minZ = t.z; if (t.z > maxZ) maxZ = t.z;
+            }
+            minX -= reach; maxX += reach; minZ -= reach; maxZ += reach;
+            var touched = new List<Vector2Int>();
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value; var c = kv.Key;
+                float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+                if (ox + ChunkSize < minX || ox > maxX || oz + ChunkSize < minZ || oz > maxZ) continue;
+                int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+                int vx0 = Mathf.Clamp(Mathf.FloorToInt((minX - ox) / sp), 0, res - 1);
+                int vx1 = Mathf.Clamp(Mathf.CeilToInt((maxX - ox) / sp), 0, res - 1);
+                int vz0 = Mathf.Clamp(Mathf.FloorToInt((minZ - oz) / sp), 0, res - 1);
+                int vz1 = Mathf.Clamp(Mathf.CeilToInt((maxZ - oz) / sp), 0, res - 1);
+                bool changed = false;
+                for (int zz = vz0; zz <= vz1; zz++)
+                    for (int xx = vx0; xx <= vx1; xx++)
+                    {
+                        float wx = ox + xx * sp, wz = oz + zz * sp;
+                        float bestD2 = reach2, bedElev = 0f; bool found = false;
+                        for (int ti = 0; ti < targets.Count; ti++)   // nearest centreline sample
+                        {
+                            var t = targets[ti]; float dx = wx - t.x, dz = wz - t.z, d2 = dx * dx + dz * dz;
+                            if (d2 < bestD2) { bestD2 = d2; bedElev = t.y; found = true; }
+                        }
+                        if (!found) continue;
+                        int i = zz * res + xx;
+                        float terrain = ch.H[i];
+                        float d = Mathf.Sqrt(bestD2);
+                        float graded;
+                        if (d <= bed) graded = bedElev;
+                        else
+                        {
+                            float rise = (d - bed) / n;   // 1:n batter
+                            graded = terrain >= bedElev ? Mathf.Min(terrain, bedElev + rise)   // cut, daylight up
+                                                        : Mathf.Max(terrain, bedElev - rise);  // fill, daylight down
+                        }
+                        if (graded != ch.H[i])
+                        {
+                            EnsureEditRes(ch, res);
+                            ch.Abs[i] = graded;
+                            ch.Op[i] = 1f;          // engineered cut/fill fully overrides the DEM
+                            ch.H[i] = graded;
+                            changed = true;
+                        }
+                    }
+                if (changed) { ch.EditDirty = true; touched.Add(c); }
+            }
+            for (int i = 0; i < touched.Count; i++)
+            {
+                var ch = _chunks[touched[i]];
+                BuildMesh(ch);
+                if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+            }
         }
 
         static float BoxAvg(float[] s, int x, int z, int res, int k)
@@ -622,38 +811,66 @@ namespace NetworkDesigner.Terrain
             return n > 0 ? sum / n : s[z * res + x];
         }
 
-        static HashSet<int> DirtySetFor(Vector2Int c)
+        // DEM (or procedural) base height at a world position — the pre-sculpt surface.
+        static float SourceAt(Vector2Int c, float wx, float wz)
+            => DemChunkSource.CoversChunk(c) ? DemChunkSource.SampleWorldYAt(wx, wz) : HeightAt(wx, wz);
+
+        // Bilinear-resample a dense grid (Abs heights or Op opacity) from srcRes to dstRes (both 2ⁿ+1).
+        // This is what makes sculpts LOD-independent: the edit carries onto whatever res a chunk rebuilds at.
+        static float[] ResampleGrid(float[] src, int srcRes, int dstRes)
         {
-            if (!_dirty.TryGetValue(c, out var set)) _dirty[c] = set = new HashSet<int>();
-            return set;
+            if (src == null) return null;
+            if (srcRes == dstRes) return src;
+            var dst = new float[dstRes * dstRes];
+            float scale = (srcRes - 1) / (float)(dstRes - 1);
+            for (int z = 0; z < dstRes; z++)
+            {
+                float sz = z * scale; int z0 = Mathf.Clamp((int)sz, 0, srcRes - 1), z1 = Mathf.Min(z0 + 1, srcRes - 1); float tz = sz - z0;
+                for (int x = 0; x < dstRes; x++)
+                {
+                    float sx = x * scale; int x0 = Mathf.Clamp((int)sx, 0, srcRes - 1), x1 = Mathf.Min(x0 + 1, srcRes - 1); float tx = sx - x0;
+                    float a = src[z0 * srcRes + x0], b = src[z0 * srcRes + x1];
+                    float cc = src[z1 * srcRes + x0], d = src[z1 * srcRes + x1];
+                    dst[z * dstRes + x] = Mathf.Lerp(Mathf.Lerp(a, b, tx), Mathf.Lerp(cc, d, tx), tz);
+                }
+            }
+            return dst;
         }
 
-        // ── Per-chunk persistence (sparse world-Y vertex diff, res-tagged) ───────────────────
+        // ── Per-chunk persistence (sparse absolute-override edit, res-tagged but RESAMPLED on load) ──
         static string ChunkFile(Vector2Int c)
             => string.IsNullOrEmpty(_editDir) ? null : Path.Combine(_editDir, $"chunk_{c.x}_{c.y}.bin");
 
+        // Write the chunk's absolute-override edit (sparse, only cells with Op>0) at its native res.
+        // "CHK4" = (Abs, Op) format. Each record: int index, float Abs, float Op.
         static void SaveChunkEdits(Vector2Int c)
         {
-            if (!_dirty.TryGetValue(c, out var set) || set.Count == 0) return;
-            if (!_chunks.TryGetValue(c, out var ch) || ch.H == null) return;
+            if (!_chunks.TryGetValue(c, out var ch) || ch.Op == null || ch.Abs == null || !ch.EditDirty) return;
             string path = ChunkFile(c);
             if (path == null) return;
+            float[] op = ch.Op, abs = ch.Abs;
+            int count = 0; for (int i = 0; i < op.Length; i++) if (op[i] > 0f) count++;
             try
             {
-                using var ms = new MemoryStream(set.Count * 8 + 16);
+                using var ms = new MemoryStream(count * 12 + 16);
                 using (var w = new BinaryWriter(ms))
                 {
-                    w.Write(0x43484b32);
-                    w.Write(ch.LodRes);
-                    w.Write(set.Count);
-                    foreach (int i in set) { w.Write(i); w.Write(ch.H[i]); }
+                    w.Write(0x43484b34);   // CHK4 — sparse (Abs, Op)
+                    w.Write(ch.EditRes);   // the resolution Abs/Op are stored at (NOT the render res)
+                    w.Write(count);
+                    for (int i = 0; i < op.Length; i++)
+                        if (op[i] > 0f) { w.Write(i); w.Write(abs[i]); w.Write(op[i]); }
                 }
                 File.WriteAllBytes(path, ms.ToArray());
+                ch.EditDirty = false;
             }
             catch (System.Exception ex) { Debug.LogWarning($"[ChunkWorld] save {c} failed: {ex.Message}"); }
         }
 
-        static void ApplyEditsToArray(Vector2Int c, float[] h, int res)
+        // Load the edit at its NATIVE (saved) res into ch.Abs/ch.Op/ch.EditRes — OverlayEdit renders it.
+        // Reads CHK4 (Abs,Op) directly; migrates CHK3 (sparse delta → Abs = source+delta, Op = 1) and the
+        // legacy CHK2 (sparse absolute → Abs = saved, Op = 1). Migrated cells get full opacity (hard edit).
+        static void LoadEdit(Vector2Int c, Chunk ch)
         {
             string path = ChunkFile(c);
             if (path == null || !File.Exists(path)) return;
@@ -662,16 +879,48 @@ namespace NetworkDesigner.Terrain
                 byte[] bytes = File.ReadAllBytes(path);
                 using var ms = new MemoryStream(bytes);
                 using var r = new BinaryReader(ms);
-                if (r.ReadInt32() != 0x43484b32) return;
-                int fres = r.ReadInt32();
-                if (fres != res) return;
+                int magic = r.ReadInt32();
+                bool isAbsOp = magic == 0x43484b34;   // CHK4
+                bool isDelta = magic == 0x43484b33;   // CHK3 (legacy delta)
+                bool isLegacyAbs = magic == 0x43484b32; // CHK2 (legacy absolute)
+                if (!isAbsOp && !isDelta && !isLegacyAbs) return;
+                int savedRes = r.ReadInt32();
                 int n = r.ReadInt32();
-                var set = DirtySetFor(c);
+                if (savedRes < 2) return;
+                var abs = new float[savedRes * savedRes];
+                var op = new float[savedRes * savedRes];   // 0 everywhere → unedited cells render pure DEM
+                float spOld = ChunkSize / (savedRes - 1);
+                float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+                // SEED the whole absolute surface with the DEM so unedited cells hold the real height
+                // (not 0). Brushes read ch.Abs[i] as their base and resampling interpolates it — leaving
+                // 0-holes would crater the surface toward zero. Only the sparse edited cells override.
+                // ch.H is the freshly DEM-filled render heights (LoadChunk fills before LoadEdit), so when
+                // the saved res matches we copy it directly; otherwise sample the DEM at the saved res.
+                if (ch.H != null && ch.H.Length == savedRes * savedRes)
+                    System.Array.Copy(ch.H, abs, savedRes * savedRes);
+                else
+                    for (int z = 0; z < savedRes; z++)
+                        for (int x = 0; x < savedRes; x++)
+                            abs[z * savedRes + x] = SourceAt(c, ox + x * spOld, oz + z * spOld);
                 for (int k = 0; k < n; k++)
                 {
-                    int i = r.ReadInt32(); float v = r.ReadSingle();
-                    if (i >= 0 && i < h.Length) { h[i] = v; set.Add(i); }
+                    int i = r.ReadInt32();
+                    if (isAbsOp)
+                    {
+                        float a = r.ReadSingle(), o = r.ReadSingle();
+                        if (i < 0 || i >= abs.Length) continue;
+                        abs[i] = a; op[i] = Mathf.Clamp01(o);
+                    }
+                    else
+                    {
+                        float v = r.ReadSingle();
+                        if (i < 0 || i >= abs.Length) continue;
+                        abs[i] = isDelta ? abs[i] + v : v;   // CHK3 delta (abs[i] already = DEM) vs CHK2 absolute
+                        op[i] = 1f;
+                    }
                 }
+                ch.Abs = abs; ch.Op = op; ch.EditRes = savedRes;   // native res; OverlayEdit resamples copies
+                ch.EditDirty = false;
             }
             catch (System.Exception ex) { Debug.LogWarning($"[ChunkWorld] load {c} failed: {ex.Message}"); }
         }

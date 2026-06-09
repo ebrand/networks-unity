@@ -115,6 +115,8 @@ namespace NetworkDesigner.Terrain
         public bool DemBackend;            // v8+: was the DEM backend active at save time
         public string DemCity;             // v8+: loaded DEM city (empty if none) — reloaded on restore
         public DemTerrainWorld.Edits DemEdits; // v9+: sparse DEM sculpt/carve height diff (null if none)
+        public bool WaterOn;               // v10+: chunk water plane shown
+        public float WaterLevel;           // v10+: chunk water level (m)
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by

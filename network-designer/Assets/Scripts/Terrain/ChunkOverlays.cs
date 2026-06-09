@@ -13,6 +13,8 @@ namespace NetworkDesigner.Terrain
         // --- water ---
         public static bool ShowWater = false;
         public static float WaterLevel = 0f;          // world Y (m); DEM heights are real metres, sea level ≈ 0
+        public static Color WaterColor = new Color(0.18f, 0.42f, 0.62f, 0.55f);
+        public static float WaterSmoothness = 0.4f;
         static GameObject _water;
         static Material _waterMat;
 
@@ -33,8 +35,24 @@ namespace NetworkDesigner.Terrain
 
         public static void SetWaterLevel(float y)
         {
-            WaterLevel = y;
-            if (_water != null) { var p = _water.transform.position; p.y = y; _water.transform.position = p; }
+            WaterLevel = Mathf.Round(y);   // snap to whole metres (0 = sea level), for both the slider + React
+            if (_water != null) { var p = _water.transform.position; p.y = WaterLevel; _water.transform.position = p; }
+        }
+
+        public static void SetWaterColor(Color c)
+        {
+            WaterColor = c;
+            if (_waterMat != null)
+            {
+                _waterMat.color = c;
+                if (_waterMat.HasProperty("_BaseColor")) _waterMat.SetColor("_BaseColor", c);
+            }
+        }
+
+        public static void SetWaterSmoothness(float s)
+        {
+            WaterSmoothness = Mathf.Clamp01(s);
+            if (_waterMat != null && _waterMat.HasProperty("_Smoothness")) _waterMat.SetFloat("_Smoothness", WaterSmoothness);
         }
 
         static void EnsureWater()
@@ -44,7 +62,7 @@ namespace NetworkDesigner.Terrain
             _water.name = "ChunkWater";
             var col = _water.GetComponent<Collider>(); if (col != null) Object.Destroy(col);
             _water.transform.rotation = Quaternion.Euler(90f, 0f, 0f);   // lie flat, face up (Quad fronts -Z)
-            _waterMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.18f, 0.42f, 0.62f, 0.55f), 0.4f, "ChunkWater");
+            _waterMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(WaterColor, WaterSmoothness, "ChunkWater");
             var mr = _water.GetComponent<MeshRenderer>();
             mr.sharedMaterial = _waterMat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
