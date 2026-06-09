@@ -412,12 +412,40 @@ namespace NetworkDesigner.Terrain
         }
 
         // ── Mesh build (per-chunk res) ───────────────────────────────────────────────────────
+        // Each chunk mesh is a res×res grid PLUS a SKIRT: walls hung straight down around the border.
+        // When a neighbour renders at a different LOD its border line won't match this chunk's, leaving
+        // a thin gap you'd see sky through — the skirt wall fills that sliver. The skirt gets its OWN
+        // top ring (duplicates of the perimeter verts) so the grid's vertex normals stay clean and the
+        // shared-vertex tilt doesn't shade-seam every chunk edge. Layout:
+        //   [0 .. res²-1]            grid
+        //   [res² .. res²+P-1]       skirt TOP ring  (= perimeter positions, full height)
+        //   [res²+P .. res²+2P-1]    skirt BOTTOM ring (top − drop)
+        static int PerimCount(int res) => 4 * (res - 1);
+
+        // Perimeter grid indices walked CCW-from-above (interior on the left → outward normal to the
+        // right of the walk), so the skirt walls front-face outward to match the grid's winding.
+        static int[] Perim(int res)
+        {
+            if (_perimByRes.TryGetValue(res, out var p)) return p;
+            p = new int[PerimCount(res)];
+            int k = 0;
+            for (int x = 0; x < res; x++) p[k++] = x;                          // bottom z=0, +x
+            for (int z = 1; z < res; z++) p[k++] = z * res + (res - 1);        // right x=res-1, +z
+            for (int x = res - 2; x >= 0; x--) p[k++] = (res - 1) * res + x;   // top z=res-1, -x
+            for (int z = res - 2; z >= 1; z--) p[k++] = z * res;               // left x=0, -z
+            _perimByRes[res] = p;
+            return p;
+        }
+
         static (Vector3[] v, int[] t, Vector2[] uv) Buffers(int res)
         {
-            if (!_vertsByRes.TryGetValue(res, out var v)) { v = new Vector3[res * res]; _vertsByRes[res] = v; }
+            int P = PerimCount(res);
+            int vCount = res * res + 2 * P;
+            var perim = Perim(res);
+            if (!_vertsByRes.TryGetValue(res, out var v) || v.Length != vCount) { v = new Vector3[vCount]; _vertsByRes[res] = v; }
             if (!_trisByRes.TryGetValue(res, out var t))
             {
-                t = new int[(res - 1) * (res - 1) * 6];
+                t = new int[(res - 1) * (res - 1) * 6 + P * 6];   // grid quads + skirt wall quads
                 int ti = 0;
                 for (int z = 0; z < res - 1; z++)
                     for (int x = 0; x < res - 1; x++)
@@ -426,15 +454,31 @@ namespace NetworkDesigner.Terrain
                         t[ti++] = a; t[ti++] = cc; t[ti++] = b;
                         t[ti++] = b; t[ti++] = cc; t[ti++] = d;
                     }
+                int topBase = res * res, botBase = res * res + P;
+                for (int e = 0; e < P; e++)
+                {
+                    int e1 = (e + 1) % P;
+                    int t0 = topBase + e, t1 = topBase + e1;   // skirt top ring
+                    int b0 = botBase + e, b1 = botBase + e1;   // skirt bottom ring
+                    // (t0,t1,b1),(t0,b1,b0) → outward-facing wall (see Perim() winding note).
+                    t[ti++] = t0; t[ti++] = t1; t[ti++] = b1;
+                    t[ti++] = t0; t[ti++] = b1; t[ti++] = b0;
+                }
                 _trisByRes[res] = t;
             }
-            if (!_uvByRes.TryGetValue(res, out var uv))
+            if (!_uvByRes.TryGetValue(res, out var uv) || uv.Length != vCount)
             {
-                uv = new Vector2[res * res];
+                uv = new Vector2[vCount];
                 float inv = 1f / (res - 1);   // local XZ → 0..1 across the chunk (grid tile per 1 km)
                 for (int z = 0; z < res; z++)
                     for (int x = 0; x < res; x++)
                         uv[z * res + x] = new Vector2(x * inv, z * inv);
+                for (int e = 0; e < P; e++)
+                {
+                    Vector2 puv = uv[perim[e]];                 // both skirt rings inherit the edge vert's UV
+                    uv[res * res + e] = puv;
+                    uv[res * res + P + e] = puv;
+                }
                 _uvByRes[res] = uv;
             }
             return (v, t, uv);
@@ -444,6 +488,7 @@ namespace NetworkDesigner.Terrain
         {
             int res = ch.LodRes; float sp = ChunkSize / (res - 1);
             var (verts, tris, uvs) = Buffers(res);
+            var perim = Perim(res);
             var H = ch.H;
             for (int z = 0; z < res; z++)
                 for (int x = 0; x < res; x++)
@@ -451,9 +496,20 @@ namespace NetworkDesigner.Terrain
                     int i = z * res + x;
                     verts[i] = new Vector3(x * sp, H[i], z * sp);
                 }
+            // Skirt top ring = the perimeter verts; bottom ring = top − drop. Drop is deeper at coarse
+            // LODs (bigger cell → bigger possible seam mismatch); floored at 10 m so high-res chunks
+            // still cover small cracks.
+            float drop = Mathf.Max(10f, sp * SkirtFactor);
+            int topBase = res * res, botBase = res * res + perim.Length;
+            for (int e = 0; e < perim.Length; e++)
+            {
+                Vector3 top = verts[perim[e]];
+                verts[topBase + e] = top;
+                verts[botBase + e] = new Vector3(top.x, top.y - drop, top.z);
+            }
             var m = ch.Mesh;
             m.Clear();
-            if (res * res > 65000) m.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            if (verts.Length > 65000) m.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
             m.vertices = verts;
             m.uv = uvs;
             m.triangles = tris;
@@ -556,7 +612,6 @@ namespace NetworkDesigner.Terrain
                 int z1 = Mathf.Clamp(Mathf.CeilToInt((world.z + radius - oz) / sp), 0, res - 1);
                 if (x1 < x0 || z1 < z0) continue;
                 EnsureEditRes(ch, res);   // seed Abs from the live DEM heights before we read/smooth it
-                float[] src = mode == DemTerrainWorld.SculptMode.Smooth ? (float[])ch.Abs.Clone() : null;
                 int kernel = Mathf.Clamp(Mathf.RoundToInt(radius / sp * 0.25f), 2, 12);
                 float blendF = Mathf.Clamp01(strength * dt * 0.12f);
                 float blendS = Mathf.Clamp01(strength * dt * 0.7f);
@@ -578,7 +633,9 @@ namespace NetworkDesigner.Terrain
                             case DemTerrainWorld.SculptMode.Raise: a += stepM * fall; break;
                             case DemTerrainWorld.SculptMode.Lower: a -= stepM * fall; break;
                             case DemTerrainWorld.SculptMode.Flatten: a = Mathf.Lerp(a, targetY, blendF * fall); break;
-                            case DemTerrainWorld.SculptMode.Smooth: a = Mathf.Lerp(a, BoxAvg(src, xx, zz, res, kernel), blendS * fall); break;
+                            // Average the GLOBAL surface in world space so the box reaches across chunk
+                            // seams — chunk-local averaging splits shared edges and tears a gap there.
+                            case DemTerrainWorld.SculptMode.Smooth: a = Mathf.Lerp(a, WorldBoxAvg(wx, wz, sp, kernel), blendS * fall); break;
                         }
                         // Coverage plateaus to 1 over the inner ~half of the brush (so the edited core
                         // fully overrides DEM — no re-derived detail leak) and feathers the rim.
@@ -798,17 +855,20 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        static float BoxAvg(float[] s, int x, int z, int res, int k)
+        // World-space box average of the CURRENT surface (k cells each way at `step` spacing), sampling
+        // across chunk boundaries via SampleHeight so smoothing stays continuous at seams. Samples that
+        // land on an unloaded chunk are skipped (else they'd drag the average toward 0 at the bubble edge).
+        static float WorldBoxAvg(float wx, float wz, float step, int k)
         {
             float sum = 0f; int n = 0;
             for (int dz = -k; dz <= k; dz++)
                 for (int dx = -k; dx <= k; dx++)
                 {
-                    int xx = x + dx, zz = z + dz;
-                    if (xx < 0 || xx >= res || zz < 0 || zz >= res) continue;
-                    sum += s[zz * res + xx]; n++;
+                    float sx = wx + dx * step, sz = wz + dz * step;
+                    if (!_chunks.ContainsKey(ChunkOf(sx, sz))) continue;
+                    sum += SampleHeight(sx, sz); n++;
                 }
-            return n > 0 ? sum / n : s[z * res + x];
+            return n > 0 ? sum / n : SampleHeight(wx, wz);
         }
 
         // DEM (or procedural) base height at a world position — the pre-sculpt surface.
