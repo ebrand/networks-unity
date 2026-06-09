@@ -35,6 +35,24 @@ namespace NetworkDesigner.UI
                 body.Add(b);
                 _sync.Add(() => StyleActive(b, pal.IsOpen));
             }
+
+            // Bubble-lock toggle (chunk worlds only): freeze the streaming set so you can sculpt in
+            // peace. Highlighted when locked. Hotkey: M (see TerrainDesigner.Update).
+            var lockBtn = MakeButton("🔓", () => Designer.ChunkLockBubble = !Designer.ChunkLockBubble);
+            lockBtn.style.height = 22;
+            lockBtn.style.fontSize = 15;
+            lockBtn.style.marginTop = 6;
+            body.Add(lockBtn);
+            _sync.Add(() =>
+            {
+                bool active = Designer.ChunkTestActive;
+                lockBtn.style.display = active ? DisplayStyle.Flex : DisplayStyle.None;
+                if (active)
+                {
+                    lockBtn.text = Designer.ChunkLockBubble ? "🔒" : "🔓";   // closed = locked, open = streaming
+                    StyleActive(lockBtn, Designer.ChunkLockBubble);
+                }
+            });
         }
     }
 }

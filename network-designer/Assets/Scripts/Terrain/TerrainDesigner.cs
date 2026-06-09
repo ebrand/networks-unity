@@ -346,6 +346,7 @@ namespace NetworkDesigner.Terrain
         DemTerrainSurface _demSurf;
         ChunkSurface _chunkSurf;
         int _minimapW = 6;   // chunk minimap half-extent (± chunks shown); scroll over the map zooms
+        bool _showMinimap = true;   // V toggles the corner chunk minimap / diorama
         // The active surface every ground-reading tool uses: the DEM when it's the selected backend
         // AND built, else the low-poly field. Driven by the Low-Poly/DEM toggle (DemBackend).
         ITerrainSurface Surf => ChunkWorld.Active ? (_chunkSurf ??= new ChunkSurface())
@@ -506,8 +507,18 @@ namespace NetworkDesigner.Terrain
             set => ChunkWorld.RecenterDeadband = Mathf.Clamp(Mathf.RoundToInt(value), 1, 8);
         }
         // Water plane at a configurable sea level (m), and a fine local build/sculpt grid that follows the view.
-        public bool ChunkShowWater { get => ChunkOverlays.ShowWater; set => ChunkOverlays.SetWater(value); }
-        public float ChunkWaterLevel { get => ChunkOverlays.WaterLevel; set => ChunkOverlays.SetWaterLevel(value); }
+        // Water toggle/level mark the scene dirty so the debounced autosave actually fires on a
+        // water-only change (otherwise it's only captured if you happen to sculpt afterwards).
+        public bool ChunkShowWater
+        {
+            get => ChunkOverlays.ShowWater;
+            set { if (value != ChunkOverlays.ShowWater) { ChunkOverlays.SetWater(value); _dirtySince = Time.realtimeSinceStartup; } }
+        }
+        public float ChunkWaterLevel
+        {
+            get => ChunkOverlays.WaterLevel;
+            set { if (Mathf.RoundToInt(value) != Mathf.RoundToInt(ChunkOverlays.WaterLevel)) { ChunkOverlays.SetWaterLevel(value); _dirtySince = Time.realtimeSinceStartup; } }
+        }
         public Color ChunkWaterColor { get => ChunkOverlays.WaterColor; set => ChunkOverlays.SetWaterColor(value); }
         public float ChunkWaterSmoothness { get => ChunkOverlays.WaterSmoothness; set => ChunkOverlays.SetWaterSmoothness(value); }
         public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
@@ -1423,7 +1434,7 @@ namespace NetworkDesigner.Terrain
         // but-unloaded chunks pink, the active chunk outlined with a heading arrow.
         void DrawChunkMinimap()
         {
-            if (!ChunkWorld.Active) return;
+            if (!ChunkWorld.Active || !_showMinimap) return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
             Vector3 cp = cam.transform.position;
@@ -2260,6 +2271,10 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.Y)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("System");
             if (Input.GetKeyDown(KeyCode.O)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Placeables");
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
+            // M toggles the chunk-streaming bubble lock (freeze the resident set to sculpt in place).
+            if (Input.GetKeyDown(KeyCode.M) && ChunkWorld.Active) ChunkLockBubble = !ChunkLockBubble;
+            // V toggles the corner minimap / 3D relief diorama.
+            if (Input.GetKeyDown(KeyCode.V) && ChunkWorld.Active) _showMinimap = !_showMinimap;
             // Cmd + mouse wheel: nudge the shared design speed ±10 km/h per notch while in
             // rail/plan mode — set it without leaving the plan. The camera ignores the wheel
             // while Cmd is held (see ScrollSuppressor in the camera setup).
