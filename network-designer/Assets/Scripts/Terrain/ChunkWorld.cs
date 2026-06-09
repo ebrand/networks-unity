@@ -24,11 +24,11 @@ namespace NetworkDesigner.Terrain
         public static int Res = 1025;            // MAX / near res; snaps 129/257/513/1025
         public static float PixelsPerVertex = 6f; // screen-space error: bigger = coarser/cheaper
         public static int Radius = 10;            // MAX footprint cap (chunks), safety on zoom-out
+        public static bool FillRadius = false;    // force the bubble to the FULL Radius (ignore the view footprint)
         public static int PreloadDepth = 1;       // margin chunks beyond the view footprint
         public static int Budget = 4;             // chunk builds/rebuilds per frame
         const string RootName = "ChunkWorld";
-        const int GridN = 10;
-        const float AmpMeters = 20f;
+        public static float AmpMeters = 0f;       // max terrain height (multi-octave); 0 = flat
         static readonly int[] ResLevels = { 65, 129, 257, 513, 1025 };
 
         public static bool Active { get; private set; }
@@ -68,6 +68,24 @@ namespace NetworkDesigner.Terrain
 
         public static bool HasWorld => Active && _chunks.Count > 0;
         public static int LoadedCount => _chunks.Count;
+
+        // World-space XZ bounds of the resident set (the "bubble") — for the minimap overlay.
+        public static bool TryLoadedBounds(out Vector3 center, out float sizeX, out float sizeZ)
+        {
+            center = default; sizeX = sizeZ = 0f;
+            if (_chunks.Count == 0) return false;
+            int minx = int.MaxValue, maxx = int.MinValue, minz = int.MaxValue, maxz = int.MinValue;
+            foreach (var c in _chunks.Keys)
+            {
+                if (c.x < minx) minx = c.x; if (c.x > maxx) maxx = c.x;
+                if (c.y < minz) minz = c.y; if (c.y > maxz) maxz = c.y;
+            }
+            float x0 = minx * ChunkSize, x1 = (maxx + 1) * ChunkSize;
+            float z0 = minz * ChunkSize, z1 = (maxz + 1) * ChunkSize;
+            center = new Vector3((x0 + x1) * 0.5f, 0f, (z0 + z1) * 0.5f);
+            sizeX = x1 - x0; sizeZ = z1 - z0;
+            return true;
+        }
         public static Vector2Int ChunkAt(float x, float z) => ChunkOf(x, z);
         public static bool IsLoaded(Vector2Int c) => _chunks.ContainsKey(c);
         public static bool IsVisibleChunk(Vector2Int c) => _chunks.ContainsKey(c);
@@ -103,6 +121,29 @@ namespace NetworkDesigner.Terrain
         public static void SaveAll() { foreach (var kv in _chunks) SaveChunkEdits(kv.Key); }
 
         public static void SetGrid(bool on) { ShowGrid = on; ApplyGridMaterial(); }
+
+        // Set the terrain max height and regenerate every loaded chunk at the new amplitude
+        // (keeps each chunk's LOD res). Heavy on big/high-res bubbles — expect a hitch per change.
+        public static void SetAmplitude(float a)
+        {
+            AmpMeters = Mathf.Max(0f, a);
+            RefillAll();
+        }
+
+        // Re-derive every loaded chunk's heights from the current source (procedural amplitude or
+        // DEM norm range) and rebuild its mesh. Heavy on big/high-res bubbles — hitch per call.
+        public static void RefillAll()
+        {
+            if (!Active) return;
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value;
+                FillHeights(kv.Key, ch.H, ch.LodRes);
+                ApplyEditsToArray(kv.Key, ch.H, ch.LodRes);
+                BuildMesh(ch);
+                if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; }
+            }
+        }
 
         // The shared chunk material is white × the grid texture when ShowGrid, else flat green.
         static void ApplyGridMaterial()
@@ -211,14 +252,17 @@ namespace NetworkDesigner.Terrain
             var center = ChunkOf(ground.x, ground.z);
             float dist = Vector3.Distance(p, ground);
             float halfExtent = dist * Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad) * Mathf.Max(1f, cam.aspect) * 1.5f;
-            int foot = Mathf.Clamp(Mathf.CeilToInt(halfExtent / ChunkSize) + Mathf.Max(0, PreloadDepth), 1, Mathf.Max(1, Radius));
+            // FillRadius: load the FULL (2·Radius+1)² regardless of zoom. Otherwise the bubble is the
+            // on-screen footprint (+preload), capped by Radius — so Radius alone never forces a big load.
+            int foot = FillRadius ? Mathf.Max(1, Radius)
+                     : Mathf.Clamp(Mathf.CeilToInt(halfExtent / ChunkSize) + Mathf.Max(0, PreloadDepth), 1, Mathf.Max(1, Radius));
 
             bool zoomChanged = _lastDist < 0f || Mathf.Abs(dist - _lastDist) / Mathf.Max(1f, _lastDist) > 0.1f;
             bool footChanged = center != _center || foot != _lastFoot;
             // STREAMING (or eager): re-centre the resident set on the view → cull + load + re-LOD.
             // FROZEN (locked): keep the resident set put; only re-LOD the existing chunks as you
             // pan/zoom (refine where you look). New chunks never load, nothing culls.
-            if (eager || (Streaming && footChanged))
+            if (eager || FillRadius || (Streaming && footChanged))
             {
                 _center = center; _lastFoot = foot; _lastDist = dist; _lastLodCenter = center;
                 Recompute(center, foot);
@@ -229,7 +273,9 @@ namespace NetworkDesigner.Terrain
                 ReLodResident(center);
             }
 
-            int budget = (eager || Budget <= 0) ? int.MaxValue : Budget;
+            // FillRadius streams a huge bubble in over many frames (never an int.MaxValue eager freeze).
+            int budget = FillRadius ? Mathf.Max(16, Budget)
+                       : (eager || Budget <= 0) ? int.MaxValue : Budget;
             int done = 0;
             while (done < budget && _pending.Count > 0)
             {
@@ -314,6 +360,7 @@ namespace NetworkDesigner.Terrain
             if (ch.Mesh != null) { if (Application.isPlaying) Object.Destroy(ch.Mesh); else Object.DestroyImmediate(ch.Mesh); }
             _chunks.Remove(c);
             _dirty.Remove(c);
+            // (DEM tiles are shared across chunks → freed by DemChunkSource's own LRU, not per-chunk.)
         }
 
         // ── Mesh build (per-chunk res) ───────────────────────────────────────────────────────
@@ -367,25 +414,50 @@ namespace NetworkDesigner.Terrain
         }
 
         // ── Procedural heights ───────────────────────────────────────────────────────────────
+        // Dramatic multi-octave terrain (0..AmpMeters) sampled at each vertex's WORLD position, so
+        // it's seamless across chunks AND LOD resolutions (any res sampling the same point agrees).
+        // The fine ~16 m octave is what makes LOD visible: high res resolves it, low res smooths it.
         static void FillHeights(Vector2Int c, float[] h, int res)
         {
-            int nside = GridN + 1;
-            var node = new float[nside * nside];
-            for (int j = 0; j <= GridN; j++)
-                for (int i = 0; i <= GridN; i++)
-                    node[j * nside + i] = Hash01(c.x * GridN + i, c.y * GridN + j) * AmpMeters;
-
-            float step = (res - 1) / (float)GridN;
+            if (DemChunkSource.CoversChunk(c)) { FillFromDem(c, h, res); return; }
+            float sp = ChunkSize / (res - 1);
+            float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
             for (int z = 0; z < res; z++)
                 for (int x = 0; x < res; x++)
-                {
-                    float gx = x / step, gz = z / step;
-                    int i0 = Mathf.Min((int)gx, GridN - 1), j0 = Mathf.Min((int)gz, GridN - 1);
-                    float tx = gx - i0, tz = gz - j0;
-                    float a = Mathf.Lerp(node[j0 * nside + i0], node[j0 * nside + i0 + 1], tx);
-                    float b = Mathf.Lerp(node[(j0 + 1) * nside + i0], node[(j0 + 1) * nside + i0 + 1], tx);
-                    h[z * res + x] = Mathf.Lerp(a, b, tz);
-                }
+                    h[z * res + x] = HeightAt(ox + x * sp, oz + z * sp);
+        }
+
+        // Real DEM heights: sample the continuous DEM mosaic at each vertex's WORLD position, so any
+        // LOD res reads the same data (high res resolves detail, low res downsamples) and a DEM tile
+        // that spans several 1 km chunks renders at true scale across all of them.
+        static void FillFromDem(Vector2Int c, float[] h, int res)
+        {
+            float sp = ChunkSize / (res - 1);
+            float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+            for (int z = 0; z < res; z++)
+                for (int x = 0; x < res; x++)
+                    h[z * res + x] = DemChunkSource.SampleWorldYAt(ox + x * sp, oz + z * sp);
+        }
+
+        static float HeightAt(float wx, float wz)
+        {
+            float n = Octave(wx, wz, 2000f, 0) * 0.60f    // mountains (~2 km)
+                    + Octave(wx, wz, 400f, 1) * 0.22f     // hills
+                    + Octave(wx, wz, 80f, 2) * 0.12f      // ridges
+                    + Octave(wx, wz, 16f, 3) * 0.06f;     // surface roughness — the LOD-visible detail
+            return n * AmpMeters;
+        }
+
+        // Value noise: smoothstepped bilinear of the hashed lattice at `wl` metres.
+        static float Octave(float wx, float wz, float wl, int seed)
+        {
+            float gx = wx / wl + seed * 131.7f, gz = wz / wl + seed * 71.3f;
+            int x0 = Mathf.FloorToInt(gx), z0 = Mathf.FloorToInt(gz);
+            float tx = gx - x0, tz = gz - z0;
+            tx = tx * tx * (3f - 2f * tx); tz = tz * tz * (3f - 2f * tz);
+            float a = Mathf.Lerp(Hash01(x0, z0), Hash01(x0 + 1, z0), tx);
+            float b = Mathf.Lerp(Hash01(x0, z0 + 1), Hash01(x0 + 1, z0 + 1), tx);
+            return Mathf.Lerp(a, b, tz);
         }
 
         static float Hash01(int x, int y)
@@ -468,6 +540,73 @@ namespace NetworkDesigner.Terrain
                     }
                 if (changed) { BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
             }
+        }
+
+        // ── Sea tool: click-to-flood lower ──────────────────────────────────────────────────
+        // From `hit`, flood-fill the contiguous region whose height is within ±tolerance of the
+        // clicked height (staying INSIDE loaded chunks), then flatten it to (seed − drop). Carves
+        // the flat DEM ocean below the water plane so it stops z-fighting. Works on any flat area.
+        public static void FloodLower(Vector3 hit, float tolerance, float drop, float cell = 30f, int maxCells = 400000)
+        {
+            if (!Active || _chunks.Count == 0) return;
+            float seedH = SampleHeight(hit.x, hit.z);
+            var start = new Vector2Int(Mathf.FloorToInt(hit.x / cell), Mathf.FloorToInt(hit.z / cell));
+            if (!CellIsSea(start, cell, seedH, tolerance)) return;   // click wasn't on a same-altitude area
+
+            var sel = new HashSet<Vector2Int> { start };
+            var q = new Queue<Vector2Int>();
+            q.Enqueue(start);
+            int mincx = start.x, maxcx = start.x, mincz = start.y, maxcz = start.y;
+            var dirs = new[] { new Vector2Int(1, 0), new Vector2Int(-1, 0), new Vector2Int(0, 1), new Vector2Int(0, -1) };
+            while (q.Count > 0 && sel.Count < maxCells)
+            {
+                var cc = q.Dequeue();
+                for (int k = 0; k < 4; k++)
+                {
+                    var nc = cc + dirs[k];
+                    if (sel.Contains(nc) || !CellIsSea(nc, cell, seedH, tolerance)) continue;
+                    sel.Add(nc); q.Enqueue(nc);
+                    if (nc.x < mincx) mincx = nc.x; if (nc.x > maxcx) maxcx = nc.x;
+                    if (nc.y < mincz) mincz = nc.y; if (nc.y > maxcz) maxcz = nc.y;
+                }
+            }
+            if (sel.Count >= maxCells) Debug.LogWarning($"[ChunkWorld] FloodLower hit the {maxCells}-cell cap — selection truncated.");
+
+            float target = seedH - Mathf.Max(0f, drop);
+            float selX0 = mincx * cell, selX1 = (maxcx + 1) * cell, selZ0 = mincz * cell, selZ1 = (maxcz + 1) * cell;
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value; var ck = kv.Key;
+                float ox = ck.x * ChunkSize, oz = ck.y * ChunkSize;
+                if (ox + ChunkSize < selX0 || ox > selX1 || oz + ChunkSize < selZ0 || oz > selZ1) continue;   // chunk outside bbox
+                int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+                bool changed = false; HashSet<int> ds = null;
+                for (int z = 0; z < res; z++)
+                    for (int x = 0; x < res; x++)
+                    {
+                        float wx = ox + x * sp, wz = oz + z * sp;
+                        var cc = new Vector2Int(Mathf.FloorToInt(wx / cell), Mathf.FloorToInt(wz / cell));
+                        if (!sel.Contains(cc)) continue;
+                        int i = z * res + x;
+                        if (Mathf.Abs(ch.H[i] - seedH) > tolerance) continue;   // don't carve land inside a sea cell
+                        if (ch.H[i] != target)
+                        {
+                            ch.H[i] = target; changed = true;
+                            if (ds == null) ds = DirtySetFor(ck);
+                            ds.Add(i);
+                        }
+                    }
+                if (changed) { BuildMesh(ch); if (ch.Mc != null) { ch.Mc.sharedMesh = null; ch.Mc.sharedMesh = ch.Mesh; } }
+            }
+        }
+
+        // A flood cell counts as "sea" if its centre is inside a loaded chunk and within tolerance
+        // of the seed height. Unloaded cells return false → the flood stops at the bubble edge.
+        static bool CellIsSea(Vector2Int c, float cell, float seedH, float tol)
+        {
+            float wx = (c.x + 0.5f) * cell, wz = (c.y + 0.5f) * cell;
+            if (!_chunks.ContainsKey(ChunkOf(wx, wz))) return false;
+            return Mathf.Abs(SampleHeight(wx, wz) - seedH) <= tol;
         }
 
         static float BoxAvg(float[] s, int x, int z, int res, int k)

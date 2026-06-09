@@ -195,12 +195,19 @@ namespace NetworkDesigner.Placeables
         {
             point = default;
             Ray ray = cam.ScreenPointToRay(Input.mousePosition);
-            // Low-poly mesh terrain, OR the DEM Unity-Terrain (TerrainCollider) when one's built.
-            if (Physics.Raycast(ray, out RaycastHit hit, 100000f)
-                && (hit.collider is MeshCollider
-                    || (NetworkDesigner.Terrain.DemTerrainWorld.HasWorld && hit.collider is TerrainCollider)))
-            { point = hit.point; return true; }
-            return false;
+            // NEAREST terrain hit, skipping any other collider in front: low-poly/chunk mesh
+            // (MeshCollider) OR the DEM Unity-Terrain (TerrainCollider). RaycastAll so a stray
+            // collider between the camera and the ground can't block the ghost.
+            bool demOrChunk = NetworkDesigner.Terrain.DemTerrainWorld.HasWorld || NetworkDesigner.Terrain.ChunkWorld.Active;
+            var hits = Physics.RaycastAll(ray, 100000f);
+            float best = float.MaxValue; bool found = false;
+            for (int i = 0; i < hits.Length; i++)
+            {
+                var h = hits[i];
+                bool ok = h.collider is MeshCollider || (demOrChunk && h.collider is TerrainCollider);
+                if (ok && h.distance < best) { best = h.distance; point = h.point; found = true; }
+            }
+            return found;
         }
 
         static void EnsureCollider(GameObject go)

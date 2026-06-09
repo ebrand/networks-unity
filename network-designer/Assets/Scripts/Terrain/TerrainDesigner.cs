@@ -24,7 +24,7 @@ namespace NetworkDesigner.Terrain
 {
     public class TerrainDesigner : MonoBehaviour
     {
-        public enum BrushMode { Raise, Lower, Smooth, Flatten, Slope }
+        public enum BrushMode { Raise, Lower, Smooth, Flatten, Slope, Sea, Measure }
 
         [Header("Terrain (low-poly chunked mesh)")]
         [Tooltip("Terrain width/length in metres (square).")]
@@ -89,6 +89,13 @@ namespace NetworkDesigner.Terrain
 
         [Header("Sculpt brush")]
         public BrushMode Brush = BrushMode.Raise;
+        // Sea tool (chunk world): click floods the contiguous area within ±SeaTolerance m of the
+        // clicked height and flattens it to (clicked height − SeaDrop). Carves the flat DEM ocean.
+        public float SeaTolerance = 3f;
+        public float SeaDrop = 5f;
+        // Measure tool (7): click A, click B → straight-line distance tooltip; A→cursor rubber-bands.
+        Vector3 _measA, _measB, _measCursor;
+        bool _measHasA, _measHasB;
         // The active terrain backend (Terrain palette's Low-Poly/DEM toggle). When DEM (and a DEM
         // world is built), EVERY tool — sculpt, rail, scatter, fences, placeables, the brush ring —
         // targets the DEM, and the low-poly terrain is hidden; otherwise everything targets the
@@ -375,33 +382,53 @@ namespace NetworkDesigner.Terrain
         // the flat plane, and starts ChunkWorld + a ChunkStreamer that keeps a 5×5 bubble loaded
         // around the camera. Sculpt edits persist per-chunk under <save>/ChunkEdits, so an edit
         // made far away survives the chunk unloading and returns when you fly back.
+        // Flat procedural streaming test, from the origin.
         public void StartChunkTest()
+            => StartChunkWorld(new Vector3(0f, 4000f, 0f), 35f, "ChunkEdits");
+
+        // Real-DEM streaming test: load a *_tile_<row>_<col>.png set into the chunks, centred on it.
+        // folder = a city under Heightmaps/Highres (e.g. "Mount Shasta, California"). Uses the
+        // current decode range (DemChunkSource.NormMin/Max — exposed as React tunables).
+        public void StartChunkDem(string folder)
+        {
+            if (ChunkWorld.Active) return;
+            if (!DemChunkSource.Configure(folder, DemChunkSource.NormMin, DemChunkSource.NormMax)) return;
+            Vector3 c = DemChunkSource.CenterWorld; c.y = 4000f;
+            // Steeper pitch than the flat test so the view footprint sits near the DEM centre and
+            // the (Radius-capped) eager load covers the whole tile grid regardless of yaw.
+            StartChunkWorld(c, 55f, "ChunkEditsDem");
+            MinimapDiorama.Spawn(ChunkCam());   // 3D relief minimap of the whole block
+        }
+
+        void StartChunkWorld(Vector3 camPos, float pitch, string editSubdir)
         {
             if (ChunkWorld.Active) return;
             if (_chunkRoot != null) _chunkRoot.SetActive(false);   // hide low-poly mesh terrain
             DemTerrainWorld.SetVisible(false);                     // hide the DEM
             if (_waterGo != null) _waterGo.SetActive(false);
             string dir = System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(ResolveAutosavePath())), "ChunkEdits");
+                System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(ResolveAutosavePath())), editSubdir);
             ChunkWorld.Begin(dir);
 
             FlyCameraController fly = ResolveFly();
-            Vector3 camXz = fly != null ? fly.transform.position : Vector3.zero;
             if (fly != null)
             {
-                fly.transform.position = new Vector3(camXz.x, 250f, camXz.z);   // above the y=0 plane
-                fly.Pitch = 35f;
-                fly.transform.rotation = Quaternion.Euler(35f, fly.Yaw, 0f);
+                // Place at the supplied spot, not the camera's (possibly far-flung) prior XZ — Unity
+                // physics raycasts (sculpt/placeables ghost) get imprecise/miss tens of km out.
+                fly.transform.position = camPos;
+                fly.Pitch = pitch;
+                fly.transform.rotation = Quaternion.Euler(pitch, fly.Yaw, 0f);
                 // Point the altitude-damping clamp at the CHUNK surface (else it reads the hidden
                 // low-poly/DEM and pins speed to the minimum → crawl). And pick a pace suited to
-                // 1 km chunks; the System-palette Camera Speed still overrides this live.
+                // the scale; the System-palette Camera Speed still overrides this live.
                 fly.GroundHeight = p => ChunkWorld.SampleHeight(p.x, p.z);
-                fly.MoveSpeed = Mathf.Max(fly.MoveSpeed, 200f);
+                fly.MoveSpeed = Mathf.Max(fly.MoveSpeed, 500f);
             }
             var streamer = FindFirstObjectByType<ChunkStreamer>();
             if (streamer == null) streamer = new GameObject("ChunkStreamer").AddComponent<ChunkStreamer>();
             streamer.Cam = ChunkCam();
             ChunkWorld.Tick(ChunkCam(), eager: true);   // load the view footprint now
+            ChunkOverlays.Reapply();                    // restore water / local-grid toggle state
             Debug.Log($"[ChunkTest] started — {ChunkWorld.LoadedCount} chunks resident.");
         }
 
@@ -419,12 +446,61 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = ResolveFly();
             if (fly != null) fly.GroundHeight = WorldGroundHeight;
             if (DemBackend && DemTerrainWorld.HasWorld) DemTerrainWorld.WireCameraToDem();
+            MinimapDiorama.Dispose();   // tear down the relief minimap (no-op for the flat test)
+            ChunkOverlays.Teardown();   // tear down water + local-grid GOs (toggle state is kept)
+            DemChunkSource.Clear();     // drop the DEM tile mapping/cache (no-op for the flat test)
             Debug.Log("[ChunkTest] stopped.");
         }
 
         public bool ChunkTestActive => ChunkWorld.Active;
+        public bool ChunkDemActive => DemChunkSource.Active;
+
+        // DEM decode range (m) — MUST match the range the PNGs were exported at (the Highres set is
+        // -500..9000). Changing it on a loaded DEM re-derives every chunk (rescales, not refines).
+        public float ChunkDemNormMin
+        {
+            get => DemChunkSource.NormMin;
+            set
+            {
+                if (Mathf.Approximately(value, DemChunkSource.NormMin)) return;
+                DemChunkSource.NormMin = value;
+                if (ChunkWorld.Active && DemChunkSource.Active) ChunkWorld.RefillAll();
+            }
+        }
+        public float ChunkDemNormMax
+        {
+            get => DemChunkSource.NormMax;
+            set
+            {
+                if (Mathf.Approximately(value, DemChunkSource.NormMax)) return;
+                DemChunkSource.NormMax = value;
+                if (ChunkWorld.Active && DemChunkSource.Active) ChunkWorld.RefillAll();
+            }
+        }
         public bool ChunkShowGrid { get => ChunkWorld.ShowGrid; set => ChunkWorld.SetGrid(value); }
         public bool ChunkLockBubble { get => ChunkWorld.LockBubble; set => ChunkWorld.LockBubble = value; }
+        // Water plane at a configurable sea level (m), and a fine local build/sculpt grid that follows the view.
+        public bool ChunkShowWater { get => ChunkOverlays.ShowWater; set => ChunkOverlays.SetWater(value); }
+        public float ChunkWaterLevel { get => ChunkOverlays.WaterLevel; set => ChunkOverlays.SetWaterLevel(value); }
+        public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
+        // Force the bubble to the FULL Radius regardless of zoom (streams in over frames). Heavy:
+        // (2·Radius+1)² chunks — e.g. Radius 40 = 6,561. Following the camera; overrides Lock while on.
+        public bool ChunkFillRadius
+        {
+            get => ChunkWorld.FillRadius;
+            set
+            {
+                if (value == ChunkWorld.FillRadius) return;
+                ChunkWorld.FillRadius = value;
+                if (ChunkWorld.Active) ChunkWorld.Tick(ChunkCam(), eager: true);   // start filling / cull back
+            }
+        }
+        // Terrain max height (m). Changing it regenerates the loaded chunks (can hitch on big bubbles).
+        public float ChunkAmplitude
+        {
+            get => ChunkWorld.AmpMeters;
+            set { if (!Mathf.Approximately(value, ChunkWorld.AmpMeters)) ChunkWorld.SetAmplitude(Mathf.Clamp(value, 0f, 8000f)); }
+        }
 
         // Live bubble radius (resident = (2r+1)²): tunable so you can sweep 5×5→7×7→9×9… in
         // session and find where synchronous loading falls over. Setting it re-streams now.
@@ -433,7 +509,7 @@ namespace NetworkDesigner.Terrain
             get => ChunkWorld.Radius;
             set
             {
-                int r = Mathf.Clamp(Mathf.RoundToInt(value), 1, 32);
+                int r = Mathf.Clamp(Mathf.RoundToInt(value), 1, 50);
                 if (r == ChunkWorld.Radius) return;
                 ChunkWorld.Radius = r;
                 if (ChunkWorld.Active)
@@ -1080,6 +1156,8 @@ namespace NetworkDesigner.Terrain
                 case BrushMode.Smooth:  return SmoothIcon;
                 case BrushMode.Flatten: return FlattenIcon;
                 case BrushMode.Slope:   return SlopeIcon;
+                case BrushMode.Sea:     return SmoothIcon;
+                case BrushMode.Measure: return SlopeIcon;
                 default:                return null;
             }
         }
@@ -1116,6 +1194,7 @@ namespace NetworkDesigner.Terrain
             DrawSlopeCurveBadge();
             DrawSlopeGradeReadout();
             DrawChunkMinimap();
+            DrawMeasure();
             if (ShowModeHud && _lineActive != null)
             {
                 bool rail = _lineActive is RailTrackLayer;
@@ -1315,6 +1394,22 @@ namespace NetworkDesigner.Terrain
             Vector3 cp = cam.transform.position;
             Vector2Int active = ChunkWorld.ChunkAt(cp.x, cp.z);
 
+            // DEM world: a pre-baked 3D relief diorama (with the camera-tracking marker) instead of
+            // the flat chunk grid. Falls back to the grid for the procedural/infinite flat test.
+            var diorama = MinimapDiorama.Current;
+            if (diorama != null && diorama.Texture != null)
+            {
+                float dm = 220f, dleft = Vw - dm - 12f, dtop = 12f;
+                Color pc = GUI.color;
+                GUI.color = new Color(0f, 0f, 0f, 0.4f);
+                GUI.DrawTexture(new Rect(dleft - 5f, dtop - 5f, dm + 10f, dm + 24f), Texture2D.whiteTexture);
+                GUI.color = Color.white;
+                GUI.DrawTexture(new Rect(dleft, dtop, dm, dm), diorama.Texture, ScaleMode.ScaleToFit, false);
+                GUI.Label(new Rect(dleft, dtop + dm + 3f, dm, 18f), $"chunk {active.x},{active.y}   loaded {ChunkWorld.LoadedCount}");
+                GUI.color = pc;
+                return;
+            }
+
             int W = _minimapW;               // ± chunks shown (scroll over the map to zoom)
             float map = 190f, cell = map / (2 * W + 1);
             float left = Vw - map - 12f, top = 12f;
@@ -1370,6 +1465,62 @@ namespace NetworkDesigner.Terrain
             GUI.color = Color.white;
             GUI.Label(new Rect(left, top + map + 3f, map, 18f), $"chunk {active.x},{active.y}   loaded {ChunkWorld.LoadedCount}");
             GUI.color = prevCol;
+        }
+
+        // Measure tool: draws the A→(B or live cursor) line + endpoint dots + a distance tooltip.
+        void DrawMeasure()
+        {
+            if (Brush != BrushMode.Measure || !_measHasA) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            Vector3 a = _measA, b = _measHasB ? _measB : _measCursor;
+            Vector3 spa = cam.WorldToScreenPoint(a), spb = cam.WorldToScreenPoint(b);
+            if (spa.z <= 0f || spb.z <= 0f) return;   // an endpoint is behind the camera
+            Vector2 ga = new Vector2(spa.x / s, (Screen.height - spa.y) / s);
+            Vector2 gb = new Vector2(spb.x / s, (Screen.height - spb.y) / s);
+            Color line = new Color(1f, 0.85f, 0.2f, 0.5f);   // translucent alpha line
+
+            // Line in RAW screen space (the rotated draw must NOT go through the UiScale matrix, or
+            // the pivot gets scaled and the line shifts). Dots + tooltip stay in scaled space below.
+            DrawScreenLine(new Vector2(spa.x, Screen.height - spa.y),
+                           new Vector2(spb.x, Screen.height - spb.y), line, 3f);
+            Color prev = GUI.color;
+            GUI.color = line;
+            GUI.DrawTexture(new Rect(ga.x - 3f, ga.y - 3f, 6f, 6f), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(gb.x - 3f, gb.y - 3f, 6f, 6f), Texture2D.whiteTexture);
+            GUI.color = prev;
+
+            float dist = Vector2.Distance(new Vector2(a.x, a.z), new Vector2(b.x, b.z));   // horizontal ground distance
+            float dh = b.y - a.y;
+            string txt = dist >= 1000f ? $"{dist / 1000f:0.00} km" : $"{dist:0.0} m";
+            if (Mathf.Abs(dh) > 0.5f) txt += $"   Δ {(dh >= 0 ? "+" : "")}{dh:0} m";
+            // Boxed tooltip near the moving end (B / cursor).
+            var content = new GUIContent(txt);
+            Vector2 sz = GUI.skin.label.CalcSize(content);
+            float bx = gb.x + 12f, by = gb.y - sz.y - 6f;
+            var box = new Rect(bx - 4f, by - 2f, sz.x + 8f, sz.y + 4f);
+            GUI.color = new Color(0f, 0f, 0f, 0.65f);
+            GUI.DrawTexture(box, Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUI.Label(new Rect(bx, by, sz.x + 2f, sz.y), content);
+            GUI.color = prev;
+        }
+
+        // A 1-pixel-thick screen-space line between two GUI-space points (under the UiScale matrix).
+        static void DrawScreenLine(Vector2 a, Vector2 b, Color col, float width)
+        {
+            float len = Vector2.Distance(a, b);
+            if (len < 0.5f) return;
+            float ang = Mathf.Atan2(b.y - a.y, b.x - a.x) * Mathf.Rad2Deg;
+            Matrix4x4 prevM = GUI.matrix;
+            Color prevC = GUI.color;
+            GUI.matrix = Matrix4x4.identity;   // raw screen space — no UiScale skew on the pivot
+            GUIUtility.RotateAroundPivot(ang, a);
+            GUI.color = col;
+            GUI.DrawTexture(new Rect(a.x, a.y - width * 0.5f, len, width), Texture2D.whiteTexture);
+            GUI.matrix = prevM;
+            GUI.color = prevC;
         }
 
         // Slope tool: live grade % + the max, floating just above the B cursor (so you read
@@ -1857,6 +2008,8 @@ namespace NetworkDesigner.Terrain
                     case BrushMode.Smooth: return "Smooth (3)";
                     case BrushMode.Flatten: return "Flatten (4)";
                     case BrushMode.Slope: return "Slope (5)";
+                    case BrushMode.Sea: return "Sea (6)";
+                    case BrushMode.Measure: return "Measure (7)";
                     default: return "";
                 }
             }
@@ -2029,6 +2182,8 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
             else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
             else if (Input.GetKeyDown(KeyCode.Alpha5)) Brush = BrushMode.Slope;
+            else if (Input.GetKeyDown(KeyCode.Alpha6)) Brush = BrushMode.Sea;
+            else if (Input.GetKeyDown(KeyCode.Alpha7)) Brush = BrushMode.Measure;
             // T/R/F toggle the active mode (mutually exclusive; press the same
             // key again to return to sculpt).
             if (Input.GetKeyDown(KeyCode.T)) { SetScatterMode(TreeLayer); SyncScatterPalette(); }
@@ -2474,6 +2629,32 @@ namespace NetworkDesigner.Terrain
             {
                 RebuildContours();
                 if (_sculptedStroke) { ConformScatterAndLines(); _sculptedStroke = false; }
+            }
+
+            // Measure tool: click A, click B → straight-line distance. Tracks the cursor live for
+            // the A→cursor rubber-band; right-click clears. Click-driven — bypasses drag-sculpt.
+            if (Brush == BrushMode.Measure)
+            {
+                if (overTerrain) _measCursor = hit.point;
+                if (overTerrain && !MouseOverActivePanel() && Input.GetMouseButtonDown(0))
+                {
+                    if (!_measHasA || _measHasB) { _measA = hit.point; _measHasA = true; _measHasB = false; }
+                    else { _measB = hit.point; _measHasB = true; }
+                }
+                if (Input.GetMouseButtonDown(1)) { _measHasA = false; _measHasB = false; }
+                return;
+            }
+
+            // Sea tool (chunk world only): ONE click floods the contiguous same-altitude area and
+            // lowers it. Click-only — handled here so it bypasses the held-button drag-sculpt path.
+            if (Brush == BrushMode.Sea)
+            {
+                if (ChunkWorld.Active && overTerrain && !MouseOverActivePanel() && Input.GetMouseButtonDown(0))
+                {
+                    ChunkWorld.FloodLower(hit.point, SeaTolerance, SeaDrop);
+                    _dirtySince = Time.realtimeSinceStartup;
+                }
+                return;
             }
 
             if (!overTerrain || !Input.GetMouseButton(0) || MouseOverActivePanel()) return;

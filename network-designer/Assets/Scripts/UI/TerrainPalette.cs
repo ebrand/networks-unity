@@ -53,6 +53,8 @@ namespace NetworkDesigner.UI
             AddBrushButton(body, "Smooth (3)",  TerrainDesigner.BrushMode.Smooth);
             AddBrushButton(body, "Flatten (4)", TerrainDesigner.BrushMode.Flatten);
             AddBrushButton(body, "Slope (5)",   TerrainDesigner.BrushMode.Slope);   // two-click ramp
+            AddBrushButton(body, "Sea (6)",     TerrainDesigner.BrushMode.Sea);     // click-to-flood lower (chunk world)
+            AddBrushButton(body, "Measure (7)", TerrainDesigner.BrushMode.Measure); // click A → click B, distance tooltip
 
             body.Add(SliderRow("Radius", () => Designer.BrushRadius, v => Designer.BrushRadius = v,
                 0.5f, Mathf.Max(1f, Designer.MaxBrushRadius), "0"));
@@ -90,10 +92,13 @@ namespace NetworkDesigner.UI
             // ---- WATER ---- (changes need ApplyWater)
             body.Add(Divider());
             body.Add(SectionLabel("WATER"));
+            // In the streaming chunk world these drive the CHUNK water plane; otherwise the low-poly water.
             body.Add(ToggleRow("Show Water",
-                () => Designer.ShowWater, v => { Designer.ShowWater = v; Designer.ApplyWater(); }));
-            body.Add(SliderRow("Level", () => Designer.WaterLevel,
-                v => { Designer.WaterLevel = v; Designer.ApplyWater(); }, -50f, 300f, "0.0"));
+                () => Designer.ChunkTestActive ? Designer.ChunkShowWater : Designer.ShowWater,
+                v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { Designer.ShowWater = v; Designer.ApplyWater(); } }));
+            body.Add(SliderRow("Level",
+                () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : Designer.WaterLevel,
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, -50f, 1000f, "0"));
         }
 
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
@@ -122,8 +127,13 @@ namespace NetworkDesigner.UI
             // ---- WATER ---- (a flat plane at a chosen elevation — floods coasts/valleys)
             body.Add(Divider());
             body.Add(SectionLabel("WATER"));
-            body.Add(ToggleRow("Show Water", () => DemWater.Show, v => { DemWater.Show = v; DemWater.Apply(); }));
-            body.Add(SliderRow("Level", () => DemWater.Level, v => { DemWater.Level = v; DemWater.Apply(); }, -50f, 3000f, "0"));
+            // In the streaming chunk world these drive the CHUNK water plane; otherwise the DEM water.
+            body.Add(ToggleRow("Show Water",
+                () => Designer.ChunkTestActive ? Designer.ChunkShowWater : DemWater.Show,
+                v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { DemWater.Show = v; DemWater.Apply(); } }));
+            body.Add(SliderRow("Level",
+                () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : DemWater.Level,
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, -50f, 3000f, "0"));
 
             // ---- LIGHTING ----
             body.Add(Divider());

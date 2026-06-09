@@ -19,6 +19,7 @@ namespace NetworkDesigner.Terrain
             // Tick every frame: recomputes the resident set when streaming, else just re-LODs the
             // frozen set as you pan/zoom; drains the budgeted build queue continuously.
             ChunkWorld.Tick(Cam);
+            ChunkOverlays.Update(Cam);   // keep the local build grid under the view
         }
     }
 }

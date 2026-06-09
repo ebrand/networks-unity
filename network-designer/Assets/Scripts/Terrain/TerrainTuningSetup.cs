@@ -164,7 +164,7 @@ namespace NetworkDesigner.Terrain
 
             // --- Chunk-streaming test world ---
             TuningRegistry.RegisterFloat("terrain.chunkRadius", "Chunk", "Bubble radius (chunks)",
-                () => t.ChunkRadius, v => t.ChunkRadius = v, 1f, 10f, 1f,
+                () => t.ChunkRadius, v => t.ChunkRadius = v, 1f, 50f, 1f,
                 description: "VISIBLE chunk radius (rendered) = (2r+1)²: r2 = 5×5/25, r3 = 7×7/49, r4 = 9×9/81. " +
                              "Re-streams on change.");
             TuningRegistry.RegisterFloat("terrain.chunkPreload", "Chunk", "Preload depth (rings)",
@@ -177,6 +177,11 @@ namespace NetworkDesigner.Terrain
                 description: "How many chunks may load per frame while streaming. Lower = smoother (no hitch) " +
                              "but fills slower; the preload depth must be deep enough that a low budget keeps " +
                              "up with your speed, or you'll see pop-in at the visible edge.");
+            TuningRegistry.RegisterFloat("terrain.chunkAmplitude", "Chunk", "Amplitude (m)",
+                () => t.ChunkAmplitude, v => t.ChunkAmplitude = v, 0f, 8000f, 50f,
+                description: "Max terrain height for the procedural multi-octave landscape. Changing it " +
+                             "regenerates every loaded chunk (can hitch on big/high-res bubbles). ~20 = gentle, " +
+                             "5000 = dramatic mountains.");
             TuningRegistry.RegisterFloat("terrain.chunkDetail", "Chunk", "Detail (px/vertex)",
                 () => t.ChunkPixelsPerVertex, v => t.ChunkPixelsPerVertex = v, 1.5f, 24f, 0.5f,
                 description: "Screen-space LOD quality: target screen pixels per terrain vertex. LOWER = " +
@@ -187,6 +192,40 @@ namespace NetworkDesigner.Terrain
                 description: "Per-chunk heightmap resolution; snaps to 129 / 257 / 513 / 1025. The BIGGEST " +
                              "per-chunk load-cost lever (SetHeights scales with Res²): 129 ≈ 8 m/sample (fastest), " +
                              "513 ≈ 2 m (sharpest sculpt). Rebuilds the bubble; edits saved at another Res are dropped.");
+            TuningRegistry.RegisterBool("terrain.chunkGrid", "Chunk", "Grid (1 km / 100 m)",
+                () => t.ChunkShowGrid, v => t.ChunkShowGrid = v,
+                description: "Paint a 1 km major / 100 m minor grid on the chunk ground for scale.");
+            TuningRegistry.RegisterBool("terrain.chunkLock", "Chunk", "Lock bubble (hold Space)",
+                () => t.ChunkLockBubble, v => t.ChunkLockBubble = v,
+                description: "Freeze the resident set: pan/zoom freely, no cull/load. Hold Space to reposition.");
+            TuningRegistry.RegisterBool("terrain.chunkWater", "Chunk", "Water plane",
+                () => t.ChunkShowWater, v => t.ChunkShowWater = v,
+                description: "A transparent water plane across the whole block at the sea-level below.");
+            TuningRegistry.RegisterFloat("terrain.chunkWaterLevel", "Chunk", "Water level (m)",
+                () => t.ChunkWaterLevel, v => t.ChunkWaterLevel = v, -100f, 1000f, 5f,
+                description: "World height of the water plane. DEM heights are real metres, so 0 ≈ sea level " +
+                             "(this Astoria block ranges about -29 to 959 m).");
+            TuningRegistry.RegisterBool("terrain.chunkLocalGrid", "Chunk", "Local build grid",
+                () => t.ChunkLocalGrid, v => t.ChunkLocalGrid = v,
+                description: "Drops a fine ~10 m / 50 m grid patch where you're looking, draped on the terrain, for " +
+                             "close-up building/sculpting. STATIC once placed — re-toggle to move it to a new spot.");
+            TuningRegistry.RegisterFloat("terrain.seaTolerance", "Chunk", "Sea tool: tolerance (m)",
+                () => t.SeaTolerance, v => t.SeaTolerance = v, 0.5f, 30f, 0.5f,
+                description: "Sea brush (6): how close in altitude counts as the same flooded area. One click floods " +
+                             "the contiguous region within ±this of the clicked height (inside loaded chunks only).");
+            TuningRegistry.RegisterFloat("terrain.seaDrop", "Chunk", "Sea tool: drop (m)",
+                () => t.SeaDrop, v => t.SeaDrop = v, 0f, 200f, 1f,
+                description: "Sea brush (6): how far below the clicked height to flatten the flooded area — sink the " +
+                             "flat DEM ocean below the water plane so it stops z-fighting.");
+            TuningRegistry.RegisterFloat("terrain.chunkDemNormMin", "Chunk", "DEM range min (m)",
+                () => t.ChunkDemNormMin, v => t.ChunkDemNormMin = v, -1000f, 4000f, 50f,
+                description: "Elevation that 16-bit value 0 decodes to. MUST match the range the DEM PNGs were " +
+                             "EXPORTED at (the Highres set is -500). Changing it on a loaded DEM rescales the heights " +
+                             "(does NOT recover resolution — that needs a re-export). Takes effect on the next DEM load.");
+            TuningRegistry.RegisterFloat("terrain.chunkDemNormMax", "Chunk", "DEM range max (m)",
+                () => t.ChunkDemNormMax, v => t.ChunkDemNormMax = v, 500f, 9000f, 50f,
+                description: "Elevation that 16-bit value 65535 decodes to. MUST match the PNG export range (Highres = 9000). " +
+                             "Tighter span = finer vertical steps ONLY if the tiles were re-exported at that span.");
 
             // --- Heightmap import ---
             TuningRegistry.RegisterSelect("terrain.heightmapPick", "Heightmap", "Pick from Heightmaps/",

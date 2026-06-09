@@ -99,17 +99,30 @@ namespace NetworkDesigner.UI
             // ---- CHUNK TEST ---- (streaming flat-chunk world: roam + sculpt far apart; edits
             // persist per chunk under <save>/ChunkEdits. No DEM data yet — proving the streamer.)
             body.Add(Divider());
-            body.Add(SectionLabel("CHUNK TEST (flat)"));
-            body.Add(ToggleRow("Streaming chunks", () => Designer.ChunkTestActive,
+            body.Add(SectionLabel("CHUNK TEST"));
+            body.Add(ToggleRow("Streaming chunks (flat)", () => Designer.ChunkTestActive && !Designer.ChunkDemActive,
                 v => { if (v) Designer.StartChunkTest(); else Designer.StopChunkTest(); }));
+            // Real-DEM streamer: pick a tile-set folder (Heightmaps/Highres/<name>) and load it into
+            // the chunks at true 1:1 scale (tile size measured from the filenames' lat/lon). Set the
+            // decode range (DEM range min/max, React "Chunk" group) to MATCH the generator's Norm
+            // From/To FIRST, or heights come out wrong. Stop via the toggle above.
+            var demDrop = new DropdownField { choices = DemTerrainWorld.ListWorlds() };
+            demDrop.style.marginBottom = 6;
+            body.Add(demDrop);
+            var demBtn = MakeButton("Load DEM chunks", () =>
+            {
+                if (string.IsNullOrWhiteSpace(demDrop.value)) return;
+                if (Designer.ChunkTestActive) Designer.StopChunkTest();
+                Designer.StartChunkDem(demDrop.value);
+            });
+            demBtn.style.marginBottom = 6;
+            body.Add(demBtn);
             body.Add(ToggleRow("Grid (1km/100m)", () => Designer.ChunkShowGrid, v => Designer.ChunkShowGrid = v));
             body.Add(ToggleRow("Lock bubble (hold Space)", () => Designer.ChunkLockBubble, v => Designer.ChunkLockBubble = v));
-            // Tunable here too (the React panel only connects in the editor, not in a build).
-            body.Add(SliderRow("Detail (px/vert)", () => Designer.ChunkPixelsPerVertex, v => Designer.ChunkPixelsPerVertex = v, 1.5f, 24f, "0.0"));
-            body.Add(SliderRow("Near Res", () => Designer.ChunkRes, v => Designer.ChunkRes = v, 129f, 1025f, "0"));
-            body.Add(SliderRow("Max chunks", () => Designer.ChunkRadius, v => Designer.ChunkRadius = v, 1f, 32f, "0"));
-            body.Add(SliderRow("Preload", () => Designer.ChunkPreloadDepth, v => Designer.ChunkPreloadDepth = v, 0f, 6f, "0"));
-            body.Add(SliderRow("Budget", () => Designer.ChunkBudget, v => Designer.ChunkBudget = v, 1f, 32f, "0"));
+            // Water moved to the Terrain palette's WATER section (it drives the chunk water there).
+            body.Add(ToggleRow("Local build grid", () => Designer.ChunkLocalGrid, v => Designer.ChunkLocalGrid = v));
+            // The numeric chunk settings (Amplitude, Detail, Near Res, Max chunks, Preload, Budget)
+            // live in the React tuning panel (group "Chunk") — the in-app sliders didn't live-sync.
         }
     }
 }

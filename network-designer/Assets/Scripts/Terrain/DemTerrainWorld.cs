@@ -999,6 +999,26 @@ namespace NetworkDesigner.Terrain
             return heights;
         }
 
+        // Decode a heightmap PNG to bottom-up normalized 0..1 floats at the tile's NATIVE pixel
+        // size (true 16-bit if possible, else 8-bit via LoadImage). Returns null on failure.
+        // Shared with ChunkWorld's DEM source (which resamples per-chunk at its own LOD res).
+        public static float[] DecodeTileGray(string path, out int w, out int h)
+        {
+            w = h = 0;
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(path); }
+            catch (System.Exception e) { Debug.LogWarning($"[DemTerrainWorld] read failed {path}: {e.Message}"); return null; }
+            if (TryDecodeGray16(bytes, out float[] gray, out w, out h)) return gray;
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!tex.LoadImage(bytes)) { Object.DestroyImmediate(tex); Debug.LogWarning($"[DemTerrainWorld] decode failed {path}"); return null; }
+            w = tex.width; h = tex.height;
+            Color[] px = tex.GetPixels();
+            Object.DestroyImmediate(tex);
+            gray = new float[w * h];
+            for (int i = 0; i < gray.Length; i++) gray[i] = px[i].r;
+            return gray;
+        }
+
         // Decode a non-interlaced 16-bit grayscale PNG to normalized 0..1 floats, BOTTOM-UP
         // (matching Texture2D.GetPixels) so it's a drop-in for the 8-bit path. Returns false
         // for any other PNG type (caller falls back to LoadImage).
@@ -1088,7 +1108,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // Trailing "..._tile_<row>_<col>" -> row, col.
-        static bool TryParseRowCol(string name, out int row, out int col)
+        public static bool TryParseRowCol(string name, out int row, out int col)
         {
             row = col = 0;
             string[] t = name.Split('_');
@@ -1099,7 +1119,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // Leading "LAT_LATFRAC_LON_LONFRAC_..." (e.g. 47_929_-122_646_...) -> degrees.
-        static bool TryParseLatLon(string name, out double lat, out double lon)
+        public static bool TryParseLatLon(string name, out double lat, out double lon)
         {
             lat = lon = 0;
             string[] t = name.Split('_');
