@@ -33,14 +33,14 @@ namespace NetworkDesigner.Terrain
     public static class ChunkWorld
     {
         public const float ChunkSize = 1000f;
-        public static int Res = 1025;            // MAX / near res; snaps 129/257/513/1025
+        public static int Res = 513;             // MAX / near res; snaps 129/257/513/1025 (513 ≈ 2 m/vertex on a 1 km chunk — smooth streaming; raise for finer sculpt detail)
         public static float PixelsPerVertex = 6f; // screen-space error: bigger = coarser/cheaper
         public static int Radius = 10;            // MAX footprint cap (chunks), safety on zoom-out
         public static bool FillRadius = false;    // force the bubble to the FULL Radius (ignore the view footprint)
         public static int PreloadDepth = 1;       // margin chunks beyond the view footprint
-        public static int Budget = 4;             // chunk builds/rebuilds per frame
+        public static int Budget = 2;             // chunk builds/rebuilds per frame (lower = smoother streaming, slower fill-in)
         public static int RecenterDeadband = 2;   // re-center the bubble only after the look-point moves this many chunks (anti-thrash on look-around)
-        public static int ColliderRadius = 3;     // cook MeshColliders only within this Chebyshev radius of the centre; far chunks skip the (expensive) cook
+        public static int ColliderRadius = 32;    // CAP on collider coverage (Chebyshev from centre); default covers the whole bubble, so everything you see is sculptable. Lower it only to save physics memory on huge stress bubbles.
         public static bool Skirts = true;         // perimeter skirt walls hide LOD-seam cracks; off → drop 0 (degenerate, no walls)
         const string RootName = "ChunkWorld";
         public static float AmpMeters = 0f;       // max terrain height (multi-octave); 0 = flat
@@ -457,7 +457,16 @@ namespace NetworkDesigner.Terrain
         // MeshCollider cooking is the biggest per-load hitch, and you only ever click/sculpt/raycast
         // near where you're looking. So only chunks within ColliderRadius of the centre carry a cooked
         // collision mesh; the rest keep the component but a null sharedMesh (no cook, no physics cost).
-        static bool NeedsCollider(Vector2Int c) => Cheb(c, _center) <= Mathf.Max(0, ColliderRadius);
+        // LOCKED bubble (frozen) → the WHOLE bubble is collidable, so you can sculpt anywhere incl. the
+        // corners. STREAMING (flying) → cover out to ColliderRadius of the centre (capped by the loaded
+        // foot). Default cap (32) covers a normal bubble in both states; async baking keeps it cheap.
+        static bool NeedsCollider(Vector2Int c)
+        {
+            if (!Streaming) return true;
+            int cap = Mathf.Max(0, ColliderRadius);
+            if (_lastFoot > 0) cap = Mathf.Min(cap, _lastFoot);
+            return Cheb(c, _center) <= cap;
+        }
 
         // Kick an async collision bake for this chunk on a worker thread (must finish before the mesh is
         // mutated or destroyed — see BuildMesh/UnloadChunk). ProcessBakes assigns the result on completion.

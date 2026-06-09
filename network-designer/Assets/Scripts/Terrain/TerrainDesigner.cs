@@ -481,7 +481,11 @@ namespace NetworkDesigner.Terrain
             }
         }
         public bool ChunkShowGrid { get => ChunkWorld.ShowGrid; set => ChunkWorld.SetGrid(value); }
-        public bool ChunkLockBubble { get => ChunkWorld.LockBubble; set => ChunkWorld.LockBubble = value; }
+        public bool ChunkLockBubble
+        {
+            get => ChunkWorld.LockBubble;
+            set { ChunkWorld.LockBubble = value; ChunkWorld.RefreshCollidersNow(); }   // locking → cook colliders across the whole bubble so the corners are sculptable
+        }
         // Perimeter skirts (hide LOD-seam cracks). Toggling rebuilds resident chunk meshes.
         public bool ChunkSkirts
         {
@@ -493,7 +497,7 @@ namespace NetworkDesigner.Terrain
         public float ChunkColliderRadius
         {
             get => ChunkWorld.ColliderRadius;
-            set { int r = Mathf.Clamp(Mathf.RoundToInt(value), 0, 50); if (r != ChunkWorld.ColliderRadius) { ChunkWorld.ColliderRadius = r; ChunkWorld.RefreshCollidersNow(); } }
+            set { int r = Mathf.Clamp(Mathf.RoundToInt(value), 1, 64); if (r != ChunkWorld.ColliderRadius) { ChunkWorld.ColliderRadius = r; ChunkWorld.RefreshCollidersNow(); } }
         }
         // Re-center the bubble only after the look-point drifts this many chunks (anti-thrash on look-around).
         public float ChunkRecenterDeadband

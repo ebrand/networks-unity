@@ -202,10 +202,11 @@ namespace NetworkDesigner.Terrain
                 () => t.ChunkSkirts, v => t.ChunkSkirts = v,
                 description: "Perimeter skirt walls that fill the thin gaps where chunks at different LODs meet. " +
                              "Off rebuilds the resident meshes flat — toggle it to A/B whether cracks return.");
-            TuningRegistry.RegisterFloat("terrain.chunkColliderRadius", "Chunk", "Collider radius (chunks)",
-                () => t.ChunkColliderRadius, v => t.ChunkColliderRadius = v, 0f, 12f, 1f,
-                description: "Only chunks within this many chunks of the bubble centre get a cooked MeshCollider " +
-                             "(cooking is the main load hitch). Must cover where you sculpt/click — 3 = a 7×7 core.");
+            TuningRegistry.RegisterFloat("terrain.chunkColliderRadius", "Chunk", "Collider radius cap (chunks)",
+                () => t.ChunkColliderRadius, v => t.ChunkColliderRadius = v, 1f, 64f, 1f,
+                description: "CAP on how far from the bubble centre chunks get a cooked MeshCollider. Default (32) " +
+                             "covers the whole bubble so everything you see is sculptable; lower it only to save " +
+                             "physics memory on huge stress bubbles (collider cooking is async now, so it's cheap).");
             TuningRegistry.RegisterFloat("terrain.chunkRecenter", "Chunk", "Re-center deadband (chunks)",
                 () => t.ChunkRecenterDeadband, v => t.ChunkRecenterDeadband = v, 1f, 8f, 1f,
                 description: "Re-center the bubble only after the look-point drifts this many chunks. Higher = less " +
