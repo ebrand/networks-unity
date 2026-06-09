@@ -120,6 +120,8 @@ namespace NetworkDesigner.Terrain
         // Analysis summary (metres per class + total route length), read by the palette.
         [System.NonSerialized] public float RouteLength;
         [System.NonSerialized] public readonly float[] ClassLen = new float[6];
+        // Earthwork volumes (m³) for the bench, average end-area; net cut-fill = mass-haul balance.
+        [System.NonSerialized] public float CutVolumeM3, FillVolumeM3;
 
         [System.NonSerialized] public bool CurveModifier; // Shift held this frame
         // Extension-guide heading seeded from the rail this plan starts on, used
@@ -716,11 +718,57 @@ namespace NetworkDesigner.Terrain
             if (field != null)
                 foreach (LineEdge e in Graph.Edges)
                     EmitEdge(field, e);
+            if (ShowAnalysis && field != null) ComputeEarthwork(field);
+            else { CutVolumeM3 = FillVolumeM3 = 0f; }
             _mesh.Clear();
             _mesh.SetVertices(_verts);
             _mesh.SetColors(_cols);
             _mesh.SetIndices(_idx, MeshTopology.Lines, 0);
             _mesh.RecalculateBounds();
+        }
+
+        // Earthwork VOLUME for the bench (average end-area method). At each station along every edge,
+        // sample a terrain cross-section across the corridor (trapezoidal strips), measure cut area
+        // (terrain above the bench bed) and fill area (terrain below it), then integrate along the
+        // route. Net = cut - fill: + means surplus spoil to export, - means borrow to import; ≈0 is a
+        // balanced (cheap) mass-haul.
+        void ComputeEarthwork(ITerrainSurface field)
+        {
+            CutVolumeM3 = 0f; FillVolumeM3 = 0f;
+            float hw = Mathf.Max(0.5f, CorridorWidth * 0.5f);
+            const int crossN = 8;                         // strips across the corridor width
+            float stripW = (2f * hw) / crossN;
+            foreach (LineEdge e in Graph.Edges)
+            {
+                GetBezier(e, out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3);
+                float eA = field.SampleHeight(q0.x, q0.y), eB = field.SampleHeight(q3.x, q3.y);
+                float chord = Vector2.Distance(q0, q3);
+                int n = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(chord, 1f) / Mathf.Max(0.5f, SampleStep)), 2, 4000);
+                float prevCut = 0f, prevFill = 0f; Vector2 prevC = default; bool havePrev = false;
+                for (int i = 0; i <= n; i++)
+                {
+                    float t = i / (float)n;
+                    Vector2 c = LineGraph.Bezier(q0, q1, q2, q3, t);
+                    Vector2 tan = LineGraph.BezierTangent(q0, q1, q2, q3, t);
+                    Vector2 perp = tan.sqrMagnitude > 1e-6f ? new Vector2(-tan.y, tan.x).normalized : Vector2.right;
+                    float bench = Mathf.Lerp(eA, eB, t);
+                    float cutArea = 0f, fillArea = 0f;             // cross-sectional areas (m²) at this station
+                    for (int k = 0; k <= crossN; k++)
+                    {
+                        Vector2 p = c + perp * (-hw + k * stripW);
+                        float d = field.SampleHeight(p.x, p.y) - bench;   // + = above bench → cut
+                        float w = (k == 0 || k == crossN) ? stripW * 0.5f : stripW;   // trapezoidal weights
+                        if (d > 0f) cutArea += d * w; else fillArea += -d * w;
+                    }
+                    if (havePrev)
+                    {
+                        float segLen = Vector2.Distance(prevC, c);
+                        CutVolumeM3 += (cutArea + prevCut) * 0.5f * segLen;     // average end-area
+                        FillVolumeM3 += (fillArea + prevFill) * 0.5f * segLen;
+                    }
+                    prevCut = cutArea; prevFill = fillArea; prevC = c; havePrev = true;
+                }
+            }
         }
 
         // One planned edge: the track centreline(s) + the two dashed corridor edges,

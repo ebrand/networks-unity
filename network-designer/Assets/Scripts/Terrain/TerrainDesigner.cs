@@ -1137,8 +1137,9 @@ namespace NetworkDesigner.Terrain
         static float Vw => Screen.width / Mathf.Max(0.25f, UiScale);
         static float Vh => Screen.height / Mathf.Max(0.25f, UiScale);
 
-        // The upper-right IMGUI mode/help box (rail/plan/linework status). Hidden for now;
-        // flip true to bring it back, or relocate its info elsewhere later.
+        // The upper-right IMGUI mode/help box (rail/plan/linework status + the plan cut/fill summary).
+        // Hidden by default — the plan's earthwork/mass-haul now surfaces in the Inspect (I) hover, and
+        // the box (when flipped on) drops below the minimap so they don't overlap (see DrawPanels).
         public bool ShowModeHud = false;
 
         // Palette IMGUI for the active scatter layer, or a hint for linework.
@@ -1243,7 +1244,9 @@ namespace NetworkDesigner.Terrain
             {
                 bool rail = _lineActive is RailTrackLayer;
                 bool plan = _lineActive is RailPlanLayer;
-                GUILayout.BeginArea(new Rect(Vw - 308f, 8f, 300f, rail ? 332f : (plan ? 292f : 104f)), GUI.skin.box);
+                // Drop below the corner minimap when it's up (chunk world) so they don't overlap.
+                float hudY = (ChunkWorld.Active && _showMinimap) ? 264f : 8f;
+                GUILayout.BeginArea(new Rect(Vw - 308f, hudY, 300f, rail ? 332f : (plan ? 292f : 104f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
@@ -1273,6 +1276,14 @@ namespace NetworkDesigner.Terrain
                         GUILayout.Label($"cut {L[1]:0} m · fill {L[2]:0} m");
                         GUILayout.Label($"bridge {L[3]:0} m · tunnel {L[4]:0} m");
                         if (L[5] > 0.5f) GUILayout.Label($"OVER-GRADE {L[5]:0} m — needs reroute");
+                        // Earthwork volume + mass-haul balance (net cut vs fill).
+                        float netM3 = pl.CutVolumeM3 - pl.FillVolumeM3;
+                        float maxM3 = Mathf.Max(1f, Mathf.Max(pl.CutVolumeM3, pl.FillVolumeM3));
+                        GUILayout.Label($"Earthwork: cut {pl.CutVolumeM3:N0} m³ · fill {pl.FillVolumeM3:N0} m³");
+                        GUILayout.Label(Mathf.Abs(netM3) < 0.05f * maxM3
+                            ? "Mass-haul: balanced (no haul)"
+                            : netM3 > 0f ? $"Mass-haul: +{netM3:N0} m³ surplus (haul off)"
+                                         : $"Mass-haul: {-netM3:N0} m³ deficit (import fill)");
                         GUILayout.Label("Key: solid=at-grade, dashed=cut,\ndbl-dash=fill · cyan/purple/red=brdg/tun/over");
                     }
                     int bs = PlanBuildableStatus();
@@ -1680,12 +1691,21 @@ namespace NetworkDesigner.Terrain
                 if (legB > 0f) DrawWorldText(cam, s, ToWorldXZ(lbMid, 2f), $"{legB:0} m", col);
                 DrawWorldText(cam, s, ToWorldXZ(corner, 2f), $"{ang:0}°", col);
             }
-            var lines = new List<string>(4);
+            var lines = new List<string>(6);
             if (decel != null) lines.Add(decel);
             if (isCurve) lines.Add($"{radius:0}m radius, max speed: {maxSpd:0} km/h");
             else lines.Add($"{len:0}m queue (~{trains:0.0} trains)");
             if (hasGrade) lines.Add($"{gradePct:0.0}% grade");
             lines.Add($"{rated:0} km/h rated");
+            // Inspecting the PLAN also surfaces its whole-plan earthwork + mass-haul (reuse the I mode).
+            if (_lineActive is RailPlanLayer plE && plE.ShowAnalysis && plE.RouteLength >= 1f)
+            {
+                lines.Add($"plan: cut {plE.CutVolumeM3:N0} m³ · fill {plE.FillVolumeM3:N0} m³");
+                float net = plE.CutVolumeM3 - plE.FillVolumeM3;
+                float maxV = Mathf.Max(1f, Mathf.Max(plE.CutVolumeM3, plE.FillVolumeM3));
+                lines.Add(Mathf.Abs(net) < 0.05f * maxV ? "mass-haul: balanced"
+                    : net > 0f ? $"mass-haul: +{net:N0} m³ surplus" : $"mass-haul: {-net:N0} m³ deficit");
+            }
             DrawWorldTextBlock(cam, s, ToWorldXZ(mid, 3f), lines, col);
         }
 
