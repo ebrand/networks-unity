@@ -20,6 +20,7 @@ namespace NetworkDesigner.Terrain
             // frozen set as you pan/zoom; drains the budgeted build queue continuously.
             ChunkWorld.Tick(Cam);
             ChunkOverlays.Update(Cam);   // keep the local build grid under the view
+            ForestGen.RenderForest(Cam); // GPU-instanced forest draw (frustum-culled), every frame
         }
     }
 }

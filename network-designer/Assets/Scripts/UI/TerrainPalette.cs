@@ -55,6 +55,7 @@ namespace NetworkDesigner.UI
             AddBrushButton(body, "Slope (5)",   TerrainDesigner.BrushMode.Slope);   // two-click ramp
             AddBrushButton(body, "Sea (6)",     TerrainDesigner.BrushMode.Sea);     // click-to-flood lower (chunk world)
             AddBrushButton(body, "Measure (7)", TerrainDesigner.BrushMode.Measure); // click A → click B, distance tooltip
+            AddBrushButton(body, "Forest (8)",  TerrainDesigner.BrushMode.Forest);  // click-to-flood select by elevation, then grow trees
 
             body.Add(SliderRow("Radius", () => Designer.BrushRadius, v => Designer.BrushRadius = v,
                 0.5f, Mathf.Max(1f, Designer.MaxBrushRadius), "0"));
@@ -63,6 +64,39 @@ namespace NetworkDesigner.UI
             // 1 = only the centreline, smoothly feathered to the edge. (Freehand brushes keep
             // their own built-in falloff.)
             body.Add(SliderRow("Falloff", () => Designer.BrushFalloff, v => Designer.BrushFalloff = v, 0f, 1f, "0.00"));
+            // Forest (8): pick the tree PACK to plant (same packs as the Trees palette), the elevation
+            // band the magic-wand flood stays within, then grow trees across the selection.
+            body.Add(SectionLabel("FOREST"));
+            body.Add(DropdownRow(() => Designer.TreeLayer.PackNames(),
+                () => Designer.TreeLayer.ActivePackName, v => Designer.TreeLayer.SelectPackByName(v)));
+            body.Add(SliderRow("Forest elev band (m)", () => ForestGen.ElevTolerance,
+                v => ForestGen.ElevTolerance = v, 2f, 200f, "0"));
+            // Distribution shape (baked at grow time — change, then Clear trees → Grow to see it):
+            var presets = HBox();
+            var ld = MakeButton("Light Dusting", () => ForestGen.PresetLightDusting());
+            ld.style.marginRight = 6;
+            presets.Add(ld);
+            presets.Add(MakeButton("Clumps", () => ForestGen.PresetClumps()));
+            body.Add(presets);
+            body.Add(SliderRow("Density", () => ForestGen.Density,
+                v => ForestGen.Density = v, 0.25f, 4f, "0.00"));               // >1 = tighter packing
+            body.Add(SliderRow("Clump scale", () => ForestGen.DensityFreq,
+                v => ForestGen.DensityFreq = v, 0.0004f, 0.006f, "0.0000"));   // lower = bigger clumps
+            body.Add(SliderRow("Clumpiness", () => ForestGen.Threshold,
+                v => ForestGen.Threshold = v, 0.1f, 0.75f, "0.00"));           // higher = sparser/clumpier
+            body.Add(SliderRow("Seams", () => ForestGen.SeamStrength,
+                v => ForestGen.SeamStrength = v, 0f, 1f, "0.00"));             // 0 blobs → 1 ridged veins
+            body.Add(SliderRow("Warp", () => ForestGen.DensityWarp,
+                v => ForestGen.DensityWarp = v, 0f, 3f, "0.0"));               // flowing distortion
+            var fr = HBox();
+            var grow = MakeButton("Grow forest", () => Designer.GrowForest());
+            grow.style.marginRight = 6;
+            fr.Add(grow);
+            var cs = MakeButton("Clear sel", () => ForestGen.ClearSelection());
+            cs.style.marginRight = 6;
+            fr.Add(cs);
+            fr.Add(MakeButton("Clear trees", () => Designer.ClearForestTrees()));
+            body.Add(fr);
             body.Add(Divider());
         }
 

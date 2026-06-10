@@ -24,7 +24,7 @@ namespace NetworkDesigner.Terrain
 {
     public class TerrainDesigner : MonoBehaviour
     {
-        public enum BrushMode { Raise, Lower, Smooth, Flatten, Slope, Sea, Measure }
+        public enum BrushMode { Raise, Lower, Smooth, Flatten, Slope, Sea, Measure, Forest }
 
         [Header("Terrain (low-poly chunked mesh)")]
         [Tooltip("Terrain width/length in metres (square).")]
@@ -256,6 +256,7 @@ namespace NetworkDesigner.Terrain
         string _pendingDemCity;
         DemTerrainWorld.Edits _pendingDemEdits;   // sparse sculpt/carve diff, applied after the DEM builds
         bool _pendingWaterOn; float _pendingWaterLevel;   // chunk water staged from the save; applied in LoadGame
+        List<ForestGen.ForestSpeciesSave> _pendingForest; // forest staged from the save; imported after surface ready
         // The DEM city to fall back to when switching to DEM with no world built — the one
         // loaded this session if any, else the one remembered from the save. Lets the palette
         // auto-reload the last city even when we restarted in low-poly (so it's not "gone").
@@ -452,6 +453,7 @@ namespace NetworkDesigner.Terrain
             if (DemBackend && DemTerrainWorld.HasWorld) DemTerrainWorld.WireCameraToDem();
             MinimapDiorama.Dispose();   // tear down the relief minimap (no-op for the flat test)
             ChunkOverlays.Teardown();   // tear down water + local-grid GOs (toggle state is kept)
+            ForestGen.Teardown();       // tear down the forest-selection highlight
             DemChunkSource.Clear();     // drop the DEM tile mapping/cache (no-op for the flat test)
             Debug.Log("[ChunkTest] stopped.");
         }
@@ -1203,6 +1205,7 @@ namespace NetworkDesigner.Terrain
                 case BrushMode.Slope:   return SlopeIcon;
                 case BrushMode.Sea:     return SmoothIcon;
                 case BrushMode.Measure: return SlopeIcon;
+                case BrushMode.Forest:  return SmoothIcon;
                 default:                return null;
             }
         }
@@ -1953,6 +1956,26 @@ namespace NetworkDesigner.Terrain
         // re-drapes objects/rail onto the new shape. DESTRUCTIVE (no auto-undo); DEM only.
         // Cut/fill the terrain to the laid rail's grade line. Routes to the streaming chunk world
         // (writing the LOD-independent edit overlay) when it's active, else the DEM backend.
+        // Plant a procedural forest across the Forest-tool elevation selection, using the tree layer's
+        // active pack/spacing/slope rules + fBM density + Worley clearings. Marks the scene dirty.
+        public void GrowForest()
+        {
+            if (!ChunkWorld.Active) { Debug.LogWarning("[Forest] Available in the chunk/DEM world only."); return; }
+            if (!ForestGen.HasSelection) { Debug.LogWarning("[Forest] Select a region first — Forest brush (8), click terrain."); return; }
+            float water = ChunkOverlays.ShowWater ? ChunkOverlays.WaterLevel : float.NegativeInfinity;
+            int n = ForestGen.Grow(TreeLayer, Surf, water);
+            if (n > 0) _dirtySince = Time.realtimeSinceStartup;   // persist on autosave
+            Debug.Log($"[Forest] planted {n} instances ({ForestGen.TreeCount} total, {ForestGen.CellCount} grid cells) over {ForestGen.SelectedCells} selected cells"
+                      + (ForestGen.TreeCount >= ForestGen.MaxTrees ? " — HIT THE CAP (raise MaxTrees / spacing, or Clear trees)." : "."));
+        }
+
+        // Clear the whole instanced forest (and persist the empty state).
+        public void ClearForestTrees()
+        {
+            ForestGen.ClearForest();
+            _dirtySince = Time.realtimeSinceStartup;
+        }
+
         public void GradeRailCorridor()
         {
             if (ChunkWorld.Active)
@@ -2108,6 +2131,7 @@ namespace NetworkDesigner.Terrain
                     case BrushMode.Slope: return "Slope (5)";
                     case BrushMode.Sea: return "Sea (6)";
                     case BrushMode.Measure: return "Measure (7)";
+                    case BrushMode.Forest: return "Forest (8)";
                     default: return "";
                 }
             }
@@ -2283,6 +2307,7 @@ namespace NetworkDesigner.Terrain
             else if (Input.GetKeyDown(KeyCode.Alpha5)) Brush = BrushMode.Slope;
             else if (Input.GetKeyDown(KeyCode.Alpha6)) Brush = BrushMode.Sea;
             else if (Input.GetKeyDown(KeyCode.Alpha7)) Brush = BrushMode.Measure;
+            else if (Input.GetKeyDown(KeyCode.Alpha8)) Brush = BrushMode.Forest;
             // T/R/F toggle the active mode (mutually exclusive; press the same
             // key again to return to sculpt).
             if (Input.GetKeyDown(KeyCode.T)) { SetScatterMode(TreeLayer); SyncScatterPalette(); }
@@ -2769,6 +2794,16 @@ namespace NetworkDesigner.Terrain
                     ChunkWorld.FloodLower(hit.point, SeaTolerance, SeaDrop);
                     _dirtySince = Time.realtimeSinceStartup;
                 }
+                return;
+            }
+
+            // Forest tool (chunk world only): left-click flood-selects a region by elevation (magic
+            // wand); right-click clears the selection. "Grow forest" in the palette plants it.
+            if (Brush == BrushMode.Forest)
+            {
+                if (ChunkWorld.Active && overTerrain && !MouseOverActivePanel() && Input.GetMouseButtonDown(0))
+                    ForestGen.SelectByElevation(hit.point);
+                if (Input.GetMouseButtonDown(1)) ForestGen.ClearSelection();
                 return;
             }
 
@@ -4187,6 +4222,12 @@ namespace NetworkDesigner.Terrain
             if (loaded != null) ConformScatterAndLines();
             // Restore the saved water plane (toggle + level) for this game.
             if (loaded != null) { ChunkOverlays.SetWaterLevel(_pendingWaterLevel); ChunkOverlays.SetWater(_pendingWaterOn); }
+            // Rebuild the GPU-instanced forest from the save (prior forest cleared by StopChunkTest above).
+            if (loaded != null && _pendingForest != null)
+            {
+                ForestGen.ImportForest(TreeLayer, _pendingForest);
+                Debug.Log($"[Forest] restored {ForestGen.TreeCount} trees from save.");
+            }
             GameManager.SetActive(name);
             Debug.Log($"[Game] loaded “{name}” (DEM {info.DemSet}, range {info.NormMin:0}..{info.NormMax:0}).");
         }
@@ -4239,6 +4280,8 @@ namespace NetworkDesigner.Terrain
                 // Chunk water plane state.
                 WaterOn = ChunkOverlays.ShowWater,
                 WaterLevel = ChunkOverlays.WaterLevel,
+                // v11+: GPU-instanced forest (decomposed per-species transforms).
+                Forest = ForestGen.ExportForest(),
             };
         }
 
@@ -4306,12 +4349,13 @@ namespace NetworkDesigner.Terrain
                 int cap = 64 + n * 8
                           + TreeBytes(save.Trees) + TreeBytes(save.Rocks)
                           + GraphBytes(save.Fences) + GraphBytes(save.PowerLines)
-                          + GraphBytes(save.Rails) + GraphBytes(save.Plan) + 256;
+                          + GraphBytes(save.Rails) + GraphBytes(save.Plan)
+                          + ForestBytes(save.Forest) + 256;
                 using var ms = new System.IO.MemoryStream(cap);
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(10); // version (10 added the chunk water plane state)
+                    w.Write(11); // version (11 added the GPU-instanced forest)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -4350,6 +4394,8 @@ namespace NetworkDesigner.Terrain
                     // v10+: chunk water plane
                     w.Write(save.WaterOn);
                     w.Write(save.WaterLevel);
+                    // v11+: GPU-instanced forest
+                    WriteForest(w, save.Forest);
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -4360,6 +4406,48 @@ namespace NetworkDesigner.Terrain
         }
 
         static int TreeBytes(List<PlacedTreeData> t) => (t?.Count ?? 0) * 40 + 8;
+        static int ForestBytes(List<ForestGen.ForestSpeciesSave> f)
+        {
+            int b = 8;
+            if (f != null) foreach (var s in f) b += 80 + (s?.X?.Length ?? 0) * 20; // 5 floats/instance
+            return b;
+        }
+
+        static void WriteForest(System.IO.BinaryWriter w, List<ForestGen.ForestSpeciesSave> list)
+        {
+            int c = list?.Count ?? 0;
+            w.Write(c);
+            for (int i = 0; i < c; i++)
+            {
+                var rec = list[i];
+                w.Write(rec?.Prefab ?? "");
+                int n = rec?.X?.Length ?? 0;
+                w.Write(n);
+                for (int k = 0; k < n; k++) w.Write(rec.X[k]);
+                for (int k = 0; k < n; k++) w.Write(rec.Y[k]);
+                for (int k = 0; k < n; k++) w.Write(rec.Z[k]);
+                for (int k = 0; k < n; k++) w.Write(rec.Rot[k]);
+                for (int k = 0; k < n; k++) w.Write(rec.Scale[k]);
+            }
+        }
+
+        static List<ForestGen.ForestSpeciesSave> ReadForest(System.IO.BinaryReader r)
+        {
+            int c = r.ReadInt32();
+            var list = new List<ForestGen.ForestSpeciesSave>(c);
+            for (int i = 0; i < c; i++)
+            {
+                var rec = new ForestGen.ForestSpeciesSave { Prefab = r.ReadString() };
+                int n = r.ReadInt32();
+                rec.X = new float[n];     for (int k = 0; k < n; k++) rec.X[k] = r.ReadSingle();
+                rec.Y = new float[n];     for (int k = 0; k < n; k++) rec.Y[k] = r.ReadSingle();
+                rec.Z = new float[n];     for (int k = 0; k < n; k++) rec.Z[k] = r.ReadSingle();
+                rec.Rot = new float[n];   for (int k = 0; k < n; k++) rec.Rot[k] = r.ReadSingle();
+                rec.Scale = new float[n]; for (int k = 0; k < n; k++) rec.Scale[k] = r.ReadSingle();
+                list.Add(rec);
+            }
+            return list;
+        }
         static int GraphBytes(LineGraphSave g) =>
             ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 32) + 16;
 
@@ -4467,6 +4555,7 @@ namespace NetworkDesigner.Terrain
                 _pendingDemEdits = save.DemEdits;
                 _pendingWaterOn = save.WaterOn;
                 _pendingWaterLevel = save.WaterLevel;
+                _pendingForest = save.Forest;
                 return f;
             }
             catch (System.Exception ex)
@@ -4544,6 +4633,8 @@ namespace NetworkDesigner.Terrain
                     s.WaterOn = r.ReadBoolean();
                     s.WaterLevel = r.ReadSingle();
                 }
+                if (version >= 11) // GPU-instanced forest
+                    s.Forest = ReadForest(r);
                 return s;
             }
             catch { return null; }

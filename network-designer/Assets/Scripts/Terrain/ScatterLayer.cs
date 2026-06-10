@@ -191,6 +191,15 @@ namespace NetworkDesigner.Terrain
             pack.WaterlineMargin = WaterlineMargin;
         }
 
+        // The currently-enabled species (the active pack's trees) — for the GPU-instanced forest renderer.
+        public List<GameObject> EnabledPrefabs()
+        {
+            SyncEnabled();
+            var l = new List<GameObject>();
+            for (int i = 0; i < Prefabs.Count; i++) if (Prefabs[i] != null && _enabled[i]) l.Add(Prefabs[i]);
+            return l;
+        }
+
         // Returns true if a pack was added/replaced (so the host can mark dirty).
         // Public so the UI Toolkit pack-management modal can save/replace by name.
         public bool CreatePack(string name)
@@ -399,6 +408,20 @@ namespace NetworkDesigner.Terrain
             }
             _accum -= placed;
             return placed > 0;
+        }
+
+        // Public single-plant for the forest generator: place a random enabled species at (wx,wz) with
+        // the given rotation/scale IF the lattice cell is free and slope/water allow. Returns true if
+        // placed. (The generator does its own density/clearing/selection filtering before calling this.)
+        public bool TryPlant(ITerrainSurface field, float wx, float wz, float rotY, float scale, float waterLevel)
+        {
+            if (field == null || Prefabs == null || Prefabs.Count == 0) return false;
+            float s = Mathf.Max(0.5f, Spacing);
+            long key = CellKey(Mathf.FloorToInt(wx / s), Mathf.FloorToInt(wz / s));
+            if (_byCell.TryGetValue(key, out List<PlacedTree> occ) && occ.Count > 0) return false;   // cell taken
+            if (MaxSlopeDeg < 89f && field.SampleSlopeDegrees(wx, wz) > MaxSlopeDeg) return false;     // too steep
+            if (AvoidWater && field.SampleHeight(wx, wz) < waterLevel + WaterlineMargin) return false; // underwater
+            return Spawn(field, RandomPrefab(), key, wx, wz, rotY, scale) != null;
         }
 
         // The first item to claim a cell keeps it.

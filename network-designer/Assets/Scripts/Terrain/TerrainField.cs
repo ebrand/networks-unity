@@ -117,6 +117,7 @@ namespace NetworkDesigner.Terrain
         public DemTerrainWorld.Edits DemEdits; // v9+: sparse DEM sculpt/carve height diff (null if none)
         public bool WaterOn;               // v10+: chunk water plane shown
         public float WaterLevel;           // v10+: chunk water level (m)
+        public List<ForestGen.ForestSpeciesSave> Forest; // v11+: GPU-instanced forest (per-species transforms)
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by
