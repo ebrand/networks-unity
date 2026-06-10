@@ -127,6 +127,72 @@ namespace NetworkDesigner.UI
             createBtn.style.height = 40;
             body.Add(createBtn);
             body.Add(status);
+
+            BuildDownloadSection(body);
+        }
+
+        // Download a NEW region straight from real-world coordinates (AWS Terrarium), write the DEM tiles
+        // + manifest, then play it — no website round-trip. Live readout shows the EXACT ground extent.
+        void BuildDownloadSection(VisualElement body)
+        {
+            body.Add(Divider());
+            var hdr = new Label("DOWNLOAD A REGION (real terrain)");
+            hdr.style.color = Ink; hdr.style.marginTop = 6; hdr.style.marginBottom = 4;
+            body.Add(hdr);
+
+            TextField Field(string label, string val)
+            {
+                var l = new Label(label); l.style.color = Sub; l.style.fontSize = 11; body.Add(l);
+                var f = new TextField { value = val }; f.style.marginBottom = 6; body.Add(f);
+                return f;
+            }
+            var dName = Field("Name", "");
+            var dLat = Field("Center latitude", "46.18");
+            var dLon = Field("Center longitude", "-123.83");
+            var dZoom = Field("Zoom (1-15; higher = finer)", "13");
+            var dTiles = Field("Tiles per side (1-8)", "3");
+
+            var readout = new Label(); readout.style.color = Sub; readout.style.fontSize = 11;
+            readout.style.whiteSpace = WhiteSpace.Normal; readout.style.marginBottom = 4; body.Add(readout);
+            var dStatus = new Label(); dStatus.style.color = new Color(0.95f, 0.6f, 0.5f); dStatus.style.fontSize = 11;
+
+            bool Parse(out double lat, out double lon, out int z, out int n)
+            {
+                lat = lon = 0; z = n = 0;
+                var ci = System.Globalization.CultureInfo.InvariantCulture; var fl = System.Globalization.NumberStyles.Float;
+                bool ok = double.TryParse(dLat.value, fl, ci, out lat) && double.TryParse(dLon.value, fl, ci, out lon)
+                       && int.TryParse(dZoom.value, out z) && int.TryParse(dTiles.value, out n);
+                z = Mathf.Clamp(z, 1, 15); n = Mathf.Clamp(n, 1, 8);
+                return ok;
+            }
+            void Refresh()
+            {
+                if (!Parse(out double lat, out double lon, out int z, out int n)) { readout.text = "Enter valid numbers."; return; }
+                NetworkDesigner.Terrain.DemDownloader.Describe(lat, lon, z, n,
+                    out double wKm, out double hKm, out double mpp, out double N, out double S, out double W, out double E);
+                readout.text = $"{wKm:0.0} × {hKm:0.0} km · {mpp:0.0} m/px · {n * 1024 + 1}px/side · {(n * 4 + 1) * (n * 4 + 1)} tiles to fetch\n"
+                             + $"N {N:0.0000}  S {S:0.0000}  W {W:0.0000}  E {E:0.0000}";
+            }
+            dLat.RegisterValueChangedCallback(_ => Refresh());
+            dLon.RegisterValueChangedCallback(_ => Refresh());
+            dZoom.RegisterValueChangedCallback(_ => Refresh());
+            dTiles.RegisterValueChangedCallback(_ => Refresh());
+            Refresh();
+
+            var dlBtn = MakeButton("Download & Play", () =>
+            {
+                string n0 = dName.value?.Trim();
+                if (string.IsNullOrEmpty(n0)) { dStatus.text = "Enter a name."; return; }
+                if (Designer.HasGame(n0)) { dStatus.text = "A game by that name exists."; return; }
+                if (!Parse(out double lat, out double lon, out int z, out int n)) { dStatus.text = "Bad numbers."; return; }
+                dStatus.text = "starting…";
+                NetworkDesigner.Terrain.DemDownloader.Start(n0, lat, lon, z, n,
+                    (p, msg) => dStatus.text = $"{(int)(p * 100)}% — {msg}",
+                    (ok, msg) => { dStatus.text = ok ? $"done — {msg}" : $"failed — {msg}"; if (ok) Designer.LoadGame(n0); });
+            });
+            dlBtn.style.height = 36; dlBtn.style.marginTop = 4;
+            body.Add(dlBtn);
+            body.Add(dStatus);
         }
 
         VisualElement BuildRegionTile(string region)
