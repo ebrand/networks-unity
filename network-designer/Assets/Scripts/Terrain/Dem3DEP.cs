@@ -1,31 +1,275 @@
-// USGS 3DEP 1 m elevation downloader — PHASE 2, NOT YET IMPLEMENTED.
+// USGS 3DEP 1 m elevation downloader (Phase 2).
 //
-// Planned: fetch the selected bbox from the USGS 3DEPElevation ImageServer
-// (https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage,
-// format=tiff, pixelType=F32) at 1 m/px where lidar coverage exists, decode the float32 GeoTIFF,
-// and re-tile into the DemChunkSource 16-bit PNG mosaic (1 km tiles, NW-corner lat/lon in the
-// filename, ≥2×2 so the loader can measure tile pitch) + GameManager manifest. US-only.
-//
-// Until then Start() reports "not implemented" so the UI never silently downloads wrong data.
+// The 3DEPElevation ImageServer exportImage endpoint 500s above ~2048 px per request, so we fetch the
+// area as a grid of 1 km tiles (1000 px = 1 m/px), in parallel with per-tile retries (the gov server
+// throws transient 502s under load). Tiles are requested in WEB MERCATOR (EPSG:3857) so a square-ground
+// tile is a square bbox — otherwise exportImage snaps a lat/lon bbox to a square-degree aspect and the
+// tiles misalign (seams + edge smear). Each tile is a float32 GeoTIFF; we decode it, SPILL the floats to
+// a temp file (RAM stays bounded), and track the global min/max. A second pass reads the spills, encodes
+// 16-bit PNG tiles into the DemChunkSource mosaic (NW-corner lat/lon in the filename, ≥2×2 so the loader
+// can measure tile pitch) + a GameManager manifest with the data's true range, then cleans up. US-only.
 
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using UnityEngine;
+using UnityEngine.Networking;
 
 namespace NetworkDesigner.Terrain
 {
-    public static class Dem3DEP
+    public class Dem3DEP : MonoBehaviour
     {
-        // 16-bit output (2 bytes/px) at 1 m/px → an areaKm-square map is (areaKm·1000)² pixels.
+        const string ExportUrl = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage";
+        const int TilePx = 1000;           // 1 km tile at 1 m/px (exportImage 500s above ~2048 px per request)
+        const int MaxTilesPerSide = 32;    // ≤32 km at 1 m; tile floats spill to temp disk so RAM stays bounded
+        const int FetchConcurrency = 5;    // tiles in parallel (gentle on the 3DEP server)
+        const int MaxRetries = 4;          // transient 502/timeout retries per tile
+        const double MercR = 6378137.0;    // Web Mercator earth radius
+
+        static Dem3DEP _runner;
+        static Dem3DEP Runner
+        {
+            get
+            {
+                if (_runner == null)
+                {
+                    var go = new GameObject("Dem3DEP") { hideFlags = HideFlags.DontSave };
+                    _runner = go.AddComponent<Dem3DEP>();
+                }
+                return _runner;
+            }
+        }
+
         public static void Estimate(double areaKm, out double sizeMB, out double seconds, out long pxSide)
         {
-            pxSide = (long)Math.Round(areaKm * 1000.0);
-            sizeMB = pxSide * pxSide * 2.0 / 1_000_000.0;
-            seconds = Math.Max(3.0, areaKm * areaKm * 1.5);   // ~1.5 s per 1 km tile (rough placeholder)
+            int N = Mathf.Clamp((int)Math.Round(areaKm), 2, MaxTilesPerSide);
+            pxSide = (long)N * TilePx;
+            sizeMB = pxSide * pxSide * 2.0 / 1_000_000.0;       // 16-bit output on disk
+            seconds = Math.Max(5.0, N * N * 0.8);               // ~0.8 s/tile effective (parallel)
         }
 
         public static void Start(string name, double centerLat, double centerLon, double areaKm,
                                  Action<float, string> onProgress, Action<bool, string> onDone)
+            => Runner.StartCoroutine(Runner.Run(name, centerLat, centerLon, areaKm, onProgress, onDone));
+
+        struct TileReq { public UnityWebRequest req; public int r, c; }
+
+        IEnumerator Run(string name, double lat, double lon, double areaKm,
+                        Action<float, string> onProgress, Action<bool, string> onDone)
         {
-            onDone?.Invoke(false, "1 m USGS 3DEP backend not wired yet — UI preview only.");
+            var ci = CultureInfo.InvariantCulture;
+            int N = Mathf.Clamp((int)Math.Round(areaKm), 2, MaxTilesPerSide);
+            int total = N * N;
+
+            // Web Mercator grid: square-metre tiles → exportImage returns exactly the requested extent.
+            double cx = Lon2MercX(lon), cy = Lat2MercY(lat);
+            double tileMerc = 1000.0 / Math.Cos(lat * Math.PI / 180.0);   // 1 km ground tile, in mercator metres
+            double half = N * tileMerc / 2.0;
+            double TileXmin(int c) => cx - half + c * tileMerc;
+            double TileYmax(int r) => cy + half - r * tileMerc;
+
+            string tmpDir = Path.Combine(Application.temporaryCachePath, "dem3dep_tmp");
+            try { TryDelete(tmpDir); Directory.CreateDirectory(tmpDir); }
+            catch (Exception ex) { onDone?.Invoke(false, "temp dir failed: " + ex.Message); yield break; }
+            string TilePath(int r, int c) => Path.Combine(tmpDir, r + "_" + c + ".f32");
+
+            // ── Pass 1: parallel fetch (with retries) + decode → spill floats; track min/max. RAM bounded. ──
+            var pending = new Queue<int>();
+            for (int i = 0; i < total; i++) pending.Enqueue(i);
+            var attempts = new int[total];
+            var inflight = new List<TileReq>();
+            float lo = float.MaxValue, hi = float.MinValue;
+            int doneCount = 0; bool failed = false; string failMsg = null;
+
+            while ((pending.Count > 0 || inflight.Count > 0) && !failed)
+            {
+                while (inflight.Count < FetchConcurrency && pending.Count > 0)
+                {
+                    int idx = pending.Dequeue(); int r = idx / N, c = idx % N;
+                    double xmin = TileXmin(c), xmax = xmin + tileMerc, ymax = TileYmax(r), ymin = ymax - tileMerc;
+                    string bbox = string.Format(ci, "{0},{1},{2},{3}", xmin, ymin, xmax, ymax);
+                    string url = ExportUrl + "?bbox=" + bbox + "&bboxSR=3857&imageSR=3857&size=" + TilePx + "," + TilePx
+                               + "&format=tiff&pixelType=F32&interpolation=RSP_BilinearInterpolation&f=image";
+                    var rq = UnityWebRequest.Get(url); rq.SendWebRequest();
+                    inflight.Add(new TileReq { req = rq, r = r, c = c });
+                }
+                yield return null;
+                for (int i = inflight.Count - 1; i >= 0 && !failed; i--)
+                {
+                    var tr = inflight[i];
+                    if (!tr.req.isDone) continue;
+                    long code = tr.req.responseCode;
+                    var res = tr.req.result;
+                    byte[] data = res == UnityWebRequest.Result.Success && tr.req.downloadHandler != null ? tr.req.downloadHandler.data : null;
+                    tr.req.Dispose(); inflight.RemoveAt(i);
+                    int idx = tr.r * N + tr.c;
+
+                    bool isTiff = data != null && data.Length >= 8 && ((data[0] == 0x49 && data[1] == 0x49) || (data[0] == 0x4D && data[1] == 0x4D));
+                    float[] e = null; int gw = 0, gh = 0;
+                    if (res == UnityWebRequest.Result.Success && isTiff)
+                    {
+                        try { e = DecodeGeoTiffF32(data, out gw, out gh); }
+                        catch (Exception ex) { Debug.LogError($"[Dem3DEP] tile {tr.r},{tr.c} decode exception: {ex}"); e = null; }
+                        if (e != null && (gw != TilePx || gh != TilePx)) e = null;
+                    }
+                    if (e == null)   // failure → retry, or give up after MaxRetries
+                    {
+                        if (++attempts[idx] <= MaxRetries)
+                        { Debug.LogWarning($"[Dem3DEP] tile {tr.r},{tr.c} HTTP {code} (result={res}) — retry {attempts[idx]}/{MaxRetries}"); pending.Enqueue(idx); continue; }
+                        if (data != null && !isTiff) Debug.LogWarning($"[Dem3DEP] tile {tr.r},{tr.c} body:\n{System.Text.Encoding.UTF8.GetString(data, 0, Mathf.Min(300, data.Length))}");
+                        failed = true; failMsg = $"tile {tr.r},{tr.c} failed after {MaxRetries} retries (HTTP {code})"; Debug.LogError("[Dem3DEP] " + failMsg); break;
+                    }
+                    for (int k = 0; k < e.Length; k++) { float v = e[k]; if (float.IsNaN(v) || v < -1000f || v > 10000f) continue; if (v < lo) lo = v; if (v > hi) hi = v; }
+                    try { var b = new byte[e.Length * 4]; Buffer.BlockCopy(e, 0, b, 0, b.Length); File.WriteAllBytes(TilePath(tr.r, tr.c), b); }
+                    catch (Exception ex) { failed = true; failMsg = "spill write failed: " + ex.Message; break; }
+                    doneCount++;
+                    onProgress?.Invoke(0.05f + 0.55f * doneCount / total, $"fetching {doneCount}/{total} tiles");
+                }
+            }
+            if (failed) { for (int i = 0; i < inflight.Count; i++) inflight[i].req.Dispose(); TryDelete(tmpDir); onDone?.Invoke(false, failMsg ?? "fetch failed"); yield break; }
+            if (lo > hi) { TryDelete(tmpDir); onDone?.Invoke(false, "no valid elevation (ocean / outside 3DEP coverage?)"); yield break; }
+
+            float normMin = Mathf.Floor(lo / 10f) * 10f - 10f, normMax = Mathf.Ceil(hi / 10f) * 10f + 10f, range = Mathf.Max(1f, normMax - normMin);
+
+            // ── Pass 2: read spilled floats → encode 16-bit tiles → write mosaic → delete temp. ──
+            string dir = Path.Combine(Application.dataPath, "Heightmaps/Highres", name);
+            try { Directory.CreateDirectory(dir); }
+            catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "mkdir failed: " + ex.Message); yield break; }
+            var gray = new ushort[TilePx * TilePx];
+            for (int r = 0; r < N; r++)
+                for (int c = 0; c < N; c++)
+                {
+                    float[] e;
+                    try { var b = File.ReadAllBytes(TilePath(r, c)); e = new float[b.Length / 4]; Buffer.BlockCopy(b, 0, e, 0, b.Length); }
+                    catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "spill read failed: " + ex.Message); yield break; }
+                    for (int k = 0; k < gray.Length; k++)
+                    {
+                        float v = k < e.Length ? e[k] : normMin;
+                        if (float.IsNaN(v) || v < -1000f || v > 10000f) v = normMin;
+                        gray[k] = (ushort)Mathf.RoundToInt(Mathf.Clamp01((v - normMin) / range) * 65535f);
+                    }
+                    double tlat = MercY2Lat(TileYmax(r)), tlon = MercX2Lon(TileXmin(c));   // tile NW corner
+                    string fn = $"{Fmt(tlat)}_{Fmt(tlon)}_0_{TilePx}_{TilePx}_16bit_tile_{r:00}_{c:00}.png";
+                    try { File.WriteAllBytes(Path.Combine(dir, fn), DemPng16.Encode(gray, TilePx, TilePx)); File.Delete(TilePath(r, c)); }
+                    catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "write failed: " + ex.Message); yield break; }
+                    onProgress?.Invoke(0.6f + 0.38f * ((r * N + c + 1) / (float)total), $"writing tile {r},{c}");
+                    yield return null;
+                }
+            TryDelete(tmpDir);
+
+            if (!GameManager.Create(name, name, normMin, normMax))
+            { onDone?.Invoke(false, "manifest (game.json) create failed — name in use?"); yield break; }
+            onDone?.Invoke(true, $"{N}×{N} km @ 1 m/px · range {normMin:0}..{normMax:0} m");
+        }
+
+        static void TryDelete(string dir) { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
+        static string Fmt(double v) => v.ToString("F6", CultureInfo.InvariantCulture).Replace('.', '_');
+
+        static double Lon2MercX(double lon) => MercR * lon * Math.PI / 180.0;
+        static double Lat2MercY(double lat) { double r = lat * Math.PI / 180.0; return MercR * Math.Log(Math.Tan(Math.PI / 4.0 + r / 2.0)); }
+        static double MercX2Lon(double x) => x / MercR * 180.0 / Math.PI;
+        static double MercY2Lat(double y) => (2.0 * Math.Atan(Math.Exp(y / MercR)) - Math.PI / 2.0) * 180.0 / Math.PI;
+
+        // Minimal GeoTIFF reader for the 3DEP exportImage response: little/big-endian, UNCOMPRESSED,
+        // single-sample 32-bit FLOAT, tiled OR stripped. Returns row-major top-down float[w*h], or null.
+        // (Validated against the live service: 128×128 tiles, compression 1, sampleFormat 3.)
+        static float[] DecodeGeoTiffF32(byte[] d, out int W, out int H)
+        {
+            W = H = 0;
+            if (d == null || d.Length < 16) return null;
+            bool le = d[0] == 0x49 && d[1] == 0x49;     // 'II'
+            bool be = d[0] == 0x4D && d[1] == 0x4D;     // 'MM'
+            if (!le && !be) return null;
+
+            ushort U16(int o) => le ? (ushort)(d[o] | (d[o + 1] << 8)) : (ushort)((d[o] << 8) | d[o + 1]);
+            uint U32(int o) => le ? (uint)(d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24))
+                                  : (uint)((d[o] << 24) | (d[o + 1] << 16) | (d[o + 2] << 8) | d[o + 3]);
+            if (U16(2) != 42) return null;
+            int ifd = (int)U32(4);
+            if (ifd <= 0 || ifd + 2 > d.Length) return null;
+            int n = U16(ifd);
+
+            uint[] ReadVals(int e)
+            {
+                int typ = U16(e + 2); uint cnt = U32(e + 4);
+                int tsz = typ == 3 ? 2 : typ == 4 ? 4 : typ == 1 ? 1 : 4;
+                long total = (long)tsz * cnt;
+                int b = total <= 4 ? e + 8 : (int)U32(e + 8);
+                var arr = new uint[cnt];
+                for (int i = 0; i < cnt; i++) { int o = b + i * tsz; if (o + tsz > d.Length) break; arr[i] = typ == 3 ? U16(o) : typ == 4 ? U32(o) : (uint)d[o]; }
+                return arr;
+            }
+            int One(int e) { var v = ReadVals(e); return v.Length > 0 ? (int)v[0] : 0; }
+
+            int width = 0, height = 0, bits = 0, comp = 1, spp = 1, sf = 1, tw = 0, tl = 0, rps = 0;
+            uint[] tileOff = null, stripOff = null;
+            for (int i = 0; i < n; i++)
+            {
+                int e = ifd + 2 + i * 12;
+                if (e + 12 > d.Length) break;
+                switch (U16(e))
+                {
+                    case 256: width = One(e); break;
+                    case 257: height = One(e); break;
+                    case 258: bits = One(e); break;
+                    case 259: comp = One(e); break;
+                    case 277: spp = One(e); break;
+                    case 278: rps = One(e); break;
+                    case 273: stripOff = ReadVals(e); break;
+                    case 322: tw = One(e); break;
+                    case 323: tl = One(e); break;
+                    case 324: tileOff = ReadVals(e); break;
+                    case 339: sf = One(e); break;
+                }
+            }
+            if (width <= 0 || height <= 0 || bits != 32 || sf != 3 || comp != 1 || spp != 1) return null;
+
+            float F32(int o)
+            {
+                if (o < 0 || o + 4 > d.Length) return float.NaN;
+                if (le == BitConverter.IsLittleEndian) return BitConverter.ToSingle(d, o);
+                var b = new byte[4]; b[0] = d[o + 3]; b[1] = d[o + 2]; b[2] = d[o + 1]; b[3] = d[o];
+                return BitConverter.ToSingle(b, 0);
+            }
+
+            var outp = new float[(long)width * height];
+            if (tw > 0 && tl > 0 && tileOff != null)
+            {
+                int across = (width + tw - 1) / tw;
+                for (int t = 0; t < tileOff.Length; t++)
+                {
+                    int tx = t % across, ty = t / across, baseOff = (int)tileOff[t];
+                    for (int iy = 0; iy < tl; iy++)
+                    {
+                        int oy = ty * tl + iy; if (oy >= height) break;
+                        for (int ix = 0; ix < tw; ix++)
+                        {
+                            int ox = tx * tw + ix; if (ox >= width) continue;
+                            outp[oy * width + ox] = F32(baseOff + (iy * tw + ix) * 4);
+                        }
+                    }
+                }
+            }
+            else if (stripOff != null)
+            {
+                int rowsPer = rps > 0 ? rps : height;
+                for (int s = 0; s < stripOff.Length; s++)
+                {
+                    int baseOff = (int)stripOff[s], y0 = s * rowsPer;
+                    for (int ry = 0; ry < rowsPer; ry++)
+                    {
+                        int oy = y0 + ry; if (oy >= height) break;
+                        for (int ox = 0; ox < width; ox++)
+                            outp[oy * width + ox] = F32(baseOff + (ry * width + ox) * 4);
+                    }
+                }
+            }
+            else return null;
+
+            W = width; H = height;
+            return outp;
         }
     }
 }

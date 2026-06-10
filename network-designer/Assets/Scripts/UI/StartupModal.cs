@@ -266,9 +266,10 @@ namespace NetworkDesigner.UI
             {
                 double areaKm = picker.AreaKm;
                 NetworkDesigner.Terrain.Dem3DEP.Estimate(areaKm, out double sizeMB, out double secs, out long pxSide);
+                double mpp = pxSide > 0 ? areaKm * 1000.0 / pxSide : 1.0;
                 info.text = $"Center {picker.CenterLat:0.0000}, {picker.CenterLon:0.0000}\n"
                           + $"{areaKm:0} × {areaKm:0} km  ({areaKm * areaKm:0} km²)\n"
-                          + $"{pxSide} × {pxSide} px @ 1 m/px\n"
+                          + $"{pxSide} × {pxSide} px @ {mpp:0.#} m/px (USGS 3DEP)\n"
                           + $"download ≈ {sizeMB:0} MB · ~{secs:0} s";
                 sizeField.SetValueWithoutNotify(areaKm.ToString("0", ci));
             }

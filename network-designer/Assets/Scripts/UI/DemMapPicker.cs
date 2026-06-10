@@ -31,7 +31,7 @@ namespace NetworkDesigner.UI
         const int TileMargin = 2;          // extra tiles loaded beyond the viewport (lead for panning)
         const int TexCacheCap = 600;       // decoded tile textures kept (~150 MB) — instant revisits
         const float HandleSize = 16f;
-        const float MaxAreaKm = 16f;
+        const float MaxAreaKm = 32f;
         const double EarthKm = 40075.017;
 
         readonly MonoBehaviour _host;
