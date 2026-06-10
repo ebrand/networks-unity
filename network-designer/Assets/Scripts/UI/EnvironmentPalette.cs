@@ -5,6 +5,7 @@
 using UnityEngine;
 using UnityEngine.UIElements;
 using NetworkDesigner.Terrain;
+using NetworkDesigner.Designer;
 
 namespace NetworkDesigner.UI
 {
@@ -32,8 +33,25 @@ namespace NetworkDesigner.UI
 
         protected override void BuildBody(VisualElement body)
         {
+            // Time-of-day sun arc (warm/low ↔ cool/high via colour temperature). Drives the sun; the
+            // warm-sun + cool-sky-ambient contrast is what gives the cinematic forest look.
+            body.Add(SectionLabel("TIME OF DAY"));
+            body.Add(ToggleRow("Day cycle", () => DayCycle.Enabled, v => DayCycle.SetEnabled(v)));
+            body.Add(SliderRow("Time (h)", () => DayCycle.TimeOfDay,
+                v => { DayCycle.TimeOfDay = v; DayCycle.Apply(); }, 0f, 24f, "0.0"));
+            body.Add(SliderRow("Sun height", () => DayCycle.PeakElevation,
+                v => { DayCycle.PeakElevation = v; DayCycle.Apply(); }, 5f, 89f, "0"));
+            body.Add(SliderRow("Sun dir", () => DayCycle.NorthYaw,
+                v => { DayCycle.NorthYaw = v; DayCycle.Apply(); }, 0f, 360f, "0"));
+            body.Add(SliderRow("Brightness", () => DayCycle.Intensity,
+                v => { DayCycle.Intensity = v; DayCycle.Apply(); }, 0f, 3f, "0.00"));
+            body.Add(ToggleRow("Auto-advance", () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v));
+            body.Add(SliderRow("Day length (min)", () => DayCycle.DayLengthMinutes,
+                v => DayCycle.DayLengthMinutes = v, 0.5f, 30f, "0.0"));
+
             // Master toggle: builds/tears down the fog + mood sky + post-FX volume. The sliders below
             // take effect live while it's on.
+            body.Add(Divider());
             body.Add(SectionLabel("ATMOSPHERE"));
             body.Add(ToggleRow("Enable", () => DemLighting.Enabled, v => DemLighting.SetEnabled(v)));
             body.Add(SliderRow("Haze (fog)", () => DemLighting.FogDensity,
