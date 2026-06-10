@@ -9,6 +9,7 @@
 // (DemLighting owns those).
 
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace NetworkDesigner.Designer
 {
@@ -21,10 +22,15 @@ namespace NetworkDesigner.Designer
         public static float Intensity = 1.35f;      // peak (midday) sun intensity
         public static bool AutoAdvance;
         public static float DayLengthMinutes = 5f;  // real minutes for a full 24 h
+        public static bool ManageSky = true;        // own a sun-following procedural sky + skybox ambient
 
         const float WarmK = 2200f, CoolK = 6200f;
 
-        public static void SetEnabled(bool on) { Enabled = on; if (on) Apply(); }
+        static Material _sky, _origSky;
+        static bool _skyInstalled;
+        static float _lastGi = -999f;
+
+        public static void SetEnabled(bool on) { Enabled = on; if (on) Apply(); else RestoreSky(); }
 
         // Advance the clock when auto-advancing; otherwise the palette drives Apply on edits.
         public static void Tick(float dt)
@@ -58,6 +64,47 @@ namespace NetworkDesigner.Designer
 
             sun.shadows = LightShadows.Soft;
             sun.shadowStrength = 0.7f;
+
+            // Sky + ambient follow the same sun: the procedural skybox scatters from this directional
+            // light, so we get blue overhead / warm horizon / sunrise-sunset, and a cool sky-ambient
+            // fill in shadows — the warm-sun/cool-shadow contrast.
+            RenderSettings.sun = sun;
+            if (ManageSky) UpdateSky(elev); else RestoreSky();
+        }
+
+        static void UpdateSky(float elev)
+        {
+            EnsureSky();
+            if (_sky == null) return;
+            float day = Mathf.Clamp01((elev + 2f) / 10f);                  // 0 night → 1 full day
+            _sky.SetColor("_SkyTint", new Color(0.52f, 0.63f, 0.85f));     // daytime blue
+            _sky.SetColor("_GroundColor", new Color(0.27f, 0.30f, 0.34f));
+            _sky.SetFloat("_Exposure", Mathf.Lerp(0.12f, 1.3f, day));      // dark night → bright day
+            _sky.SetFloat("_AtmosphereThickness", Mathf.Lerp(0.6f, 1.0f, day));
+            RenderSettings.ambientMode = AmbientMode.Skybox;
+            RenderSettings.ambientIntensity = Mathf.Lerp(0.22f, 1f, day);
+            // GI environment is the expensive bit — refresh on manual edits, but throttle auto-advance.
+            if (!AutoAdvance || Time.unscaledTime - _lastGi > 0.4f)
+            { DynamicGI.UpdateEnvironment(); _lastGi = Time.unscaledTime; }
+        }
+
+        static void EnsureSky()
+        {
+            if (_skyInstalled) return;
+            var sh = Shader.Find("Skybox/Procedural");
+            if (sh == null) return;
+            if (_sky == null) _sky = new Material(sh) { name = "DayCycle Sky" };
+            if (RenderSettings.skybox != _sky) _origSky = RenderSettings.skybox;
+            RenderSettings.skybox = _sky;
+            _skyInstalled = true;
+        }
+
+        static void RestoreSky()
+        {
+            if (!_skyInstalled) return;
+            RenderSettings.skybox = _origSky;
+            DynamicGI.UpdateEnvironment();
+            _skyInstalled = false;
         }
 
         static Light FindSun()

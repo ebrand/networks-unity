@@ -34,20 +34,17 @@ namespace NetworkDesigner.Terrain
         static ColorAdjustments _col;
         static Bloom _bloom;
         static Vignette _vig;
-        static Material _origSkybox, _moodSky;
 
         public static void SetEnabled(bool on) { if (on == Enabled) return; if (on) Enable(); else Clear(); }
         public static void Toggle() => SetEnabled(!Enabled);
 
         static void Enable()
         {
-            // Atmospheric fog (the biggest aerial-perspective lever) + a fog-matched mood sky so the
-            // sky/horizon/below-horizon all blend with the haze instead of clashing.
+            // Atmospheric fog (the biggest aerial-perspective lever). Sky + ambient are owned by DayCycle
+            // (its sun-following procedural sky), so this no longer swaps the skybox.
             RenderSettings.fog = true;
             RenderSettings.fogMode = FogMode.ExponentialSquared;
             RenderSettings.fogColor = FogTint;
-            SetupMoodSky(FogTint);
-            if (RenderSettings.skybox != null) { RenderSettings.ambientMode = AmbientMode.Skybox; DynamicGI.UpdateEnvironment(); }
 
             // Global post-processing Volume (built once; components cached for live tweaks).
             BuildProfile();
@@ -72,8 +69,6 @@ namespace NetworkDesigner.Terrain
             _col = null; _bloom = null; _vig = null; _vol = null;
 
             RenderSettings.fog = false;
-            if (_origSkybox != null) { RenderSettings.skybox = _origSkybox; _origSkybox = null; DynamicGI.UpdateEnvironment(); }
-            if (_moodSky != null) { Object.DestroyImmediate(_moodSky); _moodSky = null; }
 
             var cam = MainCam();
             if (cam != null) cam.GetUniversalAdditionalCameraData().renderPostProcessing = false;
@@ -121,22 +116,6 @@ namespace NetworkDesigner.Terrain
             _vig.smoothness.overrideState = true; _vig.smoothness.value = 0.7f;
 
             _profile = p;
-        }
-
-        // A dimmer procedural sky matched to the fog: ground hemisphere = haze (kills the brown),
-        // lower exposure (kills the white horizon), cooler tint. Restored on Clear.
-        static void SetupMoodSky(Color haze)
-        {
-            var sh = Shader.Find("Skybox/Procedural");
-            if (sh == null) return;
-            if (_origSkybox == null && RenderSettings.skybox != _moodSky) _origSkybox = RenderSettings.skybox;
-            if (_moodSky == null) _moodSky = new Material(sh) { name = "DEM Mood Sky" };
-            _moodSky.SetColor("_SkyTint", new Color(0.48f, 0.56f, 0.66f));
-            _moodSky.SetColor("_GroundColor", haze);
-            _moodSky.SetFloat("_Exposure", 0.75f);
-            _moodSky.SetFloat("_AtmosphereThickness", 1.15f);
-            RenderSettings.skybox = _moodSky;
-            DynamicGI.UpdateEnvironment();
         }
 
         static Camera MainCam() => Camera.main != null ? Camera.main : Object.FindFirstObjectByType<Camera>();

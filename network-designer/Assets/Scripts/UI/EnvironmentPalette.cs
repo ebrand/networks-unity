@@ -37,6 +37,7 @@ namespace NetworkDesigner.UI
             // warm-sun + cool-sky-ambient contrast is what gives the cinematic forest look.
             body.Add(SectionLabel("TIME OF DAY"));
             body.Add(ToggleRow("Day cycle", () => DayCycle.Enabled, v => DayCycle.SetEnabled(v)));
+            body.Add(ToggleRow("Sky + ambient", () => DayCycle.ManageSky, v => { DayCycle.ManageSky = v; DayCycle.Apply(); }));
             body.Add(SliderRow("Time (h)", () => DayCycle.TimeOfDay,
                 v => { DayCycle.TimeOfDay = v; DayCycle.Apply(); }, 0f, 24f, "0.0"));
             body.Add(SliderRow("Sun height", () => DayCycle.PeakElevation,
