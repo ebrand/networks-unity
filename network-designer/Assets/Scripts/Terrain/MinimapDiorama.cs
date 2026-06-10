@@ -1,8 +1,9 @@
 // A pre-baked 3D RELIEF DIORAMA of the whole DEM mosaic for the corner minimap. On DEM load we
 // sample the mosaic into a small low-poly relief mesh, park it far from the play area on a dedicated
 // layer, and point a private camera at it that renders to a RenderTexture (drawn in the corner by
-// TerrainDesigner.DrawChunkMinimap). A translucent marker box tracks the play camera's position on
-// the relief so you can see where you are in the ~71 km block.
+// TerrainDesigner.DrawChunkMinimap). A filled yellow patch marks the ACTUAL loaded-chunk bubble on
+// the relief, and a small hollow yellow outline marks where the play camera is — so when the bubble
+// is locked and you fly away, you can see both where your terrain is and where you are.
 //
 // Lit by the scene's directional sun (position-independent), so no extra light is added. Vertical
 // exaggeration makes the relief read at this scale. Built/destroyed by Start/StopChunkDem.
@@ -27,9 +28,9 @@ namespace NetworkDesigner.Terrain
 
         Camera _cam;
         RenderTexture _rt;
-        GameObject _meshGo, _marker;
+        GameObject _meshGo, _marker, _camMarker;
         Mesh _mesh;
-        Material _mat, _markerMat;
+        Material _mat, _markerMat, _camMarkerMat;
         Camera _track;
         float _scale, _spanX, _spanZ, _minY;
         float[] _relief;   // baked relief height grid (GridRes²), so the marker can drape the same surface
@@ -67,6 +68,7 @@ namespace NetworkDesigner.Terrain
 
             BuildReliefShell();
             BuildMarker();
+            BuildCamMarker();
             BuildCamera();
             StartCoroutine(BakeRelief(ww, wl));   // sample the mosaic progressively (decode-paced, no freeze)
         }
@@ -134,17 +136,34 @@ namespace NetworkDesigner.Terrain
 
         void BuildMarker()
         {
-            // A translucent yellow patch DRAPED over the relief (a mesh, rebuilt each frame in
-            // LateUpdate to follow the camera and conform to the surface). Same winding as the relief
+            // A translucent yellow patch DRAPED over the relief at the ACTUAL loaded-chunk footprint
+            // (rebuilt each frame in LateUpdate to conform to the surface). Same winding as the relief
             // → faces up, no single-sided-quad gotcha.
             _marker = new GameObject("BubbleMarker");
             _marker.transform.SetParent(transform, false);
             _marker.transform.position = FarOffset;
             _marker.layer = Layer;
             _marker.AddComponent<MeshFilter>().sharedMesh = new Mesh { name = "BubbleMarker" };
-            _markerMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 0.88f, 0.1f, 0.6f), 0f, "MinimapBubble");
+            _markerMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 0.88f, 0.1f, 0.55f), 0f, "MinimapBubble");
             var mr = _marker.AddComponent<MeshRenderer>();
             mr.sharedMaterial = _markerMat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+        }
+
+        void BuildCamMarker()
+        {
+            // A small hollow yellow OUTLINE marking where the play camera is (so you can tell it apart
+            // from the loaded-chunk patch when the bubble is locked and you've flown elsewhere).
+            _camMarker = new GameObject("CamMarker");
+            _camMarker.transform.SetParent(transform, false);
+            _camMarker.transform.position = FarOffset;
+            _camMarker.layer = Layer;
+            _camMarker.AddComponent<MeshFilter>().sharedMesh = new Mesh { name = "CamMarker" };
+            _camMarkerMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 0.95f, 0.2f, 0.95f), 0f, "MinimapCam");
+            _camMarkerMat.SetFloat("_Cull", 0f);   // double-sided so the thin ring shows regardless of winding
+            var mr = _camMarker.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = _camMarkerMat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows = false;
         }
@@ -208,23 +227,40 @@ namespace NetworkDesigner.Terrain
             Camera cam = _track != null ? _track : Camera.main;
             OrientCamera(cam);   // keep the diorama heading synced to the play camera, even while baking
 
-            if (_marker == null || !DemChunkSource.Active || _relief == null) return;
-            if (cam == null) { if (_marker.activeSelf) _marker.SetActive(false); return; }
-            // Size from the resident bubble (how much is loaded)…
-            if (!ChunkWorld.TryLoadedBounds(out _, out float sx, out float sz))
-            { if (_marker.activeSelf) _marker.SetActive(false); return; }
-            if (!_marker.activeSelf) _marker.SetActive(true);
+            if (_marker == null || _camMarker == null || !DemChunkSource.Active || _relief == null) return;
 
-            // …CENTRE on where the camera is looking (smooth tracking), and DRAPE a grid over the
-            // relief across the bubble footprint so it follows the surface instead of clipping.
+            // Filled patch = the ACTUAL loaded chunks (true centre + extent from the resident set), so it
+            // stays put on the relief when the bubble is locked and you fly away.
+            if (!ChunkWorld.TryLoadedBounds(out Vector3 bc, out float sx, out float sz))
+            { if (_marker.activeSelf) _marker.SetActive(false); }
+            else
+            {
+                if (!_marker.activeSelf) _marker.SetActive(true);
+                float liftB = Mathf.Max(_spanX, _spanZ) * 0.01f;
+                DrapePatch(_marker.GetComponent<MeshFilter>().sharedMesh,
+                    WorldToDioramaX(bc.x), WorldToDioramaZ(bc.z), sx * _scale * 0.5f, sz * _scale * 0.5f, liftB);
+            }
+
+            // Hollow outline = where the play camera is looking (small fixed square, lifted above the patch).
+            if (cam == null) { if (_camMarker.activeSelf) _camMarker.SetActive(false); return; }
+            if (!_camMarker.activeSelf) _camMarker.SetActive(true);
             Vector3 cp = cam.transform.position, f = cam.transform.forward;
             Vector3 g = (f.y < -1e-3f) ? cp + f * (-cp.y / f.y) : new Vector3(cp.x, 0f, cp.z);
-            float ucx = (g.x - DemChunkSource.OriginX) / Mathf.Max(1f, DemChunkSource.WorldWidthX);
-            float vcz = (g.z - DemChunkSource.OriginZ) / Mathf.Max(1f, DemChunkSource.WorldLengthZ);
-            float cxD = ucx * _spanX, czD = vcz * _spanZ;                 // diorama-space centre
-            float halfX = sx * _scale * 0.5f, halfZ = sz * _scale * 0.5f;
-            float lift = Mathf.Max(_spanX, _spanZ) * 0.01f;              // float just above the relief
+            float camHalf = Mathf.Max(_spanX, _spanZ) * 0.025f;
+            float liftC = Mathf.Max(_spanX, _spanZ) * 0.02f;
+            DrapeOutline(_camMarker.GetComponent<MeshFilter>().sharedMesh,
+                WorldToDioramaX(g.x), WorldToDioramaZ(g.z), camHalf, camHalf, camHalf * 0.34f, liftC);
+        }
 
+        float WorldToDioramaX(float wx) => (wx - DemChunkSource.OriginX) / Mathf.Max(1f, DemChunkSource.WorldWidthX) * _spanX;
+        float WorldToDioramaZ(float wz) => (wz - DemChunkSource.OriginZ) / Mathf.Max(1f, DemChunkSource.WorldLengthZ) * _spanZ;
+
+        Vector3 Pt(float dx, float dz, float lift) =>
+            new Vector3(dx, ReliefY(dx / Mathf.Max(1e-3f, _spanX), dz / Mathf.Max(1e-3f, _spanZ)) + lift, dz);
+
+        // A filled grid patch draped over the relief, centred at (cxD,czD) with the given half-extents.
+        void DrapePatch(Mesh m, float cxD, float czD, float halfX, float halfZ, float lift)
+        {
             const int n = 18;
             var verts = new Vector3[n * n];
             for (int z = 0; z < n; z++)
@@ -232,8 +268,7 @@ namespace NetworkDesigner.Terrain
                 {
                     float dx = cxD - halfX + (x / (float)(n - 1)) * (2f * halfX);
                     float dz = czD - halfZ + (z / (float)(n - 1)) * (2f * halfZ);
-                    float y = ReliefY(dx / Mathf.Max(1e-3f, _spanX), dz / Mathf.Max(1e-3f, _spanZ)) + lift;
-                    verts[z * n + x] = new Vector3(dx, y, dz);
+                    verts[z * n + x] = Pt(dx, dz, lift);
                 }
             var tris = new int[(n - 1) * (n - 1) * 6];
             int ti = 0;
@@ -244,9 +279,24 @@ namespace NetworkDesigner.Terrain
                     tris[ti++] = a; tris[ti++] = c; tris[ti++] = b;
                     tris[ti++] = b; tris[ti++] = c; tris[ti++] = d;
                 }
-            var m = _marker.GetComponent<MeshFilter>().sharedMesh;
-            m.Clear();
-            m.vertices = verts; m.triangles = tris;
+            m.Clear(); m.vertices = verts; m.triangles = tris;
+            m.RecalculateNormals(); m.RecalculateBounds();
+        }
+
+        // A hollow rectangular OUTLINE (border ring of width t) draped over the relief. Double-sided
+        // material, so winding doesn't matter.
+        void DrapeOutline(Mesh m, float cxD, float czD, float halfX, float halfZ, float t, float lift)
+        {
+            float[] ox = { cxD - halfX, cxD + halfX, cxD + halfX, cxD - halfX };
+            float[] oz = { czD - halfZ, czD - halfZ, czD + halfZ, czD + halfZ };
+            float[] ix = { cxD - halfX + t, cxD + halfX - t, cxD + halfX - t, cxD - halfX + t };
+            float[] iz = { czD - halfZ + t, czD - halfZ + t, czD + halfZ - t, czD + halfZ - t };
+            var verts = new Vector3[8];
+            for (int i = 0; i < 4; i++) verts[i] = Pt(ox[i], oz[i], lift);
+            for (int i = 0; i < 4; i++) verts[4 + i] = Pt(ix[i], iz[i], lift);
+            // Wound to face UP (so the lit material isn't dark); double-sided material covers either way.
+            var tris = new int[] { 0,5,1, 0,4,5, 1,6,2, 1,5,6, 2,7,3, 2,6,7, 3,4,0, 3,7,4 };
+            m.Clear(); m.vertices = verts; m.triangles = tris;
             m.RecalculateNormals(); m.RecalculateBounds();
         }
     }
