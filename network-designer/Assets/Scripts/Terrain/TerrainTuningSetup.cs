@@ -380,6 +380,24 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("rail.gradeStep", "Rail", "Grade sample step (m)",
                 () => t.RailLayer.GradeSampleStep, v => t.RailLayer.GradeSampleStep = v, 1f, 50f,
                 description: "Spacing at which the terrain elevation is sampled along an edge to check the per-section grade — the 'every N metres' resolution. Smaller = finer (catches short steep bumps), larger = smoother.");
+
+            // --- Plan grade labels (world-space, painted on the ground) ---
+            TuningRegistry.RegisterFloat("plan.labelSize", "Grade labels", "Label size (world m)",
+                () => WorldGradeLabels.Size, v => WorldGradeLabels.Size = v, 5f, 120f, 1f,
+                description: "World text height of the on-ground grade % labels. Bigger = readable from higher up / farther away.");
+            TuningRegistry.RegisterFloat("plan.labelLift", "Grade labels", "Label lift (m)",
+                () => WorldGradeLabels.Lift, v => WorldGradeLabels.Lift = v, 0f, 20f, 0.5f,
+                description: "Metres the labels float above the route midpoint (clears z-fighting with the terrain + contour overlay).");
+            TuningRegistry.RegisterBool("plan.labelFlat", "Grade labels", "Lay flat on the ground",
+                () => WorldGradeLabels.LieFlat, v => WorldGradeLabels.LieFlat = v,
+                description: "On: labels painted flat on the terrain along the track. Off: upright billboard text that always faces the camera.");
+            // --- Auto-route (A* plan router) ---
+            TuningRegistry.RegisterFloat("plan.routeClimb", "Auto-route", "Climb avoidance",
+                () => RailAutoRoute.ClimbWeight, v => RailAutoRoute.ClimbWeight = v, 5f, 80f, 1f,
+                description: "Metres of horizontal detour worth avoiding 1 m of climb. Higher = hunts harder for the draw / hugs contours; lower = straighter, more climb.");
+            TuningRegistry.RegisterBool("plan.routeEnforceGrade", "Auto-route", "Route ≤ ruling grade",
+                () => RailAutoRoute.EnforceGrade, v => RailAutoRoute.EnforceGrade = v,
+                description: "On: escalate climb-avoidance until every segment's ground grade ≤ Max grade %, else report best effort. Off: single-pass least-ascent corridor.");
             TuningRegistry.RegisterFloat("rail.trackSnap", "Rail", "Track snap radius (m)",
                 () => t.RailLayer.TrackSnapRadius, v => t.RailLayer.TrackSnapRadius = v, 0f, 25f,
                 description: "Snap radius for connecting to EXISTING track: a click within this of a node or rail edge is pulled exactly onto it (overrides grid snap) so it reliably joins the network. 0 = grid snap only.");
