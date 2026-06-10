@@ -106,11 +106,27 @@ namespace NetworkDesigner.Terrain
                     Destroy(t.gameObject);
         }
 
+#if UNITY_EDITOR
+        // Definitive hot-reload fix: destroy the label objects BEFORE the domain reloads, so they never
+        // survive as orphans with broken (magenta) materials. Re-registers on every editor domain load.
+        [UnityEditor.InitializeOnLoadMethod]
+        static void HookHotReload()
+        {
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () =>
+            {
+                foreach (var go in FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                    if (go != null && (go.name == "GradeLabel" || go.name == "WorldGradeLabels"))
+                        DestroyImmediate(go);
+            };
+        }
+#endif
+
         TextMeshPro NewLabel()
         {
             var go = new GameObject("GradeLabel") { hideFlags = HideFlags.DontSave };
             go.transform.SetParent(_root, false);
             var tmp = go.AddComponent<TextMeshPro>();
+            if (TMP_Settings.defaultFontAsset != null) tmp.font = TMP_Settings.defaultFontAsset;  // explicit → no magenta
             tmp.alignment = TextAlignmentOptions.Center;
             tmp.overflowMode = TextOverflowModes.Overflow;
             tmp.fontSize = Size;

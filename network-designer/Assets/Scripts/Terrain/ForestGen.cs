@@ -437,6 +437,44 @@ namespace NetworkDesigner.Terrain
             _species.Clear(); _byPrefab.Clear(); TreeCount = 0; _visDirty = true;
         }
 
+        // Erase forest instances within `radius` (m) of a world XZ point — the Forest-tool brush eraser
+        // (the trees are GPU-instanced data, not GameObjects, so the scatter palette can't remove them).
+        public static int EraseAt(float wx, float wz, float radius)
+        {
+            if (radius <= 0f || _species.Count == 0) return 0;
+            float r2 = radius * radius;
+            int cx0 = Mathf.FloorToInt((wx - radius) / CellSize), cx1 = Mathf.FloorToInt((wx + radius) / CellSize);
+            int cz0 = Mathf.FloorToInt((wz - radius) / CellSize), cz1 = Mathf.FloorToInt((wz + radius) / CellSize);
+            int removed = 0;
+            foreach (var sp in _species)
+            {
+                int spRemoved = 0;
+                for (int cz = cz0; cz <= cz1; cz++)
+                    for (int cx = cx0; cx <= cx1; cx++)
+                    {
+                        long key = ((long)cx << 32) ^ (uint)cz;
+                        if (!sp.cells.TryGetValue(key, out var cell)) continue;
+                        var items = cell.items;
+                        for (int i = items.Count - 1; i >= 0; i--)
+                        {
+                            Vector3 p = items[i].GetColumn(3);
+                            float dx = p.x - wx, dz = p.z - wz;
+                            if (dx * dx + dz * dz <= r2)
+                            {
+                                items[i] = items[items.Count - 1];   // swap-remove
+                                items.RemoveAt(items.Count - 1);
+                                spRemoved++;
+                            }
+                        }
+                        if (spRemoved > 0) cell.boundsDirty = true;
+                    }
+                sp.count -= spRemoved;
+                removed += spRemoved;
+            }
+            if (removed > 0) { TreeCount -= removed; _visDirty = true; }
+            return removed;
+        }
+
         // ── Persistence (autosave) ────────────────────────────────────────────────────────────
         // Decompose the baked instance matrices into compact per-species records. Rotation is Y-only and
         // scale uniform (how we built them), so this is exact.

@@ -2667,9 +2667,13 @@ namespace NetworkDesigner.Terrain
                     && _active.Paint(Surf, hit.point, Time.deltaTime, BrushRadius,
                                      ShowWater ? WaterLevel : float.NegativeInfinity))
                     _dirtySince = Time.realtimeSinceStartup;
-                if (!overPanel && overTerrain && Input.GetMouseButton(1)
-                    && _active.Erase(hit.point, BrushRadius))
-                    _dirtySince = Time.realtimeSinceStartup;
+                if (!overPanel && overTerrain && Input.GetMouseButton(1))
+                {
+                    bool erased = _active.Erase(hit.point, BrushRadius);
+                    // The Tree eraser also removes the instanced forest (one delete for both).
+                    if (IsTreeMode && ForestGen.EraseAt(hit.point.x, hit.point.z, BrushRadius) > 0) erased = true;
+                    if (erased) _dirtySince = Time.realtimeSinceStartup;
+                }
                 return;
             }
 
@@ -2806,12 +2810,20 @@ namespace NetworkDesigner.Terrain
             }
 
             // Forest tool (chunk world only): left-click flood-selects a region by elevation (magic
-            // wand); right-click clears the selection. "Grow forest" in the palette plants it.
+            // wand); right-drag erases planted trees within the brush radius. "Grow forest" plants the
+            // selection; "Clear sel" clears the selection highlight.
             if (Brush == BrushMode.Forest)
             {
-                if (ChunkWorld.Active && overTerrain && !MouseOverActivePanel() && Input.GetMouseButtonDown(0))
-                    ForestGen.SelectByElevation(hit.point);
-                if (Input.GetMouseButtonDown(1)) ForestGen.ClearSelection();
+                if (ChunkWorld.Active && overTerrain && !MouseOverActivePanel())
+                {
+                    if (Input.GetMouseButtonDown(0)) ForestGen.SelectByElevation(hit.point);
+                    if (Input.GetMouseButton(1))   // right-drag = tree eraser (forest + placed trees)
+                    {
+                        bool erased = ForestGen.EraseAt(hit.point.x, hit.point.z, BrushRadius) > 0;
+                        if (TreeLayer.Erase(hit.point, BrushRadius)) erased = true;
+                        if (erased) _dirtySince = Time.realtimeSinceStartup;
+                    }
+                }
                 return;
             }
 
