@@ -233,20 +233,34 @@ namespace NetworkDesigner.Terrain
                 ? RailAutoRoute.RouteWithinGrade(field, a, b, MaxGradePercent, out string status)
                 : RailAutoRoute.Route(field, a, b, MaxGradePercent, out status);
             if (route == null || route.Count < 2) return status;
+            // Round corners tighter than the design speed allows (approximate).
+            if (RailAutoRoute.SpeedLimitCurves && LimitCurveRadius)
+                route = RailAutoRoute.SmoothToRadius(route, MinRadiusForSpeed);
 
             // Drop any direct edge between A and B; we only ADD nodes after this, so ia/ib stay valid.
             for (int i = gr.Edges.Count - 1; i >= 0; i--)
             { var e = gr.Edges[i]; if ((e.A == ia && e.B == ib) || (e.A == ib && e.B == ia)) gr.Edges.RemoveAt(i); }
 
-            // Chain A → interior waypoints → B with straight edges (the plan auto-smooths them).
-            int prev = ia;
-            for (int k = 1; k < route.Count - 1; k++)
+            // Node-index list for the whole route (A, interior waypoints, B).
+            var idx = new System.Collections.Generic.List<int>(route.Count);
+            idx.Add(ia);
+            for (int k = 1; k < route.Count - 1; k++) idx.Add(gr.AddNode(route[k]));
+            idx.Add(ib);
+            // Connect with smooth CATMULL-ROM bezier edges so the plan draws real arcs through the
+            // waypoints (rounded curves), not sharp corners between straight legs.
+            for (int k = 0; k < idx.Count - 1; k++)
             {
-                int n = gr.AddNode(route[k]);
-                gr.AddEdge(prev, n);
-                prev = n;
+                gr.AddEdge(idx[k], idx[k + 1]);
+                LineEdge e = FindEdge(idx[k], idx[k + 1]);
+                if (e == null) continue;
+                Vector2 p0 = gr.Nodes[idx[Mathf.Max(0, k - 1)]];
+                Vector2 p1 = gr.Nodes[idx[k]];
+                Vector2 p2 = gr.Nodes[idx[k + 1]];
+                Vector2 p3 = gr.Nodes[idx[Mathf.Min(idx.Count - 1, k + 2)]];
+                e.HasCurve = true;
+                e.ControlA = p1 + (p2 - p0) * (1f / 6f);
+                e.ControlB = p2 - (p3 - p1) * (1f / 6f);
             }
-            gr.AddEdge(prev, ib);
             _chainTail = ib;
             Rebuild(field);
             return status;

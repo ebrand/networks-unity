@@ -20,6 +20,48 @@ namespace NetworkDesigner.Terrain
         // When true, escalate climb-avoidance until every segment's ground grade ≤ the ruling grade
         // (the grade the plan actually displays), or report the best effort if the region is too steep.
         public static bool EnforceGrade = true;
+        // When true, round corners tighter than the design speed's min radius after routing (approximate).
+        public static bool SpeedLimitCurves = true;
+        // Douglas-Peucker tolerance (m): how much micro-wiggle to drop before smoothing. Higher = longer
+        // straights with deliberate bends (more cut/fill, more realistic); lower = hugs the terrain.
+        public static float SimplifyMeters = 70f;
+
+        // Round any corner whose circumradius is below minRadius (Chaikin corner-cut), repeated a few
+        // times. Endpoints preserved. Tames grid-A* kinks toward speed-feasible curves (not a guarantee —
+        // it widens tight bends; the plan's curve analysis remains authoritative).
+        public static List<Vector2> SmoothToRadius(List<Vector2> pts, float minRadius, int maxIters = 5)
+        {
+            if (pts == null || pts.Count < 3 || minRadius <= 0f) return pts;
+            var cur = pts;
+            for (int iter = 0; iter < maxIters; iter++)
+            {
+                bool any = false;
+                var outp = new List<Vector2>(cur.Count + 8) { cur[0] };
+                for (int i = 1; i < cur.Count - 1; i++)
+                {
+                    Vector2 a = cur[i - 1], v = cur[i], b = cur[i + 1];
+                    if (Circumradius(a, v, b) < minRadius)
+                    {
+                        outp.Add(Vector2.Lerp(v, a, 0.25f));   // cut the corner → two gentler bends
+                        outp.Add(Vector2.Lerp(v, b, 0.25f));
+                        any = true;
+                    }
+                    else outp.Add(v);
+                }
+                outp.Add(cur[cur.Count - 1]);
+                cur = outp;
+                if (!any) break;
+            }
+            return cur;
+        }
+
+        static float Circumradius(Vector2 a, Vector2 b, Vector2 c)
+        {
+            float ab = Vector2.Distance(a, b), bc = Vector2.Distance(b, c), ca = Vector2.Distance(c, a);
+            float area = Mathf.Abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) * 0.5f;
+            if (area < 1e-3f) return float.PositiveInfinity;   // collinear → straight → no curve
+            return ab * bc * ca / (4f * area);
+        }
 
         // a,b = world XZ. maxGradePct = ruling grade (e.g. 2.2). climbWeight < 0 → use the static field.
         // Returns null + a reason on failure.
@@ -118,7 +160,7 @@ namespace NetworkDesigner.Terrain
             }
             path.Reverse();
 
-            var simp = Simplify(path, cell * 0.4f);   // keep draw-following bends, drop only grid noise
+            var simp = Simplify(path, Mathf.Max(cell * 0.5f, SimplifyMeters));   // drop micro-wiggle → straighter
             status = $"routed {simp.Count} pts on a {cols}×{rows} grid (cell {cell:0} m)";
             return simp;
         }

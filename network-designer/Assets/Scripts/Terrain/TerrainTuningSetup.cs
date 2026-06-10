@@ -398,6 +398,12 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterBool("plan.routeEnforceGrade", "Auto-route", "Route ≤ ruling grade",
                 () => RailAutoRoute.EnforceGrade, v => RailAutoRoute.EnforceGrade = v,
                 description: "On: escalate climb-avoidance until every segment's ground grade ≤ Max grade %, else report best effort. Off: single-pass least-ascent corridor.");
+            TuningRegistry.RegisterBool("plan.routeSpeedCurves", "Auto-route", "Speed-limit curves",
+                () => RailAutoRoute.SpeedLimitCurves, v => RailAutoRoute.SpeedLimitCurves = v,
+                description: "On: round route corners tighter than the design speed's min radius after routing (approximate; can pull tight bends in a little and nudge the grade).");
+            TuningRegistry.RegisterFloat("plan.routeStraightness", "Auto-route", "Route straightness (m)",
+                () => RailAutoRoute.SimplifyMeters, v => RailAutoRoute.SimplifyMeters = v, 10f, 300f, 5f,
+                description: "Douglas-Peucker tolerance: how much micro-wiggle to drop before smoothing. Higher = longer straights with deliberate bends (more cut/fill, more realistic); lower = hugs the terrain.");
             TuningRegistry.RegisterFloat("rail.trackSnap", "Rail", "Track snap radius (m)",
                 () => t.RailLayer.TrackSnapRadius, v => t.RailLayer.TrackSnapRadius = v, 0f, 25f,
                 description: "Snap radius for connecting to EXISTING track: a click within this of a node or rail edge is pulled exactly onto it (overrides grid snap) so it reliably joins the network. 0 = grid snap only.");

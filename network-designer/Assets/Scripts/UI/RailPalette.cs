@@ -68,6 +68,12 @@ namespace NetworkDesigner.UI
             // Keep escalating climb-avoidance until every segment ≤ the ruling grade (else best effort).
             body.Add(ToggleRow("Route ≤ ruling grade", () => RailAutoRoute.EnforceGrade,
                 v => RailAutoRoute.EnforceGrade = v));
+            // Round route corners tighter than the design-speed min radius (approximate).
+            body.Add(ToggleRow("Speed-limit curves", () => RailAutoRoute.SpeedLimitCurves,
+                v => RailAutoRoute.SpeedLimitCurves = v));
+            // Higher = longer straights / fewer wiggles (more cut/fill); lower = hugs the terrain.
+            body.Add(SliderRow("Route straightness (m)", () => RailAutoRoute.SimplifyMeters,
+                v => RailAutoRoute.SimplifyMeters = v, 10f, 300f, "0"));
 
             // Plan/track actions.
             var actRow = HBox();
