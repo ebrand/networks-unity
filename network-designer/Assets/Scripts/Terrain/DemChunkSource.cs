@@ -32,46 +32,81 @@ namespace NetworkDesigner.Terrain
         public static int DecodeCount { get; private set; }   // total PNG decodes (lets the minimap bake pace itself)
 
         static string[,] _path;          // [row, col] -> file
+        static float[,] _tMin, _tMax;    // [row, col] -> that tile's own encode range (per map set in a world)
         static readonly Dictionary<int, float[]> _gray = new Dictionary<int, float[]>();   // row*Cols+col -> gray
         static readonly Dictionary<int, Vector2Int> _dim = new Dictionary<int, Vector2Int>();
         static readonly Dictionary<int, long> _use = new Dictionary<int, long>();
         static long _useTick;
 
-        // Scan a *_tile_<row>_<col>.png folder, measure the grid + per-tile ground size from the
-        // filenames' lat/lon. fallbackTileMeters is used only if the coords don't parse.
+        // Scan a tile set into a mosaic. A "world" folder (has world.json) holds one subfolder per map set
+        // (each with mapset.json + its OWN range, and WORLD-GLOBAL row/col in the filenames); a plain game
+        // folder holds tiles directly with a single range. Global row/col may be NEGATIVE in a world, so
+        // the grid is offset by the min. Per-tile range so map sets at different elevations don't rescale.
         public static bool Configure(string folder, float normMin, float normMax, float fallbackTileMeters = 1000f)
         {
             Clear();
             string dir = ResolveDir(folder);
             if (dir == null) { Debug.LogError($"[DemChunkSource] folder not found: {folder}"); return false; }
-            string[] files = Directory.GetFiles(dir, "*.png");
 
-            int maxRow = 0, maxCol = 0;
-            double minLat = double.MaxValue, maxLat = double.MinValue, minLon = double.MaxValue, maxLon = double.MinValue;
-            bool haveGeo = false;
-            var found = new List<(int row, int col, string path)>();
-            foreach (string f in files)
+            var found = new List<(int row, int col, string path, float tmin, float tmax)>();
+            var geo = new List<(double lat, double lon)>();
+            bool isWorld = File.Exists(Path.Combine(dir, "world.json"));
+
+            void Scan(string sd, float tmin, float tmax)
             {
-                string name = Path.GetFileNameWithoutExtension(f);
-                if (!DemTerrainWorld.TryParseRowCol(name, out int r, out int c)) continue;
-                found.Add((r, c, f));
-                if (r > maxRow) maxRow = r;
-                if (c > maxCol) maxCol = c;
-                if (DemTerrainWorld.TryParseLatLon(name, out double lat, out double lon))
+                foreach (string f in Directory.GetFiles(sd, "*.png"))
                 {
-                    haveGeo = true;
-                    if (lat < minLat) minLat = lat; if (lat > maxLat) maxLat = lat;
-                    if (lon < minLon) minLon = lon; if (lon > maxLon) maxLon = lon;
+                    string name = Path.GetFileNameWithoutExtension(f);
+                    if (!DemTerrainWorld.TryParseRowCol(name, out int r, out int c)) continue;
+                    found.Add((r, c, f, tmin, tmax));
+                    geo.Add(DemTerrainWorld.TryParseLatLon(name, out double la, out double lo) ? (la, lo) : (double.NaN, double.NaN));
                 }
             }
+
+            if (isWorld)
+                foreach (string sub in Directory.GetDirectories(dir))
+                {
+                    string ms = Path.Combine(sub, "mapset.json");
+                    if (!File.Exists(ms)) continue;
+                    float tmin = normMin, tmax = normMax;
+                    try { var mi = JsonUtility.FromJson<MapSetInfo>(File.ReadAllText(ms)); if (mi != null && mi.NormMax > mi.NormMin) { tmin = mi.NormMin; tmax = mi.NormMax; } } catch { }
+                    Scan(sub, tmin, tmax);
+                }
+            else Scan(dir, normMin, normMax);
+
             if (found.Count == 0) { Debug.LogError($"[DemChunkSource] no *_tile_<row>_<col>.png in {dir}"); return false; }
 
-            Rows = maxRow + 1; Cols = maxCol + 1;
-            _path = new string[Rows, Cols];
-            foreach (var (row, col, path) in found) _path[row, col] = path;
+            int minRow = int.MaxValue, maxRow = int.MinValue, minCol = int.MaxValue, maxCol = int.MinValue;
+            double minLat = double.MaxValue, maxLat = double.MinValue, minLon = double.MaxValue, maxLon = double.MinValue;
+            bool haveGeo = false;
+            float wmin = float.MaxValue, wmax = float.MinValue;
+            for (int i = 0; i < found.Count; i++)
+            {
+                var t = found[i];
+                if (t.row < minRow) minRow = t.row; if (t.row > maxRow) maxRow = t.row;
+                if (t.col < minCol) minCol = t.col; if (t.col > maxCol) maxCol = t.col;
+                if (t.tmin < wmin) wmin = t.tmin; if (t.tmax > wmax) wmax = t.tmax;
+                var ll = geo[i];
+                if (!double.IsNaN(ll.lat))
+                {
+                    haveGeo = true;
+                    if (ll.lat < minLat) minLat = ll.lat; if (ll.lat > maxLat) maxLat = ll.lat;
+                    if (ll.lon < minLon) minLon = ll.lon; if (ll.lon > maxLon) maxLon = ll.lon;
+                }
+            }
 
-            // Per-tile ground size from the lat/lon span (tile PITCH = span / intervals). Matches
-            // DemTerrainWorld's derivation. Fall back to a flat tile size if geo is unavailable.
+            Rows = maxRow - minRow + 1; Cols = maxCol - minCol + 1;
+            _path = new string[Rows, Cols];
+            _tMin = new float[Rows, Cols]; _tMax = new float[Rows, Cols];
+            for (int i = 0; i < found.Count; i++)
+            {
+                var t = found[i];
+                int gr = t.row - minRow, gc = t.col - minCol;
+                _path[gr, gc] = t.path; _tMin[gr, gc] = t.tmin; _tMax[gr, gc] = t.tmax;
+            }
+
+            // Per-tile ground size from the lat/lon span (tile PITCH = span / intervals). Fall back to a
+            // flat tile size if geo is unavailable.
             if (haveGeo && Rows > 1 && Cols > 1 && maxLat > minLat && maxLon > minLon)
             {
                 double centerLat = (maxLat + minLat) * 0.5;
@@ -80,21 +115,20 @@ namespace NetworkDesigner.Terrain
             }
             else { TileMetersX = TileMetersZ = Mathf.Max(1f, fallbackTileMeters); }
 
-            // Centre the mosaic on the origin so the most-used middle is the float-precise spot
-            // (raycasts/sculpt degrade tens of km out); the far corners sit at ~half the world span.
+            // Centre the mosaic on the origin so the most-used middle is the float-precise spot.
             OriginX = -Cols * TileMetersX * 0.5f;
             OriginZ = -Rows * TileMetersZ * 0.5f;
 
-            NormMin = normMin; NormMax = normMax; Folder = folder; Active = true;
+            NormMin = wmin; NormMax = wmax; Folder = folder; Active = true;
             Debug.Log($"[DemChunkSource] {found.Count} tiles ({Rows}×{Cols}) → world " +
                       $"{Cols * TileMetersX / 1000f:0.#}×{Rows * TileMetersZ / 1000f:0.#} km, " +
-                      $"tile {TileMetersX:0}×{TileMetersZ:0} m, range {NormMin:0}..{NormMax:0} m.");
+                      $"tile {TileMetersX:0}×{TileMetersZ:0} m, range {NormMin:0}..{NormMax:0} m{(isWorld ? " (world · per-set ranges)" : "")}.");
             return true;
         }
 
         public static void Clear()
         {
-            _path = null; _gray.Clear(); _dim.Clear(); _use.Clear();
+            _path = null; _tMin = _tMax = null; _gray.Clear(); _dim.Clear(); _use.Clear();
             Rows = Cols = 0; TileMetersX = TileMetersZ = 0f; OriginX = OriginZ = 0f; Folder = null; Active = false; _useTick = 0; DecodeCount = 0;
         }
 
@@ -133,7 +167,7 @@ namespace NetworkDesigner.Terrain
             float a = g[z0 * w + x0], b = g[z0 * w + x1];
             float c = g[z1 * w + x0], d = g[z1 * w + x1];
             float norm = Mathf.Lerp(Mathf.Lerp(a, b, fxp), Mathf.Lerp(c, d, fxp), fzp);
-            return NormMin + norm * (NormMax - NormMin);
+            return _tMin[row, col] + norm * (_tMax[row, col] - _tMin[row, col]);   // this tile's own range
         }
 
         static float[] TileFor(int row, int col, out int w, out int h)

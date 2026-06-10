@@ -70,6 +70,7 @@ namespace NetworkDesigner.UI
             // ---- SAVED GAMES ----
             body.Add(Divider());
             body.Add(SectionLabel("SAVED GAMES"));
+            NetworkDesigner.Terrain.WorldManager.EnsureWorldGames();   // worlds appear here too
             var games = Designer.ListGames();
             if (games.Count == 0)
             {
@@ -215,9 +216,6 @@ namespace NetworkDesigner.UI
             int mapW = Mathf.Clamp(Mathf.RoundToInt(modalW - leftW - 64f), 256, 4096);
             int mapH = Mathf.Clamp(Mathf.RoundToInt(modalH - 120f), 256, 3000);
 
-            var ci = System.Globalization.CultureInfo.InvariantCulture;
-            var fl = System.Globalization.NumberStyles.Float;
-
             var rowBox = new VisualElement();
             rowBox.style.flexDirection = FlexDirection.Row; rowBox.style.flexGrow = 1;
             modal.Add(rowBox);
@@ -231,20 +229,30 @@ namespace NetworkDesigner.UI
 
             Label Cap(string t) { var l = new Label(t); l.style.color = Sub; l.style.fontSize = 11; l.style.marginBottom = 2; l.style.marginTop = 8; return l; }
 
-            left.Add(Cap("Map name:"));
-            var nameField = new TextField { value = "" };
-            nameField.style.marginBottom = 4; left.Add(nameField);
+            const string NewWorldOpt = "＋ New world…";
+            string activeWorld = null; int activeSize = 8;
 
-            left.Add(Cap("Map size (km):"));
-            var sizeField = new TextField { value = DefaultSizeKm.ToString("0", ci), isDelayed = true };
-            sizeField.style.marginBottom = 4; left.Add(sizeField);
+            left.Add(Cap("World:"));
+            var worlds = NetworkDesigner.Terrain.WorldManager.ListWorlds();
+            var worldDd = new DropdownField { choices = new List<string>(worlds) { NewWorldOpt } };
+            worldDd.style.marginBottom = 4; left.Add(worldDd);
+
+            var createPanel = new VisualElement();
+            createPanel.Add(Cap("New world name:"));
+            var worldNameField = new TextField { value = "" }; createPanel.Add(worldNameField);
+            createPanel.Add(Cap("Block size (km):"));
+            var sizeDd = new DropdownField { choices = new List<string> { "4", "8", "16" }, value = "8" };
+            createPanel.Add(sizeDd);
+            var createBtn = MakeButton("Create world", () => { });
+            createBtn.style.height = 28; createBtn.style.flexGrow = 0; createBtn.style.marginTop = 4; createPanel.Add(createBtn);
+            left.Add(createPanel);
 
             var info = new Label(); info.style.color = Sub; info.style.fontSize = 12;
             info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 10; info.style.marginBottom = 14; left.Add(info);
 
             bool busy = false;
 
-            var dlBtn = MakeButton("Download", () => { });
+            var dlBtn = MakeButton("Download this area", () => { });
             dlBtn.style.height = 36; dlBtn.style.flexGrow = 0; left.Add(dlBtn);
 
             left.Add(Cap("Progress:"));
@@ -259,43 +267,63 @@ namespace NetworkDesigner.UI
             var status = new Label(); status.style.color = Sub; status.style.fontSize = 11;
             status.style.whiteSpace = WhiteSpace.Normal; left.Add(status);
 
-            var cancel = MakeButton("Cancel", () => close());
-            cancel.style.height = 28; cancel.style.flexGrow = 0; cancel.style.marginTop = 10; left.Add(cancel);
+            var closeBtn = MakeButton("Close", () => { close(); Rebuild(); });   // refresh the launcher (new worlds appear)
+            closeBtn.style.height = 28; closeBtn.style.flexGrow = 0; closeBtn.style.marginTop = 10; left.Add(closeBtn);
 
             void UpdateInfo()
             {
-                double areaKm = picker.AreaKm;
-                NetworkDesigner.Terrain.Dem3DEP.Estimate(areaKm, out double sizeMB, out double secs, out long pxSide);
-                double mpp = pxSide > 0 ? areaKm * 1000.0 / pxSide : 1.0;
-                info.text = $"Center {picker.CenterLat:0.0000}, {picker.CenterLon:0.0000}\n"
-                          + $"{areaKm:0} × {areaKm:0} km  ({areaKm * areaKm:0} km²)\n"
-                          + $"{pxSide} × {pxSide} px @ {mpp:0.#} m/px (USGS 3DEP)\n"
-                          + $"download ≈ {sizeMB:0} MB · ~{secs:0} s";
-                sizeField.SetValueWithoutNotify(areaKm.ToString("0", ci));
+                if (activeWorld == null) { info.text = "Create or pick a world to download into."; return; }
+                NetworkDesigner.Terrain.Dem3DEP.Estimate(activeSize, out double sizeMB, out double secs, out long _);
+                info.text = $"World “{activeWorld}” · {activeSize}×{activeSize} km blocks @ 1 m/px\n"
+                          + $"Center {picker.CenterLat:0.0000}, {picker.CenterLon:0.0000}\n"
+                          + $"each map set ≈ {sizeMB:0} MB · ~{secs:0} s\n"
+                          + $"snaps to the world grid · {NetworkDesigner.Terrain.WorldManager.ListMapSets(activeWorld).Count} map set(s) so far";
+            }
+
+            void SelectWorld(string w)
+            {
+                bool isNew = string.IsNullOrEmpty(w) || w == NewWorldOpt;
+                createPanel.style.display = isNew ? DisplayStyle.Flex : DisplayStyle.None;
+                if (!isNew)
+                {
+                    var wi = NetworkDesigner.Terrain.WorldManager.Read(w);
+                    if (wi != null) { activeWorld = w; activeSize = wi.MapSizeKm; picker.SetAreaKm(activeSize); }
+                }
+                else activeWorld = null;
+                UpdateInfo();
             }
 
             void DoDownload()
             {
                 if (busy) return;
-                string nm = nameField.value?.Trim();
-                if (string.IsNullOrEmpty(nm)) { status.text = "Enter a map name."; return; }
-                if (Designer.HasGame(nm)) { status.text = "A map by that name already exists."; return; }
-                busy = true; dlBtn.SetEnabled(false); cancel.SetEnabled(false);
+                if (activeWorld == null) { status.text = "Create or pick a world first."; return; }
+                busy = true; dlBtn.SetEnabled(false);
                 fill.style.width = Length.Percent(0); status.text = "Starting…";
-                NetworkDesigner.Terrain.Dem3DEP.Start(nm, picker.CenterLat, picker.CenterLon, picker.AreaKm,
+                NetworkDesigner.Terrain.Dem3DEP.StartInWorld(activeWorld, picker.CenterLat, picker.CenterLon,
                     (p, msg) => { fill.style.width = Length.Percent(Mathf.Clamp01(p) * 100f); status.text = msg; },
                     (ok, msg) =>
                     {
-                        if (ok) { close(); Rebuild(); }
-                        else { busy = false; dlBtn.SetEnabled(true); cancel.SetEnabled(true); status.text = msg; }
+                        busy = false; dlBtn.SetEnabled(true); status.text = msg;
+                        if (ok) UpdateInfo();   // world stays open for more areas
                     });
             }
 
+            createBtn.clicked += () =>
+            {
+                string wn = worldNameField.value?.Trim();
+                if (string.IsNullOrEmpty(wn)) { status.text = "Enter a world name."; return; }
+                int sz = int.TryParse(sizeDd.value, out int s) ? s : 8;
+                if (!NetworkDesigner.Terrain.WorldManager.Create(wn, sz)) { status.text = "World exists or invalid name."; return; }
+                worldDd.choices = new List<string>(NetworkDesigner.Terrain.WorldManager.ListWorlds()) { NewWorldOpt };
+                worldDd.SetValueWithoutNotify(wn); SelectWorld(wn);
+                status.text = $"World “{wn}” created — download map sets into it.";
+            };
+
             dlBtn.clicked += DoDownload;
+            worldDd.RegisterValueChangedCallback(e => SelectWorld(e.newValue));
             picker.OnChanged = UpdateInfo;
-            sizeField.RegisterValueChangedCallback(_ =>
-            { if (double.TryParse(sizeField.value, fl, ci, out double km)) picker.SetAreaKm(km); });
-            UpdateInfo();
+            if (worlds.Count > 0) { worldDd.SetValueWithoutNotify(worlds[0]); SelectWorld(worlds[0]); }
+            else { worldDd.SetValueWithoutNotify(NewWorldOpt); SelectWorld(NewWorldOpt); }
         }
 
         VisualElement BuildRegionTile(string region)

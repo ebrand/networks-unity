@@ -3,11 +3,13 @@
 // The 3DEPElevation ImageServer exportImage endpoint 500s above ~2048 px per request, so we fetch the
 // area as a grid of 1 km tiles (1000 px = 1 m/px), in parallel with per-tile retries (the gov server
 // throws transient 502s under load). Tiles are requested in WEB MERCATOR (EPSG:3857) so a square-ground
-// tile is a square bbox — otherwise exportImage snaps a lat/lon bbox to a square-degree aspect and the
-// tiles misalign (seams + edge smear). Each tile is a float32 GeoTIFF; we decode it, SPILL the floats to
-// a temp file (RAM stays bounded), and track the global min/max. A second pass reads the spills, encodes
-// 16-bit PNG tiles into the DemChunkSource mosaic (NW-corner lat/lon in the filename, ≥2×2 so the loader
-// can measure tile pitch) + a GameManager manifest with the data's true range, then cleans up. US-only.
+// tile is a square bbox — a lat/lon bbox gets snapped to a square-degree aspect and the tiles misalign
+// (seams + edge smear). Each tile is a float32 GeoTIFF; we decode it, SPILL the floats to a temp file
+// (RAM stays bounded → areas up to 32 km), and track the global min/max. A second pass reads the spills,
+// encodes 16-bit PNG tiles (NW-corner lat/lon + GLOBAL row/col in the filename), and cleans up. US-only.
+//
+// Two entry points share RunGrid: Start() lays a standalone game, StartInWorld() lays a map set into a
+// world's shared mercator lattice (so adjacent downloads tile seamlessly — see WorldManager).
 
 using System;
 using System.Collections;
@@ -26,7 +28,6 @@ namespace NetworkDesigner.Terrain
         const int MaxTilesPerSide = 32;    // ≤32 km at 1 m; tile floats spill to temp disk so RAM stays bounded
         const int FetchConcurrency = 5;    // tiles in parallel (gentle on the 3DEP server)
         const int MaxRetries = 4;          // transient 502/timeout retries per tile
-        const double MercR = 6378137.0;    // Web Mercator earth radius
 
         static Dem3DEP _runner;
         static Dem3DEP Runner
@@ -50,25 +51,48 @@ namespace NetworkDesigner.Terrain
             seconds = Math.Max(5.0, N * N * 0.8);               // ~0.8 s/tile effective (parallel)
         }
 
+        // ── standalone game ──
         public static void Start(string name, double centerLat, double centerLon, double areaKm,
                                  Action<float, string> onProgress, Action<bool, string> onDone)
-            => Runner.StartCoroutine(Runner.Run(name, centerLat, centerLon, areaKm, onProgress, onDone));
+        {
+            int N = Mathf.Clamp((int)Math.Round(areaKm), 2, MaxTilesPerSide);
+            double tileMerc = 1000.0 / Math.Cos(centerLat * Math.PI / 180.0);
+            double mx = WorldManager.Lon2MercX(centerLon), my = WorldManager.Lat2MercY(centerLat);
+            var gs = new GridSpec
+            {
+                outDir = Path.Combine(Application.dataPath, "Heightmaps/Highres", name),
+                n = N, tileMerc = tileMerc, nwX = mx - N * tileMerc / 2.0, nwY = my + N * tileMerc / 2.0, grBase = 0, gcBase = 0
+            };
+            Runner.StartCoroutine(Runner.RunGrid(gs,
+                (mn, mxr) => GameManager.Create(name, name, mn, mxr) ? null : "manifest create failed — name in use?",
+                onProgress, onDone));
+        }
 
+        // ── map set into a world's lattice (auto-named by its block position) ──
+        public static void StartInWorld(string world, double centerLat, double centerLon,
+                                        Action<float, string> onProgress, Action<bool, string> onDone)
+        {
+            var wi = WorldManager.Read(world);
+            if (wi == null) { onDone?.Invoke(false, "world not found"); return; }
+            WorldManager.PlaceMapSet(wi, centerLat, centerLon, out int bx, out int by, out double tileMerc, out double nwX, out double nwY);
+            string mapSet = $"b{bx}_{by}";
+            if (WorldManager.ReadMapSet(world, mapSet) != null) { onDone?.Invoke(false, "this area is already in the world"); return; }
+            int N = wi.MapSizeKm;
+            var gs = new GridSpec { outDir = WorldManager.MapSetDir(world, mapSet), n = N, tileMerc = tileMerc, nwX = nwX, nwY = nwY, grBase = by * N, gcBase = bx * N };
+            Runner.StartCoroutine(Runner.RunGrid(gs,
+                (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, BlockX = bx, BlockY = by }); return null; },
+                onProgress, onDone));
+        }
+
+        struct GridSpec { public string outDir; public int n; public double tileMerc, nwX, nwY; public int grBase, gcBase; }
         struct TileReq { public UnityWebRequest req; public int r, c; }
 
-        IEnumerator Run(string name, double lat, double lon, double areaKm,
-                        Action<float, string> onProgress, Action<bool, string> onDone)
+        IEnumerator RunGrid(GridSpec gs, Func<float, float, string> persist,
+                            Action<float, string> onProgress, Action<bool, string> onDone)
         {
             var ci = CultureInfo.InvariantCulture;
-            int N = Mathf.Clamp((int)Math.Round(areaKm), 2, MaxTilesPerSide);
-            int total = N * N;
-
-            // Web Mercator grid: square-metre tiles → exportImage returns exactly the requested extent.
-            double cx = Lon2MercX(lon), cy = Lat2MercY(lat);
-            double tileMerc = 1000.0 / Math.Cos(lat * Math.PI / 180.0);   // 1 km ground tile, in mercator metres
-            double half = N * tileMerc / 2.0;
-            double TileXmin(int c) => cx - half + c * tileMerc;
-            double TileYmax(int r) => cy + half - r * tileMerc;
+            int N = gs.n, total = N * N;
+            double tileMerc = gs.tileMerc;
 
             string tmpDir = Path.Combine(Application.temporaryCachePath, "dem3dep_tmp");
             try { TryDelete(tmpDir); Directory.CreateDirectory(tmpDir); }
@@ -88,7 +112,7 @@ namespace NetworkDesigner.Terrain
                 while (inflight.Count < FetchConcurrency && pending.Count > 0)
                 {
                     int idx = pending.Dequeue(); int r = idx / N, c = idx % N;
-                    double xmin = TileXmin(c), xmax = xmin + tileMerc, ymax = TileYmax(r), ymin = ymax - tileMerc;
+                    double xmin = gs.nwX + c * tileMerc, xmax = xmin + tileMerc, ymax = gs.nwY - r * tileMerc, ymin = ymax - tileMerc;
                     string bbox = string.Format(ci, "{0},{1},{2},{3}", xmin, ymin, xmax, ymax);
                     string url = ExportUrl + "?bbox=" + bbox + "&bboxSR=3857&imageSR=3857&size=" + TilePx + "," + TilePx
                                + "&format=tiff&pixelType=F32&interpolation=RSP_BilinearInterpolation&f=image";
@@ -114,7 +138,7 @@ namespace NetworkDesigner.Terrain
                         catch (Exception ex) { Debug.LogError($"[Dem3DEP] tile {tr.r},{tr.c} decode exception: {ex}"); e = null; }
                         if (e != null && (gw != TilePx || gh != TilePx)) e = null;
                     }
-                    if (e == null)   // failure → retry, or give up after MaxRetries
+                    if (e == null)
                     {
                         if (++attempts[idx] <= MaxRetries)
                         { Debug.LogWarning($"[Dem3DEP] tile {tr.r},{tr.c} HTTP {code} (result={res}) — retry {attempts[idx]}/{MaxRetries}"); pending.Enqueue(idx); continue; }
@@ -134,8 +158,7 @@ namespace NetworkDesigner.Terrain
             float normMin = Mathf.Floor(lo / 10f) * 10f - 10f, normMax = Mathf.Ceil(hi / 10f) * 10f + 10f, range = Mathf.Max(1f, normMax - normMin);
 
             // ── Pass 2: read spilled floats → encode 16-bit tiles → write mosaic → delete temp. ──
-            string dir = Path.Combine(Application.dataPath, "Heightmaps/Highres", name);
-            try { Directory.CreateDirectory(dir); }
+            try { Directory.CreateDirectory(gs.outDir); }
             catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "mkdir failed: " + ex.Message); yield break; }
             var gray = new ushort[TilePx * TilePx];
             for (int r = 0; r < N; r++)
@@ -150,27 +173,23 @@ namespace NetworkDesigner.Terrain
                         if (float.IsNaN(v) || v < -1000f || v > 10000f) v = normMin;
                         gray[k] = (ushort)Mathf.RoundToInt(Mathf.Clamp01((v - normMin) / range) * 65535f);
                     }
-                    double tlat = MercY2Lat(TileYmax(r)), tlon = MercX2Lon(TileXmin(c));   // tile NW corner
-                    string fn = $"{Fmt(tlat)}_{Fmt(tlon)}_0_{TilePx}_{TilePx}_16bit_tile_{r:00}_{c:00}.png";
-                    try { File.WriteAllBytes(Path.Combine(dir, fn), DemPng16.Encode(gray, TilePx, TilePx)); File.Delete(TilePath(r, c)); }
+                    double tlat = WorldManager.MercY2Lat(gs.nwY - r * tileMerc), tlon = WorldManager.MercX2Lon(gs.nwX + c * tileMerc);  // NW corner
+                    int gr = gs.grBase + r, gc = gs.gcBase + c;     // world-global row/col
+                    string fn = $"{Fmt(tlat)}_{Fmt(tlon)}_0_{TilePx}_{TilePx}_16bit_tile_{gr}_{gc}.png";
+                    try { File.WriteAllBytes(Path.Combine(gs.outDir, fn), DemPng16.Encode(gray, TilePx, TilePx)); File.Delete(TilePath(r, c)); }
                     catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "write failed: " + ex.Message); yield break; }
                     onProgress?.Invoke(0.6f + 0.38f * ((r * N + c + 1) / (float)total), $"writing tile {r},{c}");
                     yield return null;
                 }
             TryDelete(tmpDir);
 
-            if (!GameManager.Create(name, name, normMin, normMax))
-            { onDone?.Invoke(false, "manifest (game.json) create failed — name in use?"); yield break; }
+            string err = persist(normMin, normMax);
+            if (err != null) { onDone?.Invoke(false, err); yield break; }
             onDone?.Invoke(true, $"{N}×{N} km @ 1 m/px · range {normMin:0}..{normMax:0} m");
         }
 
         static void TryDelete(string dir) { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
         static string Fmt(double v) => v.ToString("F6", CultureInfo.InvariantCulture).Replace('.', '_');
-
-        static double Lon2MercX(double lon) => MercR * lon * Math.PI / 180.0;
-        static double Lat2MercY(double lat) { double r = lat * Math.PI / 180.0; return MercR * Math.Log(Math.Tan(Math.PI / 4.0 + r / 2.0)); }
-        static double MercX2Lon(double x) => x / MercR * 180.0 / Math.PI;
-        static double MercY2Lat(double y) => (2.0 * Math.Atan(Math.Exp(y / MercR)) - Math.PI / 2.0) * 180.0 / Math.PI;
 
         // Minimal GeoTIFF reader for the 3DEP exportImage response: little/big-endian, UNCOMPRESSED,
         // single-sample 32-bit FLOAT, tiled OR stripped. Returns row-major top-down float[w*h], or null.
@@ -195,8 +214,8 @@ namespace NetworkDesigner.Terrain
             {
                 int typ = U16(e + 2); uint cnt = U32(e + 4);
                 int tsz = typ == 3 ? 2 : typ == 4 ? 4 : typ == 1 ? 1 : 4;
-                long total = (long)tsz * cnt;
-                int b = total <= 4 ? e + 8 : (int)U32(e + 8);
+                long tot = (long)tsz * cnt;
+                int b = tot <= 4 ? e + 8 : (int)U32(e + 8);
                 var arr = new uint[cnt];
                 for (int i = 0; i < cnt; i++) { int o = b + i * tsz; if (o + tsz > d.Length) break; arr[i] = typ == 3 ? U16(o) : typ == 4 ? U32(o) : (uint)d[o]; }
                 return arr;
