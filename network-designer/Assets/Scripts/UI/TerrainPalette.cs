@@ -88,6 +88,9 @@ namespace NetworkDesigner.UI
                 v => ForestGen.SeamStrength = v, 0f, 1f, "0.00"));             // 0 blobs → 1 ridged veins
             body.Add(SliderRow("Warp", () => ForestGen.DensityWarp,
                 v => ForestGen.DensityWarp = v, 0f, 3f, "0.0"));               // flowing distortion
+            // Live perf control (takes effect immediately, no re-grow): how far trees draw.
+            body.Add(SliderRow("Tree draw dist (m)", () => ForestGen.MaxRenderDistance,
+                v => ForestGen.MaxRenderDistance = v, 300f, 6000f, "0"));
             var fr = HBox();
             var grow = MakeButton("Grow forest", () => Designer.GrowForest());
             grow.style.marginRight = 6;

@@ -148,15 +148,37 @@ namespace NetworkDesigner.Terrain
             public bool boundsDirty = true;
         }
 
+        public static float MaxRenderDistance = 2200f;  // trees in cells past this (m) aren't drawn
+
+        struct LodLevel
+        {
+            public Mesh mesh;
+            public Material[] mats;
+            public float threshold;     // LODGroup screenRelativeTransitionHeight (LOD0 largest → last smallest)
+        }
+
+        const int MaxLods = 8;
+
         sealed class Species
         {
             public GameObject prefab;   // source prefab (for save/restore by name)
-            public Mesh mesh;
-            public Material[] mats;
+            public LodLevel[] lods;     // LOD0..n from the prefab's LODGroup (or one synthetic level)
             public Vector3 baseScale;
+            public float height;        // world height of LOD0 (drives screen-size LOD selection)
             public readonly Dictionary<long, Cell> cells = new Dictionary<long, Cell>();
             public int count;           // total instances across cells
+            public List<Matrix4x4>[] vis;   // PERSISTENT per-LOD visible set (rebuilt only when the view moves)
         }
+
+        // Visible-set cache: the cull + matrix-copy is the forest's main-thread cost, but the result only
+        // changes when the camera moves. We rebuild the per-species `vis` buffers when the camera crosses a
+        // deadband (or the forest / draw distance changes) and otherwise just re-submit the cached draws.
+        static Vector3 _lastCamPos = new Vector3(1e9f, 1e9f, 1e9f);
+        static Quaternion _lastCamRot = Quaternion.identity;
+        static float _lastMaxDist = -1f;
+        static bool _visDirty = true;
+        const float CamMoveDeadband = 6f;   // metres the camera may drift before a re-cull
+        const float CamRotDeadband = 2f;    // degrees it may rotate before a re-cull
 
         // Compact per-species save record (parallel arrays; one tree = X[i],Y[i],Z[i],Rot[i],Scale[i]).
         public sealed class ForestSpeciesSave
@@ -187,6 +209,7 @@ namespace NetworkDesigner.Terrain
             cell.boundsDirty = true;
             sp.count++;
             TreeCount++;
+            _visDirty = true;   // force a re-cull so the new tree shows
         }
 
         // Sparse, finely-broken scatter for valley floors — sets the distribution sliders, then the user
@@ -269,66 +292,127 @@ namespace NetworkDesigner.Terrain
         {
             if (prefab == null) return null;
             if (_byPrefab.TryGetValue(prefab, out var sp)) return sp;     // cached (incl. cached null = unextractable)
-            if (!Extract(prefab, out Mesh mesh, out Material[] mats, out Vector3 baseScale)) { _byPrefab[prefab] = null; return null; }
-            sp = new Species { prefab = prefab, mesh = mesh, mats = mats, baseScale = baseScale };
+            if (!ExtractLods(prefab, out var lods, out var baseScale, out var height)) { _byPrefab[prefab] = null; return null; }
+            sp = new Species { prefab = prefab, lods = lods, baseScale = baseScale, height = height };
             _byPrefab[prefab] = sp; _species.Add(sp);
+            Debug.Log($"[Forest] species '{prefab.name}': {lods.Length} LOD level(s), ~{height:0.#} m tall"
+                      + (lods.Length == 1 ? " — NO LODs/billboard; far trees stay full-detail (GPU-heavy)." : "."));
             return sp;
         }
 
-        // Pull the LOD0 mesh + materials out of a tree prefab; force GPU instancing on the materials.
-        // GOTCHA: ignores the renderer's transform if it's a non-root child (offset/scale not baked) —
-        // most tree prefabs have the mesh at/near the root; refine here if trees float or mis-scale.
-        static bool Extract(GameObject prefab, out Mesh mesh, out Material[] mats, out Vector3 baseScale)
+        // Pull EVERY LOD level (mesh + materials + screen-size threshold) out of a tree prefab's LODGroup,
+        // forcing GPU instancing on each material. A prefab's last LOD is often a billboard impostor — using
+        // it as the far LOD is how we cut triangles at distance. Falls back to a single level if no LODGroup.
+        // GOTCHA: ignores a non-root renderer transform (offset/scale not baked) — fine for root-mesh trees.
+        static bool ExtractLods(GameObject prefab, out LodLevel[] lods, out Vector3 baseScale, out float height)
         {
-            mesh = null; mats = null; baseScale = prefab.transform.localScale;
-            MeshRenderer mr = null;
-            var lod = prefab.GetComponentInChildren<LODGroup>();
-            if (lod != null)
+            lods = null; baseScale = prefab.transform.localScale; height = 10f;
+            var list = new List<LodLevel>();
+            var lodGroup = prefab.GetComponentInChildren<LODGroup>();
+            if (lodGroup != null)
             {
-                var ls = lod.GetLODs();
-                if (ls != null && ls.Length > 0 && ls[0].renderers != null)
-                    foreach (var r in ls[0].renderers) { mr = r as MeshRenderer; if (mr != null) break; }
+                foreach (var L in lodGroup.GetLODs())
+                {
+                    MeshRenderer mr = null;
+                    if (L.renderers != null) foreach (var r in L.renderers) { mr = r as MeshRenderer; if (mr != null) break; }
+                    if (mr == null) continue;
+                    var mf = mr.GetComponent<MeshFilter>();
+                    if (mf == null || mf.sharedMesh == null) continue;   // billboard LODs use BillboardRenderer (no MeshFilter) → skipped
+                    var mats = mr.sharedMaterials;
+                    if (mats != null) for (int i = 0; i < mats.Length; i++) if (mats[i] != null) mats[i].enableInstancing = true;
+                    list.Add(new LodLevel { mesh = mf.sharedMesh, mats = mats, threshold = L.screenRelativeTransitionHeight });
+                }
             }
-            if (mr == null) mr = prefab.GetComponentInChildren<MeshRenderer>();
-            if (mr == null) return false;
-            var mf = mr.GetComponent<MeshFilter>();
-            if (mf == null || mf.sharedMesh == null) return false;
-            mesh = mf.sharedMesh;
-            mats = mr.sharedMaterials;
-            if (mats != null) for (int i = 0; i < mats.Length; i++) if (mats[i] != null) mats[i].enableInstancing = true;
+            if (list.Count == 0)   // no LODGroup (or only a BillboardRenderer): grab any mesh renderer
+            {
+                var mr = prefab.GetComponentInChildren<MeshRenderer>();
+                if (mr == null) return false;
+                var mf = mr.GetComponent<MeshFilter>();
+                if (mf == null || mf.sharedMesh == null) return false;
+                var mats = mr.sharedMaterials;
+                if (mats != null) for (int i = 0; i < mats.Length; i++) if (mats[i] != null) mats[i].enableInstancing = true;
+                list.Add(new LodLevel { mesh = mf.sharedMesh, mats = mats, threshold = 0f });
+            }
+            lods = list.ToArray();
+            height = Mathf.Max(1f, lods[0].mesh.bounds.size.y * Mathf.Abs(baseScale.y));
             return true;
         }
 
-        // Draw the whole forest GPU-instanced, broad-phase culled by GRID CELL (O(cells), not O(trees)).
-        // Each visible cell's matrices are streamed straight to the GPU from its List. CALL EVERY FRAME.
+        // Draw the forest GPU-instanced. The expensive cull + per-LOD gather (`RebuildVisible`) runs ONLY
+        // when the camera crosses a deadband (or the forest / draw distance changed); otherwise we skip it
+        // and just re-submit the cached per-LOD buffers. Immediate-mode draws must still issue every frame.
         public static void RenderForest(Camera cam)
         {
             if (!ShowForest || cam == null || _species.Count == 0) return;
-            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+            Vector3 camPos = cam.transform.position;
+            Quaternion camRot = cam.transform.rotation;
+            bool rebuild = _visDirty
+                || MaxRenderDistance != _lastMaxDist
+                || (camPos - _lastCamPos).sqrMagnitude > CamMoveDeadband * CamMoveDeadband
+                || Quaternion.Angle(camRot, _lastCamRot) > CamRotDeadband;
+            if (rebuild)
+            {
+                RebuildVisible(cam, camPos);
+                _lastCamPos = camPos; _lastCamRot = camRot; _lastMaxDist = MaxRenderDistance; _visDirty = false;
+            }
+
+            var bigBounds = new Bounds(camPos, new Vector3(MaxRenderDistance * 2f + 200f, 200000f, MaxRenderDistance * 2f + 200f));
             foreach (var sp in _species)
             {
-                if (sp == null || sp.mesh == null || sp.count == 0) continue;
-                int subCount = Mathf.Max(1, sp.mesh.subMeshCount);
-                foreach (var cell in sp.cells.Values)
+                if (sp == null || sp.lods == null || sp.vis == null) continue;
+                int lodN = Mathf.Min(sp.lods.Length, MaxLods);
+                for (int li = 0; li < lodN; li++)
                 {
-                    int cnt = cell.items.Count;
-                    if (cnt == 0) continue;
-                    if (cell.boundsDirty) { cell.bounds = ComputeCellBounds(cell.items); cell.boundsDirty = false; }
-                    if (!GeometryUtility.TestPlanesAABB(planes, cell.bounds)) continue;   // whole cell off-screen
+                    var acc = sp.vis[li];
+                    int total = acc.Count;
+                    if (total == 0) continue;
+                    LodLevel lod = sp.lods[li];
+                    int subCount = Mathf.Max(1, lod.mesh.subMeshCount);
                     for (int s = 0; s < subCount; s++)
                     {
-                        Material mat = (sp.mats != null && s < sp.mats.Length && sp.mats[s] != null) ? sp.mats[s]
-                                     : (sp.mats != null && sp.mats.Length > 0 ? sp.mats[0] : null);
+                        Material mat = (lod.mats != null && s < lod.mats.Length && lod.mats[s] != null) ? lod.mats[s]
+                                     : (lod.mats != null && lod.mats.Length > 0 ? lod.mats[0] : null);
                         if (mat == null) continue;
                         var rp = new RenderParams(mat)
                         {
                             shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
                             receiveShadows = false,
-                            worldBounds = cell.bounds   // already CPU-culled; this is a valid tight bound
+                            worldBounds = bigBounds   // already CPU-culled; keep Unity from re-culling the batch
                         };
-                        for (int off = 0; off < cnt; off += 1023)
-                            Graphics.RenderMeshInstanced(rp, sp.mesh, s, cell.items, Mathf.Min(1023, cnt - off), off);
+                        for (int off = 0; off < total; off += 1023)
+                            Graphics.RenderMeshInstanced(rp, lod.mesh, s, acc, Mathf.Min(1023, total - off), off);
                     }
+                }
+            }
+        }
+
+        // Cull cells (frustum + distance) and bucket survivors by LOD into each species' persistent `vis`.
+        static void RebuildVisible(Camera cam, Vector3 camPos)
+        {
+            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+            float fovTan = Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+            float maxD2 = MaxRenderDistance * MaxRenderDistance;
+            foreach (var sp in _species)
+            {
+                if (sp == null || sp.lods == null || sp.count == 0) continue;
+                int lodN = Mathf.Min(sp.lods.Length, MaxLods);
+                if (sp.vis == null)
+                {
+                    sp.vis = new List<Matrix4x4>[MaxLods];
+                    for (int i = 0; i < MaxLods; i++) sp.vis[i] = new List<Matrix4x4>();
+                }
+                for (int i = 0; i < MaxLods; i++) sp.vis[i].Clear();
+                foreach (var cell in sp.cells.Values)
+                {
+                    if (cell.items.Count == 0) continue;
+                    if (cell.boundsDirty) { cell.bounds = ComputeCellBounds(cell.items); cell.boundsDirty = false; }
+                    float d2 = (cell.bounds.center - camPos).sqrMagnitude;
+                    if (d2 > maxD2) continue;                                          // distance cap
+                    if (!GeometryUtility.TestPlanesAABB(planes, cell.bounds)) continue; // off-screen
+                    float screenH = sp.height / (2f * Mathf.Max(1f, Mathf.Sqrt(d2)) * fovTan); // ~viewport fraction
+                    int li = 0;
+                    while (li < lodN - 1 && screenH < sp.lods[li].threshold) li++;     // first LOD small enough
+                    sp.vis[li].AddRange(cell.items);
                 }
             }
         }
@@ -350,7 +434,7 @@ namespace NetworkDesigner.Terrain
 
         public static void ClearForest()
         {
-            _species.Clear(); _byPrefab.Clear(); TreeCount = 0;
+            _species.Clear(); _byPrefab.Clear(); TreeCount = 0; _visDirty = true;
         }
 
         // ── Persistence (autosave) ────────────────────────────────────────────────────────────
