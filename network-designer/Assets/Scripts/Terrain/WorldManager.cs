@@ -31,7 +31,8 @@ namespace NetworkDesigner.Terrain
     {
         public string Name;
         public float NormMin, NormMax;  // this map set's own encode range
-        public int BlockX, BlockY;      // its block position on the world lattice (0,0 = the anchor)
+        public int GR, GC, W, H;        // NW global tile row/col + width/height in 1 km tiles (any size)
+        public int N;                   // legacy: square size, read when W/H are absent (older map sets)
     }
 
     public static class WorldManager
@@ -86,12 +87,12 @@ namespace NetworkDesigner.Terrain
             catch { }
         }
 
-        public static bool Create(string world, int mapSizeKm)
+        public static bool Create(string world)
         {
             if (string.IsNullOrWhiteSpace(world) || Exists(world)) return false;
             try
             {
-                var wi = new WorldInfo { Name = world, MapSizeKm = Mathf.Clamp(mapSizeKm, 2, 32), Anchored = false };
+                var wi = new WorldInfo { Name = world, MapSizeKm = 8, Anchored = false };   // MapSizeKm = default picker area
                 Save(wi);
                 // Also a game manifest so the world is loadable + shows in the launcher. The placeholder
                 // range is overridden by DemChunkSource.Configure, which uses each map set's own range.
@@ -121,30 +122,44 @@ namespace NetworkDesigner.Terrain
             catch { }
         }
 
-        // Snap a download centre to the world's block lattice. Anchors the lattice on the first map set.
-        // Returns the block index + the NW corner (mercator) the map set's tiles should be laid out from.
-        public static void PlaceMapSet(WorldInfo wi, double lat, double lon,
-                                       out int blockX, out int blockY, out double tileMerc, out double nwMercX, out double nwMercY)
+        // Snap a download (w×h 1 km tiles, centred at lat/lon) to the world's 1 km lattice — areas can be
+        // any size. Anchors the lattice on the first map set. Returns the NW global tile row/col + the NW
+        // corner (mercator) the map set's tiles lay out from.
+        public static void PlaceArea(WorldInfo wi, double lat, double lon, int w, int h,
+                                     out int grNW, out int gcNW, out double tileMerc, out double nwMercX, out double nwMercY)
         {
-            int s = wi.MapSizeKm;
             double mx = Lon2MercX(lon), my = Lat2MercY(lat);
             if (!wi.Anchored)
             {
                 tileMerc = 1000.0 / Math.Cos(lat * Math.PI / 180.0);
-                nwMercX = mx - s * tileMerc / 2.0;
-                nwMercY = my + s * tileMerc / 2.0;
+                nwMercX = mx - w * tileMerc / 2.0;
+                nwMercY = my + h * tileMerc / 2.0;
                 wi.Anchored = true; wi.RefLat = lat; wi.TileMercM = tileMerc;
                 wi.OriginMercX = nwMercX; wi.OriginMercY = nwMercY;
                 Save(wi);
-                blockX = 0; blockY = 0;
+                grNW = 0; gcNW = 0;
                 return;
             }
             tileMerc = wi.TileMercM;
-            double block = s * tileMerc;
-            blockX = (int)Math.Round((mx - s * tileMerc / 2.0 - wi.OriginMercX) / block);
-            blockY = (int)Math.Round((wi.OriginMercY - (my + s * tileMerc / 2.0)) / block);
-            nwMercX = wi.OriginMercX + blockX * block;
-            nwMercY = wi.OriginMercY - blockY * block;
+            double nwx = mx - w * tileMerc / 2.0, nwy = my + h * tileMerc / 2.0;
+            gcNW = (int)Math.Round((nwx - wi.OriginMercX) / tileMerc);
+            grNW = (int)Math.Round((wi.OriginMercY - nwy) / tileMerc);
+            nwMercX = wi.OriginMercX + gcNW * tileMerc;
+            nwMercY = wi.OriginMercY - grNW * tileMerc;
+        }
+
+        // True if a w×h tile area at (grNW,gcNW) would overlap any existing map set's tiles.
+        public static bool Overlaps(string world, int grNW, int gcNW, int w, int h)
+        {
+            foreach (var s in ListMapSets(world))
+            {
+                var mi = ReadMapSet(world, s);
+                if (mi == null) continue;
+                int mw = mi.W > 0 ? mi.W : mi.N, mh = mi.H > 0 ? mi.H : mi.N;
+                if (mw <= 0 || mh <= 0) continue;
+                if (grNW < mi.GR + mh && grNW + h > mi.GR && gcNW < mi.GC + mw && gcNW + w > mi.GC) return true;
+            }
+            return false;
         }
 
         public static double Lon2MercX(double lon) => MercR * lon * Math.PI / 180.0;

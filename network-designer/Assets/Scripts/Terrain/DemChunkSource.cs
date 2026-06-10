@@ -146,16 +146,17 @@ namespace NetworkDesigner.Terrain
         }
 
         // World Y at an absolute world (wx,wz). Picks the covering tile + bilinear pixel. Outside the
-        // mosaic it clamps to the edge tile (a border smear, not a cliff).
+        // mosaic (or over an un-downloaded gap tile) it returns flat NormMin — no edge smear.
         public static float SampleWorldYAt(float wx, float wz)
         {
             if (!Active || TileMetersX <= 0f || TileMetersZ <= 0f) return NormMin;
             float fx = (wx - OriginX) / TileMetersX;
-            int col = Mathf.Clamp(Mathf.FloorToInt(fx), 0, Cols - 1);
-            float lu = Mathf.Clamp01(fx - col);
             float fz = (wz - OriginZ) / TileMetersZ;
-            int bottom = Mathf.Clamp(Mathf.FloorToInt(fz), 0, Rows - 1);   // 0 = southernmost tile
-            int row = (Rows - 1) - bottom;                                 // row 0 = north (+Z)
+            if (fx < 0f || fx >= Cols || fz < 0f || fz >= Rows) return NormMin;   // beyond the mosaic → flat
+            int col = Mathf.FloorToInt(fx);
+            float lu = Mathf.Clamp01(fx - col);
+            int bottom = Mathf.FloorToInt(fz);   // 0 = southernmost tile
+            int row = (Rows - 1) - bottom;        // row 0 = north (+Z)
             float lv = Mathf.Clamp01(fz - bottom);
 
             float[] g = TileFor(row, col, out int w, out int h);

@@ -23,7 +23,8 @@ namespace NetworkDesigner.UI
         public VisualElement Root { get; }
         public double CenterLat { get; private set; }
         public double CenterLon { get; private set; }
-        public double AreaKm { get; private set; }
+        public double AreaKmW { get; private set; }
+        public double AreaKmH { get; private set; }
         public Action OnChanged;
 
         const int TileSize = 256;
@@ -50,9 +51,10 @@ namespace NetworkDesigner.UI
         int _loading;
         bool _dragging, _resizing; Vector2 _dragLast; float _dragTotal;
 
-        public DemMapPicker(MonoBehaviour host, double lat, double lon, int width, int height, double areaKm = 3.0)
+        public DemMapPicker(MonoBehaviour host, double lat, double lon, int width, int height, double areaKmW = 8.0, double areaKmH = 8.0)
         {
-            _host = host; CenterLat = lat; CenterLon = lon; AreaKm = Mathf.Clamp((float)areaKm, 1f, MaxAreaKm);
+            _host = host; CenterLat = lat; CenterLon = lon;
+            AreaKmW = Mathf.Clamp((float)areaKmW, 1f, MaxAreaKm); AreaKmH = Mathf.Clamp((float)areaKmH, 1f, MaxAreaKm);
             MapW = Mathf.Max(64, width); MapH = Mathf.Max(64, height);
             Root = new VisualElement();
 
@@ -125,8 +127,8 @@ namespace NetworkDesigner.UI
 
         public void SetCenter(double lat, double lon) { CenterLat = lat; CenterLon = lon; UpdateTiles(); }
 
-        public void SetAreaKm(double km)
-        { AreaKm = Mathf.Clamp(Mathf.Round((float)km), 1f, MaxAreaKm); UpdateBox(); OnChanged?.Invoke(); }
+        public void SetArea(double wKm, double hKm)
+        { AreaKmW = Mathf.Clamp(Mathf.Round((float)wKm), 1f, MaxAreaKm); AreaKmH = Mathf.Clamp(Mathf.Round((float)hKm), 1f, MaxAreaKm); UpdateBox(); OnChanged?.Invoke(); }
 
         // ── view math (world pixels at the current zoom) ──
         double CenterWX() => Lon2TileX(CenterLon, _ovZoom) * TileSize;
@@ -183,9 +185,9 @@ namespace NetworkDesigner.UI
 
         void ResizeTo(Vector2 p)
         {
-            float half = Mathf.Max(Mathf.Abs(p.x - MapW * 0.5f), Mathf.Abs(p.y - MapH * 0.5f));
             float pxPerKm = TileSize / Mathf.Max(0.0001f, KmPerTile());
-            AreaKm = Mathf.Clamp(Mathf.Round(2f * half / pxPerKm), 1f, MaxAreaKm);
+            AreaKmW = Mathf.Clamp(Mathf.Round(2f * Mathf.Abs(p.x - MapW * 0.5f) / pxPerKm), 1f, MaxAreaKm);
+            AreaKmH = Mathf.Clamp(Mathf.Round(2f * Mathf.Abs(p.y - MapH * 0.5f) / pxPerKm), 1f, MaxAreaKm);
             UpdateBox();
         }
 
@@ -309,13 +311,13 @@ namespace NetworkDesigner.UI
         void UpdateBox()
         {
             float pxPerKm = TileSize / Mathf.Max(0.0001f, KmPerTile());
-            float boxPx = Mathf.Max(8f, (float)AreaKm * pxPerKm);
-            float half = boxPx * 0.5f, cx = MapW * 0.5f, cy = MapH * 0.5f;
-            float l = cx - half, t = cy - half;
-            _box.style.left = l; _box.style.top = t; _box.style.width = boxPx; _box.style.height = boxPx;
-            PlaceHandle(0, l, t); PlaceHandle(1, l + boxPx, t); PlaceHandle(2, l, t + boxPx); PlaceHandle(3, l + boxPx, t + boxPx);
-            ((Label)_label).text = $"{AreaKm:0} km × {AreaKm:0} km";
-            _label.style.left = cx - 44f; _label.style.top = Mathf.Min(MapH - 18f, t + boxPx + 2f);
+            float boxW = Mathf.Max(8f, (float)AreaKmW * pxPerKm), boxH = Mathf.Max(8f, (float)AreaKmH * pxPerKm);
+            float cx = MapW * 0.5f, cy = MapH * 0.5f;
+            float l = cx - boxW * 0.5f, t = cy - boxH * 0.5f;
+            _box.style.left = l; _box.style.top = t; _box.style.width = boxW; _box.style.height = boxH;
+            PlaceHandle(0, l, t); PlaceHandle(1, l + boxW, t); PlaceHandle(2, l, t + boxH); PlaceHandle(3, l + boxW, t + boxH);
+            ((Label)_label).text = $"{AreaKmW:0} km × {AreaKmH:0} km";
+            _label.style.left = cx - 44f; _label.style.top = Mathf.Min(MapH - 18f, t + boxH + 2f);
         }
 
         void PlaceHandle(int i, float x, float y)

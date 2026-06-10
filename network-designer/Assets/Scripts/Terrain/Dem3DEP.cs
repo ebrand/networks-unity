@@ -26,8 +26,8 @@ namespace NetworkDesigner.Terrain
         const string ExportUrl = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage";
         const int TilePx = 1000;           // 1 km tile at 1 m/px (exportImage 500s above ~2048 px per request)
         const int MaxTilesPerSide = 32;    // ≤32 km at 1 m; tile floats spill to temp disk so RAM stays bounded
-        const int FetchConcurrency = 5;    // tiles in parallel (gentle on the 3DEP server)
-        const int MaxRetries = 4;          // transient 502/timeout retries per tile
+        const int FetchConcurrency = 4;    // tiles in parallel (gentle on the 3DEP server)
+        const int MaxRetries = 8;          // transient 502/504/timeout retries per tile (with backoff)
 
         static Dem3DEP _runner;
         static Dem3DEP Runner
@@ -43,12 +43,11 @@ namespace NetworkDesigner.Terrain
             }
         }
 
-        public static void Estimate(double areaKm, out double sizeMB, out double seconds, out long pxSide)
+        public static void Estimate(double wKm, double hKm, out double sizeMB, out double seconds)
         {
-            int N = Mathf.Clamp((int)Math.Round(areaKm), 2, MaxTilesPerSide);
-            pxSide = (long)N * TilePx;
-            sizeMB = pxSide * pxSide * 2.0 / 1_000_000.0;       // 16-bit output on disk
-            seconds = Math.Max(5.0, N * N * 0.8);               // ~0.8 s/tile effective (parallel)
+            int W = Mathf.Clamp((int)Math.Round(wKm), 1, MaxTilesPerSide), H = Mathf.Clamp((int)Math.Round(hKm), 1, MaxTilesPerSide);
+            sizeMB = (double)W * H * TilePx * TilePx * 2.0 / 1_000_000.0;   // 16-bit output on disk
+            seconds = Math.Max(5.0, W * H * 0.8);                          // ~0.8 s/tile effective (parallel)
         }
 
         // ── standalone game ──
@@ -61,37 +60,38 @@ namespace NetworkDesigner.Terrain
             var gs = new GridSpec
             {
                 outDir = Path.Combine(Application.dataPath, "Heightmaps/Highres", name),
-                n = N, tileMerc = tileMerc, nwX = mx - N * tileMerc / 2.0, nwY = my + N * tileMerc / 2.0, grBase = 0, gcBase = 0
+                nW = N, nH = N, tileMerc = tileMerc, nwX = mx - N * tileMerc / 2.0, nwY = my + N * tileMerc / 2.0, grBase = 0, gcBase = 0
             };
             Runner.StartCoroutine(Runner.RunGrid(gs,
                 (mn, mxr) => GameManager.Create(name, name, mn, mxr) ? null : "manifest create failed — name in use?",
                 onProgress, onDone));
         }
 
-        // ── map set into a world's lattice (auto-named by its block position) ──
-        public static void StartInWorld(string world, double centerLat, double centerLon,
+        // ── a (any W×H sized) map set into a world's 1 km lattice, auto-named by its NW tile ──
+        public static void StartInWorld(string world, double centerLat, double centerLon, double areaKmW, double areaKmH,
                                         Action<float, string> onProgress, Action<bool, string> onDone)
         {
             var wi = WorldManager.Read(world);
             if (wi == null) { onDone?.Invoke(false, "world not found"); return; }
-            WorldManager.PlaceMapSet(wi, centerLat, centerLon, out int bx, out int by, out double tileMerc, out double nwX, out double nwY);
-            string mapSet = $"b{bx}_{by}";
+            int W = Mathf.Clamp((int)Math.Round(areaKmW), 1, MaxTilesPerSide), H = Mathf.Clamp((int)Math.Round(areaKmH), 1, MaxTilesPerSide);
+            WorldManager.PlaceArea(wi, centerLat, centerLon, W, H, out int grNW, out int gcNW, out double tileMerc, out double nwX, out double nwY);
+            if (WorldManager.Overlaps(world, grNW, gcNW, W, H)) { onDone?.Invoke(false, "this area overlaps one already in the world"); return; }
+            string mapSet = $"r{grNW}_c{gcNW}";
             if (WorldManager.ReadMapSet(world, mapSet) != null) { onDone?.Invoke(false, "this area is already in the world"); return; }
-            int N = wi.MapSizeKm;
-            var gs = new GridSpec { outDir = WorldManager.MapSetDir(world, mapSet), n = N, tileMerc = tileMerc, nwX = nwX, nwY = nwY, grBase = by * N, gcBase = bx * N };
+            var gs = new GridSpec { outDir = WorldManager.MapSetDir(world, mapSet), nW = W, nH = H, tileMerc = tileMerc, nwX = nwX, nwY = nwY, grBase = grNW, gcBase = gcNW };
             Runner.StartCoroutine(Runner.RunGrid(gs,
-                (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, BlockX = bx, BlockY = by }); return null; },
+                (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, GR = grNW, GC = gcNW, W = W, H = H }); return null; },
                 onProgress, onDone));
         }
 
-        struct GridSpec { public string outDir; public int n; public double tileMerc, nwX, nwY; public int grBase, gcBase; }
+        struct GridSpec { public string outDir; public int nW, nH; public double tileMerc, nwX, nwY; public int grBase, gcBase; }
         struct TileReq { public UnityWebRequest req; public int r, c; }
 
         IEnumerator RunGrid(GridSpec gs, Func<float, float, string> persist,
                             Action<float, string> onProgress, Action<bool, string> onDone)
         {
             var ci = CultureInfo.InvariantCulture;
-            int N = gs.n, total = N * N;
+            int nW = gs.nW, nH = gs.nH, total = nW * nH;
             double tileMerc = gs.tileMerc;
 
             string tmpDir = Path.Combine(Application.temporaryCachePath, "dem3dep_tmp");
@@ -103,15 +103,19 @@ namespace NetworkDesigner.Terrain
             var pending = new Queue<int>();
             for (int i = 0; i < total; i++) pending.Enqueue(i);
             var attempts = new int[total];
+            var retryAt = new float[total];   // realtimeSinceStartup before a backed-off tile may retry
             var inflight = new List<TileReq>();
             float lo = float.MaxValue, hi = float.MinValue;
             int doneCount = 0; bool failed = false; string failMsg = null;
 
             while ((pending.Count > 0 || inflight.Count > 0) && !failed)
             {
-                while (inflight.Count < FetchConcurrency && pending.Count > 0)
+                float now = Time.realtimeSinceStartup;
+                for (int scan = pending.Count; scan > 0 && inflight.Count < FetchConcurrency; scan--)
                 {
-                    int idx = pending.Dequeue(); int r = idx / N, c = idx % N;
+                    int idx = pending.Dequeue();
+                    if (retryAt[idx] > now) { pending.Enqueue(idx); continue; }   // still backing off
+                    int r = idx / nW, c = idx % nW;
                     double xmin = gs.nwX + c * tileMerc, xmax = xmin + tileMerc, ymax = gs.nwY - r * tileMerc, ymin = ymax - tileMerc;
                     string bbox = string.Format(ci, "{0},{1},{2},{3}", xmin, ymin, xmax, ymax);
                     string url = ExportUrl + "?bbox=" + bbox + "&bboxSR=3857&imageSR=3857&size=" + TilePx + "," + TilePx
@@ -128,7 +132,7 @@ namespace NetworkDesigner.Terrain
                     var res = tr.req.result;
                     byte[] data = res == UnityWebRequest.Result.Success && tr.req.downloadHandler != null ? tr.req.downloadHandler.data : null;
                     tr.req.Dispose(); inflight.RemoveAt(i);
-                    int idx = tr.r * N + tr.c;
+                    int idx = tr.r * nW + tr.c;
 
                     bool isTiff = data != null && data.Length >= 8 && ((data[0] == 0x49 && data[1] == 0x49) || (data[0] == 0x4D && data[1] == 0x4D));
                     float[] e = null; int gw = 0, gh = 0;
@@ -141,7 +145,11 @@ namespace NetworkDesigner.Terrain
                     if (e == null)
                     {
                         if (++attempts[idx] <= MaxRetries)
-                        { Debug.LogWarning($"[Dem3DEP] tile {tr.r},{tr.c} HTTP {code} (result={res}) — retry {attempts[idx]}/{MaxRetries}"); pending.Enqueue(idx); continue; }
+                        {
+                            retryAt[idx] = Time.realtimeSinceStartup + Mathf.Min(1.5f * attempts[idx], 12f);   // backoff so the server can recover
+                            Debug.LogWarning($"[Dem3DEP] tile {tr.r},{tr.c} HTTP {code} ({res}) — retry {attempts[idx]}/{MaxRetries} after backoff");
+                            pending.Enqueue(idx); continue;
+                        }
                         if (data != null && !isTiff) Debug.LogWarning($"[Dem3DEP] tile {tr.r},{tr.c} body:\n{System.Text.Encoding.UTF8.GetString(data, 0, Mathf.Min(300, data.Length))}");
                         failed = true; failMsg = $"tile {tr.r},{tr.c} failed after {MaxRetries} retries (HTTP {code})"; Debug.LogError("[Dem3DEP] " + failMsg); break;
                     }
@@ -161,8 +169,8 @@ namespace NetworkDesigner.Terrain
             try { Directory.CreateDirectory(gs.outDir); }
             catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "mkdir failed: " + ex.Message); yield break; }
             var gray = new ushort[TilePx * TilePx];
-            for (int r = 0; r < N; r++)
-                for (int c = 0; c < N; c++)
+            for (int r = 0; r < nH; r++)
+                for (int c = 0; c < nW; c++)
                 {
                     float[] e;
                     try { var b = File.ReadAllBytes(TilePath(r, c)); e = new float[b.Length / 4]; Buffer.BlockCopy(b, 0, e, 0, b.Length); }
@@ -178,14 +186,14 @@ namespace NetworkDesigner.Terrain
                     string fn = $"{Fmt(tlat)}_{Fmt(tlon)}_0_{TilePx}_{TilePx}_16bit_tile_{gr}_{gc}.png";
                     try { File.WriteAllBytes(Path.Combine(gs.outDir, fn), DemPng16.Encode(gray, TilePx, TilePx)); File.Delete(TilePath(r, c)); }
                     catch (Exception ex) { TryDelete(tmpDir); onDone?.Invoke(false, "write failed: " + ex.Message); yield break; }
-                    onProgress?.Invoke(0.6f + 0.38f * ((r * N + c + 1) / (float)total), $"writing tile {r},{c}");
+                    onProgress?.Invoke(0.6f + 0.38f * ((r * nW + c + 1) / (float)total), $"writing tile {r},{c}");
                     yield return null;
                 }
             TryDelete(tmpDir);
 
             string err = persist(normMin, normMax);
             if (err != null) { onDone?.Invoke(false, err); yield break; }
-            onDone?.Invoke(true, $"{N}×{N} km @ 1 m/px · range {normMin:0}..{normMax:0} m");
+            onDone?.Invoke(true, $"{nW}×{nH} km @ 1 m/px · range {normMin:0}..{normMax:0} m");
         }
 
         static void TryDelete(string dir) { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
