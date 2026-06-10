@@ -343,7 +343,15 @@ namespace NetworkDesigner.UI
             dd.SetValueWithoutNotify(get());
             dd.style.marginBottom = 8;
             dd.RegisterValueChangedCallback(e => set(e.newValue));
-            _sync.Add(() => { string c = get(); if (dd.value != c) dd.SetValueWithoutNotify(c); });
+            _sync.Add(() =>
+            {
+                // Refresh the option LIST too — packs (etc.) are often created after the palette is built.
+                var cur = choices() ?? new List<string>();
+                bool changed = dd.choices == null || dd.choices.Count != cur.Count;
+                if (!changed) for (int i = 0; i < cur.Count; i++) if (dd.choices[i] != cur[i]) { changed = true; break; }
+                if (changed) dd.choices = new List<string>(cur);
+                string c = get(); if (dd.value != c) dd.SetValueWithoutNotify(c);
+            });
             return dd;
         }
 
