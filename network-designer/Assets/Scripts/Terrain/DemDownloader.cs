@@ -19,6 +19,11 @@ namespace NetworkDesigner.Terrain
 {
     public class DemDownloader : MonoBehaviour
     {
+        // Clamp elevations below this (m) UP to it. Terrarium includes ocean bathymetry (deep negatives);
+        // for a land sim that's noise — clamping to sea level flattens water, removes coastal pits, and
+        // keeps the 16-bit encode range tight on the land. Set lower to keep some bathymetry.
+        public static float SeaFloor = 0f;
+
         const string TileUrl = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{0}/{1}/{2}.png";
         const int OutTile = 1025;            // output tile size (px)
         const int TerrariumPx = 256;         // Terrarium tile size
@@ -145,7 +150,8 @@ namespace NetworkDesigner.Terrain
                 for (int tx = 0; tx < w; tx++)
                 {
                     Color32 c = px[(h - 1 - ty) * w + tx];     // texture row 0 = south → flip so ty 0 = north
-                    e[ty * w + tx] = c.r * 256f + c.g + c.b / 256f - 32768f;
+                    float m = c.r * 256f + c.g + c.b / 256f - 32768f;
+                    e[ty * w + tx] = Mathf.Max(SeaFloor, m);   // drop ocean bathymetry → flat sea level
                 }
             return e;
         }
