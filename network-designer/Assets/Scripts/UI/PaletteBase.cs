@@ -58,7 +58,7 @@ namespace NetworkDesigner.UI
         UIDocument _doc;
         VisualElement _panel, _body;
         Label _footMode, _footSub;
-        Button _snapBtn, _gridBtn;
+        Button _snapBtn, _gridBtn, _topoBtn;
         bool _built;
 
         // --- subclass hooks ---
@@ -170,7 +170,8 @@ namespace NetworkDesigner.UI
                 _footMode.text = FooterMode;
                 _footSub.text = FooterSub;
                 StyleActive(_snapBtn, Designer.SnapToGrid);
-                StyleActive(_gridBtn, Designer.GridEnabled);
+                StyleActive(_gridBtn, Designer.GridOn);
+                StyleActive(_topoBtn, Designer.ChunkContours);
             }
         }
 
@@ -257,10 +258,11 @@ namespace NetworkDesigner.UI
             labels.Add(_footMode); labels.Add(_footSub);
 
             var btns = HBox();
+            _topoBtn = FooterBtn("Topo", () => Designer.ChunkContours = !Designer.ChunkContours);
             _gridBtn = FooterBtn("Grid", () => Designer.ToggleGrid());
             _snapBtn = FooterBtn("Snap", () => Designer.SnapToGrid = !Designer.SnapToGrid);
-            _gridBtn.style.marginRight = 6;
-            btns.Add(_gridBtn); btns.Add(_snapBtn);
+            _topoBtn.style.marginRight = 6; _gridBtn.style.marginRight = 6;
+            btns.Add(_topoBtn); btns.Add(_gridBtn); btns.Add(_snapBtn);
 
             row.Add(labels); row.Add(btns);
             foot.Add(row);
@@ -270,7 +272,7 @@ namespace NetworkDesigner.UI
         Button FooterBtn(string text, Action onClick)
         {
             var b = new Button(onClick) { text = text };
-            b.style.width = 66; b.style.height = 40;
+            b.style.width = 56; b.style.height = 40;
             b.style.marginLeft = 0; b.style.marginRight = 0;
             b.style.borderTopWidth = b.style.borderBottomWidth = 0;
             b.style.borderLeftWidth = b.style.borderRightWidth = 0;

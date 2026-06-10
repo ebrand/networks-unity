@@ -141,28 +141,7 @@ namespace NetworkDesigner.UI
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
         void BuildDem(VisualElement body)
         {
-            body.Add(SectionLabel("DEM WORLD (Unity Terrain)"));
-            // Pick a city → it loads/builds that DEM. (Save/manage comes later.) -500..9000m
-            // covers all land; tile size is auto-derived from the filename lat/lon.
-            const float demTile = 10000f, demFrom = -500f, demTo = 9000f;  // LOD lives in Designer.DemLodPixelError (tunable)
-            // Surface is fixed to Flat green (Albedo / Slope-texture modes retired from the UI).
-            void ApplyDemSurface() => DemTerrainWorld.SetGreen(true);
-
-            var cityRow = HBox(); cityRow.style.marginBottom = 6;
-            var cityLbl = new Label("City"); cityLbl.style.color = Ink; cityLbl.style.minWidth = 40; cityLbl.style.flexShrink = 0;
-            var demCity = new DropdownField { choices = DemTerrainWorld.ListWorlds() };   // unselected → pick to load
-            demCity.style.flexGrow = 1; demCity.style.flexShrink = 1; demCity.style.minWidth = 0;
-            // Reflect the loaded/remembered city without re-triggering a load.
-            if (!string.IsNullOrEmpty(Designer.LastDemCity)) demCity.SetValueWithoutNotify(Designer.LastDemCity);
-            // Build blocks the main thread for a few seconds; run it from a coroutine so the
-            // "Loading DEM…" overlay paints a frame BEFORE we block (otherwise no feedback).
-            demCity.RegisterValueChangedCallback(_ =>
-                StartCoroutine(LoadDem(demCity.value, demTile, demFrom, demTo, Designer.DemLodPixelError, ApplyDemSurface)));
-            cityRow.Add(cityLbl); cityRow.Add(demCity);
-            body.Add(cityRow);
-
             // ---- WATER ---- (a flat plane at a chosen elevation — floods coasts/valleys)
-            body.Add(Divider());
             body.Add(SectionLabel("WATER"));
             // In the streaming chunk world these drive the CHUNK water plane; otherwise the DEM water.
             body.Add(ToggleRow("Show Water",
@@ -171,23 +150,7 @@ namespace NetworkDesigner.UI
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : DemWater.Level,
                 v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, 0f, 100f, "0", 1f));
-
-            // ---- LIGHTING ----
-            body.Add(Divider());
-            body.Add(SectionLabel("LIGHTING"));
-            var profiles = DemLighting.ListProfiles();
-            int dbi = profiles.IndexOf(DemLighting.Custom); if (dbi < 0) dbi = profiles.Count > 0 ? 0 : -1;
-            var ppDd = GroundDropdown(profiles, dbi);
-            float sunInt = 1.1f;
-            body.Add(GroundRow("Look", ppDd, () => { }));
-            body.Add(SliderRow("Sun", () => sunInt, v => sunInt = v, 0.3f, 2.5f, "0.0"));
-            var lightBtn = MakeButton("Apply Lighting",
-                () => { if (ppDd.value != null) DemLighting.Apply(ppDd.value, sunInt); });
-            lightBtn.style.marginTop = 6;
-            body.Add(lightBtn);
-            var lightClr = MakeButton("Clear Lighting", () => DemLighting.Clear());
-            lightClr.style.marginTop = 6;
-            body.Add(lightClr);
+            // LIGHTING controls removed from here — to be relocated.
         }
 
         // Load a DEM world with a "Loading…" overlay: flag it, yield so the overlay paints,

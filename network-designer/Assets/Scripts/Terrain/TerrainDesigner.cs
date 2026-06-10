@@ -2085,8 +2085,15 @@ namespace NetworkDesigner.Terrain
         void SyncScatterPalette()
             => NetworkDesigner.UI.PaletteBase.SetExclusive(
                    IsTreeMode || IsRockMode || IsFenceMode ? "ScatterFence" : null);
-        // Grid overlay toggle (the G key path), exposed for the palette footer button.
-        public void ToggleGrid() { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
+        // Grid overlay toggle (the G key + footer "Grid" button). In the chunk/DEM world it drives the
+        // chunk 1km/100m grid; on the low-poly backend it toggles the terrain-material grid.
+        public void ToggleGrid()
+        {
+            if (ChunkWorld.Active) ChunkShowGrid = !ChunkShowGrid;
+            else { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
+        }
+        // Current grid on/off, for the footer button's active styling (whichever grid is in play).
+        public bool GridOn => ChunkWorld.Active ? ChunkShowGrid : GridEnabled;
 
         // Entering rail mode (L/K) opens the Rail palette exclusively; toggling back out of
         // rail (L/K again) closes it to NO palette (a clean toggle), not the Terrain palette.
@@ -2366,7 +2373,7 @@ namespace NetworkDesigner.Terrain
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                 if (shift) SnapToGrid = !SnapToGrid;            // Shift+G: snap toggle
-                else { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); } // G: grid toggle
+                else ToggleGrid();                             // G: grid toggle (chunk grid in the chunk world)
             }
             // B (in rail mode): toggle grade override — build across whatever terrain
             // the edge crosses instead of truncating at the grade limit.
