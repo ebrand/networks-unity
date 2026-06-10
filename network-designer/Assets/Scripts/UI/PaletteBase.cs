@@ -187,10 +187,14 @@ namespace NetworkDesigner.UI
             return null;
         }
 
+        // Rebuild the panel body in place (e.g. after a download adds a new map to the list).
+        protected void Rebuild() { if (_built && _doc != null) BuildPanel(_doc.rootVisualElement); }
+
         void BuildPanel(VisualElement root)
         {
             root.Clear();
             _sync.Clear();
+            if (_panel != null) _panels.Remove(_panel);   // drop the stale entry before reassigning
 
             _panel = new VisualElement();
             _panel.style.position = Position.Absolute;

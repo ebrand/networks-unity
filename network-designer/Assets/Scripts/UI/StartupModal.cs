@@ -122,7 +122,12 @@ namespace NetworkDesigner.UI
                 if (string.IsNullOrEmpty(n)) { status.text = "Enter a name."; return; }
                 if (string.IsNullOrEmpty(_selectedRegion)) { status.text = "Pick a region."; return; }
                 if (Designer.HasGame(n)) { status.text = "A game by that name already exists."; return; }
-                Designer.NewGame(n, _selectedRegion, Designer.DefaultNormMin, Designer.DefaultNormMax);
+                // Use the region's own data-derived range (from its manifest, written at download) so we
+                // don't fall back to the hardcoded defaults and need manual NormMin/Max tweaking.
+                float rmn = Designer.DefaultNormMin, rmx = Designer.DefaultNormMax;
+                var ri = GameManager.Read(_selectedRegion);
+                if (ri != null && ri.NormMax > ri.NormMin) { rmn = ri.NormMin; rmx = ri.NormMax; }
+                Designer.NewGame(n, _selectedRegion, rmn, rmx);
             });
             createBtn.style.height = 40;
             body.Add(createBtn);
@@ -131,68 +136,165 @@ namespace NetworkDesigner.UI
             BuildDownloadSection(body);
         }
 
-        // Download a NEW region straight from real-world coordinates (AWS Terrarium), write the DEM tiles
-        // + manifest, then play it — no website round-trip. Live readout shows the EXACT ground extent.
+        // Entry point: a button that opens the full-screen "Download terrain" modal.
         void BuildDownloadSection(VisualElement body)
         {
             body.Add(Divider());
-            var hdr = new Label("DOWNLOAD A REGION (real terrain)");
-            hdr.style.color = Ink; hdr.style.marginTop = 6; hdr.style.marginBottom = 4;
-            body.Add(hdr);
+            body.Add(SectionLabel("DOWNLOAD A REGION (real terrain)"));
+            var btn = MakeButton("Download terrain…", OpenDownloadModal);
+            btn.style.height = 38;
+            body.Add(btn);
 
-            TextField Field(string label, string val)
-            {
-                var l = new Label(label); l.style.color = Sub; l.style.fontSize = 11; body.Add(l);
-                var f = new TextField { value = val }; f.style.marginBottom = 6; body.Add(f);
-                return f;
-            }
-            var dName = Field("Name", "");
-            var dLat = Field("Center latitude", "46.18");
-            var dLon = Field("Center longitude", "-123.83");
-            var dZoom = Field("Zoom (1-15; higher = finer)", "13");
-            var dTiles = Field("Tiles per side (1-8)", "3");
+            var cacheBtn = MakeButton("Cache US basemap (offline)…", OpenPrefetchModal);
+            cacheBtn.style.height = 28; cacheBtn.style.marginTop = 6;
+            body.Add(cacheBtn);
+        }
 
-            var readout = new Label(); readout.style.color = Sub; readout.style.fontSize = 11;
-            readout.style.whiteSpace = WhiteSpace.Normal; readout.style.marginBottom = 4; body.Add(readout);
-            var dStatus = new Label(); dStatus.style.color = new Color(0.95f, 0.6f, 0.5f); dStatus.style.fontSize = 11;
+        // Pre-download the USGS topo basemap for the US (overview zooms) to the persistent disk cache,
+        // so the picker map works offline. Deeper zoom still caches on demand as you pan.
+        void OpenPrefetchModal()
+        {
+            var modal = BeginModal("Cache US basemap (offline)", 440f, 0f, out System.Action close);
+            if (modal == null) return;
+            const int zMin = 5, zMax = 10;
+            int tiles = TileCache.EstimateTiles(zMin, zMax);
+            double estMB = tiles * 0.025;                 // ~25 KB/tile
+            long haveMB = TileCache.CacheSizeBytes() / 1_000_000;
 
-            bool Parse(out double lat, out double lon, out int z, out int n)
-            {
-                lat = lon = 0; z = n = 0;
-                var ci = System.Globalization.CultureInfo.InvariantCulture; var fl = System.Globalization.NumberStyles.Float;
-                bool ok = double.TryParse(dLat.value, fl, ci, out lat) && double.TryParse(dLon.value, fl, ci, out lon)
-                       && int.TryParse(dZoom.value, out z) && int.TryParse(dTiles.value, out n);
-                z = Mathf.Clamp(z, 1, 15); n = Mathf.Clamp(n, 1, 8);
-                return ok;
-            }
-            void Refresh()
-            {
-                if (!Parse(out double lat, out double lon, out int z, out int n)) { readout.text = "Enter valid numbers."; return; }
-                NetworkDesigner.Terrain.DemDownloader.Describe(lat, lon, z, n,
-                    out double wKm, out double hKm, out double mpp, out double N, out double S, out double W, out double E);
-                readout.text = $"{wKm:0.0} × {hKm:0.0} km · {mpp:0.0} m/px · {n * 1024 + 1}px/side · {(n * 4 + 1) * (n * 4 + 1)} tiles to fetch\n"
-                             + $"N {N:0.0000}  S {S:0.0000}  W {W:0.0000}  E {E:0.0000}";
-            }
-            dLat.RegisterValueChangedCallback(_ => Refresh());
-            dLon.RegisterValueChangedCallback(_ => Refresh());
-            dZoom.RegisterValueChangedCallback(_ => Refresh());
-            dTiles.RegisterValueChangedCallback(_ => Refresh());
-            Refresh();
+            var info = new Label($"USGS The National Map topo (public domain), zoom {zMin}–{zMax} over the US:\n"
+                               + $"~{tiles:n0} tiles ≈ {estMB:0} MB · a long one-time download.\n"
+                               + $"Browses the US offline; deeper zoom caches as you pan.\n"
+                               + $"Already cached: {haveMB} MB.");
+            info.style.color = Ink; info.style.fontSize = 12; info.style.whiteSpace = WhiteSpace.Normal; info.style.marginBottom = 12;
+            modal.Add(info);
 
-            var dlBtn = MakeButton("Download & Play", () =>
+            var bar = new VisualElement();
+            bar.style.height = 14; bar.style.marginBottom = 6;
+            bar.style.backgroundColor = TrackOff; Radius(bar, 4);
+            var fill = new VisualElement();
+            fill.style.height = 14; fill.style.width = Length.Percent(0); fill.style.backgroundColor = Accent; Radius(fill, 4);
+            bar.Add(fill); modal.Add(bar);
+
+            var status = new Label(); status.style.color = Sub; status.style.fontSize = 11;
+            status.style.whiteSpace = WhiteSpace.Normal; status.style.marginBottom = 12; modal.Add(status);
+
+            bool running = false;
+            var row = HBox(); row.style.justifyContent = Justify.FlexEnd;
+            var stopBtn = MakeButton("Stop", () => { TileCache.CancelPrefetch(); status.text = "Stopping…"; });
+            var closeBtn = MakeButton("Close", () => close());     // leaves any download running in the background
+            Button startBtn = null;
+            startBtn = MakeButton("Start", () =>
             {
-                string n0 = dName.value?.Trim();
-                if (string.IsNullOrEmpty(n0)) { dStatus.text = "Enter a name."; return; }
-                if (Designer.HasGame(n0)) { dStatus.text = "A game by that name exists."; return; }
-                if (!Parse(out double lat, out double lon, out int z, out int n)) { dStatus.text = "Bad numbers."; return; }
-                dStatus.text = "starting…";
-                NetworkDesigner.Terrain.DemDownloader.Start(n0, lat, lon, z, n,
-                    (p, msg) => dStatus.text = $"{(int)(p * 100)}% — {msg}",
-                    (ok, msg) => { dStatus.text = ok ? $"done — {msg}" : $"failed — {msg}"; if (ok) Designer.LoadGame(n0); });
+                if (running) return;
+                running = true; startBtn.SetEnabled(false); status.text = "Starting…";
+                TileCache.PrefetchUS(zMin, zMax,
+                    (p, msg) => { fill.style.width = Length.Percent(Mathf.Clamp01(p) * 100f); status.text = msg; },
+                    (ok, msg) => { running = false; startBtn.SetEnabled(true); status.text = msg; });
             });
-            dlBtn.style.height = 36; dlBtn.style.marginTop = 4;
-            body.Add(dlBtn);
-            body.Add(dStatus);
+            foreach (var b in new[] { stopBtn, closeBtn, startBtn }) { b.style.flexGrow = 0; b.style.width = 92; b.style.marginLeft = 6; }
+            StyleActive(startBtn, true);
+            row.Add(stopBtn); row.Add(closeBtn); row.Add(startBtn);
+            modal.Add(row);
+        }
+
+        const double AstoriaLat = 46.18, AstoriaLon = -123.83;
+        const double DefaultSizeKm = 3.0;
+
+        // Full-screen modal modelled on the Leaflet/Esri picker: a large interactive map (drag to
+        // reposition, drag a corner handle to resize the area in 1 km steps, wheel/± to zoom) + a left
+        // panel with the map name, size (km, synced to the box), area/download-size/est-time info, a
+        // Download button and a progress bar. 1 m via USGS 3DEP (Dem3DEP). Success: close + rebuild.
+        void OpenDownloadModal()
+        {
+            float modalW = Mathf.Max(640f, Screen.width - 80f);
+            float modalH = Mathf.Max(460f, Screen.height - 80f);
+            var modal = BeginModal("Download terrain", modalW, modalH, out System.Action close, closeOnBackdropClick: false);
+            if (modal == null) return;
+
+            float leftW = 230f;
+            int mapW = Mathf.Clamp(Mathf.RoundToInt(modalW - leftW - 64f), 256, 4096);
+            int mapH = Mathf.Clamp(Mathf.RoundToInt(modalH - 120f), 256, 3000);
+
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            var fl = System.Globalization.NumberStyles.Float;
+
+            var rowBox = new VisualElement();
+            rowBox.style.flexDirection = FlexDirection.Row; rowBox.style.flexGrow = 1;
+            modal.Add(rowBox);
+
+            var left = new VisualElement();
+            left.style.width = leftW; left.style.marginRight = 16;
+            rowBox.Add(left);
+
+            var picker = new DemMapPicker(this, AstoriaLat, AstoriaLon, mapW, mapH, DefaultSizeKm);
+            rowBox.Add(picker.Root);
+
+            Label Cap(string t) { var l = new Label(t); l.style.color = Sub; l.style.fontSize = 11; l.style.marginBottom = 2; l.style.marginTop = 8; return l; }
+
+            left.Add(Cap("Map name:"));
+            var nameField = new TextField { value = "" };
+            nameField.style.marginBottom = 4; left.Add(nameField);
+
+            left.Add(Cap("Map size (km):"));
+            var sizeField = new TextField { value = DefaultSizeKm.ToString("0", ci), isDelayed = true };
+            sizeField.style.marginBottom = 4; left.Add(sizeField);
+
+            var info = new Label(); info.style.color = Sub; info.style.fontSize = 12;
+            info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 10; info.style.marginBottom = 14; left.Add(info);
+
+            bool busy = false;
+
+            var dlBtn = MakeButton("Download", () => { });
+            dlBtn.style.height = 36; dlBtn.style.flexGrow = 0; left.Add(dlBtn);
+
+            left.Add(Cap("Progress:"));
+            var bar = new VisualElement();
+            bar.style.height = 14; bar.style.marginBottom = 6;
+            bar.style.backgroundColor = TrackOff; Radius(bar, 4);
+            SetBorder(bar, 1, new Color(0.3f, 0.32f, 0.36f));
+            var fill = new VisualElement();
+            fill.style.height = 12; fill.style.width = Length.Percent(0); fill.style.backgroundColor = Accent; Radius(fill, 3);
+            bar.Add(fill); left.Add(bar);
+
+            var status = new Label(); status.style.color = Sub; status.style.fontSize = 11;
+            status.style.whiteSpace = WhiteSpace.Normal; left.Add(status);
+
+            var cancel = MakeButton("Cancel", () => close());
+            cancel.style.height = 28; cancel.style.flexGrow = 0; cancel.style.marginTop = 10; left.Add(cancel);
+
+            void UpdateInfo()
+            {
+                double areaKm = picker.AreaKm;
+                NetworkDesigner.Terrain.Dem3DEP.Estimate(areaKm, out double sizeMB, out double secs, out long pxSide);
+                info.text = $"Center {picker.CenterLat:0.0000}, {picker.CenterLon:0.0000}\n"
+                          + $"{areaKm:0} × {areaKm:0} km  ({areaKm * areaKm:0} km²)\n"
+                          + $"{pxSide} × {pxSide} px @ 1 m/px\n"
+                          + $"download ≈ {sizeMB:0} MB · ~{secs:0} s";
+                sizeField.SetValueWithoutNotify(areaKm.ToString("0", ci));
+            }
+
+            void DoDownload()
+            {
+                if (busy) return;
+                string nm = nameField.value?.Trim();
+                if (string.IsNullOrEmpty(nm)) { status.text = "Enter a map name."; return; }
+                if (Designer.HasGame(nm)) { status.text = "A map by that name already exists."; return; }
+                busy = true; dlBtn.SetEnabled(false); cancel.SetEnabled(false);
+                fill.style.width = Length.Percent(0); status.text = "Starting…";
+                NetworkDesigner.Terrain.Dem3DEP.Start(nm, picker.CenterLat, picker.CenterLon, picker.AreaKm,
+                    (p, msg) => { fill.style.width = Length.Percent(Mathf.Clamp01(p) * 100f); status.text = msg; },
+                    (ok, msg) =>
+                    {
+                        if (ok) { close(); Rebuild(); }
+                        else { busy = false; dlBtn.SetEnabled(true); cancel.SetEnabled(true); status.text = msg; }
+                    });
+            }
+
+            dlBtn.clicked += DoDownload;
+            picker.OnChanged = UpdateInfo;
+            sizeField.RegisterValueChangedCallback(_ =>
+            { if (double.TryParse(sizeField.value, fl, ci, out double km)) picker.SetAreaKm(km); });
+            UpdateInfo();
         }
 
         VisualElement BuildRegionTile(string region)
