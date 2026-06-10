@@ -1233,7 +1233,7 @@ namespace NetworkDesigner.Terrain
 
         void DrawPanels()
         {
-            DrawPlanGradeLabels();
+            // Plan grade % labels are now world-space TMP (UpdatePlanGradeLabels), not IMGUI.
             DrawCurveDimLabels();
             DrawCurveTickLabels();
             DrawSpeedLabels();
@@ -1375,27 +1375,18 @@ namespace NetworkDesigner.Terrain
         // Float a grade-% label over each plan segment (current terrain), so you can read
         // the natural grade before earthworks and the achieved grade after. Shown while
         // editing the plan or using the slope tool. Red box = over the plan's max grade.
-        void DrawPlanGradeLabels()
+        // Drive the world-space TMP grade labels (replaces the old IMGUI GUI.Box version). Called from
+        // Update every frame; hides the labels when the plan/grade view isn't active.
+        void UpdatePlanGradeLabels()
         {
-            if (PlanLayer == null || _field == null || _active != null || !PlanLayer.ShowGradeLabels) return;
-            if (!(Brush == BrushMode.Slope || _lineActive is RailPlanLayer)) return;
+            var wl = WorldGradeLabels.Instance;
+            if (wl == null) return;
+            bool show = PlanLayer != null && _active == null && PlanLayer.ShowGradeLabels
+                        && (Brush == BrushMode.Slope || _lineActive is RailPlanLayer);
+            if (!show) { wl.Show(null, null); return; }
             PlanLayer.CollectEdgeGrades(Surf, _planGrades);
-            if (_planGrades.Count == 0) return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
-            if (cam == null) return;
-            float s = Mathf.Max(0.25f, UiScale);
-            Color prevC = GUI.color;
-            foreach (var g in _planGrades)
-            {
-                Vector3 sp = cam.WorldToScreenPoint(g.Mid);
-                if (sp.z <= 0f) continue; // behind the camera
-                float mx = sp.x / s, my = (Screen.height - sp.y) / s;
-                var content = new GUIContent($"{Mathf.Abs(g.GradePct):0.0}%");
-                Vector2 size = GUI.skin.box.CalcSize(content);
-                GUI.color = g.Over ? new Color(1f, 0.45f, 0.4f, 1f) : Color.white;
-                GUI.Box(new Rect(mx - size.x * 0.5f, my - size.y * 0.5f, size.x + 6f, size.y + 2f), content);
-            }
-            GUI.color = prevC;
+            wl.Show(_planGrades, cam);
         }
 
         // A boxed text label centred at a world position, projected to the (Ui-scaled)
@@ -2311,6 +2302,7 @@ namespace NetworkDesigner.Terrain
 
         void Update()
         {
+            UpdatePlanGradeLabels();   // world-space TMP grade labels (runs even under a modal, to hide)
             // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
             // typing a name doesn't fire hotkeys or sculpt.
             if (NetworkDesigner.UI.PaletteBase.ModalOpen) return;

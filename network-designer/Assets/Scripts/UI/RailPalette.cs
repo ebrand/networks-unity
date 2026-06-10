@@ -5,6 +5,7 @@
 
 using UnityEngine;
 using UnityEngine.UIElements;
+using NetworkDesigner.Terrain;
 
 namespace NetworkDesigner.UI
 {
@@ -61,6 +62,12 @@ namespace NetworkDesigner.UI
             var autoBtn = MakeButton("Auto-route A→B", () => Designer.AutoRoutePlan());
             autoBtn.style.marginTop = 4;
             body.Add(autoBtn);
+            // How hard the auto-route works to avoid climbing (hug the draw) vs. go straight.
+            body.Add(SliderRow("Route climb avoid", () => RailAutoRoute.ClimbWeight,
+                v => RailAutoRoute.ClimbWeight = v, 5f, 80f, "0"));
+            // Keep escalating climb-avoidance until every segment ≤ the ruling grade (else best effort).
+            body.Add(ToggleRow("Route ≤ ruling grade", () => RailAutoRoute.EnforceGrade,
+                v => RailAutoRoute.EnforceGrade = v));
 
             // Plan/track actions.
             var actRow = HBox();

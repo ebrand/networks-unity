@@ -17,12 +17,18 @@ namespace NetworkDesigner.Terrain
         // How many metres of horizontal detour are worth avoiding 1 m of climb. Higher = the route
         // works harder to find the draw/pass and stay on contour; lower = straighter, more climb.
         public static float ClimbWeight = 25f;
+        // When true, escalate climb-avoidance until every segment's ground grade ≤ the ruling grade
+        // (the grade the plan actually displays), or report the best effort if the region is too steep.
+        public static bool EnforceGrade = true;
 
-        // a,b = world XZ. maxGradePct = ruling grade (e.g. 2.2). Returns null + a reason on failure.
+        // a,b = world XZ. maxGradePct = ruling grade (e.g. 2.2). climbWeight < 0 → use the static field.
+        // Returns null + a reason on failure.
         public static List<Vector2> Route(ITerrainSurface surf, Vector2 a, Vector2 b, float maxGradePct,
-                                          out string status, float desiredCell = 30f, int maxCells = 90000)
+                                          out string status, float desiredCell = 30f, int maxCells = 90000,
+                                          float climbWeight = -1f)
         {
             status = "";
+            float cw = climbWeight < 0f ? ClimbWeight : climbWeight;
             if (surf == null) { status = "no terrain surface"; return null; }
             float dAB = Vector2.Distance(a, b);
             if (dAB < desiredCell) { status = "endpoints too close to route"; return null; }
@@ -90,7 +96,7 @@ namespace NetworkDesigner.Terrain
                         // crossing — through the draw / saddle — and hugs contours instead of cresting hills.
                         float climb = hgt[v] - hgt[u];
                         if (climb < 0f) climb = 0f;
-                        float cost = dist + ClimbWeight * climb;
+                        float cost = dist + cw * climb;
                         float ng = g[u] + cost;
                         if (ng < g[v])
                         {
@@ -115,6 +121,51 @@ namespace NetworkDesigner.Terrain
             var simp = Simplify(path, cell * 0.4f);   // keep draw-following bends, drop only grid noise
             status = $"routed {simp.Count} pts on a {cols}×{rows} grid (cell {cell:0} m)";
             return simp;
+        }
+
+        // Escalate climb-avoidance until the route's worst segment grade ≤ ruling (the plan's own grade
+        // metric), or return the gentlest attempt + a warning if the region can't hold the grade.
+        public static List<Vector2> RouteWithinGrade(ITerrainSurface surf, Vector2 a, Vector2 b,
+                                                     float maxGradePct, out string status)
+        {
+            float ruling = Mathf.Max(0.001f, maxGradePct / 100f);
+            bool dem = DemChunkSource.Active;
+            List<Vector2> best = null; float bestMax = float.MaxValue;
+            float w = Mathf.Max(15f, ClimbWeight);
+            for (int it = 0; it < 6; it++)
+            {
+                var r = Route(surf, a, b, maxGradePct, out _, climbWeight: w);
+                if (r != null && r.Count >= 2)
+                {
+                    float mx = MaxGroundGrade(surf, dem, r);
+                    if (mx < bestMax) { bestMax = mx; best = r; }
+                    if (mx <= ruling)
+                    {
+                        status = $"within grade — max {mx * 100f:0.0}% ≤ {maxGradePct:0.0}% ({r.Count} pts, climb-avoid {w:0})";
+                        return r;
+                    }
+                }
+                w *= 1.7f;
+            }
+            status = best == null
+                ? "no route found"
+                : $"best effort max {bestMax * 100f:0.0}% (> {maxGradePct:0.0}% — region too steep, or an endpoint is on a steep face)";
+            return best;
+        }
+
+        // Worst node-to-node ground grade along a polyline (matches how the plan measures grade).
+        static float MaxGroundGrade(ITerrainSurface surf, bool dem, List<Vector2> pts)
+        {
+            float max = 0f;
+            for (int i = 1; i < pts.Count; i++)
+            {
+                float d = Vector2.Distance(pts[i - 1], pts[i]);
+                if (d < 1e-3f) continue;
+                float h0 = dem ? DemChunkSource.SampleWorldYAt(pts[i - 1].x, pts[i - 1].y) : surf.SampleHeight(pts[i - 1].x, pts[i - 1].y);
+                float h1 = dem ? DemChunkSource.SampleWorldYAt(pts[i].x, pts[i].y) : surf.SampleHeight(pts[i].x, pts[i].y);
+                max = Mathf.Max(max, Mathf.Abs(h1 - h0) / d);
+            }
+            return max;
         }
 
         static int CellOf(Vector2 p, float minx, float minz, float cell, int cols, int rows)

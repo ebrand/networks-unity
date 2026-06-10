@@ -104,7 +104,7 @@ namespace NetworkDesigner.Terrain
         public bool ShowGradeLabels = true;
 
         // Per-edge grade readout (current terrain), for the floating labels.
-        public struct EdgeGrade { public Vector3 Mid; public float GradePct; public bool Over; }
+        public struct EdgeGrade { public Vector3 Mid; public float GradePct; public bool Over; public Vector3 Dir; }
 
         // Section classes (also index the per-class length tallies below).
         const int CLS_ATGRADE = 0, CLS_CUT = 1, CLS_FILL = 2, CLS_BRIDGE = 3, CLS_TUNNEL = 4, CLS_OVER = 5;
@@ -229,7 +229,9 @@ namespace NetworkDesigner.Terrain
             int ia = gr.Nodes.Count - 2, ib = gr.Nodes.Count - 1;
             Vector2 a = gr.Nodes[ia], b = gr.Nodes[ib];
 
-            var route = RailAutoRoute.Route(field, a, b, MaxGradePercent, out string status);
+            var route = RailAutoRoute.EnforceGrade
+                ? RailAutoRoute.RouteWithinGrade(field, a, b, MaxGradePercent, out string status)
+                : RailAutoRoute.Route(field, a, b, MaxGradePercent, out status);
             if (route == null || route.Count < 2) return status;
 
             // Drop any direct edge between A and B; we only ADD nodes after this, so ia/ib stay valid.
@@ -551,11 +553,15 @@ namespace NetworkDesigner.Terrain
                 float pct = (eB - eA) / L * 100f;
                 Vector2 mid = LineGraph.Bezier(q0, q1, q2, q3, 0.5f);
                 float my = field.SampleHeight(mid.x, mid.y) + Lift + 1.5f;
+                // Local tangent at the midpoint → world XZ direction (for laying the label along the track).
+                Vector2 t = LineGraph.Bezier(q0, q1, q2, q3, 0.55f) - LineGraph.Bezier(q0, q1, q2, q3, 0.45f);
+                Vector3 dir = t.sqrMagnitude > 1e-6f ? new Vector3(t.x, 0f, t.y).normalized : Vector3.forward;
                 outList.Add(new EdgeGrade
                 {
                     Mid = new Vector3(mid.x, my, mid.y),
                     GradePct = pct,
                     Over = Mathf.Abs(pct) > maxPct,
+                    Dir = dir,
                 });
             }
         }
