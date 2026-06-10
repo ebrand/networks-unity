@@ -1851,6 +1851,14 @@ namespace NetworkDesigner.Terrain
         }
         public void RebuildPlan() { PlanLayer.Rebuild(Surf); }
         public void ClearPlan() { PlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
+        // Grade-aware A* auto-route between the last two plan points.
+        public void AutoRoutePlan()
+        {
+            if (PlanLayer == null) return;
+            string msg = PlanLayer.AutoRouteLastSegment(Surf);
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[Plan] auto-route — {msg}");
+        }
 
         // Status of the "build rail on the plan centreline" action, surfaced in the
         // plan panel. -1 = empty plan, 0 = buildable, >0 = that many over-grade segments.

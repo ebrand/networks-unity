@@ -220,6 +220,36 @@ namespace NetworkDesigner.Terrain
             Rebuild(field);
         }
 
+        // Grade-aware A* auto-route between the last two plan points (A then B): replace the straight A→B
+        // edge with a routed node chain that stays within MaxGradePercent. Returns a status string.
+        public string AutoRouteLastSegment(ITerrainSurface field)
+        {
+            var gr = Graph;
+            if (gr.Nodes.Count < 2) return "Place two plan points (A then B) first.";
+            int ia = gr.Nodes.Count - 2, ib = gr.Nodes.Count - 1;
+            Vector2 a = gr.Nodes[ia], b = gr.Nodes[ib];
+
+            var route = RailAutoRoute.Route(field, a, b, MaxGradePercent, out string status);
+            if (route == null || route.Count < 2) return status;
+
+            // Drop any direct edge between A and B; we only ADD nodes after this, so ia/ib stay valid.
+            for (int i = gr.Edges.Count - 1; i >= 0; i--)
+            { var e = gr.Edges[i]; if ((e.A == ia && e.B == ib) || (e.A == ib && e.B == ia)) gr.Edges.RemoveAt(i); }
+
+            // Chain A → interior waypoints → B with straight edges (the plan auto-smooths them).
+            int prev = ia;
+            for (int k = 1; k < route.Count - 1; k++)
+            {
+                int n = gr.AddNode(route[k]);
+                gr.AddEdge(prev, n);
+                prev = n;
+            }
+            gr.AddEdge(prev, ib);
+            _chainTail = ib;
+            Rebuild(field);
+            return status;
+        }
+
         const float NodePickRadius = 5f;
 
         int NearestOrNew(Vector2 p)

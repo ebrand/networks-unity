@@ -57,6 +57,11 @@ namespace NetworkDesigner.UI
                 () => Designer.PlanLayer.CorridorWidth,
                 v => { Designer.PlanLayer.CorridorWidth = v; Designer.RebuildPlan(); }, 2f, 200f, "0"));
 
+            // Grade-aware A* auto-route between the last two plan points (place A, place B, then this).
+            var autoBtn = MakeButton("Auto-route A→B", () => Designer.AutoRoutePlan());
+            autoBtn.style.marginTop = 4;
+            body.Add(autoBtn);
+
             // Plan/track actions.
             var actRow = HBox();
             var carve = MakeButton("Carve Appr.", () => Designer.CarveRailApproaches());
