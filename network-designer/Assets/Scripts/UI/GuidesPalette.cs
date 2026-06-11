@@ -55,6 +55,16 @@ namespace NetworkDesigner.UI
                 v => PlanGuides.ProximitySnapOn = v));
             body.Add(SliderRow("Proximity snap", () => PlanGuides.EndSnapRadius,
                 v => PlanGuides.EndSnapRadius = v, 0f, 30f, "0.#"));
+
+            body.Add(Divider());
+            body.Add(SectionLabel("SPEED CONSTRAINTS"));
+            // Design speeds gate the tightest curve each tool will draw (min radius from speed).
+            body.Add(NumberRow("Rail design speed", "km/h",
+                () => Designer.RailLayer.SpeedLimitKmh,
+                v => Designer.RailLayer.SpeedLimitKmh = v, 5f, 200f, "0"));   // rail plan mirrors this live
+            body.Add(NumberRow("Road design speed", "km/h",
+                () => Designer.RoadPlanLayer.DesignSpeedKmh,
+                v => Designer.RoadPlanLayer.DesignSpeedKmh = v, 5f, 200f, "0"));
         }
 
         // A "Label  #RRGGBBAA" row: a delayed text field that parses an HTML colour hex.

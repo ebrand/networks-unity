@@ -915,8 +915,11 @@ namespace NetworkDesigner.Terrain
                 }
                 if (_lineActive is RoadPlanLayer rdp)
                 {
-                    // Roads turn freely at corners — node JOIN (intersections) + SOFT extension assist, no
-                    // hard collinear lock. Node snap wins so segments meet cleanly at shared nodes.
+                    // Shift-curve: bend sticks to the min-distance target > equal-leg lock (placing the end) >
+                    // PAC owns the cursor. Then node JOIN (intersections) + SOFT extension assist for straights.
+                    if (rdp.TrySnapBendToTarget(flat, out Vector2 rbt)) return new Vector3(rbt.x, raw.y, rbt.y);
+                    if (rdp.TrySnapCurveSymmetry(flat, out Vector2 rsym)) return new Vector3(rsym.x, raw.y, rsym.y);
+                    if (rdp.PlacingCurveEnd) return raw;
                     if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
                     if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
                 }
@@ -925,7 +928,8 @@ namespace NetworkDesigner.Terrain
                 // rail curve has no incoming tangent to honour, so snapping its bend to the
                 // grid is exactly what you want — keep grid snap on in that case.
                 bool curveMode = (_lineActive is RailTrackLayer crl && crl.InCurveMode)
-                              || (_lineActive is RailPlanLayer cpl && cpl.InCurveMode);
+                              || (_lineActive is RailPlanLayer cpl && cpl.InCurveMode)
+                              || (_lineActive is RoadPlanLayer crd && crd.InCurveMode);
                 bool brandNewRailCurve = _lineActive is RailTrackLayer nrl && !nrl.ChainExtendsExisting;
                 return (curveMode && !brandNewRailCurve) ? raw : ApplyGridSnap(raw);
             }
@@ -1254,6 +1258,7 @@ namespace NetworkDesigner.Terrain
             DrawCurveTickLabels();
             DrawSpeedLabels();
             DrawDesignSpeedReadout();
+            DrawRoadCurveLabels();
             DrawCurveInspectLabels();
             DrawSlopeCurveBadge();
             DrawSlopeGradeReadout();
@@ -1444,6 +1449,7 @@ namespace NetworkDesigner.Terrain
             List<Vector3> pos = null; List<int> deg = null;
             if (_lineActive is RailTrackLayer rt && rt.PlacingCurveEnd) { pos = rt.CurveTickWorld; deg = rt.CurveTickDeg; }
             else if (_lineActive is RailPlanLayer pl && pl.PlacingCurveEnd) { pos = pl.CurveTickWorld; deg = pl.CurveTickDeg; }
+            else if (_lineActive is RoadPlanLayer rd && rd.PlacingCurveEnd) { pos = rd.CurveTickWorld; deg = rd.CurveTickDeg; }
             if (pos == null || pos.Count == 0) return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
@@ -1648,6 +1654,8 @@ namespace NetworkDesigner.Terrain
             { kmh = rt.SpeedLimitKmh; col = new Color(1f, 0.8f, 0.3f); haveTail = rt.TryGetTailXZ(out tail); }
             else if (_lineActive is RailPlanLayer pl)
             { kmh = pl.SpeedLimitKmh; col = new Color(1f, 0.92f, 0.2f); haveTail = pl.TryGetTailXZ(out tail); }
+            else if (_lineActive is RoadPlanLayer rd)
+            { kmh = rd.DesignSpeedKmh; col = rd.LastPreviewTooTight ? new Color(1f, 0.3f, 0.25f) : new Color(1f, 0.62f, 0.2f); haveTail = rd.TryGetTailXZ(out tail); }
             else return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
@@ -1661,7 +1669,29 @@ namespace NetworkDesigner.Terrain
                 Vector2 dir = cur - tail;
                 if (dir.sqrMagnitude > 1e-4f) { dir.Normalize(); anchor += new Vector3(dir.x, 0f, dir.y) * 10f; }
             }
-            DrawWorldText(cam, s, anchor, $"{kmh:0} km/h", col, 0.75f, new Vector2(-40f, 0f));
+            string txt = $"{kmh:0} km/h";
+            // While a road shift-curve is armed, show the pending radius vs. the design-speed minimum.
+            if (_lineActive is RoadPlanLayer rdp && rdp.CornerPending && !float.IsPositiveInfinity(rdp.LastPreviewRadius))
+                txt += rdp.LastPreviewTooTight
+                    ? $"  R {rdp.LastPreviewRadius:0} m (min {rdp.MinRadiusForSpeed:0})"
+                    : $"  R {rdp.LastPreviewRadius:0} m";
+            DrawWorldText(cam, s, anchor, txt, col, 0.75f, new Vector2(-40f, 0f));
+        }
+
+        // Road shift-curve dimensions: both construction-leg lengths (tail→bend, bend→end) at their
+        // midpoints, and the deflection angle at the bend. Red when the curve is too tight to build.
+        void DrawRoadCurveLabels()
+        {
+            if (!(_lineActive is RoadPlanLayer rd) || !rd.PreviewCurveActive) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            Color col = rd.LastPreviewTooTight ? new Color(1f, 0.3f, 0.25f) : new Color(1f, 0.85f, 0.3f);
+            if (rd.PreviewLegA > 0.5f)
+                DrawWorldText(cam, s, ToWorldXZ((rd.PreviewTail + rd.PreviewCorner) * 0.5f, 2f), $"{rd.PreviewLegA:0} m", col);
+            if (rd.PreviewLegB > 0.5f)
+                DrawWorldText(cam, s, ToWorldXZ((rd.PreviewCorner + rd.PreviewEnd) * 0.5f, 2f), $"{rd.PreviewLegB:0} m", col);
+            DrawWorldText(cam, s, ToWorldXZ(rd.PreviewCorner, 2f), $"{rd.PreviewDeflectionDeg:0}°", col);
         }
 
         // Curve-inspection readout for the hovered curve: leg distances + deflection angle
@@ -2004,7 +2034,7 @@ namespace NetworkDesigner.Terrain
                 float halfW = Mathf.Max(2f, RailLayer.GradeCorridorWidth * 0.5f);
                 float innerFrac = 1f - Mathf.Clamp01(BrushFalloff);
                 ChunkWorld.GradeCorridor(targets, halfW, innerFrac);
-                RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+                RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf); RoadPlanLayer.Rebuild(Surf);
                 ConformScatterAndLines();   // re-settle scatter/fences onto the carved bed
                 _dirtySince = Time.realtimeSinceStartup;
                 Debug.Log($"[Grade] Graded {targets.Count} corridor samples (chunk world).");
@@ -2255,10 +2285,11 @@ namespace NetworkDesigner.Terrain
 
         float WorldGroundHeight(Vector3 p) => _field != null ? _field.SampleHeight(p.x, p.z) : 0f;
 
-        // True while Cmd is held in rail/plan mode: the wheel adjusts the design speed
-        // (and the camera ignores it, via ScrollSuppressor).
-        bool CmdSpeedScroll() => RailLayer != null
-            && (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer)
+        // True while Cmd is held in rail/plan/road-plan mode: the wheel adjusts the active
+        // tool's design speed (and the camera ignores it, via ScrollSuppressor). Only one of
+        // these modes is active at a time, so the same gesture drives whichever is current.
+        bool CmdSpeedScroll() =>
+            (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer || _lineActive is RoadPlanLayer)
             && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand));
 
         // Option(Alt) + wheel adjusts the parallel-track count (rail Build mode, parallel on).
@@ -2359,14 +2390,20 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.V) && ChunkWorld.Active) _showMinimap = !_showMinimap;
             // J toggles topographic contour lines over the terrain.
             if (Input.GetKeyDown(KeyCode.J) && ChunkWorld.Active) ChunkContours = !ChunkContours;
-            // Cmd + mouse wheel: nudge the shared design speed ±10 km/h per notch while in
-            // rail/plan mode — set it without leaving the plan. The camera ignores the wheel
-            // while Cmd is held (see ScrollSuppressor in the camera setup).
+            // Cmd + mouse wheel: nudge the active tool's design speed ±10 km/h per notch while
+            // in rail/plan/road-plan mode — set it without leaving the plan. The camera ignores
+            // the wheel while Cmd is held (see ScrollSuppressor in the camera setup).
             if (CmdSpeedScroll())
             {
                 int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
                 if (notches != 0)
-                    RailLayer.SpeedLimitKmh = Mathf.Clamp(RailLayer.SpeedLimitKmh + notches * 10f, 10f, 200f);
+                {
+                    // ±5 km/h per notch, snapped to multiples of 5 (…05, 10, 15…).
+                    if (_lineActive is RoadPlanLayer rdSpd)
+                        rdSpd.DesignSpeedKmh = Mathf.Clamp(Mathf.Round((rdSpd.DesignSpeedKmh + notches * 5f) / 5f) * 5f, 5f, 200f);
+                    else
+                        RailLayer.SpeedLimitKmh = Mathf.Clamp(Mathf.Round((RailLayer.SpeedLimitKmh + notches * 5f) / 5f) * 5f, 5f, 200f);
+                }
             }
             // Option(Alt) + wheel in rail parallel mode: ±1 parallel track per notch. The
             // camera ignores the wheel while this is active (ScrollSuppressor).
@@ -2550,6 +2587,7 @@ namespace NetworkDesigner.Terrain
             {
                 bool curveModNow = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                 if (_lineActive is RailTrackLayer railModNow) railModNow.CurveModifier = curveModNow;
+                else if (_lineActive is RoadPlanLayer roadModNow) roadModNow.CurveModifier = curveModNow;
                 else if (_lineActive is RailPlanLayer planModNow)
                 {
                     planModNow.CurveModifier = curveModNow;
@@ -2603,7 +2641,7 @@ namespace NetworkDesigner.Terrain
             // Remember the placement cursor + whether it's over terrain, for the on-screen
             // design-speed readout drawn in OnGUI.
             _lineCursorWorld = cursorVis; _lineCursorValid = overTerrain
-                && (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer);
+                && (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer || _lineActive is RoadPlanLayer);
 
             // Linework mode (fence/…): click adds a node + connects from the last
             // (chain); right-click ends the chain; Backspace undoes the last node.
@@ -2672,6 +2710,8 @@ namespace NetworkDesigner.Terrain
                     else if ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) && overTerrain
                              && _lineActive is RailTrackLayer railEd && railEd.DeleteEdgeNear(Surf, hit.point, 4f))
                         _dirtySince = Time.realtimeSinceStartup;
+                    // A pending shift-curve bend cancels first (keep the chain) before delete/end-chain.
+                    else if (_lineActive is RoadPlanLayer roadCancel && roadCancel.CornerPending) roadCancel.CancelCorner();
                     else DeleteOrEndChain(hit, overTerrain);
                 }
                 if (Input.GetKeyDown(KeyCode.Backspace))
@@ -2913,6 +2953,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);  // re-drape the rail too (load-restore onto the chunk surface; follows sculpts)
             PlanLayer.Rebuild(Surf); // re-drape the survey lines onto the new surface
+            RoadPlanLayer.Rebuild(Surf); // re-drape the road corridor too — else it stays buried after load
         }
 
         // World hit -> fractional grid coords, relative to the terrain corner
@@ -3469,7 +3510,7 @@ namespace NetworkDesigner.Terrain
             if (targets.Count == 0) return;
             // Flat/ramped BED of width 2·halfW along the path, with daylighting batters at 1:BatterRatio.
             ChunkWorld.GradeBatter(targets, halfW, BatterRatio);
-            RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+            RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf); RoadPlanLayer.Rebuild(Surf);
         }
 
         void ApplySlope(Vector3 aWorld, Vector3 bWorld, float elevA, float elevB)

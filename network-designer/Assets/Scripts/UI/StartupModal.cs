@@ -23,6 +23,7 @@ namespace NetworkDesigner.UI
         protected override Color Accent => new Color(0.52f, 0.76f, 0.46f);
 
         string _selectedRegion;
+        DropdownField _worldDd;   // saved-worlds dropdown — Return loads its selection (default = last visited)
         readonly List<VisualElement> _tiles = new List<VisualElement>();
         static readonly Dictionary<string, Texture2D> _previewCache = new Dictionary<string, Texture2D>();
         bool _heldModal;   // whether we're currently holding the global modal ref-count
@@ -38,6 +39,12 @@ namespace NetworkDesigner.UI
                 if (shown) PushModal(); else PopModal();
                 _heldModal = shown;
             }
+            // Return = the modal's default action: load the selected (default = last-visited) world.
+            // Suppressed while typing a new world's name so Enter there doesn't fire a load.
+            if (shown && Designer != null && _worldDd != null && !TextEditing
+                && !string.IsNullOrWhiteSpace(_worldDd.value)
+                && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)))
+                Designer.LoadGame(_worldDd.value);
         }
 
         protected override void OnDisable()
@@ -64,6 +71,7 @@ namespace NetworkDesigner.UI
             var worlds = NetworkDesigner.Terrain.WorldManager.ListWorlds();
             if (worlds.Count == 0)
             {
+                _worldDd = null;
                 var none = new Label("  (none yet — create one below)");
                 none.style.color = Sub; none.style.fontSize = 11;
                 none.style.unityFontStyleAndWeight = FontStyle.Italic; none.style.marginBottom = 6;
@@ -71,7 +79,11 @@ namespace NetworkDesigner.UI
             }
             else
             {
-                var wd = new DropdownField { choices = worlds, value = worlds[0] };
+                // Default to the last world visited (persisted in GameManager.Last) when it still exists.
+                string last = NetworkDesigner.Terrain.GameManager.Last;
+                string def = (!string.IsNullOrEmpty(last) && worlds.Contains(last)) ? last : worlds[0];
+                var wd = new DropdownField { choices = worlds, value = def };
+                _worldDd = wd;
                 wd.style.marginBottom = 6; body.Add(wd);
 
                 var thumb = new VisualElement();

@@ -43,6 +43,45 @@ namespace NetworkDesigner.Terrain
         public float EndSnapRadius { get => PlanGuides.EndSnapRadius; set => PlanGuides.EndSnapRadius = value; }
         public float ExtensionGuideLength { get => PlanGuides.ExtensionGuideLength; set => PlanGuides.ExtensionGuideLength = value; }
         public float NodePuckRadius { get => PlanGuides.NodePuckRadius; set => PlanGuides.NodePuckRadius = value; }
+        public float CurveLever { get => PlanGuides.CurveLever; set => PlanGuides.CurveLever = value; }
+
+        // ── shift-curves: hold Shift, click to drop a bend corner, click again for the end ──
+        [Tooltip("Refuse curves tighter than the design speed allows (AASHTO-style min radius). No decel zones — one design speed for the corridor.")]
+        public bool LimitCurveRadius = true;
+        [Tooltip("Design speed (km/h) the corridor's curves are built for.")]
+        public float DesignSpeedKmh = 40f;
+        [Range(0f, 0.12f)]
+        [Tooltip("Max superelevation e_max (road banking). Urban low-speed ~0.04, suburban/rural ~0.06, mountain up to 0.12.")]
+        public float MaxSuperelevation = 0.06f;
+        // AASHTO minimum horizontal radius (m): R = V²/(127·(e_max + f)), V in km/h, f = speed-dependent side friction.
+        public float MinRadiusForSpeed
+        {
+            get { float v = DesignSpeedKmh; return v * v / (127f * Mathf.Max(0.02f, MaxSuperelevation + SideFriction(v))); }
+        }
+        // AASHTO max side-friction factor f, interpolated by design speed (km/h) — it drops as speed rises.
+        static float SideFriction(float kmh)
+        {
+            float[] V = { 30f, 40f, 50f, 60f, 70f, 80f, 90f, 100f, 110f, 120f };
+            float[] F = { 0.28f, 0.23f, 0.19f, 0.17f, 0.15f, 0.14f, 0.13f, 0.12f, 0.11f, 0.09f };
+            if (kmh <= V[0]) return F[0];
+            for (int i = 1; i < V.Length; i++)
+                if (kmh <= V[i]) return Mathf.Lerp(F[i - 1], F[i], (kmh - V[i - 1]) / (V[i] - V[i - 1]));
+            return F[F.Length - 1];
+        }
+        [Tooltip("Smallest deflection (deg) that still counts as a real turn — below this, treat the leg as straight.")]
+        public float MinCurveDeflectionDeg = 5f;
+        public float CurveSymmetrySnap { get => PlanGuides.CurveSymmetrySnap; set => PlanGuides.CurveSymmetrySnap = value; }
+
+        [System.NonSerialized] public bool CurveModifier;                       // Shift held this frame
+        [System.NonSerialized] public float LastPreviewRadius = float.PositiveInfinity;
+        [System.NonSerialized] public bool LastPreviewTooTight;                 // pending curve tighter than MinRadiusForSpeed
+        // While a shift-curve bend is being placed: geometry for the on-screen leg/angle labels.
+        [System.NonSerialized] public bool PreviewCurveActive;
+        [System.NonSerialized] public Vector2 PreviewTail, PreviewCorner, PreviewEnd;
+        [System.NonSerialized] public float PreviewLegA, PreviewLegB, PreviewDeflectionDeg;
+        public bool CornerPending => _cornerPending;                           // a bend is armed, awaiting the end click
+        public void CancelCorner() { _cornerPending = false; }                 // right-click backs out of the armed bend
+        Vector2 _corner; bool _cornerPending;
 
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
@@ -58,9 +97,18 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _nn = new List<Vector3>();
         readonly List<int> _nidx = new List<int>();
 
-        GameObject _pvGo; MeshFilter _pvMf; MeshRenderer _pvMr; Mesh _pvMesh;
+        GameObject _pvGo; MeshFilter _pvMf; MeshRenderer _pvMr; Mesh _pvMesh; Material _pvBadMat;
         readonly List<Vector3> _pv = new List<Vector3>();
-        readonly List<int> _pvIdx = new List<int>();
+        readonly List<int> _pvIdx = new List<int>();       // submesh 0: normal (plan colour)
+        readonly List<int> _pvBadIdx = new List<int>();    // submesh 1: too-tight curve (red)
+
+        // Equal-leg "PAC" ring (vertex-coloured yellow=buildable / red=too-tight) + its 15° tick labels.
+        GameObject _symGo; MeshFilter _symMf; MeshRenderer _symMr; Mesh _symMesh; Material _symMat;
+        readonly List<Vector3> _symV = new List<Vector3>();
+        readonly List<int> _symIdx = new List<int>();
+        readonly List<Color32> _symCol = new List<Color32>();
+        [System.NonSerialized] public readonly List<Vector3> CurveTickWorld = new List<Vector3>();
+        [System.NonSerialized] public readonly List<int> CurveTickDeg = new List<int>();
 
         const int SubSteps = 48;
         static readonly Vector2[] _pts = new Vector2[SubSteps + 1];
@@ -84,8 +132,23 @@ namespace NetworkDesigner.Terrain
                 if (near >= 0) _chainTail = near;
                 else if (Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _)) { _chainTail = Graph.SplitEdge(ei, tt); Rebuild(field); }
                 else _chainTail = Graph.AddNode(p);
+                _cornerPending = false;
                 return;
             }
+            if (_cornerPending)   // END click of a shift-curve: build the curve tail→end through the armed corner
+            {
+                if (LimitCurveRadius)
+                {
+                    CurveControls(Graph.Nodes[_chainTail], p, _corner, out Vector2 cc1, out Vector2 cc2);
+                    if (MinCurveRadius(Graph.Nodes[_chainTail], cc1, cc2, p) < MinRadiusForSpeed) return;   // too tight: keep the corner armed for a wider end
+                }
+                int endc = NearestOrNew(p);
+                AddCurvedEdge(_chainTail, endc, _corner);
+                _chainTail = endc; _cornerPending = false;
+                Rebuild(field);
+                return;
+            }
+            if (CurveModifier) { _corner = p; _cornerPending = true; return; }   // arm the bend; the next click is the end
             int end = NearestOrNew(p);   // join an existing node → a real intersection
             int before = Graph.Edges.Count;
             Graph.AddEdge(_chainTail, end);
@@ -100,11 +163,171 @@ namespace NetworkDesigner.Terrain
             return (near >= 0 && near != _chainTail) ? near : Graph.AddNode(p);
         }
 
+        // Cubic controls that pull the curve toward the bend corner (CurveLever ≈ 0.55 ≈ circular arc).
+        void CurveControls(Vector2 a, Vector2 b, Vector2 corner, out Vector2 c1, out Vector2 c2)
+        {
+            float f = Mathf.Clamp(CurveLever, 0.1f, 0.95f);
+            c1 = Vector2.Lerp(a, corner, f);
+            c2 = Vector2.Lerp(b, corner, f);
+        }
+
+        void AddCurvedEdge(int a, int b, Vector2 corner)
+        {
+            int before = Graph.Edges.Count;
+            Graph.AddEdge(a, b);
+            if (Graph.Edges.Count <= before) return;   // edge already existed (dedup) — leave it straight
+            LineEdge e = Graph.Edges[Graph.Edges.Count - 1];
+            CurveControls(Graph.Nodes[a], Graph.Nodes[b], corner, out Vector2 c1, out Vector2 c2);
+            e.HasCurve = true; e.ControlA = c1; e.ControlB = c2; e.Profile = ActiveProfileId;
+        }
+
+        // Tightest radius (m) along a cubic bezier, via 3-point circumradius over samples (+inf for a line).
+        static float MinCurveRadius(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            const int N = 24;
+            float minR = float.PositiveInfinity;
+            Vector2 a = LineGraph.Bezier(p0, p1, p2, p3, 0f);
+            Vector2 b = LineGraph.Bezier(p0, p1, p2, p3, 1f / N);
+            for (int i = 2; i <= N; i++)
+            {
+                Vector2 c = LineGraph.Bezier(p0, p1, p2, p3, i / (float)N);
+                float ab = Vector2.Distance(a, b), bc = Vector2.Distance(b, c), ca = Vector2.Distance(c, a);
+                float area2 = Mathf.Abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+                if (area2 > 1e-6f) minR = Mathf.Min(minR, ab * bc * ca / (2f * area2));
+                a = b; b = c;
+            }
+            return minR;
+        }
+
+        // ---- curve-constraint guides (mirrors the rail plan: equal-leg ring, buildable arc, 15° ticks) ----
+
+        // Would a symmetric curve through (start, bend, end) meet the design-speed minimum radius?
+        bool CurveBuildable(Vector2 start, Vector2 bend, Vector2 end)
+        {
+            if (!LimitCurveRadius) return true;
+            Vector2 inD = bend - start, outD = end - bend;
+            if (inD.sqrMagnitude < 1e-6f || outD.sqrMagnitude < 1e-6f) return false;
+            CurveControls(start, end, bend, out Vector2 c1, out Vector2 c2);
+            return MinCurveRadius(start, c1, c2, end) >= MinRadiusForSpeed;
+        }
+
+        // After the bend is armed, lock the end onto the equal-leg circle and clamp its direction
+        // into the buildable arc (and onto 15° ticks). False when the leg is too short for any turn.
+        public bool TrySnapCurveSymmetry(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (!_cornerPending || CurveSymmetrySnap <= 0f
+                || _chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            Vector2 start = Graph.Nodes[_chainTail], bend = _corner;
+            float legA = Vector2.Distance(start, bend);
+            if (legA < 0.5f) return false;
+            if (!LimitCurveRadius)   // unconstrained: lock distance only, any direction
+            {
+                Vector2 t0 = cursor - bend;
+                Vector2 d0 = t0.sqrMagnitude > 1e-6f ? t0.normalized : (bend - start).normalized;
+                snapped = bend + d0 * legA; return true;
+            }
+            Vector2 toCur = cursor - bend;
+            Vector2 dir = toCur.sqrMagnitude > 1e-6f ? toCur.normalized : (bend - start).normalized;
+            ClampToBuildableArc(start, bend, legA, dir, out Vector2 cdir);
+            snapped = bend + cdir * legA;
+            return true;
+        }
+
+        void ClampToBuildableArc(Vector2 start, Vector2 bend, float legA, Vector2 dir, out Vector2 outDir)
+        {
+            Vector2 a0 = (bend - start).sqrMagnitude > 1e-6f ? (bend - start).normalized : Vector2.right;
+            float a0A = Mathf.Atan2(a0.y, a0.x) * Mathf.Rad2Deg;
+            float delta = Mathf.DeltaAngle(a0A, Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg);
+            float sign = delta >= 0f ? 1f : -1f;
+            float thMax = MaxBuildableDeflection(start, bend, legA, a0A, sign);
+            float mag = SnapDeflectionToTick(Mathf.Clamp(Mathf.Abs(delta), 0f, thMax), thMax);
+            float ang = (a0A + mag * sign) * Mathf.Deg2Rad;
+            outDir = new Vector2(Mathf.Cos(ang), Mathf.Sin(ang));
+        }
+
+        static readonly float[] DeflectionTicksDeg = { 15f, 30f, 45f, 60f, 75f, 90f };
+
+        static float SnapDeflectionToTick(float deg, float maxDeg)
+        {
+            const float tol = 3f;
+            for (int i = 0; i < DeflectionTicksDeg.Length; i++)
+            {
+                float t = DeflectionTicksDeg[i];
+                if (t > maxDeg + 0.5f) break;
+                if (Mathf.Abs(deg - t) <= tol) return t;
+            }
+            return deg;
+        }
+
+        bool DeflectionBuildable(Vector2 start, Vector2 bend, float legA, float a0A, float sign, float d)
+        {
+            float ang = (a0A + sign * d) * Mathf.Deg2Rad;
+            return CurveBuildable(start, bend, bend + new Vector2(Mathf.Cos(ang), Mathf.Sin(ang)) * legA);
+        }
+
+        // Largest deflection (deg) on the given side whose curve still meets the min radius.
+        float MaxBuildableDeflection(Vector2 start, Vector2 bend, float legA, float a0A, float sign)
+        {
+            float lo = 0f, hi = 181f;
+            for (float d = 0.5f; d <= 179f; d += 1f)
+            {
+                if (DeflectionBuildable(start, bend, legA, a0A, sign, d)) lo = d;
+                else { hi = d; break; }
+            }
+            for (int i = 0; i < 6 && hi <= 179f; i++)
+            {
+                float mid = 0.5f * (lo + hi);
+                if (DeflectionBuildable(start, bend, legA, a0A, sign, mid)) lo = mid; else hi = mid;
+            }
+            return lo;
+        }
+
+        // While positioning the bend (Shift held, before the end click), keep the first leg at least
+        // long enough for a real turn at the speed: lock onto the collinear extension (no kink) if
+        // extending, else onto the min-distance-target ring.
+        public bool TrySnapBendToTarget(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (!LimitCurveRadius || CurveSymmetrySnap <= 0f || !CurveModifier || _cornerPending
+                || _chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            float minLeg = MinFirstLegForSpeed();
+            if (minLeg < 1f) return false;
+            Vector2 start = Graph.Nodes[_chainTail];
+            if (IncomingDirection(cursor, out Vector2 ext))
+            {
+                float along = Mathf.Max(minLeg, Vector2.Dot(cursor - start, ext));
+                snapped = start + ext * along;
+                return true;
+            }
+            Vector2 toCur = cursor - start; float d = toCur.magnitude;
+            if (d < 1e-4f) return false;
+            if (d >= minLeg + Mathf.Max(5f, minLeg * 0.04f)) return false;   // well past target → free angle
+            snapped = start + (toCur / d) * minLeg;
+            return true;
+        }
+
+        // Leg length at which a MinCurveDeflectionDeg curve first meets the min radius (0 if unlimited).
+        float MinFirstLegForSpeed()
+        {
+            if (!LimitCurveRadius) return 0f;
+            float th = Mathf.Max(0.1f, MinCurveDeflectionDeg) * Mathf.Deg2Rad;
+            Vector2 end = new Vector2(1f + Mathf.Cos(th), Mathf.Sin(th));
+            CurveControls(Vector2.zero, end, new Vector2(1f, 0f), out Vector2 c1, out Vector2 c2);
+            float k = MinCurveRadius(Vector2.zero, c1, c2, end);
+            return k > 1e-3f ? MinRadiusForSpeed / k : 0f;
+        }
+
+        // True while a curve is being built (bend awaiting placement, or end awaiting it).
+        public bool InCurveMode => (CurveModifier || _cornerPending) && CurveSymmetrySnap > 0f && LimitCurveRadius;
+        // True while positioning the END: the equal-leg ring owns the cursor exclusively.
+        public bool PlacingCurveEnd => _cornerPending && CurveSymmetrySnap > 0f && LimitCurveRadius;
+
         public void EndChain()
         {
             // Cancelling a just-started chain leaves a lone node with no edges — drop it.
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count && !NodeHasEdge(_chainTail)) Graph.RemoveNode(_chainTail);
-            _chainTail = -1;
+            _chainTail = -1; _cornerPending = false;
         }
 
         bool NodeHasEdge(int n) { foreach (LineEdge e in Graph.Edges) if (e.A == n || e.B == n) return true; return false; }
@@ -133,8 +356,22 @@ namespace NetworkDesigner.Terrain
             Graph.RemoveNode(n);
             if (_chainTail == n) _chainTail = -1;
             else if (_chainTail > n) _chainTail--;
+            _cornerPending = false;
+            PruneOrphanNodes();   // drop the far end(s) of the deleted segment(s) if now edgeless
             Rebuild(field);
             return true;
+        }
+
+        // Remove any node left with no edges (e.g. the far end of a just-deleted segment),
+        // keeping the active chain tail (a fresh, not-yet-connected start node).
+        void PruneOrphanNodes()
+        {
+            for (int i = Graph.Nodes.Count - 1; i >= 0; i--)
+            {
+                if (i == _chainTail || NodeHasEdge(i)) continue;
+                Graph.RemoveNode(i);
+                if (_chainTail > i) _chainTail--;
+            }
         }
 
         // ---- snapping (extension guide + node join), mirroring the rail plan tool ----
@@ -227,7 +464,11 @@ namespace NetworkDesigner.Terrain
 
         void EdgeBezier(LineEdge e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3)
         {
-            if (Straight)
+            if (e.HasCurve)   // an explicit shift-curve always renders as its own bezier (even with Straight on)
+            {
+                p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B]; p1 = e.ControlA; p2 = e.ControlB;
+            }
+            else if (Straight)
             {
                 p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B];
                 Vector2 d = p3 - p0; p1 = p0 + d / 3f; p2 = p0 + d * (2f / 3f);
@@ -343,14 +584,136 @@ namespace NetworkDesigner.Terrain
 
         // ---- placement preview (ghost puck + dashed pending edge) ----
 
-        public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; }
+        public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; HideSymRing(); }
+
+        // ---- curve-constraint visuals (equal-leg ring + 15° ticks + min-leg target) ----
+
+        // The equal-leg symmetry ring around the bend: YELLOW where ending there is a buildable turn for
+        // the design speed, RED otherwise (near-straight centre + too-tight), with 15° snap-tick marks.
+        void BuildSymRing(ITerrainSurface field, Vector2 start, Vector2 bend)
+        {
+            EnsureSymRing();
+            _symV.Clear(); _symIdx.Clear(); _symCol.Clear();
+            CurveTickWorld.Clear(); CurveTickDeg.Clear();
+            float radius = Vector2.Distance(start, bend);
+            if (radius >= 0.5f)
+            {
+                int N = Mathf.Clamp(Mathf.CeilToInt(2f * Mathf.PI * radius / 3f), 64, 512);
+                Color32 ok = new Color32(255, 225, 50, 200), bad = new Color32(255, 55, 45, 200);
+                Vector3 prev = RingPt(field, bend, radius, 0f);
+                for (int i = 1; i <= N; i++)
+                {
+                    Vector3 w = RingPt(field, bend, radius, i / (float)N * Mathf.PI * 2f);
+                    float aMid = (i - 0.5f) / N * Mathf.PI * 2f;
+                    Vector2 endMid = new Vector2(bend.x + Mathf.Cos(aMid) * radius, bend.y + Mathf.Sin(aMid) * radius);
+                    Color32 col = CurveBuildable(start, bend, endMid) ? ok : bad;
+                    int s = _symV.Count; _symV.Add(prev); _symV.Add(w);
+                    _symCol.Add(col); _symCol.Add(col); _symIdx.Add(s); _symIdx.Add(s + 1);
+                    prev = w;
+                }
+                Vector2 a0 = (bend - start).sqrMagnitude > 1e-6f ? (bend - start).normalized : Vector2.right;
+                float a0A = Mathf.Atan2(a0.y, a0.x) * Mathf.Rad2Deg;
+                float tl = Mathf.Clamp(radius * 0.02f, 2f, 25f);
+                Color32 tickCol = ok;
+                for (int sgn = -1; sgn <= 1; sgn += 2)
+                {
+                    float thMax = MaxBuildableDeflection(start, bend, radius, a0A, sgn);
+                    for (int ti = 0; ti < DeflectionTicksDeg.Length && DeflectionTicksDeg[ti] <= thMax + 0.5f; ti++)
+                    {
+                        float ang = (a0A + sgn * DeflectionTicksDeg[ti]) * Mathf.Deg2Rad;
+                        Vector3 wi = RingPt(field, bend, radius - tl, ang), wo = RingPt(field, bend, radius + tl, ang);
+                        int ts = _symV.Count; _symV.Add(wi); _symV.Add(wo);
+                        _symCol.Add(tickCol); _symCol.Add(tickCol); _symIdx.Add(ts); _symIdx.Add(ts + 1);
+                        CurveTickWorld.Add(RingPt(field, bend, radius + tl + Mathf.Max(2f, tl), ang));
+                        CurveTickDeg.Add((int)DeflectionTicksDeg[ti]);
+                    }
+                }
+            }
+            _symMesh.Clear(); _symMesh.SetVertices(_symV); _symMesh.SetColors(_symCol);
+            _symMesh.SetIndices(_symIdx, MeshTopology.Lines, 0); _symMesh.RecalculateBounds();
+            _symMr.enabled = true;
+        }
+
+        Vector3 RingPt(ITerrainSurface field, Vector2 c, float radius, float angle)
+        {
+            float x = c.x + Mathf.Cos(angle) * radius, z = c.y + Mathf.Sin(angle) * radius;
+            return new Vector3(x, (field != null ? field.SampleHeight(x, z) : 0f) + Lift, z);
+        }
+
+        // While positioning the bend: a dashed guide leg (RED until the first leg is long enough for a
+        // real turn at this speed) + a circle marking the min-distance target.
+        void BuildMinLegGuide(ITerrainSurface field, Vector2 start, Vector2 cur)
+        {
+            EnsureSymRing();
+            _symV.Clear(); _symIdx.Clear(); _symCol.Clear();
+            CurveTickWorld.Clear(); CurveTickDeg.Clear();
+            float minLeg = MinFirstLegForSpeed();
+            float leg = Vector2.Distance(start, cur);
+            Color32 ok = new Color32(255, 225, 50, 220), bad = new Color32(255, 55, 45, 220);
+            SymDashedLine(field, start, cur, (minLeg > 1f && leg < minLeg) ? bad : ok);
+            if (minLeg > 1f && (cur - start).sqrMagnitude > 1e-4f)
+            {
+                Vector2 dir = (cur - start).normalized;
+                SymCircle(field, start + dir * minLeg, 5f, bad);
+            }
+            _symMesh.Clear(); _symMesh.SetVertices(_symV); _symMesh.SetColors(_symCol);
+            _symMesh.SetIndices(_symIdx, MeshTopology.Lines, 0); _symMesh.RecalculateBounds();
+            _symMr.enabled = true;
+        }
+
+        void SymDashedLine(ITerrainSurface field, Vector2 a, Vector2 b, Color32 col)
+        {
+            float len = Vector2.Distance(a, b);
+            if (len < 1e-4f) return;
+            Vector2 dir = (b - a) / len;
+            const float dash = 1f, gap = 0.6f, period = dash + gap;
+            for (float pos = 0f; pos < len; pos += period)
+            {
+                Vector2 p0 = a + dir * pos, p1 = a + dir * Mathf.Min(pos + dash, len);
+                Vector3 w0 = new Vector3(p0.x, (field != null ? field.SampleHeight(p0.x, p0.y) : 0f) + Lift, p0.y);
+                Vector3 w1 = new Vector3(p1.x, (field != null ? field.SampleHeight(p1.x, p1.y) : 0f) + Lift, p1.y);
+                int s = _symV.Count; _symV.Add(w0); _symV.Add(w1); _symCol.Add(col); _symCol.Add(col); _symIdx.Add(s); _symIdx.Add(s + 1);
+            }
+        }
+
+        void SymCircle(ITerrainSurface field, Vector2 c, float r, Color32 col)
+        {
+            const int n = 18; Vector3 prev = default;
+            for (int i = 0; i <= n; i++)
+            {
+                float a = i / (float)n * Mathf.PI * 2f;
+                Vector3 w = RingPt(field, c, r, a);
+                if (i > 0) { int s = _symV.Count; _symV.Add(prev); _symV.Add(w); _symCol.Add(col); _symCol.Add(col); _symIdx.Add(s); _symIdx.Add(s + 1); }
+                prev = w;
+            }
+        }
+
+        void HideSymRing() { if (_symMr != null) _symMr.enabled = false; }
+
+        void EnsureSymRing()
+        {
+            if (_symMf != null) return;
+            _symGo = new GameObject(RootName + "_SymRing") { hideFlags = HideFlags.DontSave };
+            _symMf = _symGo.AddComponent<MeshFilter>();
+            _symMr = _symGo.AddComponent<MeshRenderer>();
+            _symMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _symMr.receiveShadows = false;
+            _symMesh = new Mesh { name = "RoadPlanSymRing" };
+            _symMf.sharedMesh = _symMesh;
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            _symMat = sh != null ? new Material(sh) { name = "RoadPlanSymRingMat" } : MakeMat(PlanColor, "RoadPlanSymRingMat");
+            _symMr.sharedMaterial = _symMat;
+        }
 
         public void UpdatePreview(ITerrainSurface field, Vector3 cursor, bool show)
         {
             EnsurePreview();
             _pvMr.enabled = show;
+            LastPreviewRadius = float.PositiveInfinity; LastPreviewTooTight = false;
+            PreviewCurveActive = false;
+            HideSymRing();   // default off each frame; BuildSymRing/BuildMinLegGuide re-enable it
             if (!show) return;
-            _pv.Clear(); _pvIdx.Clear();
+            _pv.Clear(); _pvIdx.Clear(); _pvBadIdx.Clear();
 
             const int N = 24; const float R = 1.0f;
             Vector3 prev = default;
@@ -361,24 +724,53 @@ namespace NetworkDesigner.Terrain
                 if (i > 0) AddPv(prev, cur);
                 prev = cur;
             }
+
+            // Shift-curve in progress: the bend is armed, so draw the curve tail→corner→cursor (red when too
+            // tight for the design speed), plus the two construction legs and a marker at the corner.
+            if (_cornerPending && _chainTail >= 0 && _chainTail < Graph.Nodes.Count)
+            {
+                Vector2 tnode = Graph.Nodes[_chainTail];
+                Vector2 endp = new Vector2(cursor.x, cursor.z);
+                CurveControls(tnode, endp, _corner, out Vector2 c1, out Vector2 c2);
+                LastPreviewRadius = MinCurveRadius(tnode, c1, c2, endp);
+                LastPreviewTooTight = LimitCurveRadius && LastPreviewRadius < MinRadiusForSpeed;
+                List<int> idx = LastPreviewTooTight ? _pvBadIdx : _pvIdx;
+
+                // Expose geometry for the on-screen leg-length + deflection-angle labels.
+                Vector2 inLeg = _corner - tnode, outLeg = endp - _corner;
+                PreviewCurveActive = true; PreviewTail = tnode; PreviewCorner = _corner; PreviewEnd = endp;
+                PreviewLegA = inLeg.magnitude; PreviewLegB = outLeg.magnitude;
+                PreviewDeflectionDeg = (inLeg.sqrMagnitude > 1e-6f && outLeg.sqrMagnitude > 1e-6f)
+                    ? Vector2.Angle(inLeg, outLeg) : 0f;
+
+                int cn = Mathf.Clamp(Mathf.CeilToInt(Vector2.Distance(tnode, endp) / 3f), 8, 256);
+                Vector3 bPrev = Drape(field, tnode);
+                for (int i = 1; i <= cn; i++)
+                {
+                    Vector3 cur = Drape(field, LineGraph.Bezier(tnode, c1, c2, endp, (float)i / cn));
+                    AddPvTo(idx, bPrev, cur);
+                    bPrev = cur;
+                }
+                DashLeg(field, tnode, _corner);     // construction legs (dashed, plan colour)
+                DashLeg(field, _corner, endp);
+                MarkCorner(field, _corner);
+                BuildSymRing(field, tnode, _corner);   // equal-leg ring: yellow buildable / red too-tight + 15° ticks
+                _pvMesh.Clear(); _pvMesh.subMeshCount = 2; _pvMesh.SetVertices(_pv);
+                _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0); _pvMesh.SetIndices(_pvBadIdx, MeshTopology.Lines, 1);
+                _pvMesh.RecalculateBounds();
+                return;
+            }
+
+            // Arming a bend (Shift held, corner not yet dropped): show the min-leg target guide.
+            if (CurveModifier && _chainTail >= 0 && _chainTail < Graph.Nodes.Count)
+                BuildMinLegGuide(field, Graph.Nodes[_chainTail], new Vector2(cursor.x, cursor.z));
+
+            // Straight placement: a dashed line tail→cursor + the collinear extension guide.
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count)
             {
                 Vector2 tnode = Graph.Nodes[_chainTail];
-                Vector2 c2 = new Vector2(cursor.x, cursor.z);
-                float len = Vector2.Distance(tnode, c2);
-                if (len > 1e-3f)
-                {
-                    int n = Mathf.Clamp(Mathf.CeilToInt(len / 3f), 1, 200);
-                    Vector3 dPrev = default;
-                    for (int i = 0; i <= n; i++)
-                    {
-                        Vector3 cur = Drape(field, Vector2.Lerp(tnode, c2, (float)i / n));
-                        if (i > 0 && (i % 2 == 0)) AddPv(dPrev, cur);   // dashed
-                        dPrev = cur;
-                    }
-                }
+                DashLeg(field, tnode, new Vector2(cursor.x, cursor.z));
             }
-            // Collinear extension guide: a dashed line straight out of the tail (where the cursor soft-snaps).
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count
                 && IncomingDirection(new Vector2(cursor.x, cursor.z), out Vector2 gdir))
             {
@@ -392,10 +784,42 @@ namespace NetworkDesigner.Terrain
                     gp = cur;
                 }
             }
-            _pvMesh.Clear(); _pvMesh.SetVertices(_pv); _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0); _pvMesh.RecalculateBounds();
+            _pvMesh.Clear(); _pvMesh.subMeshCount = 2; _pvMesh.SetVertices(_pv);
+            _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0); _pvMesh.SetIndices(_pvBadIdx, MeshTopology.Lines, 1);
+            _pvMesh.RecalculateBounds();
+        }
+
+        // A dashed straight leg a→b into the normal (plan-colour) preview submesh.
+        void DashLeg(ITerrainSurface field, Vector2 a, Vector2 b)
+        {
+            float len = Vector2.Distance(a, b);
+            if (len < 1e-3f) return;
+            int n = Mathf.Clamp(Mathf.CeilToInt(len / 3f), 1, 200);
+            Vector3 prev = default;
+            for (int i = 0; i <= n; i++)
+            {
+                Vector3 cur = Drape(field, Vector2.Lerp(a, b, (float)i / n));
+                if (i > 0 && (i % 2 == 0)) AddPv(prev, cur);
+                prev = cur;
+            }
+        }
+
+        // A small draped ring marking the armed bend corner.
+        void MarkCorner(ITerrainSurface field, Vector2 c)
+        {
+            const int N = 16; const float R = 1.2f;
+            Vector3 prev = default;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                Vector3 cur = Drape(field, new Vector2(c.x + Mathf.Cos(a) * R, c.y + Mathf.Sin(a) * R));
+                if (i > 0) AddPv(prev, cur);
+                prev = cur;
+            }
         }
 
         void AddPv(Vector3 a, Vector3 b) { int s = _pv.Count; _pv.Add(a); _pv.Add(b); _pvIdx.Add(s); _pvIdx.Add(s + 1); }
+        void AddPvTo(List<int> idx, Vector3 a, Vector3 b) { int s = _pv.Count; _pv.Add(a); _pv.Add(b); idx.Add(s); idx.Add(s + 1); }
 
         void EnsurePreview()
         {
@@ -406,7 +830,8 @@ namespace NetworkDesigner.Terrain
             _pvMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _pvMr.receiveShadows = false;
             _pvMesh = new Mesh { name = "RoadPlanPreviewMesh" };
             _pvMf.sharedMesh = _pvMesh;
-            _pvMr.sharedMaterial = MakeMat(PlanColor, "RoadPlanPreviewMat");
+            _pvBadMat = MakeMat(new Color(1f, 0.25f, 0.2f, 0.95f), "RoadPlanPreviewBadMat");   // too-tight curve
+            _pvMr.sharedMaterials = new[] { MakeMat(PlanColor, "RoadPlanPreviewMat"), _pvBadMat };
         }
 
         // ---- save / load (the node/edge graph; geometry regenerated on load) ----
