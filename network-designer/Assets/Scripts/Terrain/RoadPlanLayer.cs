@@ -97,6 +97,7 @@ namespace NetworkDesigner.Terrain
         GameObject _root; MeshFilter _mf; MeshRenderer _mr; Mesh _mesh; Material _mat;
         readonly List<Vector3> _v = new List<Vector3>();
         readonly List<int> _idx = new List<int>();
+        readonly List<Color32> _col = new List<Color32>();   // per-vertex lane-marking colours
         // Node pucks ride a SEPARATE 3D mesh (lit-transparent) so they carry their own colour + height + toggle.
         GameObject _nodeGo; MeshFilter _nodeMf; MeshRenderer _nodeMr; Mesh _nodeMesh; Material _nodeMat;
         readonly List<Vector3> _nv = new List<Vector3>();
@@ -491,18 +492,16 @@ namespace NetworkDesigner.Terrain
         public void Rebuild(ITerrainSurface field)
         {
             EnsureRoot();
-            _v.Clear(); _idx.Clear(); _nv.Clear(); _nn.Clear(); _nidx.Clear();
-            float tieEvery = Mathf.Max(1f, TieSpacing);
+            _v.Clear(); _idx.Clear(); _col.Clear(); _nv.Clear(); _nn.Clear(); _nidx.Clear();
 
             foreach (LineEdge e in Graph.Edges)
             {
                 EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
-                float half = Mathf.Max(0.1f, EdgeWidth(e) * 0.5f);   // each segment at its own profile width
-                BuildCorridorEdge(field, p0, p1, p2, p3, half, tieEvery);
+                BuildCorridorEdge(field, p0, p1, p2, p3, e);   // lane schematic from the segment's profile
             }
             foreach (Vector2 n in Graph.Nodes) DrawPuck(field, n);   // into the node mesh (own colour + toggle)
 
-            _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
+            _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
             _nodeMr.enabled = PlanGuides.ShowNodes;
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
@@ -533,41 +532,132 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
-        // Sample the edge by arc length; lay down the centreline + both offset edges + periodic cross-ties.
-        void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3,
-                               float half, float tieEvery)
+        // ---- lane schematic: draw the segment's cross-section as real lane markings ----
+
+        static readonly Color32 ColEdge   = new Color32(235, 235, 235, 255);   // pavement / lane edge line (white, solid)
+        static readonly Color32 ColLane   = new Color32(205, 205, 205, 235);   // same-direction lane divider (dashed)
+        static readonly Color32 ColCenter = new Color32(245, 205, 45, 255);    // opposing centreline (yellow, double)
+        static readonly Color32 ColTurn   = new Color32(245, 205, 45, 255);    // turn-lane boundary (yellow)
+        static readonly Color32 ColMedian = new Color32(200, 165, 110, 220);   // median hatch (warm tan — reads as raised, not drivable)
+        Color32 ColFoot => new Color32((byte)(PlanColor.r * 255f), (byte)(PlanColor.g * 255f), (byte)(PlanColor.b * 255f), 170); // shoulder/footprint (plan amber, dashed)
+
+        // strip kinds across the cross-section (BA side → centre → AB side)
+        const int KOut = -1, KShBA = 0, KLnBA = 1, KMed = 2, KTrn = 3, KLnAB = 4, KShAB = 5;
+
+        // Lay the segment's lanes/median/turn-lane/shoulders out as draped markings, draped along the bezier.
+        void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, LineEdge e)
         {
             float len = 0f;
             _pts[0] = p0;
             for (int i = 1; i <= SubSteps; i++) { _pts[i] = LineGraph.Bezier(p0, p1, p2, p3, i / (float)SubSteps); len += Vector2.Distance(_pts[i - 1], _pts[i]); }
             if (len < 1e-3f) return;
+            int n = Mathf.Clamp(Mathf.CeilToInt(len / 1.5f), 2, 2048);   // fine enough for dashed markings
 
-            int n = Mathf.Clamp(Mathf.CeilToInt(len / Mathf.Max(0.5f, SampleStep)), 2, 1024);
-            float nextTie = 0f, walked = 0f;
-            Vector3 cPrev = default, lPrev = default, rPrev = default;
+            NetworkDesigner.Model.RoadProfile prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(e?.Profile);
+            if (prof == null || prof.TotalWidth < 0.5f)
+            {
+                float half = Mathf.Max(0.1f, EdgeWidth(e) * 0.5f);
+                EmitOffsetLine(field, p0, p1, p2, p3, n, half, ColEdge, 0f, 0f);   // generic: two solid edges + dashed centre
+                EmitOffsetLine(field, p0, p1, p2, p3, n, -half, ColEdge, 0f, 0f);
+                EmitOffsetLine(field, p0, p1, p2, p3, n, 0f, ColCenter, 2f, 2f);
+                return;
+            }
+
+            float W = prof.TotalWidth;
+            // Build the strip order across the section.
+            var w = new List<float>(8); var k = new List<int>(8);
+            void S(float width, int kind) { if (width > 0.01f) { w.Add(width); k.Add(kind); } }
+            S(prof.ShoulderBA.Width, KShBA);
+            for (int i = prof.BA.Lanes.Count - 1; i >= 0; i--) S(prof.BA.Lanes[i].Width, KLnBA);
+            if (prof.Median != null) S(prof.Median.Width, KMed);
+            else if (prof.TurnLane != null) S(prof.TurnLane.Width, KTrn);
+            for (int i = 0; i < prof.AB.Lanes.Count; i++) S(prof.AB.Lanes[i].Width, KLnAB);
+            S(prof.ShoulderAB.Width, KShAB);
+
+            float u = -W * 0.5f;
+            EmitBoundary(field, p0, p1, p2, p3, n, u, KOut, k.Count > 0 ? k[0] : KOut);
+            for (int i = 0; i < w.Count; i++)
+            {
+                if (k[i] == KMed) EmitMedianHatch(field, p0, p1, p2, p3, n, len, u, u + w[i]);
+                u += w[i];
+                EmitBoundary(field, p0, p1, p2, p3, n, u, k[i], (i + 1 < k.Count) ? k[i + 1] : KOut);
+            }
+        }
+
+        // Pick the marking style for the line between two strip kinds, then emit it.
+        void EmitBoundary(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float u, int left, int right)
+        {
+            bool isSh(int kk) => kk == KShBA || kk == KShAB;
+            bool isLn(int kk) => kk == KLnBA || kk == KLnAB;
+            if (left == KOut || right == KOut)
+            {
+                int s = left == KOut ? right : left;
+                if (isSh(s)) EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColFoot, 3f, 2.2f);   // footprint/shoulder edge (dashed amber)
+                else EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f);             // pavement edge (solid)
+                return;
+            }
+            if (isSh(left) || isSh(right)) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f); return; }  // shoulder|lane edge
+            if (left == KMed || right == KMed) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f); return; } // median edge (solid white)
+            if (left == KTrn || right == KTrn) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColTurn, 0f, 0f); return; } // turn-lane edge (yellow)
+            if (isLn(left) && isLn(right))
+            {
+                if (left == right) EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColLane, 1.5f, 2.2f);   // same dir → dashed lane divider
+                else { EmitOffsetLine(field, p0, p1, p2, p3, n, u - 0.25f, ColCenter, 0f, 0f);          // opposing → double-yellow centreline
+                       EmitOffsetLine(field, p0, p1, p2, p3, n, u + 0.25f, ColCenter, 0f, 0f); }
+                return;
+            }
+            EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f);
+        }
+
+        // A line at constant lateral offset `u`, draped, dashed when gap>0 (solid when gap<=0).
+        void EmitOffsetLine(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float u, Color32 col, float dash, float gap)
+        {
+            float period = dash + gap, walked = 0f;
+            Vector3 prev = default; bool have = false;
             for (int i = 0; i <= n; i++)
             {
                 float t = (float)i / n;
                 Vector2 pos = LineGraph.Bezier(p0, p1, p2, p3, t);
                 Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, t);
                 Vector2 perp = tan.sqrMagnitude > 1e-8f ? new Vector2(-tan.y, tan.x).normalized : Vector2.right;
-                Vector3 c = Drape(field, pos);
-                Vector3 l = Drape(field, pos + perp * half);
-                Vector3 r = Drape(field, pos - perp * half);
-                if (i > 0)
+                Vector3 cwld = Drape(field, pos + perp * u);
+                if (have)
                 {
-                    AddSeg(cPrev, c); AddSeg(lPrev, l); AddSeg(rPrev, r);
-                    walked += Vector3.Distance(cPrev, c);
+                    bool on = gap <= 0f || (walked % period) < dash;
+                    if (on) AddSeg(prev, cwld, col);
+                    walked += Vector3.Distance(prev, cwld);
                 }
-                if (walked >= nextTie) { AddSeg(l, r); nextTie += tieEvery; }   // cross-tie
-                cPrev = c; lPrev = l; rPrev = r;
+                prev = cwld; have = true;
             }
+        }
+
+        // Diagonal hatch fill across a median band [uA,uB] (the boundary lines are drawn separately).
+        void EmitMedianHatch(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float len, float uA, float uB)
+        {
+            float band = Mathf.Abs(uB - uA);
+            int m = Mathf.Clamp(Mathf.CeilToInt(len / 3f), 1, 1024);
+            float dt = Mathf.Max(1e-4f, band / Mathf.Max(1f, len));   // ~45° lead in t for the diagonal
+            for (int j = 0; j < m; j++)
+            {
+                float t0 = (float)j / m;
+                float t1 = Mathf.Min(1f, t0 + dt);
+                AddSeg(OffsetPt(field, p0, p1, p2, p3, t0, uA), OffsetPt(field, p0, p1, p2, p3, t1, uB), ColMedian);
+            }
+        }
+
+        Vector3 OffsetPt(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t, float u)
+        {
+            Vector2 pos = LineGraph.Bezier(p0, p1, p2, p3, t);
+            Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, t);
+            Vector2 perp = tan.sqrMagnitude > 1e-8f ? new Vector2(-tan.y, tan.x).normalized : Vector2.right;
+            return Drape(field, pos + perp * u);
         }
 
         Vector3 Drape(ITerrainSurface field, Vector2 xz)
             => new Vector3(xz.x, (field != null ? field.SampleHeight(xz.x, xz.y) : 0f) + Lift, xz.y);
 
-        void AddSeg(Vector3 a, Vector3 b) { int s = _v.Count; _v.Add(a); _v.Add(b); _idx.Add(s); _idx.Add(s + 1); }
+        void AddSeg(Vector3 a, Vector3 b, Color32 col)
+        { int s = _v.Count; _v.Add(a); _v.Add(b); _col.Add(col); _col.Add(col); _idx.Add(s); _idx.Add(s + 1); }
         // A short draped 3D cylinder puck (top cap + side wall, manual outward normals) at a node — the
         // visible handle you grab to move / curve / delete. Lit-transparent so the alpha shows. Mirrors rail.
         void DrawPuck(ITerrainSurface field, Vector2 c)
@@ -618,7 +708,8 @@ namespace NetworkDesigner.Terrain
             _mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _mr.receiveShadows = false;
             _mesh = new Mesh { name = "RoadPlanMesh" };
             _mf.sharedMesh = _mesh;
-            _mat = MakeMat(PlanColor, "RoadPlanMat");
+            Shader vc = Shader.Find("NetworkDesigner/VertexColorOverlay");   // per-vertex lane-marking colours
+            _mat = vc != null ? new Material(vc) { name = "RoadPlanMat" } : MakeMat(PlanColor, "RoadPlanMat");
             _mr.sharedMaterial = _mat;
 
             _nodeGo = new GameObject(RootName + "_Nodes") { hideFlags = HideFlags.DontSave };
