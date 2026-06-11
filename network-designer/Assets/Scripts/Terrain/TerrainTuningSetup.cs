@@ -216,6 +216,12 @@ namespace NetworkDesigner.Terrain
                 () => t.ChunkLocalGrid, v => t.ChunkLocalGrid = v,
                 description: "Drops a fine ~10 m / 50 m grid patch where you're looking, draped on the terrain, for " +
                              "close-up building/sculpting. STATIC once placed — re-toggle to move it to a new spot.");
+            TuningRegistry.RegisterFloat("terrain.chunkTopoMinor", "Chunk", "Topo minor (m)",
+                () => t.ChunkContourInterval, v => t.ChunkContourInterval = v, 1f, 100f, 1f,
+                description: "Spacing of the chunk-world topo contour lines (the Topo footer button toggles them on/off).");
+            TuningRegistry.RegisterFloat("terrain.chunkTopoStrength", "Chunk", "Topo strength",
+                () => t.ChunkContourStrength, v => t.ChunkContourStrength = v, 0.05f, 1f, 0.05f,
+                description: "Opacity/contrast of the chunk-world topo contour overlay.");
             TuningRegistry.RegisterFloat("terrain.seaTolerance", "Chunk", "Sea tool: tolerance (m)",
                 () => t.SeaTolerance, v => t.SeaTolerance = v, 0.5f, 30f, 0.5f,
                 description: "Sea brush (6): how close in altitude counts as the same flooded area. One click floods " +

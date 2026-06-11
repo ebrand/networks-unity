@@ -39,8 +39,18 @@ namespace NetworkDesigner.Terrain
     {
         const double MercR = 6378137.0;
 
-        static string Root => Path.Combine(Application.dataPath, "Heightmaps/Highres");
-        public static string WorldDir(string world) => Path.Combine(Root, world);
+        // New worlds live at Assets/Worlds/<World>/. Worlds created before the move stay under the legacy
+        // Heightmaps/Highres/ root and are still read in place — no risky runtime file moves.
+        static string NewRoot => Path.Combine(Application.dataPath, "Worlds");
+        static string OldRoot => Path.Combine(Application.dataPath, "Heightmaps/Highres");
+        public static string WorldDir(string world)
+        {
+            string nw = Path.Combine(NewRoot, world);
+            if (Directory.Exists(nw)) return nw;
+            string ow = Path.Combine(OldRoot, world);
+            if (Directory.Exists(ow)) return ow;
+            return nw;   // doesn't exist yet → create under Assets/Worlds
+        }
         static string WorldFile(string world) => Path.Combine(WorldDir(world), "world.json");
         public static string MapSetDir(string world, string mapSet) => Path.Combine(WorldDir(world), mapSet);
 
@@ -48,14 +58,18 @@ namespace NetworkDesigner.Terrain
 
         public static List<string> ListWorlds()
         {
-            var list = new List<string>();
-            try
+            var set = new HashSet<string>();
+            foreach (var root in new[] { NewRoot, OldRoot })
             {
-                if (Directory.Exists(Root))
-                    foreach (var d in Directory.GetDirectories(Root))
-                        if (File.Exists(Path.Combine(d, "world.json"))) list.Add(Path.GetFileName(d));
+                try
+                {
+                    if (Directory.Exists(root))
+                        foreach (var d in Directory.GetDirectories(root))
+                            if (File.Exists(Path.Combine(d, "world.json"))) set.Add(Path.GetFileName(d));
+                }
+                catch { }
             }
-            catch { }
+            var list = new List<string>(set);
             list.Sort();
             return list;
         }

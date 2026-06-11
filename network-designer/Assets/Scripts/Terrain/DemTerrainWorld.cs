@@ -365,6 +365,7 @@ namespace NetworkDesigner.Terrain
             var fly = Object.FindFirstObjectByType<NetworkDesigner.Designer.FlyCameraController>();
             if (fly == null) { DropCameraToSurface(); return; }
             WireCameraToDem();
+            fly.MoveSpeed = 500f; fly.ZoomStep = 10f;   // "Overview off" baseline (System palette toggles 500/10 ↔ 5000/100)
             float cx = WorldWidthX * 0.5f, cz = WorldLengthZ * 0.5f;
             Vector3 center = new Vector3(cx, SampleHeight(cx, cz), cz);
             float span = Mathf.Clamp(Mathf.Max(WorldWidthX, WorldLengthZ) * 0.3f, 8000f, 30000f);

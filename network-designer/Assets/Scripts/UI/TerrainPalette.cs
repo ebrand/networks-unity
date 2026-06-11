@@ -135,7 +135,7 @@ namespace NetworkDesigner.UI
                 v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { Designer.ShowWater = v; Designer.ApplyWater(); } }));
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : Designer.WaterLevel,
-                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, 0f, 100f, "0", 1f));
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, WaterLo(), WaterHi(), "0", 1f));
         }
 
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
@@ -149,7 +149,7 @@ namespace NetworkDesigner.UI
                 v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { DemWater.Show = v; DemWater.Apply(); } }));
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : DemWater.Level,
-                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, 0f, 100f, "0", 1f));
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, WaterLo(), WaterHi(), "0", 1f));
             // LIGHTING controls removed from here — to be relocated.
         }
 
@@ -283,5 +283,11 @@ namespace NetworkDesigner.UI
 
             UpdatePreview();
         }
+
+        // Water slider range, relative to the world's floor so high inland terrain isn't out of reach:
+        // the level defaults (on load) to floor − 20 m; the slider spans floor − 50 … floor + 500.
+        float WaterFloor() => Designer.ChunkTestActive ? Mathf.Floor(Designer.DefaultNormMin) : 0f;
+        float WaterLo() => WaterFloor() - 50f;
+        float WaterHi() => WaterFloor() + 500f;
     }
 }

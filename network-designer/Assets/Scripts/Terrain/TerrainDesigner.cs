@@ -398,6 +398,9 @@ namespace NetworkDesigner.Terrain
         {
             if (ChunkWorld.Active) return;
             if (!DemChunkSource.Configure(folder, DemChunkSource.NormMin, DemChunkSource.NormMax)) return;
+            // Default the water 20 m below the world's lowest point so it isn't "left behind" at sea level on
+            // high inland terrain. A saved level (loaded games) overrides this afterwards in LoadGame.
+            ChunkOverlays.SetWaterLevel(Mathf.Floor(DemChunkSource.NormMin) - 20f);
             Vector3 c = DemChunkSource.CenterWorld; c.y = 4000f;
             // Steeper pitch than the flat test so the view footprint sits near the DEM centre and
             // the (Radius-capped) eager load covers the whole tile grid regardless of yaw.
@@ -4353,6 +4356,22 @@ namespace NetworkDesigner.Terrain
         {
             get { var f = ResolveFly(); return f != null ? f.MoveSpeed : 12f; }
             set { var f = ResolveFly(); if (f != null) f.MoveSpeed = value; }
+        }
+
+        // Fly-camera scroll-dolly step (m per notch).
+        public float CameraZoomStep
+        {
+            get { var f = ResolveFly(); return f != null ? f.ZoomStep : 14f; }
+            set { var f = ResolveFly(); if (f != null) f.ZoomStep = value; }
+        }
+
+        // "Overview" fast-travel mode: bumps speed + zoom step for crossing a whole world (5000 / 100),
+        // back to fine values for detail work (500 / 10). State is derived from the current speed, so it
+        // always reflects reality without a separate stored flag.
+        public bool CameraOverview
+        {
+            get => CameraSpeed >= 2500f;
+            set { CameraSpeed = value ? 5000f : 500f; CameraZoomStep = value ? 100f : 10f; }
         }
 
         const int SaveMagic = 0x54524E33; // "TRN3"

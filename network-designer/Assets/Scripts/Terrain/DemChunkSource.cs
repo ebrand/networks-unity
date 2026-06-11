@@ -201,7 +201,9 @@ namespace NetworkDesigner.Terrain
         {
             if (string.IsNullOrEmpty(folder)) return null;
             if (Directory.Exists(folder)) return folder;
-            string underBase = Path.Combine(Application.dataPath, "Heightmaps/Highres", folder);
+            string underWorlds = Path.Combine(Application.dataPath, "Worlds", folder);   // new home
+            if (Directory.Exists(underWorlds)) return underWorlds;
+            string underBase = Path.Combine(Application.dataPath, "Heightmaps/Highres", folder);   // legacy
             if (Directory.Exists(underBase)) return underBase;
             string abs = Path.Combine(Application.dataPath, folder.StartsWith("Assets/") ? folder.Substring(7) : folder);
             return Directory.Exists(abs) ? abs : null;

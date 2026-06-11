@@ -114,6 +114,10 @@ network-designer/Assets/icons/
 network-designer/Assets/Heightmaps/Highres/*
 !network-designer/Assets/Heightmaps/Highres/dem_norms.txt
 
+# DEM worlds — downloaded 1 m tiles + metadata, large + user-local (new home for map sets).
+network-designer/Assets/Worlds/
+network-designer/Assets/Worlds.meta
+
 # Purchased Unity environment pack (Rocky Hills + Toby Foliage Engine) — 2.3GB,
 # re-importable from the Asset Store, kept out of git.
 network-designer/Assets/Toby Fredson/

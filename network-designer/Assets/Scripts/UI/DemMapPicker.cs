@@ -51,11 +51,25 @@ namespace NetworkDesigner.UI
         int _loading;
         bool _dragging, _resizing; Vector2 _dragLast; float _dragTotal;
 
+        // World context: when set, the picker draws already-downloaded areas + snaps the selection box to
+        // the world's shared 1 km mercator lattice (so a new area lands flush against existing ones).
+        bool _hasWorld; double _wOX, _wOY, _wTile;
+        double _viewLat, _viewLon;   // map view centre — panning moves this; the target box moves independently
+        bool _movingBox;
+        float _boxL, _boxT, _boxW, _boxH;   // last-drawn box rect (view px) — for corner-anchored resize
+        float _anchorX, _anchorY;           // the fixed (opposite) corner held while resizing
+        readonly List<(double w, double s, double e, double n)> _areas = new List<(double w, double s, double e, double n)>();
+        readonly List<VisualElement> _areaEls = new List<VisualElement>();
+        VisualElement _areaLayer;
+        float _boxCx, _boxCy;
+        public bool Overlapping { get; private set; }
+
         public DemMapPicker(MonoBehaviour host, double lat, double lon, int width, int height, double areaKmW = 8.0, double areaKmH = 8.0)
         {
-            _host = host; CenterLat = lat; CenterLon = lon;
+            _host = host; CenterLat = lat; CenterLon = lon; _viewLat = lat; _viewLon = lon;
             AreaKmW = Mathf.Clamp((float)areaKmW, 1f, MaxAreaKm); AreaKmH = Mathf.Clamp((float)areaKmH, 1f, MaxAreaKm);
             MapW = Mathf.Max(64, width); MapH = Mathf.Max(64, height);
+            _boxCx = MapW * 0.5f; _boxCy = MapH * 0.5f;
             Root = new VisualElement();
 
             _viewport = new VisualElement();
@@ -73,11 +87,17 @@ namespace NetworkDesigner.UI
             _layer.style.left = 0; _layer.style.top = 0; _layer.style.right = 0; _layer.style.bottom = 0;
             _viewport.Add(_layer);
 
+            _areaLayer = new VisualElement { pickingMode = PickingMode.Ignore };   // already-downloaded areas (under the box)
+            _areaLayer.style.position = Position.Absolute;
+            _areaLayer.style.left = 0; _areaLayer.style.top = 0; _areaLayer.style.right = 0; _areaLayer.style.bottom = 0;
+            _viewport.Add(_areaLayer);
+
             var blue = new Color(0.16f, 0.32f, 0.95f);
-            _box = new VisualElement { pickingMode = PickingMode.Ignore };
+            _box = new VisualElement { pickingMode = PickingMode.Position };   // draggable: moves the target area
             _box.style.position = Position.Absolute;
             _box.style.borderTopWidth = _box.style.borderBottomWidth = _box.style.borderLeftWidth = _box.style.borderRightWidth = 3;
             _box.style.borderTopColor = _box.style.borderBottomColor = _box.style.borderLeftColor = _box.style.borderRightColor = blue;
+            _box.RegisterCallback<PointerDownEvent>(OnBoxDown);
             _viewport.Add(_box);
 
             _pin = new VisualElement { pickingMode = PickingMode.Ignore };
@@ -98,7 +118,8 @@ namespace NetworkDesigner.UI
                 h.style.backgroundColor = new Color(0.30f, 0.42f, 0.95f, 0.65f);
                 h.style.borderTopWidth = h.style.borderBottomWidth = h.style.borderLeftWidth = h.style.borderRightWidth = 2;
                 h.style.borderTopColor = h.style.borderBottomColor = h.style.borderLeftColor = h.style.borderRightColor = blue;
-                h.RegisterCallback<PointerDownEvent>(OnHandleDown);
+                int idx = i;
+                h.RegisterCallback<PointerDownEvent>(e => OnHandleDown(e, idx));
                 _handles[i] = h; _viewport.Add(h);
             }
 
@@ -114,9 +135,9 @@ namespace NetworkDesigner.UI
             _viewport.Add(attr);
 
             var zr = new VisualElement(); zr.style.flexDirection = FlexDirection.Row; zr.style.marginTop = 4; zr.style.marginBottom = 4;
-            zr.Add(ZoomBtn("–", () => ZoomAt(MapW * 0.5f, MapH * 0.5f, -1)));
-            zr.Add(ZoomBtn("+", () => ZoomAt(MapW * 0.5f, MapH * 0.5f, +1)));
-            var hint = new Label("drag to pan · drag a corner to resize (1 km) · wheel/± to zoom");
+            zr.Add(ZoomBtn("–", () => ZoomAt(_boxCx, _boxCy, -1)));
+            zr.Add(ZoomBtn("+", () => ZoomAt(_boxCx, _boxCy, +1)));
+            var hint = new Label("drag the box to move it · drag the map to pan · corner to resize · wheel/± to zoom");
             hint.style.color = new Color(0.6f, 0.64f, 0.7f); hint.style.fontSize = 10; hint.style.marginLeft = 8; hint.style.alignSelf = Align.Center;
             zr.Add(hint);
             Root.Add(zr);
@@ -125,24 +146,93 @@ namespace NetworkDesigner.UI
             UpdateBox();
         }
 
-        public void SetCenter(double lat, double lon) { CenterLat = lat; CenterLon = lon; UpdateTiles(); }
+        public void SetCenter(double lat, double lon) { CenterLat = lat; CenterLon = lon; _viewLat = lat; _viewLon = lon; UpdateTiles(); }
 
         public void SetArea(double wKm, double hKm)
         { AreaKmW = Mathf.Clamp(Mathf.Round((float)wKm), 1f, MaxAreaKm); AreaKmH = Mathf.Clamp(Mathf.Round((float)hKm), 1f, MaxAreaKm); UpdateBox(); OnChanged?.Invoke(); }
 
-        // ── view math (world pixels at the current zoom) ──
-        double CenterWX() => Lon2TileX(CenterLon, _ovZoom) * TileSize;
-        double CenterWY() => Lat2TileY(CenterLat, _ovZoom) * TileSize;
+        // Give the picker the world's lattice + existing areas. areas = (west,south,east,north) in mercator.
+        // Turns on area outlines + lattice snapping. Pass tileMercM <= 0 (e.g. an un-anchored world) to disable.
+        public void SetWorld(double originMercX, double originMercY, double tileMercM, List<(double w, double s, double e, double n)> areas)
+        {
+            _hasWorld = tileMercM > 0.0;
+            _wOX = originMercX; _wOY = originMercY; _wTile = tileMercM;
+            foreach (var el in _areaEls) el.RemoveFromHierarchy();
+            _areaEls.Clear(); _areas.Clear();
+            if (areas != null)
+                foreach (var a in areas)
+                {
+                    _areas.Add(a);
+                    var el = new VisualElement { pickingMode = PickingMode.Ignore };
+                    el.style.position = Position.Absolute;
+                    el.style.backgroundColor = new Color(0.16f, 0.32f, 0.95f, 0.18f);
+                    var c = new Color(0.16f, 0.32f, 0.95f, 0.9f);
+                    el.style.borderTopWidth = el.style.borderBottomWidth = el.style.borderLeftWidth = el.style.borderRightWidth = 2;
+                    el.style.borderTopColor = el.style.borderBottomColor = el.style.borderLeftColor = el.style.borderRightColor = c;
+                    _areaLayer.Add(el);
+                    _areaEls.Add(el);
+                }
+            UpdateAreas(); UpdateBox();
+        }
+
+        // Mercator point → viewport pixel at the current zoom/pan.
+        void MercToView(double mx, double my, out float vx, out float vy)
+        {
+            double lon = NetworkDesigner.Terrain.WorldManager.MercX2Lon(mx);
+            double lat = NetworkDesigner.Terrain.WorldManager.MercY2Lat(my);
+            GeoToView(lat, lon, out vx, out vy);
+        }
+
+        // Lat/lon → viewport pixel at the current zoom/pan.
+        void GeoToView(double lat, double lon, out float vx, out float vy)
+        {
+            double tlx = CenterWX() - MapW * 0.5, tly = CenterWY() - MapH * 0.5;
+            vx = (float)(Lon2TileX(lon, _ovZoom) * TileSize - tlx);
+            vy = (float)(Lat2TileY(lat, _ovZoom) * TileSize - tly);
+        }
+
+        void UpdateAreas()
+        {
+            for (int i = 0; i < _areaEls.Count && i < _areas.Count; i++)
+            {
+                var a = _areas[i];
+                MercToView(a.w, a.n, out float lx, out float ty);
+                MercToView(a.e, a.s, out float rx, out float by);
+                var el = _areaEls[i];
+                el.style.left = lx; el.style.top = ty;
+                el.style.width = Mathf.Max(1f, rx - lx); el.style.height = Mathf.Max(1f, by - ty);
+            }
+        }
+
+        // ── view math (world pixels at the current zoom) — based on the VIEW centre, not the target ──
+        double CenterWX() => Lon2TileX(_viewLon, _ovZoom) * TileSize;
+        double CenterWY() => Lat2TileY(_viewLat, _ovZoom) * TileSize;
         float KmPerTile() => (float)(EarthKm * Math.Cos(CenterLat * Math.PI / 180.0) / (1 << _ovZoom));
 
-        void OnDown(PointerDownEvent ev)
-        { _dragging = true; _resizing = false; _dragLast = (Vector2)ev.localPosition; _dragTotal = 0f; _viewport.CapturePointer(ev.pointerId); }
+        void OnDown(PointerDownEvent ev)   // background → pan the map
+        { _dragging = true; _resizing = false; _movingBox = false; _dragLast = (Vector2)ev.localPosition; _dragTotal = 0f; _viewport.CapturePointer(ev.pointerId); }
 
-        void OnHandleDown(PointerDownEvent ev)
-        { _resizing = true; _dragging = false; _viewport.CapturePointer(ev.pointerId); ev.StopPropagation(); }
+        // corner → resize, holding the OPPOSITE corner fixed (0=NW 1=NE 2=SW 3=SE).
+        void OnHandleDown(PointerDownEvent ev, int corner)
+        {
+            _resizing = true; _dragging = false; _movingBox = false;
+            _anchorX = (corner == 0 || corner == 2) ? _boxL + _boxW : _boxL;   // grab a west corner → anchor east
+            _anchorY = (corner == 0 || corner == 1) ? _boxT + _boxH : _boxT;   // grab a north corner → anchor south
+            _viewport.CapturePointer(ev.pointerId); ev.StopPropagation();
+        }
+
+        void OnBoxDown(PointerDownEvent ev)   // box → move the target (map stays put)
+        { _movingBox = true; _dragging = false; _resizing = false; _dragLast = _viewport.WorldToLocal((Vector2)ev.position); _viewport.CapturePointer(ev.pointerId); ev.StopPropagation(); }
 
         void OnMove(PointerMoveEvent ev)
         {
+            if (_movingBox)
+            {
+                Vector2 q = (Vector2)ev.localPosition;
+                MoveTargetByPixels(q.x - _dragLast.x, q.y - _dragLast.y); _dragLast = q;
+                UpdateBox();   // view unchanged → only the box moves (and re-snaps)
+                return;
+            }
             if (_resizing) { ResizeTo((Vector2)ev.localPosition); return; }
             if (!_dragging) return;
             Vector2 p = (Vector2)ev.localPosition;
@@ -153,19 +243,21 @@ namespace NetworkDesigner.UI
 
         void OnUp(PointerUpEvent ev)
         {
+            if (_movingBox) { _movingBox = false; _viewport.ReleasePointer(ev.pointerId); OnChanged?.Invoke(); return; }
             if (_resizing) { _resizing = false; _viewport.ReleasePointer(ev.pointerId); OnChanged?.Invoke(); return; }
             if (!_dragging) return;
             _dragging = false; _viewport.ReleasePointer(ev.pointerId);
-            if (_dragTotal < 4f)   // click → centre on the clicked point
+            if (_dragTotal < 4f)   // click → place the target box at the clicked point (map stays put)
             {
                 double cwx = CenterWX() - MapW * 0.5 + ev.localPosition.x, cwy = CenterWY() - MapH * 0.5 + ev.localPosition.y;
                 CenterLon = Tile2Lon(cwx / TileSize, _ovZoom); CenterLat = Tile2Lat(cwy / TileSize, _ovZoom);
-                UpdateTiles();
+                UpdateBox();
             }
             OnChanged?.Invoke();
         }
 
-        void OnWheel(WheelEvent ev) { ZoomAt(ev.localMousePosition.x, ev.localMousePosition.y, ev.delta.y < 0f ? +1 : -1); ev.StopPropagation(); }
+        // Wheel zooms around the rectangle (target) centre, not the cursor.
+        void OnWheel(WheelEvent ev) { ZoomAt(_boxCx, _boxCy, ev.delta.y < 0f ? +1 : -1); ev.StopPropagation(); }
 
         // Zoom keeping the geo point under (px,py) fixed (zoom toward cursor).
         void ZoomAt(float px, float py, int dir)
@@ -177,7 +269,7 @@ namespace NetworkDesigner.UI
             _ovZoom = nz;
             double anchorWX = Lon2TileX(lon, nz) * TileSize, anchorWY = Lat2TileY(lat, nz) * TileSize;
             double newCWX = anchorWX - px + MapW * 0.5, newCWY = anchorWY - py + MapH * 0.5;
-            CenterLon = Tile2Lon(newCWX / TileSize, nz); CenterLat = Tile2Lat(newCWY / TileSize, nz);
+            _viewLon = Tile2Lon(newCWX / TileSize, nz); _viewLat = Tile2Lat(newCWY / TileSize, nz);
             ClearTiles();   // tile coords are zoom-specific; textures stay cached for zoom-back
             UpdateTiles(); UpdateBox();
             OnChanged?.Invoke();
@@ -186,15 +278,27 @@ namespace NetworkDesigner.UI
         void ResizeTo(Vector2 p)
         {
             float pxPerKm = TileSize / Mathf.Max(0.0001f, KmPerTile());
-            AreaKmW = Mathf.Clamp(Mathf.Round(2f * Mathf.Abs(p.x - MapW * 0.5f) / pxPerKm), 1f, MaxAreaKm);
-            AreaKmH = Mathf.Clamp(Mathf.Round(2f * Mathf.Abs(p.y - MapH * 0.5f) / pxPerKm), 1f, MaxAreaKm);
+            AreaKmW = Mathf.Clamp(Mathf.Round(Mathf.Abs(p.x - _anchorX) / pxPerKm), 1f, MaxAreaKm);
+            AreaKmH = Mathf.Clamp(Mathf.Round(Mathf.Abs(p.y - _anchorY) / pxPerKm), 1f, MaxAreaKm);
+            // Target centre = midpoint of the fixed anchor corner and the dragged corner, so the anchor
+            // corner stays put (normal corner resize) rather than the box growing concentrically.
+            double cwx = CenterWX() - MapW * 0.5 + (p.x + _anchorX) * 0.5, cwy = CenterWY() - MapH * 0.5 + (p.y + _anchorY) * 0.5;
+            CenterLon = Tile2Lon(cwx / TileSize, _ovZoom); CenterLat = Tile2Lat(cwy / TileSize, _ovZoom);
             UpdateBox();
         }
 
-        void PanByPixels(double dpx, double dpy)
+        void PanByPixels(double dpx, double dpy)   // moves the VIEW; the target box stays anchored to its geo
         {
             double cwx = CenterWX() + dpx, cwy = CenterWY() + dpy;
-            CenterLon = Tile2Lon(cwx / TileSize, _ovZoom); CenterLat = Tile2Lat(cwy / TileSize, _ovZoom);
+            _viewLon = Tile2Lon(cwx / TileSize, _ovZoom); _viewLat = Tile2Lat(cwy / TileSize, _ovZoom);
+        }
+
+        // Moves the target (download centre) by a screen-pixel delta — used while dragging the box.
+        void MoveTargetByPixels(double dpx, double dpy)
+        {
+            double twx = Lon2TileX(CenterLon, _ovZoom) * TileSize + dpx;
+            double twy = Lat2TileY(CenterLat, _ovZoom) * TileSize + dpy;
+            CenterLon = Tile2Lon(twx / TileSize, _ovZoom); CenterLat = Tile2Lat(twy / TileSize, _ovZoom);
         }
 
         // Recompute the visible tile set: position/keep loaded tiles, create newly-visible ones (stream
@@ -231,6 +335,7 @@ namespace NetworkDesigner.UI
             foreach (var kv in _tiles) if (!_want.Contains(kv.Key)) _toRemove.Add(kv.Key);
             for (int i = 0; i < _toRemove.Count; i++) { _tiles[_toRemove[i]].RemoveFromHierarchy(); _tiles.Remove(_toRemove[i]); }
             PumpLoads();
+            UpdateAreas(); UpdateBox();   // keep areas + the geo-anchored target box glued to the map while panning/zooming
         }
 
         void ClearTiles()
@@ -310,14 +415,47 @@ namespace NetworkDesigner.UI
 
         void UpdateBox()
         {
-            float pxPerKm = TileSize / Mathf.Max(0.0001f, KmPerTile());
-            float boxW = Mathf.Max(8f, (float)AreaKmW * pxPerKm), boxH = Mathf.Max(8f, (float)AreaKmH * pxPerKm);
-            float cx = MapW * 0.5f, cy = MapH * 0.5f;
-            float l = cx - boxW * 0.5f, t = cy - boxH * 0.5f;
+            float l, t, boxW, boxH;
+            bool overlap = false;
+            if (_hasWorld)
+            {
+                // Snap the W×H area's NW corner to the lattice — exactly what the download does — and draw it
+                // there, so the box previews where the area will actually land (1 km steps, flush with neighbours).
+                double mx = NetworkDesigner.Terrain.WorldManager.Lon2MercX(CenterLon);
+                double my = NetworkDesigner.Terrain.WorldManager.Lat2MercY(CenterLat);
+                int W = Mathf.Clamp(Mathf.RoundToInt((float)AreaKmW), 1, (int)MaxAreaKm);
+                int H = Mathf.Clamp(Mathf.RoundToInt((float)AreaKmH), 1, (int)MaxAreaKm);
+                double nwx = mx - W * _wTile / 2.0, nwy = my + H * _wTile / 2.0;
+                int gc = (int)Math.Round((nwx - _wOX) / _wTile), gr = (int)Math.Round((_wOY - nwy) / _wTile);
+                double bw = _wOX + gc * _wTile, bn = _wOY - gr * _wTile;
+                double be = bw + W * _wTile, bs = bn - H * _wTile;
+                double eps = _wTile * 0.1;   // abutting edges (shared lattice line) are NOT an overlap
+                foreach (var a in _areas)
+                    if (bw < a.e - eps && be > a.w + eps && bs < a.n - eps && bn > a.s + eps) { overlap = true; break; }
+                MercToView(bw, bn, out float lx, out float tyv);
+                MercToView(be, bs, out float rx, out float byv);
+                l = lx; t = tyv; boxW = Mathf.Max(4f, rx - lx); boxH = Mathf.Max(4f, byv - tyv);
+                _boxCx = l + boxW * 0.5f; _boxCy = t + boxH * 0.5f;
+                _pin.style.left = _boxCx - 6f; _pin.style.top = _boxCy - 6f;
+            }
+            else
+            {
+                float pxPerKm = TileSize / Mathf.Max(0.0001f, KmPerTile());
+                boxW = Mathf.Max(8f, (float)AreaKmW * pxPerKm); boxH = Mathf.Max(8f, (float)AreaKmH * pxPerKm);
+                GeoToView(CenterLat, CenterLon, out float gcx, out float gcy);
+                _boxCx = gcx; _boxCy = gcy;
+                l = _boxCx - boxW * 0.5f; t = _boxCy - boxH * 0.5f;
+                _pin.style.left = _boxCx - 6f; _pin.style.top = _boxCy - 6f;
+            }
+            Overlapping = overlap;
+            var col = overlap ? new Color(0.95f, 0.25f, 0.20f) : new Color(0.16f, 0.32f, 0.95f);
+            _box.style.borderTopColor = _box.style.borderBottomColor = _box.style.borderLeftColor = _box.style.borderRightColor = col;
             _box.style.left = l; _box.style.top = t; _box.style.width = boxW; _box.style.height = boxH;
+            _boxL = l; _boxT = t; _boxW = boxW; _boxH = boxH;
             PlaceHandle(0, l, t); PlaceHandle(1, l + boxW, t); PlaceHandle(2, l, t + boxH); PlaceHandle(3, l + boxW, t + boxH);
-            ((Label)_label).text = $"{AreaKmW:0} km × {AreaKmH:0} km";
-            _label.style.left = cx - 44f; _label.style.top = Mathf.Min(MapH - 18f, t + boxH + 2f);
+            ((Label)_label).text = overlap ? $"{AreaKmW:0} × {AreaKmH:0} km — overlaps" : $"{AreaKmW:0} km × {AreaKmH:0} km";
+            ((Label)_label).style.color = col;
+            _label.style.left = _boxCx - 44f; _label.style.top = Mathf.Min(MapH - 18f, t + boxH + 2f);
         }
 
         void PlaceHandle(int i, float x, float y)

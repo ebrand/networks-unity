@@ -161,96 +161,6 @@ namespace NetworkDesigner.UI
             modal.Add(row);
         }
 
-        const double AstoriaLat = 46.18, AstoriaLon = -123.83;
-
-        // Full-screen picker for adding map areas to a world: drag/zoom the map, "Download this area"
-        // grabs the world-sized block at the centre (snapped to the world lattice) and appends it. The
-        // box is locked to the world's block size. Each download regenerates the world thumbnail.
-        void OpenDownloadModal(string world)
-        {
-            var wi = NetworkDesigner.Terrain.WorldManager.Read(world);
-            if (wi == null) return;
-            int defaultKm = wi.MapSizeKm;
-            double clat = AstoriaLat, clon = AstoriaLon;
-            if (wi.Anchored)
-            {
-                double cmx = wi.OriginMercX + defaultKm * wi.TileMercM / 2.0, cmy = wi.OriginMercY - defaultKm * wi.TileMercM / 2.0;
-                clon = NetworkDesigner.Terrain.WorldManager.MercX2Lon(cmx); clat = NetworkDesigner.Terrain.WorldManager.MercY2Lat(cmy);
-            }
-
-            float modalW = Mathf.Max(640f, Screen.width - 80f);
-            float modalH = Mathf.Max(460f, Screen.height - 80f);
-            var modal = BeginModal($"Add map areas — “{world}”", modalW, modalH, out System.Action close, closeOnBackdropClick: false);
-            if (modal == null) return;
-
-            float leftW = 230f;
-            int mapW = Mathf.Clamp(Mathf.RoundToInt(modalW - leftW - 64f), 256, 4096);
-            int mapH = Mathf.Clamp(Mathf.RoundToInt(modalH - 120f), 256, 3000);
-
-            var rowBox = new VisualElement();
-            rowBox.style.flexDirection = FlexDirection.Row; rowBox.style.flexGrow = 1;
-            modal.Add(rowBox);
-
-            var left = new VisualElement();
-            left.style.width = leftW; left.style.marginRight = 16;
-            rowBox.Add(left);
-
-            var picker = new DemMapPicker(this, clat, clon, mapW, mapH, defaultKm, defaultKm);
-            rowBox.Add(picker.Root);
-
-            Label Cap(string t) { var l = new Label(t); l.style.color = Sub; l.style.fontSize = 11; l.style.marginBottom = 2; l.style.marginTop = 8; return l; }
-
-            var info = new Label(); info.style.color = Sub; info.style.fontSize = 12;
-            info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 4; info.style.marginBottom = 14; left.Add(info);
-
-            bool busy = false;
-
-            var dlBtn = MakeButton("Download this area", () => { });
-            dlBtn.style.height = 36; dlBtn.style.flexGrow = 0; left.Add(dlBtn);
-
-            left.Add(Cap("Progress:"));
-            var bar = new VisualElement();
-            bar.style.height = 14; bar.style.marginBottom = 6;
-            bar.style.backgroundColor = TrackOff; Radius(bar, 4);
-            SetBorder(bar, 1, new Color(0.3f, 0.32f, 0.36f));
-            var fill = new VisualElement();
-            fill.style.height = 12; fill.style.width = Length.Percent(0); fill.style.backgroundColor = Accent; Radius(fill, 3);
-            bar.Add(fill); left.Add(bar);
-
-            var status = new Label(); status.style.color = Sub; status.style.fontSize = 11;
-            status.style.whiteSpace = WhiteSpace.Normal; left.Add(status);
-
-            var closeBtn = MakeButton("Close", () => { close(); Rebuild(); });   // refresh the start palette (thumbnail updates)
-            closeBtn.style.height = 28; closeBtn.style.flexGrow = 0; closeBtn.style.marginTop = 10; left.Add(closeBtn);
-
-            void UpdateInfo()
-            {
-                NetworkDesigner.Terrain.Dem3DEP.Estimate(picker.AreaKmW, picker.AreaKmH, out double sizeMB, out double secs);
-                info.text = $"World “{world}” · drag a corner to size (1 km steps) @ 1 m/px\n"
-                          + $"{picker.AreaKmW:0} × {picker.AreaKmH:0} km · Center {picker.CenterLat:0.0000}, {picker.CenterLon:0.0000}\n"
-                          + $"this area ≈ {sizeMB:0} MB · ~{secs:0} s\n"
-                          + $"snaps to the world grid · {NetworkDesigner.Terrain.WorldManager.ListMapSets(world).Count} area(s) so far";
-            }
-
-            void DoDownload()
-            {
-                if (busy) return;
-                busy = true; dlBtn.SetEnabled(false);
-                fill.style.width = Length.Percent(0); status.text = "Starting…";
-                NetworkDesigner.Terrain.Dem3DEP.StartInWorld(world, picker.CenterLat, picker.CenterLon, picker.AreaKmW, picker.AreaKmH,
-                    (p, msg) => { fill.style.width = Length.Percent(Mathf.Clamp01(p) * 100f); status.text = msg; },
-                    (ok, msg) =>
-                    {
-                        busy = false; dlBtn.SetEnabled(true); status.text = msg;
-                        if (ok) { NetworkDesigner.Terrain.WorldThumbnail.Generate(world); UpdateInfo(); }
-                    });
-            }
-
-            dlBtn.clicked += DoDownload;
-            picker.OnChanged = UpdateInfo;
-            UpdateInfo();
-        }
-
         VisualElement BuildRegionTile(string region)
         {
             var tile = new VisualElement();
@@ -286,14 +196,6 @@ namespace NetworkDesigner.UI
             foreach (var t in _tiles)
                 SetBorder(t, (string)t.userData == region ? 3 : 2,
                           (string)t.userData == region ? Accent : new Color(0.32f, 0.35f, 0.40f));
-        }
-
-        static void SetBorder(VisualElement e, float w, Color c)
-        {
-            e.style.borderTopWidth = w; e.style.borderBottomWidth = w;
-            e.style.borderLeftWidth = w; e.style.borderRightWidth = w;
-            e.style.borderTopColor = c; e.style.borderBottomColor = c;
-            e.style.borderLeftColor = c; e.style.borderRightColor = c;
         }
 
         // Region thumbnail: <region folder>/preview.png (drop a screenshot there). Cached; null if absent.

@@ -28,30 +28,42 @@ namespace NetworkDesigner.UI
 
         protected override void BuildBody(VisualElement body)
         {
-            // ---- CAMERA ---- (speed + chunk-world view toggles; map save/load moved to the launcher's
-            // Games flow, and DEM worlds are started from there, so this palette is now view-only.)
-            body.Add(SectionLabel("CAMERA"));
-            body.Add(SliderRow("Speed", () => Designer.CameraSpeed,
-                v => Designer.CameraSpeed = v, 5f, 50000f, "0"));
-            // Grid (1km/100m) lives on the footer "Grid" button now (drives the chunk grid here).
-            body.Add(ToggleRow("Lock bubble (hold Space)", () => Designer.ChunkLockBubble, v => Designer.ChunkLockBubble = v));
-            body.Add(ToggleRow("Local build grid", () => Designer.ChunkLocalGrid, v => Designer.ChunkLocalGrid = v));
-            // Topo on/off lives on the footer "Topo" button now (J hotkey unchanged).
-            body.Add(SliderRow("Topo Minor (m)", () => Designer.ChunkContourInterval,
-                v => Designer.ChunkContourInterval = v, 1f, 100f, "0", 1f));
-            body.Add(SliderRow("Topo strength", () => Designer.ChunkContourStrength,
-                v => Designer.ChunkContourStrength = v, 0.05f, 1f, "0.00", 0.05f));
-            // Full-screen top-down map to trim empty/ocean chunks out of the streamed set (DEM worlds).
-            var trimBtn = MakeButton("Trim map (empty chunks)…", () =>
+            // ---- WORLD ---- (the active world: a thumbnail of its downloaded extent + grow it with more
+            // map areas. Fine-grained chunk/topo/grid tunables now live in the React tuning app.)
+            string world = GameManager.ActiveGame;
+            if (!string.IsNullOrEmpty(world) && WorldManager.Exists(world))
             {
-                if (Designer.ChunkDemActive) ChunkMapEditor.Toggle();
-            });
-            trimBtn.style.marginTop = 6;
-            body.Add(trimBtn);
+                body.Add(SectionLabel("WORLD"));
 
-            // ---- AUTOSAVE ---- (snapshots the scene a debounce after each edit; the snapshot
-            // touches the terrain + every placed tree on the main thread, so on big scatter
-            // worlds it hitches — turn it off or raise the debounce to avoid the periodic lag.)
+                var thumb = new VisualElement();
+                thumb.style.height = 150; thumb.style.marginBottom = 8;
+                thumb.style.backgroundColor = new Color(0.12f, 0.13f, 0.15f);
+                thumb.style.unityBackgroundScaleMode = ScaleMode.ScaleToFit;
+                Radius(thumb, 8);
+                var tex = WorldThumbnail.Load(world);
+                if (tex != null) thumb.style.backgroundImage = new StyleBackground(tex);
+                body.Add(thumb);
+
+                // Opens the shared download picker for THIS world (snaps to its lattice). New areas land on
+                // disk + refresh the thumbnail; the live world reloads them on next load.
+                var addBtn = MakeButton("Add geographic area…", () => OpenDownloadModal(world));
+                addBtn.style.marginBottom = 4; body.Add(addBtn);
+
+                // Full-screen top-down map to trim empty/ocean chunks out of the streamed set (DEM worlds).
+                if (Designer.ChunkDemActive)
+                    body.Add(MakeButton("Trim map (empty chunks)…", () => ChunkMapEditor.Toggle()));
+
+                body.Add(Divider());
+            }
+
+            // ---- CAMERA ---- (Overview = fast-travel preset: bumps fly speed + zoom step for crossing a
+            // whole world; off returns to fine values. Manual tunables are in the React tuning app.)
+            body.Add(SectionLabel("CAMERA"));
+            body.Add(ToggleRow("Overview (fast travel)", () => Designer.CameraOverview, v => Designer.CameraOverview = v));
+
+            // ---- AUTOSAVE ---- (snapshots the scene a debounce after each edit; the snapshot touches the
+            // terrain + every placed tree on the main thread, so on big scatter worlds it hitches — turn it
+            // off or raise the debounce to avoid the periodic lag.)
             body.Add(Divider());
             body.Add(SectionLabel("AUTOSAVE"));
             body.Add(ToggleRow("Autosave", () => Designer.Autosave, v => Designer.Autosave = v));
