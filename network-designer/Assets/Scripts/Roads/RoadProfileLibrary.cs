@@ -13,10 +13,13 @@ namespace NetworkDesigner.Roads
 {
     public static class RoadProfileLibrary
     {
-        static List<SavedConfig> _configs;
+        static List<SavedConfig> _configs;   // merged: React road-config.json + in-game profiles
+        static List<SavedConfig> _user;       // in-game profiles (authored by the Road Designer)
 
-        public static IReadOnlyList<SavedConfig> Configs => _configs ??= Load();
-        public static void Reload() => _configs = null;
+        public static IReadOnlyList<SavedConfig> Configs => _configs ??= LoadMerged();
+        // In-game profiles only — editable + persisted to a separate file (React's road-config.json stays read-only).
+        public static List<SavedConfig> UserConfigs => _user ??= LoadFrom(UserPath);
+        public static void Reload() { _configs = null; _user = null; }
 
         public static RoadProfile Resolve(string id)
         {
@@ -33,16 +36,50 @@ namespace NetworkDesigner.Roads
             return p != null && p.TotalWidth > 0.1f ? p.TotalWidth : fallback;
         }
 
-        static List<SavedConfig> Load()
+        static string ReactPath => Path.Combine(Application.dataPath, "..", "road-config.json");
+        static string UserPath => Path.Combine(Application.dataPath, "..", "road-profiles-ingame.json");
+
+        static List<SavedConfig> LoadFrom(string path)
         {
-            try
-            {
-                string path = Path.Combine(Application.dataPath, "..", "road-config.json");
-                if (File.Exists(path)) return ConfigImporter.LoadFromFile(path).Configs ?? new List<SavedConfig>();
-                Debug.LogWarning($"[RoadProfileLibrary] road-config.json not found at '{path}'.");
-            }
-            catch (Exception e) { Debug.LogWarning($"[RoadProfileLibrary] load failed: {e.Message}"); }
+            try { if (File.Exists(path)) return ConfigImporter.LoadFromFile(path).Configs ?? new List<SavedConfig>(); }
+            catch (Exception e) { Debug.LogWarning($"[RoadProfileLibrary] load failed ({path}): {e.Message}"); }
             return new List<SavedConfig>();
+        }
+
+        // React profiles first, then in-game ones (in-game overrides a same-id React profile).
+        static List<SavedConfig> LoadMerged()
+        {
+            var merged = new List<SavedConfig>(LoadFrom(ReactPath));
+            foreach (var u in UserConfigs)
+            {
+                if (u == null) continue;
+                merged.RemoveAll(c => c != null && c.Id == u.Id);
+                merged.Add(u);
+            }
+            return merged;
+        }
+
+        // Add or update an in-game profile (keyed by Id) and persist to the in-game file.
+        public static void SaveUserConfig(SavedConfig cfg)
+        {
+            if (cfg == null || string.IsNullOrEmpty(cfg.Id)) return;
+            UserConfigs.RemoveAll(c => c != null && c.Id == cfg.Id);
+            UserConfigs.Add(cfg);
+            Persist();
+        }
+
+        public static void DeleteUserConfig(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            UserConfigs.RemoveAll(c => c != null && c.Id == id);
+            Persist();
+        }
+
+        static void Persist()
+        {
+            try { ConfigImporter.SaveToFile(UserPath, new ExportedConfigFile { Configs = new List<SavedConfig>(UserConfigs) }); }
+            catch (Exception e) { Debug.LogWarning($"[RoadProfileLibrary] save failed: {e.Message}"); }
+            _configs = null;   // force a re-merge so the road planner's dropdown sees the change
         }
     }
 }

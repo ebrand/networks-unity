@@ -59,7 +59,9 @@ namespace NetworkDesigner.UI
             profDd.style.marginBottom = 6; body.Add(profDd);
 
             var reload = MakeButton("Reload profiles", () => { NetworkDesigner.Roads.RoadProfileLibrary.Reload(); Rebuild(); });
-            reload.style.marginBottom = 8; body.Add(reload);
+            reload.style.marginBottom = 6; body.Add(reload);
+            var design = MakeButton("Road Designer…", () => PaletteBase.ToggleQuick("RoadDesigner"));
+            design.style.marginBottom = 8; body.Add(design);
 
             // Custom-width fallback (used when no profile is selected; a profile overrides this).
             body.Add(NumberRow("Width (custom)", "m",
