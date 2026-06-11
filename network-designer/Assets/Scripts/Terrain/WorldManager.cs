@@ -1,6 +1,7 @@
 // A "world" is a container of DEM map sets that grow a single navigable area. It lives at
-// Heightmaps/Highres/<World>/ with a world.json (the shared Web-Mercator lattice + fixed map-set size)
-// and one subfolder per map set (one download), each with a mapset.json (its own elevation range +
+// Worlds/<World>/ (GameManager owns the root, outside Assets/) with a world.json (the shared Web-Mercator
+// lattice) alongside its game state, and one subfolder per map set (one download), each with a mapset.json
+// (its own elevation range +
 // block position). Every map set snaps to the world's lattice so downloads tile seamlessly; tile
 // filenames carry WORLD-GLOBAL row/col so the loader can mosaic all map sets into one grid.
 //
@@ -39,18 +40,10 @@ namespace NetworkDesigner.Terrain
     {
         const double MercR = 6378137.0;
 
-        // New worlds live at Assets/Worlds/<World>/. Worlds created before the move stay under the legacy
-        // Heightmaps/Highres/ root and are still read in place — no risky runtime file moves.
-        static string NewRoot => Path.Combine(Application.dataPath, "Worlds");
-        static string OldRoot => Path.Combine(Application.dataPath, "Heightmaps/Highres");
-        public static string WorldDir(string world)
-        {
-            string nw = Path.Combine(NewRoot, world);
-            if (Directory.Exists(nw)) return nw;
-            string ow = Path.Combine(OldRoot, world);
-            if (Directory.Exists(ow)) return ow;
-            return nw;   // doesn't exist yet → create under Assets/Worlds
-        }
+        // A world's data lives in the SAME folder as its game state — GameManager owns the root
+        // (Worlds/<name>/, outside Assets/). Delegating keeps the path + name-sanitize identical, so
+        // world.json, game.json, autosave.json, sculpt edits and the DEM tiles all co-locate.
+        public static string WorldDir(string world) => GameManager.Folder(world);
         static string WorldFile(string world) => Path.Combine(WorldDir(world), "world.json");
         public static string MapSetDir(string world, string mapSet) => Path.Combine(WorldDir(world), mapSet);
 
@@ -58,18 +51,14 @@ namespace NetworkDesigner.Terrain
 
         public static List<string> ListWorlds()
         {
-            var set = new HashSet<string>();
-            foreach (var root in new[] { NewRoot, OldRoot })
+            var list = new List<string>();
+            try
             {
-                try
-                {
-                    if (Directory.Exists(root))
-                        foreach (var d in Directory.GetDirectories(root))
-                            if (File.Exists(Path.Combine(d, "world.json"))) set.Add(Path.GetFileName(d));
-                }
-                catch { }
+                if (Directory.Exists(GameManager.WorldsDir))
+                    foreach (var d in Directory.GetDirectories(GameManager.WorldsDir))
+                        if (File.Exists(Path.Combine(d, "world.json"))) list.Add(Path.GetFileName(d));
             }
-            var list = new List<string>(set);
+            catch { }
             list.Sort();
             return list;
         }

@@ -59,7 +59,7 @@ namespace NetworkDesigner.Terrain
             double mx = WorldManager.Lon2MercX(centerLon), my = WorldManager.Lat2MercY(centerLat);
             var gs = new GridSpec
             {
-                outDir = Path.Combine(Application.dataPath, "Heightmaps/Highres", name),
+                outDir = WorldManager.WorldDir(name),
                 nW = N, nH = N, tileMerc = tileMerc, nwX = mx - N * tileMerc / 2.0, nwY = my + N * tileMerc / 2.0, grBase = 0, gcBase = 0
             };
             Runner.StartCoroutine(Runner.RunGrid(gs,

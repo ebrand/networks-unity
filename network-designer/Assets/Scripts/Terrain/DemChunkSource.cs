@@ -200,11 +200,9 @@ namespace NetworkDesigner.Terrain
         static string ResolveDir(string folder)
         {
             if (string.IsNullOrEmpty(folder)) return null;
-            if (Directory.Exists(folder)) return folder;
-            string underWorlds = Path.Combine(Application.dataPath, "Worlds", folder);   // new home
-            if (Directory.Exists(underWorlds)) return underWorlds;
-            string underBase = Path.Combine(Application.dataPath, "Heightmaps/Highres", folder);   // legacy
-            if (Directory.Exists(underBase)) return underBase;
+            if (Directory.Exists(folder)) return folder;                       // absolute path
+            string inWorld = GameManager.Folder(folder);                       // Worlds/<name>/ (same root + sanitize)
+            if (Directory.Exists(inWorld)) return inWorld;
             string abs = Path.Combine(Application.dataPath, folder.StartsWith("Assets/") ? folder.Substring(7) : folder);
             return Directory.Exists(abs) ? abs : null;
         }

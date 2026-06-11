@@ -1,7 +1,9 @@
-// Saved "games": one folder per game under Games/, holding its manifest (DEM set + decode range),
-// its object snapshot (autosave.json), and its terrain sculpt edits (ChunkEditsDem/). The trick that
-// makes autosave "just work" per-game: point Designer.AutosavePath at <folder>/autosave.json and BOTH
-// the snapshot AND the chunk-edit directory follow it (the edit dir is derived from the autosave dir).
+// Saved "games": one folder per world under Worlds/ (a sibling of Assets/, OUTSIDE the Unity asset
+// pipeline so the heavy DEM tiles + constantly-rewritten sculpt edits never get imported/.meta'd).
+// Each folder holds the manifest (game.json), object snapshot (autosave.json), terrain sculpt edits
+// (ChunkEditsDem/), the world lattice (world.json) and the DEM tiles (per-mapset subfolders) — all in
+// one place. The trick that makes autosave "just work": point Designer.AutosavePath at
+// <folder>/autosave.json and BOTH the snapshot AND the chunk-edit directory follow it.
 
 using System.Collections.Generic;
 using System.IO;
@@ -25,26 +27,26 @@ namespace NetworkDesigner.Terrain
         public static string ActiveGame { get; private set; }
         public static bool HasActiveGame => !string.IsNullOrEmpty(ActiveGame);
 
-        public static string GamesDir =>
+        public static string WorldsDir =>
 #if UNITY_EDITOR
-            Path.Combine(Application.dataPath, "..", "Games");
+            Path.Combine(Application.dataPath, "..", "Worlds");
 #else
-            Path.Combine(Application.persistentDataPath, "Games");
+            Path.Combine(Application.persistentDataPath, "Worlds");
 #endif
 
-        public static string Folder(string name) => Path.Combine(GamesDir, Sanitize(name));
+        public static string Folder(string name) => Path.Combine(WorldsDir, Sanitize(name));
         public static string AutosaveFile(string name) => Path.Combine(Folder(name), "autosave.json");
         public static string ManifestFile(string name) => Path.Combine(Folder(name), "game.json");
         public static bool Exists(string name) => !string.IsNullOrWhiteSpace(name) && File.Exists(ManifestFile(name));
 
-        // Folders under Games/ that contain a game.json manifest.
+        // Folders under Worlds/ that contain a game.json manifest.
         public static List<string> ListGames()
         {
             var list = new List<string>();
             try
             {
-                if (Directory.Exists(GamesDir))
-                    foreach (var d in Directory.GetDirectories(GamesDir))
+                if (Directory.Exists(WorldsDir))
+                    foreach (var d in Directory.GetDirectories(WorldsDir))
                         if (File.Exists(Path.Combine(d, "game.json")))
                             list.Add(Path.GetFileName(d));
             }
