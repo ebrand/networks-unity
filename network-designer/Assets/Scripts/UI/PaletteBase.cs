@@ -627,7 +627,11 @@ namespace NetworkDesigner.UI
             Label Cap(string t) { var l = new Label(t); l.style.color = Sub; l.style.fontSize = 11; l.style.marginBottom = 2; l.style.marginTop = 8; return l; }
 
             var info = new Label(); info.style.color = Sub; info.style.fontSize = 12;
-            info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 4; info.style.marginBottom = 14; left.Add(info);
+            info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 4; info.style.marginBottom = 10; left.Add(info);
+
+            var srcDd = new DropdownField(new System.Collections.Generic.List<string> {
+                "USGS 3DEP — 1 m (US)", "AWS Terrarium — global ~30 m" }, 0);
+            srcDd.style.marginBottom = 10; left.Add(srcDd);
 
             bool busy = false, anyDownload = false;
 
@@ -690,7 +694,9 @@ namespace NetworkDesigner.UI
                 if (busy) return;
                 busy = true; dlBtn.SetEnabled(false);
                 fill.style.width = Length.Percent(0); status.text = "Starting…";
-                NetworkDesigner.Terrain.Dem3DEP.StartInWorld(world, picker.CenterLat, picker.CenterLon, picker.AreaKmW, picker.AreaKmH,
+                var src = srcDd.index == 1 ? NetworkDesigner.Terrain.Dem3DEP.Source.AwsTerrarium
+                                           : NetworkDesigner.Terrain.Dem3DEP.Source.Usgs3DEP;
+                NetworkDesigner.Terrain.Dem3DEP.StartInWorld(world, picker.CenterLat, picker.CenterLon, picker.AreaKmW, picker.AreaKmH, src,
                     (p, msg) => { fill.style.width = Length.Percent(Mathf.Clamp01(p) * 100f); status.text = msg; },
                     (ok, msg) =>
                     {

@@ -29,6 +29,11 @@ namespace NetworkDesigner.Terrain
         const int FetchConcurrency = 4;    // tiles in parallel (gentle on the 3DEP server)
         const int MaxRetries = 8;          // transient 502/504/timeout retries per tile (with backoff)
 
+        // Elevation source. 3DEP = USGS 1 m lidar (US-only, but a DSM — captures buildings, and noisy/
+        // spiky over dense urban). Terrarium = AWS global ~10–30 m, smoothed (no structures) — the backup
+        // for messy 3DEP or anywhere outside the US.
+        public enum Source { Usgs3DEP, AwsTerrarium }
+
         static Dem3DEP _runner;
         static Dem3DEP Runner
         {
@@ -69,7 +74,7 @@ namespace NetworkDesigner.Terrain
 
         // ── a (any W×H sized) map set into a world's 1 km lattice, auto-named by its NW tile ──
         public static void StartInWorld(string world, double centerLat, double centerLon, double areaKmW, double areaKmH,
-                                        Action<float, string> onProgress, Action<bool, string> onDone)
+                                        Source source, Action<float, string> onProgress, Action<bool, string> onDone)
         {
             var wi = WorldManager.Read(world);
             if (wi == null) { onDone?.Invoke(false, "world not found"); return; }
@@ -79,9 +84,10 @@ namespace NetworkDesigner.Terrain
             string mapSet = $"r{grNW}_c{gcNW}";
             if (WorldManager.ReadMapSet(world, mapSet) != null) { onDone?.Invoke(false, "this area is already in the world"); return; }
             var gs = new GridSpec { outDir = WorldManager.MapSetDir(world, mapSet), nW = W, nH = H, tileMerc = tileMerc, nwX = nwX, nwY = nwY, grBase = grNW, gcBase = gcNW };
-            Runner.StartCoroutine(Runner.RunGrid(gs,
-                (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, GR = grNW, GC = gcNW, W = W, H = H }); return null; },
-                onProgress, onDone));
+            Func<float, float, string> persist = (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, GR = grNW, GC = gcNW, W = W, H = H }); return null; };
+            Runner.StartCoroutine(source == Source.AwsTerrarium
+                ? Runner.RunGridTerrarium(gs, persist, onProgress, onDone)
+                : Runner.RunGrid(gs, persist, onProgress, onDone));
         }
 
         struct GridSpec { public string outDir; public int nW, nH; public double tileMerc, nwX, nwY; public int grBase, gcBase; }
@@ -198,6 +204,137 @@ namespace NetworkDesigner.Terrain
 
         static void TryDelete(string dir) { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
         static string Fmt(double v) => v.ToString("F6", CultureInfo.InvariantCulture).Replace('.', '_');
+
+        // ── AWS Terrarium source: fetch the z15 slippy tiles covering the area, decode north-up (ocean/
+        // river bathymetry clamped to sea level), then resample each 1 km output tile onto the SAME 3857
+        // lattice 3DEP uses, so a Terrarium map set tiles seamlessly with the rest of the world. Global +
+        // smooth (no DSM buildings), but ~30 m data upsampled to the 1 m grid. Tiles cached in RAM (no
+        // disk-spill) — fine for typical areas; a 32 km grab is a few hundred MB of source tiles.
+        const string TerrUrl = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{0}/{1}/{2}.png";
+
+        IEnumerator RunGridTerrarium(GridSpec gs, Func<float, float, string> persist,
+                                     Action<float, string> onProgress, Action<bool, string> onDone)
+        {
+            int nW = gs.nW, nH = gs.nH, total = nW * nH;
+            double tileMerc = gs.tileMerc;
+            const int Z = 15, TPx = 256; int worldTilesZ = 1 << Z;
+
+            // Terrarium tile range covering the area (+1 margin for bilinear edges).
+            double wLon = WorldManager.MercX2Lon(gs.nwX), eLon = WorldManager.MercX2Lon(gs.nwX + nW * tileMerc);
+            double nLat = WorldManager.MercY2Lat(gs.nwY), sLat = WorldManager.MercY2Lat(gs.nwY - nH * tileMerc);
+            int txMin = (int)Math.Floor(TLon2X(wLon, Z)) - 1, txMax = (int)Math.Floor(TLon2X(eLon, Z)) + 1;
+            int tyMin = (int)Math.Floor(TLat2Y(nLat, Z)) - 1, tyMax = (int)Math.Floor(TLat2Y(sLat, Z)) + 1;
+
+            var cache = new Dictionary<long, float[]>();
+            var queue = new List<(int tx, int ty)>();
+            for (int ty = tyMin; ty <= tyMax; ty++) for (int tx = txMin; tx <= txMax; tx++) queue.Add((tx, ty));
+
+            // Parallel fetch + decode → cache (a missing tile samples as sea level, not a hard failure).
+            var inflight = new List<(UnityWebRequest req, int X, int Y)>();
+            int next = 0, fetched = 0;
+            while (next < queue.Count || inflight.Count > 0)
+            {
+                while (next < queue.Count && inflight.Count < FetchConcurrency)
+                {
+                    var (tx, ty) = queue[next++];
+                    int X = ((tx % worldTilesZ) + worldTilesZ) % worldTilesZ, Y = Mathf.Clamp(ty, 0, worldTilesZ - 1);
+                    if (cache.ContainsKey(TKey(X, Y))) { fetched++; continue; }   // edge tiles can repeat after wrap/clamp
+                    var rq = UnityWebRequestTexture.GetTexture(string.Format(TerrUrl, Z, X, Y), false);
+                    rq.SendWebRequest();
+                    inflight.Add((rq, X, Y));
+                }
+                yield return null;
+                for (int i = inflight.Count - 1; i >= 0; i--)
+                {
+                    var it = inflight[i];
+                    if (!it.req.isDone) continue;
+                    if (it.req.result == UnityWebRequest.Result.Success)
+                    {
+                        var tex = DownloadHandlerTexture.GetContent(it.req);
+                        cache[TKey(it.X, it.Y)] = DecodeTerr(tex);
+                        Destroy(tex);
+                    }
+                    it.req.Dispose(); inflight.RemoveAt(i);
+                    onProgress?.Invoke(0.05f + 0.5f * ++fetched / Mathf.Max(1, queue.Count), $"fetching {fetched}/{queue.Count} AWS tiles");
+                }
+            }
+            if (cache.Count == 0) { onDone?.Invoke(false, "no AWS terrain (network / outside coverage?)"); yield break; }
+
+            // Encode range from the fetched data (bathymetry already clamped to 0 in DecodeTerr).
+            float lo = float.MaxValue, hi = float.MinValue;
+            foreach (var arr in cache.Values) for (int k = 0; k < arr.Length; k++) { float v = arr[k]; if (v < lo) lo = v; if (v > hi) hi = v; }
+            if (lo > hi) { onDone?.Invoke(false, "no valid AWS elevation"); yield break; }
+            float normMin = Mathf.Floor(lo / 10f) * 10f - 10f, normMax = Mathf.Ceil(hi / 10f) * 10f + 10f, range = Mathf.Max(1f, normMax - normMin);
+
+            try { Directory.CreateDirectory(gs.outDir); }
+            catch (Exception ex) { onDone?.Invoke(false, "mkdir failed: " + ex.Message); yield break; }
+            var gray = new ushort[TilePx * TilePx];
+            for (int r = 0; r < nH; r++)
+                for (int c = 0; c < nW; c++)
+                {
+                    for (int py = 0; py < TilePx; py++)
+                    {
+                        double Ym = gs.nwY - r * tileMerc - (py + 0.5) / TilePx * tileMerc;
+                        double gyf = TLat2Y(WorldManager.MercY2Lat(Ym), Z) * TPx;
+                        for (int pxc = 0; pxc < TilePx; pxc++)
+                        {
+                            double Xm = gs.nwX + c * tileMerc + (pxc + 0.5) / TilePx * tileMerc;
+                            double gxf = TLon2X(WorldManager.MercX2Lon(Xm), Z) * TPx;
+                            float v = SampleTerr(cache, gxf, gyf, worldTilesZ);
+                            gray[py * TilePx + pxc] = (ushort)Mathf.RoundToInt(Mathf.Clamp01((v - normMin) / range) * 65535f);
+                        }
+                    }
+                    double tlat = WorldManager.MercY2Lat(gs.nwY - r * tileMerc), tlon = WorldManager.MercX2Lon(gs.nwX + c * tileMerc);
+                    int gr = gs.grBase + r, gc = gs.gcBase + c;
+                    string fn = $"{Fmt(tlat)}_{Fmt(tlon)}_0_{TilePx}_{TilePx}_16bit_tile_{gr}_{gc}.png";
+                    try { File.WriteAllBytes(Path.Combine(gs.outDir, fn), DemPng16.Encode(gray, TilePx, TilePx)); }
+                    catch (Exception ex) { onDone?.Invoke(false, "write failed: " + ex.Message); yield break; }
+                    onProgress?.Invoke(0.55f + 0.43f * ((r * nW + c + 1) / (float)total), $"writing tile {r},{c}");
+                    yield return null;
+                }
+
+            string err = persist(normMin, normMax);
+            if (err != null) { onDone?.Invoke(false, err); yield break; }
+            onDone?.Invoke(true, $"{nW}×{nH} km · AWS ~30 m → 1 m grid · range {normMin:0}..{normMax:0} m");
+        }
+
+        // Terrarium RGB → metres, flipped to NORTH-UP (GetPixels32 is bottom-up); bathymetry → sea level.
+        static float[] DecodeTerr(Texture2D tex)
+        {
+            var px = tex.GetPixels32(); int w = tex.width, h = tex.height;
+            var e = new float[w * h];
+            for (int ty = 0; ty < h; ty++)
+                for (int tx = 0; tx < w; tx++)
+                {
+                    Color32 cc = px[(h - 1 - ty) * w + tx];
+                    float m = cc.r * 256f + cc.g + cc.b / 256f - 32768f;
+                    e[ty * w + tx] = Mathf.Max(0f, m);
+                }
+            return e;
+        }
+
+        // Bilinear sample of the cached z15 mosaic at a global fractional pixel (gx,gy); cross-tile, X wraps,
+        // Y clamps. Missing tiles read as sea level.
+        static float SampleTerr(Dictionary<long, float[]> cache, double gx, double gy, int worldTilesZ)
+        {
+            double fx = gx - 0.5, fy = gy - 0.5;
+            int x0 = (int)Math.Floor(fx), y0 = (int)Math.Floor(fy);
+            float dx = (float)(fx - x0), dy = (float)(fy - y0);
+            float h00 = TerrAt(cache, x0, y0, worldTilesZ), h10 = TerrAt(cache, x0 + 1, y0, worldTilesZ);
+            float h01 = TerrAt(cache, x0, y0 + 1, worldTilesZ), h11 = TerrAt(cache, x0 + 1, y0 + 1, worldTilesZ);
+            return Mathf.Lerp(Mathf.Lerp(h00, h10, dx), Mathf.Lerp(h01, h11, dx), dy);
+        }
+
+        static float TerrAt(Dictionary<long, float[]> cache, int gx, int gy, int worldTilesZ)
+        {
+            int totalPx = worldTilesZ * 256;
+            int wx = ((gx % totalPx) + totalPx) % totalPx, wy = Mathf.Clamp(gy, 0, totalPx - 1);
+            return cache.TryGetValue(TKey(wx / 256, wy / 256), out var arr) ? arr[(wy % 256) * 256 + (wx % 256)] : 0f;
+        }
+
+        static double TLon2X(double lon, int z) => (lon + 180.0) / 360.0 * (1 << z);
+        static double TLat2Y(double lat, int z) { double r = lat * Math.PI / 180.0; return (1.0 - Math.Log(Math.Tan(r) + 1.0 / Math.Cos(r)) / Math.PI) / 2.0 * (1 << z); }
+        static long TKey(int tx, int ty) => ((long)tx << 32) ^ (uint)ty;
 
         // Minimal GeoTIFF reader for the 3DEP exportImage response: little/big-endian, UNCOMPRESSED,
         // single-sample 32-bit FLOAT, tiled OR stripped. Returns row-major top-down float[w*h], or null.
