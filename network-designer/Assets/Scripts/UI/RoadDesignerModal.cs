@@ -23,7 +23,8 @@ namespace NetworkDesigner.UI
         protected override bool Centered => true;
         protected override bool ShowFooter => false;
         protected override string Title => "Road Designer";
-        protected override float PanelWidth => Mathf.Max(720f, Screen.width - 120f);
+        // Centered window sized to leave the Road + Design Controls side palettes visible (per layout).
+        protected override float PanelWidth => Mathf.Clamp(Screen.width - 720f, 700f, 1200f);
         protected override Color Accent => new Color(0.95f, 0.55f, 0.15f);
 
         enum Center { None, TurnLane, NormalMedian, WideMedian }
@@ -35,8 +36,10 @@ namespace NetworkDesigner.UI
         Center _center = Center.None;
         float _laneW = 3.5f, _medianW = 3.5f, _shoulderW = 2.0f;
 
-        VisualElement _preview, _listBox;
-        bool _heldModal;
+        VisualElement _preview, _listBox, _view3d;
+        bool _heldModal, _dragging;
+        Vector2 _lastPtr;
+        RoadPreview3D _rig;
 
         // Hold ModalOpen while visible (suspends world hotkeys / camera under the full-screen window).
         protected override void Update()
@@ -44,12 +47,39 @@ namespace NetworkDesigner.UI
             base.Update();
             bool shown = ShouldShow();
             if (shown != _heldModal) { if (shown) PushModal(); else PopModal(); _heldModal = shown; }
+            if (_rig != null) _rig.SetActive(shown);   // only render the preview while the window is open
         }
 
         protected override void OnDisable()
         {
             base.OnDisable();
             if (_heldModal) { PopModal(); _heldModal = false; }
+            if (_rig != null) _rig.SetActive(false);
+        }
+
+        protected override void OnDestroy()
+        {
+            base.OnDestroy();
+            if (_rig != null) Destroy(_rig.gameObject);
+        }
+
+        void EnsureRig()
+        {
+            if (_rig != null) return;
+            var go = new GameObject("RoadDesignerPreview3D") { hideFlags = HideFlags.DontSave };
+            _rig = go.AddComponent<RoadPreview3D>();
+        }
+
+        // Drag to orbit, wheel to zoom the 3D view.
+        void RegisterViewportInput(VisualElement v)
+        {
+            v.RegisterCallback<PointerDownEvent>(e => { v.CapturePointer(e.pointerId); _dragging = true; _lastPtr = (Vector2)e.position; });
+            v.RegisterCallback<PointerMoveEvent>(e =>
+            {
+                if (_dragging && _rig != null) { Vector2 d = (Vector2)e.position - _lastPtr; _rig.Orbit(d.x, d.y); _lastPtr = (Vector2)e.position; }
+            });
+            v.RegisterCallback<PointerUpEvent>(e => { v.ReleasePointer(e.pointerId); _dragging = false; });
+            v.RegisterCallback<WheelEvent>(e => { if (_rig != null) _rig.Zoom(e.delta.y); });
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -72,12 +102,19 @@ namespace NetworkDesigner.UI
             row.Add(left);
 
             var right = new VisualElement();
-            right.style.flexGrow = 1; right.style.minHeight = 420;
-            right.style.backgroundColor = new Color(0.08f, 0.09f, 0.10f);
-            Radius(right, 8);
+            right.style.flexGrow = 1; right.style.minHeight = 440;
             row.Add(right);
-            _preview = new VisualElement();
-            _preview.style.flexGrow = 1;
+
+            _view3d = new VisualElement();   // rotatable / zoomable 3D road
+            _view3d.style.flexGrow = 1; _view3d.style.minHeight = 360;
+            _view3d.style.backgroundColor = new Color(0.08f, 0.09f, 0.10f);
+            _view3d.style.unityBackgroundScaleMode = ScaleMode.ScaleAndCrop;
+            Radius(_view3d, 8);
+            right.Add(_view3d);
+            RegisterViewportInput(_view3d);
+
+            _preview = new VisualElement();   // 2D cross-section strip below the 3D view
+            _preview.style.height = 96; _preview.style.marginTop = 8;
             right.Add(_preview);
 
             BuildControls(left);
@@ -220,13 +257,21 @@ namespace NetworkDesigner.UI
             }
         }
 
-        // ---- 2D cross-section preview ----
+        // ---- preview: rotatable 3D road + a compact 2D cross-section strip ----
 
         void RefreshPreview()
         {
+            RoadProfile prof = BuildConfig().Road;
+
+            // 3D view
+            EnsureRig();
+            _rig.SetProfile(prof);
+            if (_view3d != null && _rig.Texture != null)
+                _view3d.style.backgroundImage = new StyleBackground(Background.FromRenderTexture(_rig.Texture));
+
+            // 2D cross-section strip
             if (_preview == null) return;
             _preview.Clear();
-            RoadProfile prof = BuildConfig().Road;
 
             var strips = new List<(float w, string kind)>();
             void S(float w, string k) { if (w > 0.01f) strips.Add((w, k)); }
@@ -237,17 +282,13 @@ namespace NetworkDesigner.UI
             for (int i = 0; i < prof.AB.Lanes.Count; i++) S(prof.AB.Lanes[i].Width, "lane");
             S(prof.ShoulderAB.Width, "shoulder");
 
-            var wrap = new VisualElement();
-            wrap.style.flexGrow = 1; wrap.style.justifyContent = Justify.Center;
-            wrap.style.paddingLeft = 24; wrap.style.paddingRight = 24;
-
             var total = new Label($"{prof.TotalWidth:0.#} m · {prof.AB.Lanes.Count}×{prof.BA.Lanes.Count} lanes"
-                                  + (_highway ? " · Highway" : ""));
-            total.style.color = Ink; total.style.unityTextAlign = TextAnchor.MiddleCenter; total.style.marginBottom = 10;
-            wrap.Add(total);
+                                  + (_highway ? " · Highway" : "") + "   (drag to orbit · wheel to zoom)");
+            total.style.color = Sub; total.style.fontSize = 11; total.style.marginBottom = 4;
+            _preview.Add(total);
 
             var sec = HBox();
-            sec.style.height = 90; sec.style.alignItems = Align.Stretch;
+            sec.style.height = 56; sec.style.alignItems = Align.Stretch;
             SetBorder(sec, 1, new Color(1f, 1f, 1f, 0.4f));
             foreach (var s in strips)
             {
@@ -258,12 +299,7 @@ namespace NetworkDesigner.UI
                 { box.style.borderRightWidth = 1; box.style.borderRightColor = new Color(1f, 1f, 1f, 0.45f); }
                 sec.Add(box);
             }
-            wrap.Add(sec);
-
-            var note = new Label("2D cross-section — rotatable 3D view coming next");
-            note.style.color = Sub; note.style.fontSize = 11; note.style.unityTextAlign = TextAnchor.MiddleCenter; note.style.marginTop = 12;
-            wrap.Add(note);
-            _preview.Add(wrap);
+            _preview.Add(sec);
         }
 
         static Color StripColor(string kind)
