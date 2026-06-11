@@ -37,16 +37,12 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Metres between the cross-ties drawn across the corridor.")]
         public float TieSpacing = 8f;
         public Color PlanColor = new Color(1f, 0.55f, 0.12f, 0.95f);   // amber-orange (rail plan is yellow)
-        [Tooltip("Radius (m) to grab an existing node when starting/joining a chain — forms intersections.")]
-        public float NodePickRadius = 2.5f;
-        [Tooltip("Cursor distance (m) to soft-snap onto the straight-ahead extension of the previous segment.")]
-        public float ExtensionSnapRadius = 4f;
-        [Tooltip("Radius (m) to snap the cursor onto the plan's own nodes/edges (resume/join).")]
-        public float EndSnapRadius = 8f;
-        [Tooltip("Length (m) of the collinear extension guide line.")]
-        public float ExtensionGuideLength = 120f;
-        [Tooltip("Radius (m) of the node puck rings drawn at each plan node.")]
-        public float NodePuckRadius = 1.5f;
+        // Guide/snap controls — shared by all plan tools via PlanGuides (tune in the Guides palette).
+        public float NodePickRadius { get => PlanGuides.NodePickRadius; set => PlanGuides.NodePickRadius = value; }
+        public float ExtensionSnapRadius { get => PlanGuides.ExtensionSnapRadius; set => PlanGuides.ExtensionSnapRadius = value; }
+        public float EndSnapRadius { get => PlanGuides.EndSnapRadius; set => PlanGuides.EndSnapRadius = value; }
+        public float ExtensionGuideLength { get => PlanGuides.ExtensionGuideLength; set => PlanGuides.ExtensionGuideLength = value; }
+        public float NodePuckRadius { get => PlanGuides.NodePuckRadius; set => PlanGuides.NodePuckRadius = value; }
 
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
@@ -56,6 +52,11 @@ namespace NetworkDesigner.Terrain
         GameObject _root; MeshFilter _mf; MeshRenderer _mr; Mesh _mesh; Material _mat;
         readonly List<Vector3> _v = new List<Vector3>();
         readonly List<int> _idx = new List<int>();
+        // Node pucks ride a SEPARATE 3D mesh (lit-transparent) so they carry their own colour + height + toggle.
+        GameObject _nodeGo; MeshFilter _nodeMf; MeshRenderer _nodeMr; Mesh _nodeMesh; Material _nodeMat;
+        readonly List<Vector3> _nv = new List<Vector3>();
+        readonly List<Vector3> _nn = new List<Vector3>();
+        readonly List<int> _nidx = new List<int>();
 
         GameObject _pvGo; MeshFilter _pvMf; MeshRenderer _pvMr; Mesh _pvMesh;
         readonly List<Vector3> _pv = new List<Vector3>();
@@ -187,6 +188,7 @@ namespace NetworkDesigner.Terrain
         public bool TrySnapToOwnNode(Vector2 p, out Vector2 snapped)
         {
             snapped = p;
+            if (!PlanGuides.ProximitySnapOn) return false;
             float r = Mathf.Max(0f, EndSnapRadius);
             if (r <= 0f) return false;
             int best = -1; float bestSq = r * r;
@@ -206,7 +208,7 @@ namespace NetworkDesigner.Terrain
         public void Rebuild(ITerrainSurface field)
         {
             EnsureRoot();
-            _v.Clear(); _idx.Clear();
+            _v.Clear(); _idx.Clear(); _nv.Clear(); _nn.Clear(); _nidx.Clear();
             float tieEvery = Mathf.Max(1f, TieSpacing);
 
             foreach (LineEdge e in Graph.Edges)
@@ -215,12 +217,12 @@ namespace NetworkDesigner.Terrain
                 float half = Mathf.Max(0.1f, EdgeWidth(e) * 0.5f);   // each segment at its own profile width
                 BuildCorridorEdge(field, p0, p1, p2, p3, half, tieEvery);
             }
-            foreach (Vector2 n in Graph.Nodes) DrawPuck(field, n);   // visible node markers (move/curve/delete handles)
+            foreach (Vector2 n in Graph.Nodes) DrawPuck(field, n);   // into the node mesh (own colour + toggle)
 
-            _mesh.Clear();
-            _mesh.SetVertices(_v);
-            _mesh.SetIndices(_idx, MeshTopology.Lines, 0);
-            _mesh.RecalculateBounds();
+            _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
+            _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
+            _nodeMr.enabled = PlanGuides.ShowNodes;
+            if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
         }
 
         void EdgeBezier(LineEdge e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3)
@@ -268,18 +270,42 @@ namespace NetworkDesigner.Terrain
             => new Vector3(xz.x, (field != null ? field.SampleHeight(xz.x, xz.y) : 0f) + Lift, xz.y);
 
         void AddSeg(Vector3 a, Vector3 b) { int s = _v.Count; _v.Add(a); _v.Add(b); _idx.Add(s); _idx.Add(s + 1); }
-
-        // A draped ring at a node — the visible marker you grab to move / curve / delete.
+        // A short draped 3D cylinder puck (top cap + side wall, manual outward normals) at a node — the
+        // visible handle you grab to move / curve / delete. Lit-transparent so the alpha shows. Mirrors rail.
         void DrawPuck(ITerrainSurface field, Vector2 c)
         {
-            const int N = 16; float r = Mathf.Max(0.2f, NodePuckRadius);
-            Vector3 prev = default;
+            const int N = 16;
+            float radius = Mathf.Max(0.2f, NodePuckRadius);
+            float baseY = (field != null ? field.SampleHeight(c.x, c.y) : 0f) + Lift;   // coplanar with the corridor ribbon
+            float topY = baseY + Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+
+            int capC = _nv.Count;
+            _nv.Add(new Vector3(c.x, topY, c.y)); _nn.Add(Vector3.up);
+            int capRim = _nv.Count;
             for (int i = 0; i <= N; i++)
             {
                 float a = i / (float)N * Mathf.PI * 2f;
-                Vector3 cur = Drape(field, new Vector2(c.x + Mathf.Cos(a) * r, c.y + Mathf.Sin(a) * r));
-                if (i > 0) AddSeg(prev, cur);
-                prev = cur;
+                _nv.Add(new Vector3(c.x + Mathf.Cos(a) * radius, topY, c.y + Mathf.Sin(a) * radius)); _nn.Add(Vector3.up);
+            }
+            for (int i = 0; i < N; i++) { _nidx.Add(capC); _nidx.Add(capRim + i + 1); _nidx.Add(capRim + i); }   // cap up
+
+            int wTop = _nv.Count;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f; float nx = Mathf.Cos(a), nz = Mathf.Sin(a);
+                _nv.Add(new Vector3(c.x + nx * radius, topY, c.y + nz * radius)); _nn.Add(new Vector3(nx, 0f, nz));
+            }
+            int wBot = _nv.Count;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f; float nx = Mathf.Cos(a), nz = Mathf.Sin(a);
+                _nv.Add(new Vector3(c.x + nx * radius, baseY, c.y + nz * radius)); _nn.Add(new Vector3(nx, 0f, nz));
+            }
+            for (int i = 0; i < N; i++)
+            {
+                int ti = wTop + i, tj = wTop + i + 1, bi = wBot + i, bj = wBot + i + 1;
+                _nidx.Add(bi); _nidx.Add(ti); _nidx.Add(tj);   // outward
+                _nidx.Add(bi); _nidx.Add(tj); _nidx.Add(bj);
             }
         }
 
@@ -294,15 +320,25 @@ namespace NetworkDesigner.Terrain
             _mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _mr.receiveShadows = false;
             _mesh = new Mesh { name = "RoadPlanMesh" };
             _mf.sharedMesh = _mesh;
-            _mat = MakeMat();
+            _mat = MakeMat(PlanColor, "RoadPlanMat");
             _mr.sharedMaterial = _mat;
+
+            _nodeGo = new GameObject(RootName + "_Nodes") { hideFlags = HideFlags.DontSave };
+            _nodeGo.transform.SetParent(_root.transform, false);
+            _nodeMf = _nodeGo.AddComponent<MeshFilter>();
+            _nodeMr = _nodeGo.AddComponent<MeshRenderer>();
+            _nodeMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _nodeMr.receiveShadows = false;
+            _nodeMesh = new Mesh { name = "RoadPlanNodesMesh" };
+            _nodeMf.sharedMesh = _nodeMesh;
+            _nodeMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(PlanGuides.RoadNodeColor, 0.2f, "RoadPlanNodeMat");
+            _nodeMr.sharedMaterial = _nodeMat;
         }
 
-        Material MakeMat()
+        Material MakeMat(Color c, string name)
         {
             Shader sh = Shader.Find("NetworkDesigner/CursorOverlay");
-            return sh != null ? new Material(sh) { name = "RoadPlanMat", color = PlanColor }
-                              : NetworkDesigner.PipelineMaterials.CreateUnlitColor(PlanColor, "RoadPlanMat");
+            return sh != null ? new Material(sh) { name = name, color = c }
+                              : NetworkDesigner.PipelineMaterials.CreateUnlitColor(c, name);
         }
 
         // ---- placement preview (ghost puck + dashed pending edge) ----
@@ -370,7 +406,7 @@ namespace NetworkDesigner.Terrain
             _pvMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _pvMr.receiveShadows = false;
             _pvMesh = new Mesh { name = "RoadPlanPreviewMesh" };
             _pvMf.sharedMesh = _pvMesh;
-            _pvMr.sharedMaterial = MakeMat();
+            _pvMr.sharedMaterial = MakeMat(PlanColor, "RoadPlanPreviewMat");
         }
 
         // ---- save / load (the node/edge graph; geometry regenerated on load) ----

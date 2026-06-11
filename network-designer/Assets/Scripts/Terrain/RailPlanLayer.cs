@@ -28,13 +28,9 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Distance between the two tracks (m) when planning a double-track " +
                  "corridor (track centre to track centre).")]
         public float TrackGap = 4f;
-        [Tooltip("Curve mode (held-Shift): how far the bezier controls sit from each " +
-                 "node toward the guide corner (0 = sharp, 1 = wide arc).")]
-        [Range(0.1f, 0.95f)] public float CurveLever = 0.55f;
-        [Tooltip("After the bend is placed, snap the end to the same leg length as the " +
-                 "start->bend leg (a symmetric curve) when the cursor is within this " +
-                 "fraction of that length. 0 = off.")]
-        [Range(0f, 0.5f)] public float CurveSymmetrySnap = 0.1f;
+        // Shared via PlanGuides (Guides palette) — see PlanGuides.cs.
+        public float CurveLever { get => PlanGuides.CurveLever; set => PlanGuides.CurveLever = value; }
+        public float CurveSymmetrySnap { get => PlanGuides.CurveSymmetrySnap; set => PlanGuides.CurveSymmetrySnap = value; }
         [Tooltip("The bend can't be placed until the first leg gives at least this much " +
                  "turn (deg) above/below the centreline for the design speed — the min-" +
                  "distance target. The guide stays red until then.")]
@@ -69,14 +65,10 @@ namespace NetworkDesigner.Terrain
         public float SampleStep = 2f;
         [Tooltip("Metres the plan lines float above the terrain so they don't z-fight.")]
         public float Lift = 0.2f;
-        [Tooltip("Length (m) of the straight-ahead alignment guide — the dashed " +
-                 "collinear extension out of the chain tail. Also bounds the snap reach.")]
-        public float ExtensionGuideLength = 120f;
-        [Tooltip("Snap radius (m) to the straight-ahead alignment guide.")]
-        public float ExtensionSnapRadius = 4f;
-        [Tooltip("Snap radius (m) for resuming/joining the plan's OWN nodes (the end " +
-                 "of the corridor you already drew).")]
-        public float EndSnapRadius = 8f;
+        // Shared via PlanGuides (Guides palette) — see PlanGuides.cs.
+        public float ExtensionGuideLength { get => PlanGuides.ExtensionGuideLength; set => PlanGuides.ExtensionGuideLength = value; }
+        public float ExtensionSnapRadius { get => PlanGuides.ExtensionSnapRadius; set => PlanGuides.ExtensionSnapRadius = value; }
+        public float EndSnapRadius { get => PlanGuides.EndSnapRadius; set => PlanGuides.EndSnapRadius = value; }
         public Color PlanColor = new Color(1f, 0.92f, 0.2f, 0.85f);
 
         [Header("Analysis (Phase 2)")]
@@ -535,6 +527,7 @@ namespace NetworkDesigner.Terrain
         public bool TrySnapToOwnNode(Vector2 p, out Vector2 snapped)
         {
             snapped = p;
+            if (!PlanGuides.ProximitySnapOn) return false;
             float r = Mathf.Max(0f, EndSnapRadius);
             if (r <= 0f) return false;
             int best = -1; float bestSq = r * r;

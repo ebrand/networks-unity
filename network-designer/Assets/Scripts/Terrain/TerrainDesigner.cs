@@ -2327,7 +2327,7 @@ namespace NetworkDesigner.Terrain
             UpdatePlanGradeLabels();   // world-space TMP grade labels (runs even under a modal, to hide)
             // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
             // typing a name doesn't fire hotkeys or sculpt.
-            if (NetworkDesigner.UI.PaletteBase.ModalOpen) return;
+            if (NetworkDesigner.UI.PaletteBase.ModalOpen || NetworkDesigner.UI.PaletteBase.TextEditing) return;
             // Brush-mode hotkeys.
             if (Input.GetKeyDown(KeyCode.Alpha1)) Brush = BrushMode.Raise;
             else if (Input.GetKeyDown(KeyCode.Alpha2)) Brush = BrushMode.Lower;
@@ -2351,6 +2351,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.O)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Placeables");
             if (Input.GetKeyDown(KeyCode.U)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Environment");
             if (Input.GetKeyDown(KeyCode.Semicolon)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road");
+            if (Input.GetKeyDown(KeyCode.BackQuote)) NetworkDesigner.UI.PaletteBase.ToggleQuick("Guides");   // ` = Design Controls quick palette (overlays, keeps your place)
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
             // M toggles the chunk-streaming bubble lock (freeze the resident set to sculpt in place).
             if (Input.GetKeyDown(KeyCode.M) && ChunkWorld.Active) ChunkLockBubble = !ChunkLockBubble;
@@ -3204,6 +3205,8 @@ namespace NetworkDesigner.Terrain
                     deleted = rlDel.DeleteNearNode(Surf, new Vector3(dsnap.x, hit.point.y, dsnap.y), 2f);
                 else if (_lineActive is RailPlanLayer plDel && plDel.TrySnapToOwnNode(dflat, out Vector2 psnap))
                     deleted = plDel.DeleteNearNode(Surf, new Vector3(psnap.x, hit.point.y, psnap.y), 2f);
+                else if (_lineActive is RoadPlanLayer rdDel && rdDel.TrySnapToOwnNode(dflat, out Vector2 rdsnap))
+                    deleted = rdDel.DeleteNearNode(Surf, new Vector3(rdsnap.x, hit.point.y, rdsnap.y), 2f);
                 if (!deleted) deleted = _lineActive.DeleteNearNode(Surf, hit.point, 3f);
             }
             if (deleted) _dirtySince = Time.realtimeSinceStartup;

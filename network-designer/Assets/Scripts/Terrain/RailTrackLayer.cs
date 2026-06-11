@@ -38,12 +38,9 @@ namespace NetworkDesigner.Terrain
         public float VerticalOffset = 0.02f;
         [Tooltip("Conform the track to the terrain surface (sampled along the curve).")]
         public bool Conform = true;
-        [Tooltip("Curve mode (held-Shift): how far the bezier controls sit from each " +
-                 "node toward the guide corner (0 = sharp through corner, 1 = wide arc).")]
-        [Range(0.1f, 0.95f)] public float CurveLever = 0.55f;
-        [Tooltip("After the bend is placed, snap the end to the same leg length as the " +
-                 "start->bend leg (a symmetric curve) when within this fraction of it. 0 = off.")]
-        [Range(0f, 0.5f)] public float CurveSymmetrySnap = 0.1f;
+        // Shared via PlanGuides (Guides palette) — see PlanGuides.cs.
+        public float CurveLever { get => PlanGuides.CurveLever; set => PlanGuides.CurveLever = value; }
+        public float CurveSymmetrySnap { get => PlanGuides.CurveSymmetrySnap; set => PlanGuides.CurveSymmetrySnap = value; }
         [Tooltip("The bend can't be placed until the first leg is long enough to give at " +
                  "least this much turn (deg) above/below the centreline for the design " +
                  "speed — the min-distance target. The guide stays red until then.")]
@@ -155,15 +152,11 @@ namespace NetworkDesigner.Terrain
                  "stranded stretch is obvious.")]
         public bool HighlightDisconnected = true;
 
-        [Tooltip("Show a translucent puck at each rail node while editing rail, so nodes " +
-                 "are visible and the one under the cursor highlights.")]
-        public bool ShowNodePucks = true;
-        [Tooltip("Radius (m) of the node pucks.")]
-        public float NodePuckSize = 1.6f;
-        [Tooltip("Height (m) of the 3D node pucks (the short cylinder's thickness).")]
-        public float NodePuckHeight = 0.6f;
-        [Tooltip("Node puck colour (alpha < 1 = translucent).")]
-        public Color NodePuckColor = new Color(0.3f, 0.7f, 1f, 0.55f);
+        // Node display shared via PlanGuides (Design Controls palette) — see PlanGuides.cs.
+        public bool ShowNodePucks { get => PlanGuides.ShowNodes; set => PlanGuides.ShowNodes = value; }
+        public float NodePuckSize { get => PlanGuides.NodePuckRadius; set => PlanGuides.NodePuckRadius = value; }
+        public float NodePuckHeight { get => PlanGuides.NodePuckHeight; set => PlanGuides.NodePuckHeight = value; }
+        public Color NodePuckColor { get => PlanGuides.RailNodeColor; set => PlanGuides.RailNodeColor = value; }
         [Tooltip("Colour of the puck under the cursor (the node you'd pick/insert by).")]
         public Color NodePuckHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);
 
@@ -2482,10 +2475,8 @@ namespace NetworkDesigner.Terrain
 
         // ---- placement preview ----
 
-        [Tooltip("Length (m) of the straight-ahead alignment guide — the dashed " +
-                 "collinear extension drawn out of the chain tail. Also bounds how " +
-                 "far ahead the extension snap reaches.")]
-        public float ExtensionGuideLength = 120f;
+        // Shared via PlanGuides (Guides palette) — see PlanGuides.cs.
+        public float ExtensionGuideLength { get => PlanGuides.ExtensionGuideLength; set => PlanGuides.ExtensionGuideLength = value; }
 
         // Heading that continues straight out of the chain tail (180° / collinear
         // continuation). When the tail sits mid-track (several edges), pick the edge whose

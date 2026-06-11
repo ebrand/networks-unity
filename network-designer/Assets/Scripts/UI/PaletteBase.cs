@@ -37,6 +37,23 @@ namespace NetworkDesigner.UI
         public static void PushModal() => _modalDepth++;
         public static void PopModal() => _modalDepth = Mathf.Max(0, _modalDepth - 1);
 
+        // True while a UI Toolkit text field has keyboard focus — so tool hotkeys (F/P/L/K/…) and sculpt
+        // don't fire while you're typing into a palette field (e.g. a colour hex).
+        public static bool TextEditing
+        {
+            get
+            {
+                for (int i = 0; i < _panels.Count; i++)
+                {
+                    IPanel p = _panels[i] != null ? _panels[i].panel : null;
+                    var fe = p?.focusController?.focusedElement;
+                    if (fe is TextField) return true;
+                    if (fe is VisualElement ve && ve.GetFirstAncestorOfType<TextField>() != null) return true;
+                }
+                return false;
+            }
+        }
+
         public TerrainDesigner Designer;
         [Tooltip("Optional themed PanelSettings. If empty, the palette finds one " +
                  "(Resources/RailPanelSettings, then any themed PanelSettings asset).")]
@@ -94,6 +111,13 @@ namespace NetworkDesigner.UI
             if (IsOpenId(id)) { SetExclusive(null); return; }
             PaletteBase p = _all.Find(x => x.PaletteId == id);
             if (p != null) p.OpenExclusive(); else SetExclusive(id);
+        }
+        // "Quick palette" toggle: show/hide `id` WITHOUT closing the other open palettes and
+        // WITHOUT running OnOpened — so you can pop a settings overlay (e.g. Design Controls) in
+        // and out over whatever tool you're using without losing your place or editing mode.
+        public static void ToggleQuick(string id)
+        {
+            if (_open.Contains(id)) _open.Remove(id); else _open.Add(id);
         }
         // Open this palette exclusively and run its OnOpened hook.
         public void OpenExclusive() { SetExclusive(PaletteId); OnOpened(); }
