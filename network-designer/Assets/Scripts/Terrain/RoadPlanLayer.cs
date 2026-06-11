@@ -28,8 +28,14 @@ namespace NetworkDesigner.Terrain
         public float EdgeWidth(LineEdge e) => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(e?.Profile, RoadWidth);
         // The active profile's width (for the placement preview).
         public float ActiveWidth() => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(ActiveProfileId, RoadWidth);
-        [Tooltip("Straight edges with hard corners. Off = auto-smoothed bezier through the nodes.")]
-        public bool Straight = false;
+        [Tooltip("Straight edges with hard corners (default). Off = auto-smoothed bezier through the nodes.")]
+        public bool Straight = true;
+        [Tooltip("Guided drawing: a continuing straight locks to colinear; turns must be a speed-based curve, or a 90° corner where the speed allows. Off = freehand straights at any angle.")]
+        public bool GuidedTurns = true;
+        [Tooltip("At/below this design speed (km/h), a straight may snap a hard 90° corner; above it, turns must be curves.")]
+        public float HardCornerMaxSpeedKmh = 50f;
+        public bool AllowHardCorner => DesignSpeedKmh <= HardCornerMaxSpeedKmh;
+        [System.NonSerialized] public bool StraightOffAxis;   // cursor isn't on an allowed heading → suppress the (kinked) click
         [Tooltip("Metres between draped samples along the curve.")]
         public float SampleStep = 2f;
         [Tooltip("Metres above the terrain (avoids z-fighting with the ground).")]
@@ -160,7 +166,12 @@ namespace NetworkDesigner.Terrain
         int NearestOrNew(Vector2 p)
         {
             int near = Graph.NearestNode(p, NodePickRadius);
-            return (near >= 0 && near != _chainTail) ? near : Graph.AddNode(p);
+            if (near >= 0 && near != _chainTail) return near;
+            // Crossing an existing road mid-span → split it into a shared intersection node (so an
+            // oblique through-crossing becomes a real junction, not two overlapping roads).
+            if (near < 0 && Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _))
+                return Graph.SplitEdge(ei, tt);
+            return Graph.AddNode(p);
         }
 
         // Cubic controls that pull the curve toward the bend corner (CurveLever ≈ 0.55 ≈ circular arc).
@@ -440,6 +451,41 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        // Hard-lock a continuing straight to an allowed heading off the chain tail: colinear (continue the
+        // tangent) always, plus a 90° corner when the design speed permits one. Snaps the cursor to the
+        // nearest allowed heading within tolerance; otherwise reports offAxis so the caller suppresses the
+        // (kinked) click. Returns false with offAxis=false when there's no constraint (first tangent /
+        // guided off / drawing a curve) so the caller can fall back to the soft assist.
+        public bool SnapStraightConstrained(Vector2 cursor, out Vector2 snapped, out bool offAxis)
+        {
+            snapped = cursor; offAxis = false;
+            if (!GuidedTurns || CurveModifier || _cornerPending) return false;     // curve path / freehand
+            if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            if (!IncomingDirection(cursor, out Vector2 inDir)) return false;       // first tangent: free angle
+            Vector2 tail = Graph.Nodes[_chainTail];
+            Vector2 toCur = cursor - tail;
+            float dist = toCur.magnitude;
+            if (dist < 1e-3f) return false;
+            Vector2 curDir = toCur / dist;
+
+            // Pick the closest allowed heading: colinear, plus the two 90° corners if the speed allows.
+            float bestDot = Vector2.Dot(curDir, inDir); Vector2 best = inDir;
+            if (AllowHardCorner)
+            {
+                Vector2 hL = new Vector2(-inDir.y, inDir.x), hR = new Vector2(inDir.y, -inDir.x);
+                float dL = Vector2.Dot(curDir, hL), dR = Vector2.Dot(curDir, hR);
+                if (dL > bestDot) { bestDot = dL; best = hL; }
+                if (dR > bestDot) { bestDot = dR; best = hR; }
+            }
+            const float tolDeg = 22f;   // within this of an allowed heading → snap; else it's a kink
+            float devDeg = Mathf.Acos(Mathf.Clamp(bestDot, -1f, 1f)) * Mathf.Rad2Deg;
+            if (devDeg > tolDeg) { offAxis = true; return false; }
+            float along = Vector2.Dot(toCur, best);
+            if (along <= 0.1f) { offAxis = true; return false; }                   // behind the tail → suppress
+            snapped = tail + best * along;
+            return true;
+        }
+
         // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) + node pucks ----
 
         public void Rebuild(ITerrainSurface field)
@@ -468,12 +514,23 @@ namespace NetworkDesigner.Terrain
             {
                 p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B]; p1 = e.ControlA; p2 = e.ControlB;
             }
-            else if (Straight)
+            else if (Straight || HasCurvedNeighbor(e))   // hard-corner mode, OR keep a tangent straight beside a curve
             {
                 p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B];
                 Vector2 d = p3 - p0; p1 = p0 + d / 3f; p2 = p0 + d * (2f / 3f);
             }
             else Graph.EdgeControls(e, out p0, out p1, out p2, out p3);
+        }
+
+        // A plain segment sharing a node with an explicit shift-curve stays straight — the curve
+        // shouldn't bow its neighbour via the Catmull-Rom auto-smoothing (what you drew as a tangent
+        // stays a tangent). Pure straight chains (no curves) still auto-smooth.
+        bool HasCurvedNeighbor(LineEdge e)
+        {
+            foreach (LineEdge o in Graph.Edges)
+                if (!ReferenceEquals(o, e) && o.HasCurve
+                    && (o.A == e.A || o.A == e.B || o.B == e.A || o.B == e.B)) return true;
+            return false;
         }
 
         // Sample the edge by arc length; lay down the centreline + both offset edges + periodic cross-ties.
@@ -775,18 +832,30 @@ namespace NetworkDesigner.Terrain
                 && IncomingDirection(new Vector2(cursor.x, cursor.z), out Vector2 gdir))
             {
                 Vector2 o = Graph.Nodes[_chainTail];
-                const int gn = 30;
-                Vector3 gp = default;
-                for (int i = 0; i <= gn; i++)
+                DashGuide(field, o, gdir, ExtensionGuideLength);                 // colinear continuation
+                if (GuidedTurns && AllowHardCorner)                              // 90° corner guides (slow enough)
                 {
-                    Vector3 cur = Drape(field, o + gdir * ((float)i / gn * ExtensionGuideLength));
-                    if (i > 0 && (i % 2 == 0)) AddPv(gp, cur);   // dashed
-                    gp = cur;
+                    float gl = Mathf.Min(ExtensionGuideLength, 60f);
+                    DashGuide(field, o, new Vector2(-gdir.y, gdir.x), gl);
+                    DashGuide(field, o, new Vector2(gdir.y, -gdir.x), gl);
                 }
             }
             _pvMesh.Clear(); _pvMesh.subMeshCount = 2; _pvMesh.SetVertices(_pv);
             _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0); _pvMesh.SetIndices(_pvBadIdx, MeshTopology.Lines, 1);
             _pvMesh.RecalculateBounds();
+        }
+
+        // A dashed ray from origin `o` along unit `dir` for `len` metres (a heading guide).
+        void DashGuide(ITerrainSurface field, Vector2 o, Vector2 dir, float len)
+        {
+            const int gn = 30;
+            Vector3 gp = default;
+            for (int i = 0; i <= gn; i++)
+            {
+                Vector3 cur = Drape(field, o + dir * ((float)i / gn * len));
+                if (i > 0 && (i % 2 == 0)) AddPv(gp, cur);   // dashed
+                gp = cur;
+            }
         }
 
         // A dashed straight leg a→b into the normal (plan-colour) preview submesh.

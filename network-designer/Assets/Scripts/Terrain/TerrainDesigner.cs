@@ -915,12 +915,16 @@ namespace NetworkDesigner.Terrain
                 }
                 if (_lineActive is RoadPlanLayer rdp)
                 {
-                    // Shift-curve: bend sticks to the min-distance target > equal-leg lock (placing the end) >
-                    // PAC owns the cursor. Then node JOIN (intersections) + SOFT extension assist for straights.
+                    rdp.StraightOffAxis = false;
+                    // Shift-curve: bend → equal-leg lock → PAC owns the cursor. Then node JOIN (any-angle junction).
                     if (rdp.TrySnapBendToTarget(flat, out Vector2 rbt)) return new Vector3(rbt.x, raw.y, rbt.y);
                     if (rdp.TrySnapCurveSymmetry(flat, out Vector2 rsym)) return new Vector3(rsym.x, raw.y, rsym.y);
                     if (rdp.PlacingCurveEnd) return raw;
                     if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
+                    // Guided straights: hard-lock to colinear / 90° (the off-axis flag suppresses kinked clicks).
+                    bool rsnap = rdp.SnapStraightConstrained(flat, out Vector2 rsh, out bool roff);
+                    rdp.StraightOffAxis = roff;
+                    if (rsnap) return new Vector3(rsh.x, raw.y, rsh.y);
                     if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
                 }
                 // Grid snap makes no sense while shaping an arc that EXTENDS existing track —
@@ -2694,6 +2698,11 @@ namespace NetworkDesigner.Terrain
                     {
                         // Mouse is off the extension line and not over a node — ignore the
                         // click (no wonky straight; come back on-axis or hover a node).
+                    }
+                    else if (_lineActive is RoadPlanLayer roadOA && roadOA.StraightOffAxis)
+                    {
+                        // Guided road: off-axis would be a freehand kink — ignore. Continue colinear,
+                        // turn via a speed-based curve (Shift), or (slow enough) snap a 90° corner.
                     }
                     else
                     {
