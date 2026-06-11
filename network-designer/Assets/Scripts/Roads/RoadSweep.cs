@@ -156,6 +156,9 @@ namespace NetworkDesigner.Roads
                 RoadSurface.Grass    => new Color(0.30f, 0.45f, 0.22f),
                 RoadSurface.Dirt     => new Color(0.40f, 0.30f, 0.20f),
                 RoadSurface.Deck     => new Color(0.45f, 0.45f, 0.48f),
+                RoadSurface.Curb     => new Color(0.72f, 0.72f, 0.72f),   // light gray
+                RoadSurface.Sidewalk => new Color(0.85f, 0.85f, 0.86f),   // white
+                RoadSurface.Guardrail => new Color(0.56f, 0.57f, 0.60f),  // steel
                 _ => Color.magenta
             };
             return PipelineMaterials.CreateLitMatte(c, "RoadSurface_" + s);

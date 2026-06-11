@@ -94,6 +94,14 @@ namespace NetworkDesigner.Model
         public TurnLane TurnLane;
         public Shoulder ShoulderAB = new Shoulder { Width = 1f };
         public Shoulder ShoulderBA = new Shoulder { Width = 1f };
+        /// <summary>Raised curb (0.25 m high × 0.5 m wide) between the outer lanes and the edge.</summary>
+        public bool Curbs;
+        /// <summary>Edge is a raised sidewalk (white) instead of a flat shoulder; shoulder width is reused as the sidewalk width.</summary>
+        public bool Sidewalks;
+        /// <summary>Road sits on a deck with 1 m edge parapets. Forces shoulders (no sidewalks); curbs still allowed.</summary>
+        public bool Elevated;
+        /// <summary>When elevated, the parapets are metal guardrails instead of the default concrete parapets.</summary>
+        public bool Guardrails;
 
         /// <summary>True when one of the two sides has zero lanes.</summary>
         [JsonIgnore] public bool IsOneWay => AB.Lanes.Count == 0 || BA.Lanes.Count == 0;

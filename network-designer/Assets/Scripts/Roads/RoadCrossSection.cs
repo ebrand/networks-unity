@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace NetworkDesigner.Roads
 {
-    public enum RoadSurface { Asphalt, Shoulder, Concrete, Grass, Dirt, Deck }
+    public enum RoadSurface { Asphalt, Shoulder, Concrete, Grass, Dirt, Deck, Curb, Sidewalk, Guardrail }
 
     public class RoadCrossSection
     {

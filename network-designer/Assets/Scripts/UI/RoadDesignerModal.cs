@@ -33,8 +33,9 @@ namespace NetworkDesigner.UI
         string _name = "new-road-profile";
         int _aLanes = 2, _bLanes = 2;
         bool _oneWay, _highway;
+        bool _curbs, _sidewalks, _elevated, _guardrails;
         Center _center = Center.None;
-        float _laneW = 3.5f, _medianW = 3.5f, _shoulderW = 2.0f;
+        float _laneW = 4.0f, _medianW = 1.5f, _shoulderW = 1.0f;
 
         VisualElement _preview, _listBox, _view3d;
         bool _heldModal, _dragging;
@@ -153,9 +154,33 @@ namespace NetworkDesigner.UI
             left.Add(ToggleRow("Normal Median", () => _center == Center.NormalMedian,
                 v => { _center = v ? Center.NormalMedian : Center.None; RefreshPreview(); }));
 
+            // Edge / structure options.
+            left.Add(ToggleRow("Curbs", () => _curbs, v => { _curbs = v; RefreshPreview(); }));
+            left.Add(ToggleRow("Sidewalks", () => _sidewalks && !_elevated, v =>
+            {
+                _sidewalks = v && !_elevated;                       // elevated forces shoulders
+                if (_sidewalks) _guardrails = false;                // guardrails need shoulders
+                if (_sidewalks && _shoulderW <= 1.01f) _shoulderW = 2f;   // sidewalks default 2 m
+                RefreshPreview();
+            }));
+            left.Add(ToggleRow("Elevated", () => _elevated, v =>
+            {
+                _elevated = v;
+                if (_elevated) _sidewalks = false;                  // elevated → shoulders only
+                RefreshPreview();
+            }));
+            // Guardrails (wood posts + light-gray rail) — only with shoulders; on elevated they replace the parapet.
+            left.Add(ToggleRow("Guardrails", () => _guardrails, v =>
+            {
+                _guardrails = v;
+                if (_guardrails) _sidewalks = false;                // guardrails need shoulders
+                RefreshPreview();
+            }));
+
             left.Add(NumberRow("Lane", "m", () => _laneW, v => { _laneW = v; RefreshPreview(); }, 2f, 6f, "0.#"));
             left.Add(NumberRow("Median", "m", () => _medianW, v => { _medianW = v; RefreshPreview(); }, 0.5f, 20f, "0.#"));
-            left.Add(NumberRow("Shoulder", "m", () => _shoulderW, v => { _shoulderW = v; RefreshPreview(); }, 0f, 6f, "0.#"));
+            left.Add(NumberRow(_sidewalks && !_elevated ? "Sidewalk" : "Shoulder", "m",
+                () => _shoulderW, v => { _shoulderW = v; RefreshPreview(); }, 0f, 6f, "0.#"));
 
             var save = MakeButton("Save", () => { SaveCurrent(); RefreshList(); });
             save.style.marginTop = 10; left.Add(save);
@@ -202,11 +227,17 @@ namespace NetworkDesigner.UI
             int b = _oneWay ? 0 : _bLanes;
             p.BA = new Side();
             for (int i = 0; i < b; i++) p.BA.Lanes.Add(new Lane { Id = "b" + i, Width = _laneW });
-            if (_center == Center.TurnLane) p.TurnLane = new TurnLane { Width = _medianW };
+            if (_center == Center.TurnLane) p.TurnLane = new TurnLane { Width = _laneW };   // turn lane = a normal lane width
             else if (_center == Center.NormalMedian) p.Median = new Median { Width = _medianW };
-            else if (_center == Center.WideMedian) p.Median = new Median { Width = _medianW * 2.5f };
+            // Wide median = one lane wide, so it lines up with a turn lane and can open into a
+            // dedicated left-turn pocket at intersection ends.
+            else if (_center == Center.WideMedian) p.Median = new Median { Width = _laneW };
             p.ShoulderAB = new Shoulder { Width = _shoulderW };
             p.ShoulderBA = new Shoulder { Width = _shoulderW };
+            p.Curbs = _curbs;
+            p.Elevated = _elevated;
+            p.Sidewalks = _sidewalks && !_elevated;                       // elevated forces shoulders
+            p.Guardrails = _guardrails && !(p.Sidewalks);                 // guardrails only with shoulders
             return new SavedConfig { Id = p.Id, Name = _name, Category = _highway ? "Highway" : "Custom", Road = p };
         }
 
@@ -224,11 +255,19 @@ namespace NetworkDesigner.UI
             _bLanes = p.BA.Lanes.Count;
             _oneWay = p.IsOneWay;
             _laneW = (p.AB.Lanes.Count > 0 ? p.AB.Lanes[0].Width : (p.BA.Lanes.Count > 0 ? p.BA.Lanes[0].Width : 3.5f));
-            if (p.TurnLane != null) { _center = Center.TurnLane; _medianW = p.TurnLane.Width; }
-            else if (p.Median != null) { _medianW = p.Median.Width; _center = p.Median.Width > _laneW * 1.5f ? Center.WideMedian : Center.NormalMedian; }
+            if (p.TurnLane != null) { _center = Center.TurnLane; }   // turn lane is lane-width; leave the median field alone
+            else if (p.Median != null)
+            {
+                if (Mathf.Abs(p.Median.Width - _laneW) < 0.2f) _center = Center.WideMedian;   // lane-width → wide
+                else { _center = Center.NormalMedian; _medianW = p.Median.Width; }
+            }
             else { _center = Center.None; }
             _shoulderW = p.ShoulderAB != null ? p.ShoulderAB.Width : 2f;
             _highway = (c.Category ?? "") == "Highway";
+            _curbs = p.Curbs;
+            _elevated = p.Elevated;
+            _sidewalks = p.Sidewalks && !p.Elevated;
+            _guardrails = p.Guardrails;
             Rebuild();   // re-read all controls from the loaded state
         }
 
@@ -269,33 +308,26 @@ namespace NetworkDesigner.UI
             if (_view3d != null && _rig.Texture != null)
                 _view3d.style.backgroundImage = new StyleBackground(Background.FromRenderTexture(_rig.Texture));
 
-            // 2D cross-section strip
+            // 2D cross-section strip (same layout as the 3D mesh)
             if (_preview == null) return;
             _preview.Clear();
 
-            var strips = new List<(float w, string kind)>();
-            void S(float w, string k) { if (w > 0.01f) strips.Add((w, k)); }
-            S(prof.ShoulderBA.Width, "shoulder");
-            for (int i = prof.BA.Lanes.Count - 1; i >= 0; i--) S(prof.BA.Lanes[i].Width, "lane");
-            if (prof.Median != null) S(prof.Median.Width, "median");
-            else if (prof.TurnLane != null) S(prof.TurnLane.Width, "turn");
-            for (int i = 0; i < prof.AB.Lanes.Count; i++) S(prof.AB.Lanes[i].Width, "lane");
-            S(prof.ShoulderAB.Width, "shoulder");
-
+            bool sidewalk = prof.Sidewalks && !prof.Elevated;
             var total = new Label($"{prof.TotalWidth:0.#} m · {prof.AB.Lanes.Count}×{prof.BA.Lanes.Count} lanes"
-                                  + (_highway ? " · Highway" : "") + "   (drag to orbit · wheel to zoom)");
+                                  + (_highway ? " · Highway" : "") + (prof.Elevated ? " · Elevated" : "")
+                                  + "   (drag to orbit · wheel to zoom)");
             total.style.color = Sub; total.style.fontSize = 11; total.style.marginBottom = 4;
             _preview.Add(total);
 
             var sec = HBox();
             sec.style.height = 56; sec.style.alignItems = Align.Stretch;
             SetBorder(sec, 1, new Color(1f, 1f, 1f, 0.4f));
-            foreach (var s in strips)
+            foreach (var (w, k) in RoadPreview3D.Layout(prof))
             {
                 var box = new VisualElement();
-                box.style.flexGrow = s.w;
-                box.style.backgroundColor = StripColor(s.kind);
-                if (s.kind == "lane")
+                box.style.flexGrow = w;
+                box.style.backgroundColor = RoadPreview3D.LayoutColor(k, sidewalk);
+                if (k == RoadPreview3D.KLnBA || k == RoadPreview3D.KLnAB)
                 { box.style.borderRightWidth = 1; box.style.borderRightColor = new Color(1f, 1f, 1f, 0.45f); }
                 sec.Add(box);
             }
