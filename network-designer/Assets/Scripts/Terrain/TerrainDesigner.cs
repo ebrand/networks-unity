@@ -1851,6 +1851,8 @@ namespace NetworkDesigner.Terrain
         }
         public void RebuildPlan() { PlanLayer.Rebuild(Surf); }
         public void ClearPlan() { PlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
+        public void RebuildRoadPlan() { RoadPlanLayer.Rebuild(Surf); }
+        public void ClearRoadPlan() { RoadPlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
         // Grade-aware A* auto-route between the last two plan points.
         public void AutoRoutePlan()
         {
