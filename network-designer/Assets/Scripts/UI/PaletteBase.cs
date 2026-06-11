@@ -592,7 +592,7 @@ namespace NetworkDesigner.UI
         // world's 1 km lattice), drag the map to pan, "Download this area" appends the block. Existing
         // areas are outlined; overlaps are blocked. Shared by the launcher + the in-world System palette;
         // Rebuild() refreshes whichever palette opened it (so its world thumbnail updates).
-        protected void OpenDownloadModal(string world)
+        protected void OpenDownloadModal(string world, Action<bool> onClosed = null)
         {
             var wi = NetworkDesigner.Terrain.WorldManager.Read(world);
             if (wi == null) return;
@@ -629,7 +629,7 @@ namespace NetworkDesigner.UI
             var info = new Label(); info.style.color = Sub; info.style.fontSize = 12;
             info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 4; info.style.marginBottom = 14; left.Add(info);
 
-            bool busy = false;
+            bool busy = false, anyDownload = false;
 
             var dlBtn = MakeButton("Download this area", () => { });
             dlBtn.style.height = 36; dlBtn.style.flexGrow = 0; left.Add(dlBtn);
@@ -646,7 +646,9 @@ namespace NetworkDesigner.UI
             var status = new Label(); status.style.color = Sub; status.style.fontSize = 11;
             status.style.whiteSpace = WhiteSpace.Normal; left.Add(status);
 
-            var closeBtn = MakeButton("Close", () => { close(); Rebuild(); });   // refresh the palette (thumbnail updates)
+            // onClosed(didDownload): lets the caller react (launcher just refreshes; the in-world palette
+            // reloads the world so new tiles appear live). Default = refresh this palette.
+            var closeBtn = MakeButton("Close", () => { close(); if (onClosed != null) onClosed(anyDownload); else Rebuild(); });
             closeBtn.style.height = 28; closeBtn.style.flexGrow = 0; closeBtn.style.marginTop = 10; left.Add(closeBtn);
 
             void UpdateInfo()
@@ -693,7 +695,7 @@ namespace NetworkDesigner.UI
                     (ok, msg) =>
                     {
                         busy = false; status.text = msg;
-                        if (ok) { NetworkDesigner.Terrain.WorldThumbnail.Generate(world); RefreshAreas(); }
+                        if (ok) { NetworkDesigner.Terrain.WorldThumbnail.Generate(world); RefreshAreas(); anyDownload = true; }
                         UpdateInfo();
                     });
             }

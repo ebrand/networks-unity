@@ -23,8 +23,9 @@ namespace NetworkDesigner.UI
         protected override string FooterMode => "System";
         protected override string FooterSub => string.Empty;
 
-        // Opening System exits any rail/scatter mode.
-        protected override void OnOpened() => Designer.EnterSculptMode();
+        // Opening System exits any rail/scatter mode. Rebuild the body too: it's first built at Start (before
+        // any world is active), so without this the WORLD section + thumbnail would never appear once one is.
+        protected override void OnOpened() { Designer.EnterSculptMode(); Rebuild(); }
 
         protected override void BuildBody(VisualElement body)
         {
@@ -44,9 +45,13 @@ namespace NetworkDesigner.UI
                 if (tex != null) thumb.style.backgroundImage = new StyleBackground(tex);
                 body.Add(thumb);
 
-                // Opens the shared download picker for THIS world (snaps to its lattice). New areas land on
-                // disk + refresh the thumbnail; the live world reloads them on next load.
-                var addBtn = MakeButton("Add geographic area…", () => OpenDownloadModal(world));
+                // Opens the shared download picker for THIS world (snaps to its lattice). On close, if any
+                // area was downloaded, save + reload the world so the new tiles stream in live (no menu trip).
+                var addBtn = MakeButton("Add geographic area…", () => OpenDownloadModal(world, didDownload =>
+                {
+                    if (didDownload) { Designer.SaveNow(); Designer.LoadGame(world); }
+                    Rebuild();
+                }));
                 addBtn.style.marginBottom = 4; body.Add(addBtn);
 
                 // Full-screen top-down map to trim empty/ocean chunks out of the streamed set (DEM worlds).
