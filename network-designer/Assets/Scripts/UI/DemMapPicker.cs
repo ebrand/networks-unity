@@ -63,6 +63,15 @@ namespace NetworkDesigner.UI
         VisualElement _areaLayer;
         float _boxCx, _boxCy;
         public bool Overlapping { get; private set; }
+        public int OverlappingIndex { get; private set; } = -1;   // index into the areas passed to SetWorld
+
+        // Basemap: Esri World Imagery (global, all zooms — works outside the US) vs USGS topo (US-only but
+        // public-domain → disk-cached). Default satellite so positioning works anywhere. _gen guards against
+        // an in-flight tile of the old layer landing after a toggle.
+        bool _sat = true;
+        Label _attr;
+        int _gen;
+        const string EsriImageryUrl = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{0}/{1}/{2}";
 
         public DemMapPicker(MonoBehaviour host, double lat, double lon, int width, int height, double areaKmW = 8.0, double areaKmH = 8.0)
         {
@@ -129,14 +138,18 @@ namespace NetworkDesigner.UI
             _label.style.unityFontStyleAndWeight = FontStyle.Bold;
             _viewport.Add(_label);
 
-            var attr = new Label("USGS The National Map") { pickingMode = PickingMode.Ignore };
-            attr.style.position = Position.Absolute; attr.style.bottom = 2; attr.style.left = 4;
-            attr.style.fontSize = 9; attr.style.color = new Color(0.2f, 0.2f, 0.2f, 0.8f);
-            _viewport.Add(attr);
+            _attr = new Label(_sat ? "Esri, Maxar, Earthstar Geographics" : "USGS The National Map") { pickingMode = PickingMode.Ignore };
+            _attr.style.position = Position.Absolute; _attr.style.bottom = 2; _attr.style.left = 4;
+            _attr.style.fontSize = 9; _attr.style.color = new Color(0.95f, 0.95f, 0.95f, 0.7f);
+            _viewport.Add(_attr);
 
             var zr = new VisualElement(); zr.style.flexDirection = FlexDirection.Row; zr.style.marginTop = 4; zr.style.marginBottom = 4;
             zr.Add(ZoomBtn("–", () => ZoomAt(_boxCx, _boxCy, -1)));
             zr.Add(ZoomBtn("+", () => ZoomAt(_boxCx, _boxCy, +1)));
+            var baseBtn = new Button { text = _sat ? "Topo" : "Sat" };   // label = the layer you'd switch TO
+            baseBtn.style.width = 52; baseBtn.style.height = 22; baseBtn.style.marginLeft = 6;
+            baseBtn.clicked += () => { SetBasemap(!_sat); baseBtn.text = _sat ? "Topo" : "Sat"; };
+            zr.Add(baseBtn);
             var hint = new Label("drag the box to move it · drag the map to pan · corner to resize · wheel/± to zoom");
             hint.style.color = new Color(0.6f, 0.64f, 0.7f); hint.style.fontSize = 10; hint.style.marginLeft = 8; hint.style.alignSelf = Align.Center;
             zr.Add(hint);
@@ -358,26 +371,48 @@ namespace NetworkDesigner.UI
             }
         }
 
+        // Switch basemap layer. Tile keys don't encode the layer, so wipe both caches + the live tiles and
+        // refetch; _gen bumps so any in-flight old-layer tile is discarded when it lands.
+        void SetBasemap(bool sat)
+        {
+            if (_sat == sat) return;
+            _sat = sat; _gen++;
+            foreach (var t in _texCache.Values) if (t != null) UnityEngine.Object.Destroy(t);
+            _texCache.Clear(); _texLru.Clear();
+            ClearTiles();
+            _attr.text = _sat ? "Esri, Maxar, Earthstar Geographics" : "USGS The National Map";
+            _attr.style.color = _sat ? new Color(0.95f, 0.95f, 0.95f, 0.7f) : new Color(0.2f, 0.2f, 0.2f, 0.8f);
+            UpdateTiles();
+        }
+
         IEnumerator LoadTile(long k)
         {
             yield return null;   // spread work across frames (don't decode a whole screen in one frame)
+            int gen = _gen;
             DecodeKey(k, out int z, out int tx, out int ty);
             Texture2D tex = null;
-            byte[] disk = TileCache.TryLoad(TileCache.Layer, z, tx, ty);
-            if (disk != null) tex = Decode(disk);
+            // USGS topo is public-domain → disk-cached + US prefetch. Esri imagery (global) is fetched per
+            // session only (no persistent cache, per Esri terms); the in-memory _texCache still covers revisits.
+            if (!_sat)
+            {
+                byte[] disk = TileCache.TryLoad(TileCache.Layer, z, tx, ty);
+                if (disk != null) tex = Decode(disk);
+            }
             if (tex == null)
             {
-                using var req = UnityWebRequest.Get(string.Format(TileCache.UsgsTopoUrl, z, ty, tx));
+                string url = _sat ? string.Format(EsriImageryUrl, z, ty, tx) : string.Format(TileCache.UsgsTopoUrl, z, ty, tx);
+                using var req = UnityWebRequest.Get(url);
                 yield return req.SendWebRequest();
                 if (req.result == UnityWebRequest.Result.Success)
                 {
                     byte[] raw = req.downloadHandler.data;
-                    TileCache.Save(TileCache.Layer, z, tx, ty, raw);
+                    if (!_sat) TileCache.Save(TileCache.Layer, z, tx, ty, raw);
                     tex = Decode(raw);
                 }
             }
             _loading--;
             _queued.Remove(k);
+            if (gen != _gen) { if (tex != null) UnityEngine.Object.Destroy(tex); PumpLoads(); yield break; }   // basemap switched mid-load
             if (tex != null) { TexPut(k, tex); ApplyTex(k); }
             PumpLoads();
         }
@@ -417,6 +452,7 @@ namespace NetworkDesigner.UI
         {
             float l, t, boxW, boxH;
             bool overlap = false;
+            OverlappingIndex = -1;
             if (_hasWorld)
             {
                 // Snap the W×H area's NW corner to the lattice — exactly what the download does — and draw it
@@ -430,8 +466,11 @@ namespace NetworkDesigner.UI
                 double bw = _wOX + gc * _wTile, bn = _wOY - gr * _wTile;
                 double be = bw + W * _wTile, bs = bn - H * _wTile;
                 double eps = _wTile * 0.1;   // abutting edges (shared lattice line) are NOT an overlap
-                foreach (var a in _areas)
-                    if (bw < a.e - eps && be > a.w + eps && bs < a.n - eps && bn > a.s + eps) { overlap = true; break; }
+                for (int ai = 0; ai < _areas.Count; ai++)
+                {
+                    var a = _areas[ai];
+                    if (bw < a.e - eps && be > a.w + eps && bs < a.n - eps && bn > a.s + eps) { overlap = true; OverlappingIndex = ai; break; }
+                }
                 MercToView(bw, bn, out float lx, out float tyv);
                 MercToView(be, bs, out float rx, out float byv);
                 l = lx; t = tyv; boxW = Mathf.Max(4f, rx - lx); boxH = Mathf.Max(4f, byv - tyv);

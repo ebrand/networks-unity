@@ -110,8 +110,15 @@ namespace NetworkDesigner.UI
             createBtn.style.height = 40; body.Add(createBtn); body.Add(status);
 
             body.Add(Divider());
-            var cacheBtn = MakeButton("Cache US basemap (offline)…", OpenPrefetchModal);
-            cacheBtn.style.height = 28; body.Add(cacheBtn);
+            var quitBtn = MakeButton("Quit", () =>
+            {
+#if UNITY_EDITOR
+                UnityEditor.EditorApplication.isPlaying = false;
+#else
+                Application.Quit();
+#endif
+            });
+            quitBtn.style.height = 28; body.Add(quitBtn);
         }
 
         // Pre-download the USGS topo basemap for the US (overview zooms) to the persistent disk cache,

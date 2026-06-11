@@ -17,6 +17,9 @@ namespace NetworkDesigner.Terrain
         const int TileSize = 256;
         const int MaxTilesAcross = 5;
         const double WorldMerc = 40075016.685578488;   // 2·π·6378137 (Web-Mercator world width)
+        // Global basemap (Esri World Imagery) — USGS topo is US-only, so non-US (Terrarium) worlds would
+        // render a blank thumbnail. Fetched per generation, not cached (Esri terms).
+        const string EsriImageryUrl = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{0}/{1}/{2}";
 
         static string FilePath(string world) => Path.Combine(WorldManager.WorldDir(world), "thumbnail.png");
 
@@ -78,12 +81,11 @@ namespace NetworkDesigner.Terrain
                 {
                     int X = ((tx % worldTiles) + worldTiles) % worldTiles, Y = Mathf.Clamp(ty, 0, worldTiles - 1);
                     Color32[] px = null;
-                    byte[] bytes = TileCache.TryLoad(TileCache.Layer, z, X, Y);
-                    if (bytes == null)
+                    byte[] bytes = null;
+                    using (var req = UnityWebRequest.Get(string.Format(EsriImageryUrl, z, Y, X)))
                     {
-                        using var req = UnityWebRequest.Get(string.Format(TileCache.UsgsTopoUrl, z, Y, X));
                         yield return req.SendWebRequest();
-                        if (req.result == UnityWebRequest.Result.Success) { bytes = req.downloadHandler.data; TileCache.Save(TileCache.Layer, z, X, Y, bytes); }
+                        if (req.result == UnityWebRequest.Result.Success) bytes = req.downloadHandler.data;
                     }
                     if (bytes != null) { var t = new Texture2D(2, 2); if (t.LoadImage(bytes) && t.width == TileSize && t.height == TileSize) px = t.GetPixels32(); UnityEngine.Object.Destroy(t); }
                     if (px != null) tex.SetPixels32((tx - tx0) * TileSize, (down - 1 - (ty - ty0)) * TileSize, TileSize, TileSize, px);   // north tile at top

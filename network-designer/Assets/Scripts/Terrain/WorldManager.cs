@@ -34,6 +34,7 @@ namespace NetworkDesigner.Terrain
         public float NormMin, NormMax;  // this map set's own encode range
         public int GR, GC, W, H;        // NW global tile row/col + width/height in 1 km tiles (any size)
         public int N;                   // legacy: square size, read when W/H are absent (older map sets)
+        public int Source;              // elevation source this area was fetched from: 0 = USGS 3DEP, 1 = AWS Terrarium
     }
 
     public static class WorldManager
@@ -123,6 +124,14 @@ namespace NetworkDesigner.Terrain
         {
             try { Directory.CreateDirectory(MapSetDir(world, mi.Name)); File.WriteAllText(Path.Combine(MapSetDir(world, mi.Name), "mapset.json"), JsonUtility.ToJson(mi, true)); }
             catch { }
+        }
+
+        // Remove a map set (its tiles + mapset.json) so its footprint can be re-downloaded.
+        public static bool DeleteMapSet(string world, string mapSet)
+        {
+            try { var d = MapSetDir(world, mapSet); if (Directory.Exists(d)) { Directory.Delete(d, true); return true; } }
+            catch { }
+            return false;
         }
 
         // Snap a download (w×h 1 km tiles, centred at lat/lon) to the world's 1 km lattice — areas can be

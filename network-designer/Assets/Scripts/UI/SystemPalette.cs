@@ -54,10 +54,6 @@ namespace NetworkDesigner.UI
                 }));
                 addBtn.style.marginBottom = 4; body.Add(addBtn);
 
-                // Full-screen top-down map to trim empty/ocean chunks out of the streamed set (DEM worlds).
-                if (Designer.ChunkDemActive)
-                    body.Add(MakeButton("Trim map (empty chunks)…", () => ChunkMapEditor.Toggle()));
-
                 body.Add(Divider());
             }
 

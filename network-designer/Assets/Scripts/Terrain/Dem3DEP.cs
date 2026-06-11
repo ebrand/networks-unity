@@ -84,7 +84,7 @@ namespace NetworkDesigner.Terrain
             string mapSet = $"r{grNW}_c{gcNW}";
             if (WorldManager.ReadMapSet(world, mapSet) != null) { onDone?.Invoke(false, "this area is already in the world"); return; }
             var gs = new GridSpec { outDir = WorldManager.MapSetDir(world, mapSet), nW = W, nH = H, tileMerc = tileMerc, nwX = nwX, nwY = nwY, grBase = grNW, gcBase = gcNW };
-            Func<float, float, string> persist = (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, GR = grNW, GC = gcNW, W = W, H = H }); return null; };
+            Func<float, float, string> persist = (mn, mxr) => { WorldManager.SaveMapSet(world, new MapSetInfo { Name = mapSet, NormMin = mn, NormMax = mxr, GR = grNW, GC = gcNW, W = W, H = H, Source = (int)source }); return null; };
             Runner.StartCoroutine(source == Source.AwsTerrarium
                 ? Runner.RunGridTerrarium(gs, persist, onProgress, onDone)
                 : Runner.RunGrid(gs, persist, onProgress, onDone));

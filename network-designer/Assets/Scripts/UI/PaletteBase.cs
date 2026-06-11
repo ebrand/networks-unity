@@ -629,14 +629,34 @@ namespace NetworkDesigner.UI
             var info = new Label(); info.style.color = Sub; info.style.fontSize = 12;
             info.style.whiteSpace = WhiteSpace.Normal; info.style.marginTop = 4; info.style.marginBottom = 10; left.Add(info);
 
+            // Default to the source the world was already built with (so adding to an AWS/global world
+            // doesn't try to fetch nonexistent 3DEP tiles).
+            int defaultSrc = 0;
+            foreach (var ms0 in NetworkDesigner.Terrain.WorldManager.ListMapSets(world))
+            {
+                var mi0 = NetworkDesigner.Terrain.WorldManager.ReadMapSet(world, ms0);
+                if (mi0 != null) { defaultSrc = Mathf.Clamp(mi0.Source, 0, 1); break; }
+            }
+            // Legacy AWS worlds (made before Source was recorded) read 0; if the world is outside the US,
+            // 3DEP can't have produced it → it must be Terrarium.
+            if (defaultSrc == 0 && wi.Anchored)
+            {
+                double wlon = NetworkDesigner.Terrain.WorldManager.MercX2Lon(wi.OriginMercX);
+                if (wlon < -125.0 || wlon > -66.5 || wi.RefLat < 24.4 || wi.RefLat > 49.5) defaultSrc = 1;
+            }
             var srcDd = new DropdownField(new System.Collections.Generic.List<string> {
-                "USGS 3DEP — 1 m (US)", "AWS Terrarium — global ~30 m" }, 0);
+                "USGS 3DEP — 1 m (US)", "AWS Terrarium — global ~30 m" }, defaultSrc);
             srcDd.style.marginBottom = 10; left.Add(srcDd);
 
             bool busy = false, anyDownload = false;
+            var msNames = new System.Collections.Generic.List<string>();   // map-set folder per drawn area, index-aligned with the picker
 
             var dlBtn = MakeButton("Download this area", () => { });
             dlBtn.style.height = 36; dlBtn.style.flexGrow = 0; left.Add(dlBtn);
+
+            // Enabled only while the box is over an existing area — deletes that map set so it can be re-downloaded.
+            var delBtn = MakeButton("Delete this area", () => { });
+            delBtn.style.height = 28; delBtn.style.flexGrow = 0; delBtn.style.marginTop = 4; left.Add(delBtn);
 
             left.Add(Cap("Progress:"));
             var bar = new VisualElement();
@@ -665,6 +685,7 @@ namespace NetworkDesigner.UI
                               ? "⚠ overlaps an existing area — move it to a free spot"
                               : $"snaps to the world grid · {NetworkDesigner.Terrain.WorldManager.ListMapSets(world).Count} area(s) so far");
                 dlBtn.SetEnabled(!busy && !picker.Overlapping);
+                delBtn.SetEnabled(!busy && picker.Overlapping);
             }
 
             // Show this world's already-downloaded areas + turn on lattice snapping. Re-read after each
@@ -672,6 +693,7 @@ namespace NetworkDesigner.UI
             // (brand-new) world → no context yet, so the first area places freely.
             void RefreshAreas()
             {
+                msNames.Clear();
                 var wi2 = NetworkDesigner.Terrain.WorldManager.Read(world);
                 if (wi2 == null || !wi2.Anchored) { picker.SetWorld(0, 0, 0, null); return; }
                 var areas = new System.Collections.Generic.List<(double w, double s, double e, double n)>();
@@ -685,6 +707,7 @@ namespace NetworkDesigner.UI
                     double w0 = wi2.OriginMercX + mi.GC * tm, e0 = w0 + mw * tm;
                     double n0 = wi2.OriginMercY - mi.GR * tm, s0 = n0 - mh * tm;
                     areas.Add((w0, s0, e0, n0));
+                    msNames.Add(ms);
                 }
                 picker.SetWorld(wi2.OriginMercX, wi2.OriginMercY, tm, areas);
             }
@@ -707,6 +730,20 @@ namespace NetworkDesigner.UI
             }
 
             dlBtn.clicked += DoDownload;
+            delBtn.clicked += () =>
+            {
+                if (busy) return;
+                int idx = picker.OverlappingIndex;
+                if (idx < 0 || idx >= msNames.Count) return;
+                string nm = msNames[idx];
+                if (NetworkDesigner.Terrain.WorldManager.DeleteMapSet(world, nm))
+                {
+                    NetworkDesigner.Terrain.WorldThumbnail.Generate(world);
+                    RefreshAreas(); anyDownload = true;   // closing reloads the world so the removed area disappears live
+                    status.text = $"deleted area {nm} — re-download it now";
+                }
+                UpdateInfo();
+            };
             picker.OnChanged = UpdateInfo;
             RefreshAreas();
             UpdateInfo();
