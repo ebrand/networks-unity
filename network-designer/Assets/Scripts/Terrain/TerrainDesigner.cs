@@ -2338,12 +2338,12 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) { SetLineMode(RailLayer); SyncPaletteToMode(); }
             if (Input.GetKeyDown(KeyCode.K)) { SetLineMode(PlanLayer); SyncPaletteToMode(); }
-            if (Input.GetKeyDown(KeyCode.Semicolon)) SetLineMode(RoadPlanLayer);   // ';' = road plan corridor
             // Launcher palette hotkeys (radio toggle, same as the launcher buttons).
             if (Input.GetKeyDown(KeyCode.N)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Terrain");
             if (Input.GetKeyDown(KeyCode.Y)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("System");
             if (Input.GetKeyDown(KeyCode.O)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Placeables");
             if (Input.GetKeyDown(KeyCode.U)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Environment");
+            if (Input.GetKeyDown(KeyCode.Semicolon)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road");
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
             // M toggles the chunk-streaming bubble lock (freeze the resident set to sculpt in place).
             if (Input.GetKeyDown(KeyCode.M) && ChunkWorld.Active) ChunkLockBubble = !ChunkLockBubble;
