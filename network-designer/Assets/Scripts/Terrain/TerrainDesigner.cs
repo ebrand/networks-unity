@@ -4306,6 +4306,7 @@ namespace NetworkDesigner.Terrain
                 PowerLines = PowerLineLayer.CollectData(),
                 Rails = RailLayer.CollectData(),
                 Plan = PlanLayer.CollectData(),
+                RoadPlan = RoadPlanLayer.CollectData(),
                 HasCamera = haveCam,
                 CamPos = camPos,
                 CamYaw = camYaw,
@@ -4404,13 +4405,13 @@ namespace NetworkDesigner.Terrain
                 int cap = 64 + n * 8
                           + TreeBytes(save.Trees) + TreeBytes(save.Rocks)
                           + GraphBytes(save.Fences) + GraphBytes(save.PowerLines)
-                          + GraphBytes(save.Rails) + GraphBytes(save.Plan)
+                          + GraphBytes(save.Rails) + GraphBytes(save.Plan) + GraphBytes(save.RoadPlan)
                           + ForestBytes(save.Forest) + 256;
                 using var ms = new System.IO.MemoryStream(cap);
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(11); // version (11 added the GPU-instanced forest)
+                    w.Write(12); // version (12 added the road-plan corridor)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -4451,6 +4452,7 @@ namespace NetworkDesigner.Terrain
                     w.Write(save.WaterLevel);
                     // v11+: GPU-instanced forest
                     WriteForest(w, save.Forest);
+                    WriteGraph(w, save.RoadPlan);   // v12+: road-plan corridor
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -4600,6 +4602,7 @@ namespace NetworkDesigner.Terrain
                 PowerLineLayer.LoadState(save.PowerLines);
                 RailLayer.LoadState(save.Rails);
                 PlanLayer.LoadState(save.Plan);
+                RoadPlanLayer.LoadState(save.RoadPlan);
                 // Stage the camera pose; applied in Start once the fly camera exists.
                 _havePendingCam = save.HasCamera;
                 _pendingCamPos = save.CamPos;
@@ -4690,6 +4693,8 @@ namespace NetworkDesigner.Terrain
                 }
                 if (version >= 11) // GPU-instanced forest
                     s.Forest = ReadForest(r);
+                if (version >= 12) // road-plan corridor
+                    s.RoadPlan = ReadGraph(r, version);
                 return s;
             }
             catch { return null; }
