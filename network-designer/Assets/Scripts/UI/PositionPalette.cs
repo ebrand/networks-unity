@@ -1,7 +1,7 @@
-// Small always-on HUD (top-right) showing the camera's world position — altitude (Y)
-// and X/Z — useful for orienting on the big DEM worlds. Not toggleable and always
-// visible (independent of the launcher's exclusive palette state). Auto-spawns so no
-// scene setup is needed.
+// Small HUD (top-right) showing the camera's world position — altitude (Y) and X/Z,
+// plus the route length — useful for orienting on the big DEM worlds. Toggled with Tab
+// (independent of the launcher's exclusive palette state, so it stays put when you switch
+// tools). Auto-spawns so no scene setup is needed.
 
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -13,8 +13,12 @@ namespace NetworkDesigner.UI
     public class PositionPalette : PaletteBase
     {
         public override string PaletteId => "Position";
-        public override bool Toggleable => false;          // no launcher button
-        protected override bool ShouldShow() => true;      // always visible
+        public override bool Toggleable => false;          // no launcher button (Tab toggles it)
+        // Own independent show/hide (Tab) — not tied to the exclusive launcher state, so switching
+        // tools doesn't hide the position HUD.
+        static bool _shown = true;
+        public static void Toggle() => _shown = !_shown;
+        protected override bool ShouldShow() => _shown;
         protected override bool ShowFooter => false;
         protected override bool AnchorRight => true;       // top-right
         protected override string Title => null;

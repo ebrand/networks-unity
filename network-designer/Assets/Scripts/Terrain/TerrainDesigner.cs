@@ -2151,17 +2151,19 @@ namespace NetworkDesigner.Terrain
         // Current grid on/off, for the footer button's active styling (whichever grid is in play).
         public bool GridOn => ChunkWorld.Active ? ChunkShowGrid : GridEnabled;
 
-        // Snap + topo toggles routed through here so they persist (footer buttons / hotkeys call these).
+        // Snap + topo + minimap toggles routed through here so they persist (footer buttons / hotkeys call these).
         public void ToggleSnap() { SnapToGrid = !SnapToGrid; SaveViewPrefs(); }
         public void ToggleTopo() { ChunkContours = !ChunkContours; SaveViewPrefs(); }
+        public void ToggleMinimap() { _showMinimap = !_showMinimap; SaveViewPrefs(); }
 
-        // The grid / snap / topo view toggles persist across worlds in PlayerPrefs.
-        const string ViewSnapKey = "ViewSnap", ViewGridKey = "ViewGrid", ViewTopoKey = "ViewTopo";
+        // The grid / snap / topo / minimap view toggles persist across worlds in PlayerPrefs.
+        const string ViewSnapKey = "ViewSnap", ViewGridKey = "ViewGrid", ViewTopoKey = "ViewTopo", ViewMiniKey = "ViewMinimap";
         void SaveViewPrefs()
         {
             PlayerPrefs.SetInt(ViewSnapKey, SnapToGrid ? 1 : 0);
             PlayerPrefs.SetInt(ViewGridKey, GridOn ? 1 : 0);
             PlayerPrefs.SetInt(ViewTopoKey, ChunkContours ? 1 : 0);
+            PlayerPrefs.SetInt(ViewMiniKey, _showMinimap ? 1 : 0);
             PlayerPrefs.Save();
         }
         public void ApplyViewPrefs()
@@ -2170,6 +2172,7 @@ namespace NetworkDesigner.Terrain
             bool grid = PlayerPrefs.GetInt(ViewGridKey, 0) == 1;
             if (ChunkWorld.Active) ChunkShowGrid = grid; else { GridEnabled = grid; ApplyTerrainMaterial(); }
             ChunkContours = PlayerPrefs.GetInt(ViewTopoKey, 0) == 1;
+            _showMinimap = PlayerPrefs.GetInt(ViewMiniKey, 1) == 1;   // default on
         }
 
         // Entering rail mode (L/K) opens the Rail palette exclusively; toggling back out of
@@ -2409,11 +2412,12 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.U)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Environment");
             if (Input.GetKeyDown(KeyCode.Semicolon)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road");
             if (Input.GetKeyDown(KeyCode.BackQuote)) NetworkDesigner.UI.PaletteBase.ToggleQuick("Guides");   // ` = Design Controls quick palette (overlays, keeps your place)
+            if (Input.GetKeyDown(KeyCode.Tab)) NetworkDesigner.UI.PositionPalette.Toggle();                  // Tab = position HUD (Alt/X/Z/Route)
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
             // M toggles the chunk-streaming bubble lock (freeze the resident set to sculpt in place).
             if (Input.GetKeyDown(KeyCode.M) && ChunkWorld.Active) ChunkLockBubble = !ChunkLockBubble;
             // V toggles the corner minimap / 3D relief diorama.
-            if (Input.GetKeyDown(KeyCode.V) && ChunkWorld.Active) _showMinimap = !_showMinimap;
+            if (Input.GetKeyDown(KeyCode.V) && ChunkWorld.Active) ToggleMinimap();
             // J toggles topographic contour lines over the terrain.
             if (Input.GetKeyDown(KeyCode.J) && ChunkWorld.Active) ToggleTopo();
             // Cmd + mouse wheel: nudge the active tool's design speed ±10 km/h per notch while
