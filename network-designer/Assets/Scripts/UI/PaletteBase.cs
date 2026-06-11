@@ -286,9 +286,9 @@ namespace NetworkDesigner.UI
             labels.Add(_footMode); labels.Add(_footSub);
 
             var btns = HBox();
-            _topoBtn = FooterBtn("Topo", () => Designer.ChunkContours = !Designer.ChunkContours);
+            _topoBtn = FooterBtn("Topo", () => Designer.ToggleTopo());
             _gridBtn = FooterBtn("Grid", () => Designer.ToggleGrid());
-            _snapBtn = FooterBtn("Snap", () => Designer.SnapToGrid = !Designer.SnapToGrid);
+            _snapBtn = FooterBtn("Snap", () => Designer.ToggleSnap());
             _topoBtn.style.marginRight = 6; _gridBtn.style.marginRight = 6;
             btns.Add(_topoBtn); btns.Add(_gridBtn); btns.Add(_snapBtn);
 

@@ -28,14 +28,16 @@ namespace NetworkDesigner.Terrain
         public float EdgeWidth(LineEdge e) => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(e?.Profile, RoadWidth);
         // The active profile's width (for the placement preview).
         public float ActiveWidth() => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(ActiveProfileId, RoadWidth);
-        [Tooltip("Straight edges with hard corners (default). Off = auto-smoothed bezier through the nodes.")]
-        public bool Straight = true;
         [Tooltip("Guided drawing: a continuing straight locks to colinear; turns must be a speed-based curve, or a 90° corner where the speed allows. Off = freehand straights at any angle.")]
         public bool GuidedTurns = true;
         [Tooltip("At/below this design speed (km/h), a straight may snap a hard 90° corner; above it, turns must be curves.")]
         public float HardCornerMaxSpeedKmh = 50f;
         public bool AllowHardCorner => DesignSpeedKmh <= HardCornerMaxSpeedKmh;
         [System.NonSerialized] public bool StraightOffAxis;   // cursor isn't on an allowed heading → suppress the (kinked) click
+        [Tooltip("Draw a stop bar across each approach at an intersection (3+ roads).")]
+        public bool ShowStopBars = true;
+        [Tooltip("Draw crosswalk stripes across each approach at an intersection (3+ roads).")]
+        public bool ShowCrosswalks = true;
         [Tooltip("Metres between draped samples along the curve.")]
         public float SampleStep = 2f;
         [Tooltip("Metres above the terrain (avoids z-fighting with the ground).")]
@@ -119,6 +121,7 @@ namespace NetworkDesigner.Terrain
 
         const int SubSteps = 48;
         static readonly Vector2[] _pts = new Vector2[SubSteps + 1];
+        float _tStart = 0f, _tEnd = 1f;   // current edge's trim range (markings drawn over [tStart,tEnd])
 
         string RootName => "RoadPlan_" + Name;
 
@@ -156,12 +159,91 @@ namespace NetworkDesigner.Terrain
                 return;
             }
             if (CurveModifier) { _corner = p; _cornerPending = true; return; }   // arm the bend; the next click is the end
+            int start = _chainTail;
             int end = NearestOrNew(p);   // join an existing node → a real intersection
             int before = Graph.Edges.Count;
             Graph.AddEdge(_chainTail, end);
             if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
+            SplitSegmentCrossings(start, end, ActiveProfileId);   // drawn OVER existing roads → make intersection nodes
             _chainTail = end;
             Rebuild(field);
+        }
+
+        // After laying a STRAIGHT edge start→end, split it (and every road it crosses) at each interior
+        // crossing, so a segment drawn over another road creates real shared intersection nodes.
+        void SplitSegmentCrossings(int start, int end, string profile)
+        {
+            if (start < 0 || end < 0 || start >= Graph.Nodes.Count || end >= Graph.Nodes.Count) return;
+            Vector2 A = Graph.Nodes[start], B = Graph.Nodes[end];
+            var hits = new List<(float t, Vector2 pt, int c, int d)>();
+            foreach (LineEdge e in Graph.Edges)
+            {
+                if (e.HasCurve) continue;                                           // straight-only for now
+                if (e.A == start || e.A == end || e.B == start || e.B == end) continue;  // shares an endpoint (incl. the new edge)
+                Vector2 C = Graph.Nodes[e.A], D = Graph.Nodes[e.B];
+                if (SegSegIntersect(A, B, C, D, out float tAB, out float tCD, out Vector2 X)
+                    && tAB > 1e-3f && tAB < 1f - 1e-3f && tCD > 1e-3f && tCD < 1f - 1e-3f)
+                    hits.Add((tAB, X, e.A, e.B));
+            }
+            if (hits.Count == 0) return;
+            hits.Sort((x, y) => x.t.CompareTo(y.t));
+
+            // Drop the straight start→end edge; we'll re-lay it in pieces through the crossing nodes.
+            for (int i = Graph.Edges.Count - 1; i >= 0; i--)
+            { LineEdge e = Graph.Edges[i]; if ((e.A == start && e.B == end) || (e.A == end && e.B == start)) { Graph.RemoveEdgeAt(i); break; } }
+
+            int prev = start;
+            foreach (var h in hits)
+            {
+                int ei = FindEdgeIndex(h.c, h.d);   // node indices are stable (SplitEdge appends, RemoveEdgeAt only drops edges)
+                int x;
+                if (ei >= 0)
+                {
+                    Vector2 C = Graph.Nodes[h.c], D = Graph.Nodes[h.d];
+                    float tt = ParamOnSeg(C, D, h.pt);
+                    x = Graph.SplitEdge(ei, tt);
+                }
+                else x = Graph.AddNode(h.pt);
+                ConnectStraight(prev, x, profile);
+                prev = x;
+            }
+            ConnectStraight(prev, end, profile);
+        }
+
+        void ConnectStraight(int a, int b, string profile)
+        {
+            if (a == b) return;
+            int before = Graph.Edges.Count;
+            Graph.AddEdge(a, b);
+            if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = profile;
+        }
+
+        int FindEdgeIndex(int a, int b)
+        {
+            for (int i = 0; i < Graph.Edges.Count; i++)
+            { LineEdge e = Graph.Edges[i]; if ((e.A == a && e.B == b) || (e.A == b && e.B == a)) return i; }
+            return -1;
+        }
+
+        static float ParamOnSeg(Vector2 a, Vector2 b, Vector2 p)
+        {
+            Vector2 ab = b - a; float d = ab.sqrMagnitude;
+            return d < 1e-9f ? 0f : Mathf.Clamp01(Vector2.Dot(p - a, ab) / d);
+        }
+
+        // 2D segment intersection: true + params/point when AB and CD cross at an interior-or-endpoint point.
+        static bool SegSegIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d, out float tAB, out float tCD, out Vector2 pt)
+        {
+            tAB = tCD = 0f; pt = a;
+            Vector2 r = b - a, s = d - c;
+            float denom = r.x * s.y - r.y * s.x;
+            if (Mathf.Abs(denom) < 1e-9f) return false;   // parallel / collinear
+            Vector2 ca = c - a;
+            tAB = (ca.x * s.y - ca.y * s.x) / denom;
+            tCD = (ca.x * r.y - ca.y * r.x) / denom;
+            if (tAB < 0f || tAB > 1f || tCD < 0f || tCD > 1f) return false;
+            pt = a + r * tAB;
+            return true;
         }
 
         int NearestOrNew(Vector2 p)
@@ -494,11 +576,22 @@ namespace NetworkDesigner.Terrain
             EnsureRoot();
             _v.Clear(); _idx.Clear(); _col.Clear(); _nv.Clear(); _nn.Clear(); _nidx.Clear();
 
+            int nc = Graph.Nodes.Count;
+            var treated = new bool[nc];   // node gets a junction box (trim + outline)
+            var isX = new bool[nc];       // true = intersection (3+ roads) → gets stop bars / crosswalks
+            ComputeJunctions(treated, isX);
+            var boxHalf = new float[nc];  // square junction box: half-side + alignment axis (largest corridor)
+            var boxAx = new Vector2[nc];
+            for (int v = 0; v < nc; v++) if (treated[v]) ComputeBox(v, out boxHalf[v], out boxAx[v]);
+
             foreach (LineEdge e in Graph.Edges)
             {
                 EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
-                BuildCorridorEdge(field, p0, p1, p2, p3, e);   // lane schematic from the segment's profile
+                float ta = e.A < nc && treated[e.A] ? ApproachTrim(e.A, e, boxHalf[e.A], boxAx[e.A]) : 0f;
+                float tb = e.B < nc && treated[e.B] ? ApproachTrim(e.B, e, boxHalf[e.B], boxAx[e.B]) : 0f;
+                BuildCorridorEdge(field, p0, p1, p2, p3, e, ta, tb);   // lane schematic, trimmed back to the box
             }
+            for (int v = 0; v < nc; v++) if (treated[v]) BuildJunction(field, v, boxHalf[v], boxAx[v], isX[v]);
             foreach (Vector2 n in Graph.Nodes) DrawPuck(field, n);   // into the node mesh (own colour + toggle)
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
@@ -507,35 +600,123 @@ namespace NetworkDesigner.Terrain
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
         }
 
+        // ---- intersections / junctions ----
+
+        // Classify each node: degree ≥ 3 = intersection (box + stop bars/crosswalks); degree 2 with a real
+        // straight corner or a profile change = transition (box only); collinear runs untouched.
+        void ComputeJunctions(bool[] treated, bool[] isX)
+        {
+            int nc = Graph.Nodes.Count;
+            var deg = new int[nc];
+            foreach (LineEdge e in Graph.Edges) { if (e.A < nc) deg[e.A]++; if (e.B < nc) deg[e.B]++; }
+            for (int v = 0; v < nc; v++)
+            {
+                if (deg[v] >= 3) { isX[v] = true; treated[v] = true; continue; }
+                if (deg[v] != 2) continue;
+                LineEdge e1 = null, e2 = null;
+                foreach (LineEdge e in Graph.Edges)
+                    if (e.A == v || e.B == v) { if (e1 == null) e1 = e; else { e2 = e; break; } }
+                if (e1 == null || e2 == null) continue;
+                if (e1.HasCurve || e2.HasCurve) continue;   // leave smooth curve connections alone
+                float turn = Vector2.Angle(EdgeDirAtNode(e1, v), -EdgeDirAtNode(e2, v));   // 0 = colinear through
+                bool diffProfile = (e1.Profile ?? "") != (e2.Profile ?? "");
+                if (turn > 20f || diffProfile) treated[v] = true;   // corner / transition: box only
+            }
+        }
+
+        // The junction box is a SQUARE whose side = the largest corridor's full width, aligned to that
+        // corridor. The major road sets the box; everything else connects into it. The roomy box also
+        // leaves clear space for inspect-mode analysis details.
+        void ComputeBox(int v, out float half, out Vector2 ax)
+        {
+            float maxW = 0f; LineEdge wide = null;
+            foreach (LineEdge e in Graph.Edges)
+                if (e.A == v || e.B == v) { float w = EdgeWidth(e); if (w > maxW) { maxW = w; wide = e; } }
+            half = Mathf.Max(0.5f, maxW * 0.5f);
+            ax = wide != null ? EdgeDirAtNode(wide, v) : Vector2.right;
+        }
+
+        // Distance to pull edge `e`'s markings back at node `v`: where its centreline exits the square box.
+        float ApproachTrim(int v, LineEdge e, float half, Vector2 ax)
+        {
+            Vector2 d = EdgeDirAtNode(e, v);
+            Vector2 ay = new Vector2(-ax.y, ax.x);
+            float m = Mathf.Max(Mathf.Abs(Vector2.Dot(d, ax)), Mathf.Abs(Vector2.Dot(d, ay)));
+            return half / Mathf.Max(0.2f, m);
+        }
+
+        // Unit direction pointing AWAY from node `v` along edge `e`.
+        Vector2 EdgeDirAtNode(LineEdge e, int v)
+        {
+            EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            Vector2 d = e.A == v ? LineGraph.BezierTangent(p0, p1, p2, p3, 0f) : -LineGraph.BezierTangent(p0, p1, p2, p3, 1f);
+            if (d.sqrMagnitude < 1e-8f) d = e.A == v ? (Graph.Nodes[e.B] - Graph.Nodes[e.A]) : (Graph.Nodes[e.A] - Graph.Nodes[e.B]);
+            return d.sqrMagnitude > 1e-8f ? d.normalized : Vector2.right;
+        }
+
+        // Draw the closed square junction box (side = largest corridor width, aligned to it), plus stop
+        // bars + crosswalks at real intersections. Roads trim to the box; the box leaves clear space for
+        // inspect-mode analysis details.
+        void BuildJunction(ITerrainSurface field, int v, float half, Vector2 ax, bool isX)
+        {
+            Vector2 c = Graph.Nodes[v];
+            Vector2 ay = new Vector2(-ax.y, ax.x);
+            Vector3 b0 = Drape(field, c + ax * half + ay * half);
+            Vector3 b1 = Drape(field, c + ax * half - ay * half);
+            Vector3 b2 = Drape(field, c - ax * half - ay * half);
+            Vector3 b3 = Drape(field, c - ax * half + ay * half);
+            AddSeg(b0, b1, ColEdge); AddSeg(b1, b2, ColEdge); AddSeg(b2, b3, ColEdge); AddSeg(b3, b0, ColEdge);
+
+            if (!isX) return;
+            foreach (LineEdge e in Graph.Edges)
+            {
+                if (e.A != v && e.B != v) continue;
+                Vector2 d = EdgeDirAtNode(e, v);
+                float hw = Mathf.Max(0.5f, EdgeWidth(e) * 0.5f);
+                float r = ApproachTrim(v, e, half, ax);
+                if (ShowStopBars) EmitStopBar(field, c, d, hw, r);
+                if (ShowCrosswalks) EmitCrosswalk(field, c, d, hw, r);
+            }
+        }
+
+        // A (doubled) white bar across the approach pavement at the box edge.
+        void EmitStopBar(ITerrainSurface field, Vector2 c, Vector2 d, float hw, float r)
+        {
+            Vector2 perp = new Vector2(-d.y, d.x);
+            for (float off = 0f; off <= 0.5f; off += 0.5f)
+            {
+                Vector2 b = c + d * (r + off);
+                AddSeg(Drape(field, b + perp * hw), Drape(field, b - perp * hw), ColEdge);
+            }
+        }
+
+        // Continental crosswalk: stripes parallel to traffic, just inside the box edge, across the pavement.
+        void EmitCrosswalk(ITerrainSurface field, Vector2 c, Vector2 d, float hw, float r)
+        {
+            Vector2 perp = new Vector2(-d.y, d.x);
+            float depth = 2.2f, inner = Mathf.Max(0.5f, r - depth);
+            Vector2 a = c + d * inner, b = c + d * r;
+            for (float u = -hw + 0.5f; u <= hw - 0.5f; u += 0.9f)
+                AddSeg(Drape(field, a + perp * u), Drape(field, b + perp * u), ColEdge);
+        }
+
         void EdgeBezier(LineEdge e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3)
         {
-            if (e.HasCurve)   // an explicit shift-curve always renders as its own bezier (even with Straight on)
+            if (e.HasCurve)   // an explicit shift-curve renders as its own bezier
             {
                 p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B]; p1 = e.ControlA; p2 = e.ControlB;
             }
-            else if (Straight || HasCurvedNeighbor(e))   // hard-corner mode, OR keep a tangent straight beside a curve
+            else   // every other connection is a hard-angle straight (no auto-smoothing)
             {
                 p0 = Graph.Nodes[e.A]; p3 = Graph.Nodes[e.B];
                 Vector2 d = p3 - p0; p1 = p0 + d / 3f; p2 = p0 + d * (2f / 3f);
             }
-            else Graph.EdgeControls(e, out p0, out p1, out p2, out p3);
-        }
-
-        // A plain segment sharing a node with an explicit shift-curve stays straight — the curve
-        // shouldn't bow its neighbour via the Catmull-Rom auto-smoothing (what you drew as a tangent
-        // stays a tangent). Pure straight chains (no curves) still auto-smooth.
-        bool HasCurvedNeighbor(LineEdge e)
-        {
-            foreach (LineEdge o in Graph.Edges)
-                if (!ReferenceEquals(o, e) && o.HasCurve
-                    && (o.A == e.A || o.A == e.B || o.B == e.A || o.B == e.B)) return true;
-            return false;
         }
 
         // ---- lane schematic: draw the segment's cross-section as real lane markings ----
 
-        static readonly Color32 ColEdge   = new Color32(235, 235, 235, 255);   // pavement / lane edge line (white, solid)
-        static readonly Color32 ColLane   = new Color32(205, 205, 205, 235);   // same-direction lane divider (dashed)
+        static readonly Color32 ColEdge   = new Color32(235, 235, 235, 195);   // pavement / lane edge line (white, solid)
+        static readonly Color32 ColLane   = new Color32(205, 205, 205, 165);   // same-direction lane divider (dashed)
         static readonly Color32 ColCenter = new Color32(245, 205, 45, 255);    // opposing centreline (yellow, double)
         static readonly Color32 ColTurn   = new Color32(245, 205, 45, 255);    // turn-lane boundary (yellow)
         static readonly Color32 ColMedian = new Color32(200, 165, 110, 220);   // median hatch (warm tan — reads as raised, not drivable)
@@ -545,13 +726,17 @@ namespace NetworkDesigner.Terrain
         const int KOut = -1, KShBA = 0, KLnBA = 1, KMed = 2, KTrn = 3, KLnAB = 4, KShAB = 5;
 
         // Lay the segment's lanes/median/turn-lane/shoulders out as draped markings, draped along the bezier.
-        void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, LineEdge e)
+        void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, LineEdge e, float trimA, float trimB)
         {
             float len = 0f;
             _pts[0] = p0;
             for (int i = 1; i <= SubSteps; i++) { _pts[i] = LineGraph.Bezier(p0, p1, p2, p3, i / (float)SubSteps); len += Vector2.Distance(_pts[i - 1], _pts[i]); }
             if (len < 1e-3f) return;
-            int n = Mathf.Clamp(Mathf.CeilToInt(len / 1.5f), 2, 2048);   // fine enough for dashed markings
+            // Pull the markings back from junctions so approaches don't pile on top of each other.
+            _tStart = Mathf.Clamp01(trimA / len);
+            _tEnd = 1f - Mathf.Clamp01(trimB / len);
+            if (_tEnd - _tStart < 0.02f) { _tStart = 0f; _tEnd = 1f; return; }   // wholly inside junction boxes
+            int n = Mathf.Clamp(Mathf.CeilToInt(len * (_tEnd - _tStart) / 1.5f), 2, 2048);   // fine enough for dashed markings
 
             NetworkDesigner.Model.RoadProfile prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(e?.Profile);
             if (prof == null || prof.TotalWidth < 0.5f)
@@ -616,7 +801,7 @@ namespace NetworkDesigner.Terrain
             Vector3 prev = default; bool have = false;
             for (int i = 0; i <= n; i++)
             {
-                float t = (float)i / n;
+                float t = Mathf.Lerp(_tStart, _tEnd, (float)i / n);   // trimmed range
                 Vector2 pos = LineGraph.Bezier(p0, p1, p2, p3, t);
                 Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, t);
                 Vector2 perp = tan.sqrMagnitude > 1e-8f ? new Vector2(-tan.y, tan.x).normalized : Vector2.right;
@@ -635,12 +820,12 @@ namespace NetworkDesigner.Terrain
         void EmitMedianHatch(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float len, float uA, float uB)
         {
             float band = Mathf.Abs(uB - uA);
-            int m = Mathf.Clamp(Mathf.CeilToInt(len / 3f), 1, 1024);
+            int m = Mathf.Clamp(Mathf.CeilToInt(len * (_tEnd - _tStart) / 3f), 1, 1024);
             float dt = Mathf.Max(1e-4f, band / Mathf.Max(1f, len));   // ~45° lead in t for the diagonal
             for (int j = 0; j < m; j++)
             {
-                float t0 = (float)j / m;
-                float t1 = Mathf.Min(1f, t0 + dt);
+                float t0 = Mathf.Lerp(_tStart, _tEnd, (float)j / m);   // trimmed range
+                float t1 = Mathf.Min(_tEnd, t0 + dt);
                 AddSeg(OffsetPt(field, p0, p1, p2, p3, t0, uA), OffsetPt(field, p0, p1, p2, p3, t1, uB), ColMedian);
             }
         }

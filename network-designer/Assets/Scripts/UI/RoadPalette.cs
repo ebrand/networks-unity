@@ -65,14 +65,17 @@ namespace NetworkDesigner.UI
             body.Add(NumberRow("Width (custom)", "m",
                 () => Designer.RoadPlanLayer.RoadWidth,
                 v => { Designer.RoadPlanLayer.RoadWidth = v; Designer.RebuildRoadPlan(); }, 3f, 60f, "0"));
-            body.Add(ToggleRow("Straight (hard corners)",
-                () => Designer.RoadPlanLayer.Straight,
-                v => { Designer.RoadPlanLayer.Straight = v; Designer.RebuildRoadPlan(); }));
             // Guided drawing: lock straights to colinear; turn via a speed-based curve (Shift) or a 90°
             // corner where the speed allows. Off = freehand straights at any angle.
             body.Add(ToggleRow("Guided turns (lock)",
                 () => Designer.RoadPlanLayer.GuidedTurns,
                 v => Designer.RoadPlanLayer.GuidedTurns = v));
+            body.Add(ToggleRow("Stop bars",
+                () => Designer.RoadPlanLayer.ShowStopBars,
+                v => { Designer.RoadPlanLayer.ShowStopBars = v; Designer.RebuildRoadPlan(); }));
+            body.Add(ToggleRow("Crosswalks",
+                () => Designer.RoadPlanLayer.ShowCrosswalks,
+                v => { Designer.RoadPlanLayer.ShowCrosswalks = v; Designer.RebuildRoadPlan(); }));
 
             var clear = MakeButton("Clear Plan", () => Designer.ClearRoadPlan());
             clear.style.marginTop = 10;

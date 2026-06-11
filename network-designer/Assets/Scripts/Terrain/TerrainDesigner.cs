@@ -2146,9 +2146,31 @@ namespace NetworkDesigner.Terrain
         {
             if (ChunkWorld.Active) ChunkShowGrid = !ChunkShowGrid;
             else { GridEnabled = !GridEnabled; ApplyTerrainMaterial(); }
+            SaveViewPrefs();
         }
         // Current grid on/off, for the footer button's active styling (whichever grid is in play).
         public bool GridOn => ChunkWorld.Active ? ChunkShowGrid : GridEnabled;
+
+        // Snap + topo toggles routed through here so they persist (footer buttons / hotkeys call these).
+        public void ToggleSnap() { SnapToGrid = !SnapToGrid; SaveViewPrefs(); }
+        public void ToggleTopo() { ChunkContours = !ChunkContours; SaveViewPrefs(); }
+
+        // The grid / snap / topo view toggles persist across worlds in PlayerPrefs.
+        const string ViewSnapKey = "ViewSnap", ViewGridKey = "ViewGrid", ViewTopoKey = "ViewTopo";
+        void SaveViewPrefs()
+        {
+            PlayerPrefs.SetInt(ViewSnapKey, SnapToGrid ? 1 : 0);
+            PlayerPrefs.SetInt(ViewGridKey, GridOn ? 1 : 0);
+            PlayerPrefs.SetInt(ViewTopoKey, ChunkContours ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+        public void ApplyViewPrefs()
+        {
+            SnapToGrid = PlayerPrefs.GetInt(ViewSnapKey, 0) == 1;
+            bool grid = PlayerPrefs.GetInt(ViewGridKey, 0) == 1;
+            if (ChunkWorld.Active) ChunkShowGrid = grid; else { GridEnabled = grid; ApplyTerrainMaterial(); }
+            ChunkContours = PlayerPrefs.GetInt(ViewTopoKey, 0) == 1;
+        }
 
         // Entering rail mode (L/K) opens the Rail palette exclusively; toggling back out of
         // rail (L/K again) closes it to NO palette (a clean toggle), not the Terrain palette.
@@ -2393,7 +2415,7 @@ namespace NetworkDesigner.Terrain
             // V toggles the corner minimap / 3D relief diorama.
             if (Input.GetKeyDown(KeyCode.V) && ChunkWorld.Active) _showMinimap = !_showMinimap;
             // J toggles topographic contour lines over the terrain.
-            if (Input.GetKeyDown(KeyCode.J) && ChunkWorld.Active) ChunkContours = !ChunkContours;
+            if (Input.GetKeyDown(KeyCode.J) && ChunkWorld.Active) ToggleTopo();
             // Cmd + mouse wheel: nudge the active tool's design speed ±10 km/h per notch while
             // in rail/plan/road-plan mode — set it without leaving the plan. The camera ignores
             // the wheel while Cmd is held (see ScrollSuppressor in the camera setup).
@@ -2438,7 +2460,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.G))
             {
                 bool shift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-                if (shift) SnapToGrid = !SnapToGrid;            // Shift+G: snap toggle
+                if (shift) ToggleSnap();                        // Shift+G: snap toggle
                 else ToggleGrid();                             // G: grid toggle (chunk grid in the chunk world)
             }
             // B (in rail mode): toggle grade override — build across whatever terrain
@@ -4330,6 +4352,7 @@ namespace NetworkDesigner.Terrain
                 Debug.Log($"[Forest] restored {ForestGen.TreeCount} trees from save.");
             }
             GameManager.SetActive(name);
+            ApplyViewPrefs();   // restore grid / snap / topo from the last session (persist across worlds)
             Debug.Log($"[Game] loaded “{name}” (DEM {info.DemSet}, range {info.NormMin:0}..{info.NormMax:0}).");
         }
 
