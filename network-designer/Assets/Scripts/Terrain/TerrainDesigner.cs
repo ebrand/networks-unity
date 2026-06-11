@@ -913,6 +913,13 @@ namespace NetworkDesigner.Terrain
                         return new Vector3(rp.x, raw.y, rp.y);
                     if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
                 }
+                if (_lineActive is RoadPlanLayer rdp)
+                {
+                    // Roads turn freely at corners — node JOIN (intersections) + SOFT extension assist, no
+                    // hard collinear lock. Node snap wins so segments meet cleanly at shared nodes.
+                    if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
+                    if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
+                }
                 // Grid snap makes no sense while shaping an arc that EXTENDS existing track —
                 // the bend/end are pinned to the MDT / extension line / PAC. But a brand-new
                 // rail curve has no incoming tangent to honour, so snapping its bend to the

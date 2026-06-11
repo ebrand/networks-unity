@@ -37,6 +37,16 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Metres between the cross-ties drawn across the corridor.")]
         public float TieSpacing = 8f;
         public Color PlanColor = new Color(1f, 0.55f, 0.12f, 0.95f);   // amber-orange (rail plan is yellow)
+        [Tooltip("Radius (m) to grab an existing node when starting/joining a chain — forms intersections.")]
+        public float NodePickRadius = 2.5f;
+        [Tooltip("Cursor distance (m) to soft-snap onto the straight-ahead extension of the previous segment.")]
+        public float ExtensionSnapRadius = 4f;
+        [Tooltip("Radius (m) to snap the cursor onto the plan's own nodes/edges (resume/join).")]
+        public float EndSnapRadius = 8f;
+        [Tooltip("Length (m) of the collinear extension guide line.")]
+        public float ExtensionGuideLength = 120f;
+        [Tooltip("Radius (m) of the node puck rings drawn at each plan node.")]
+        public float NodePuckRadius = 1.5f;
 
         // ---- runtime (not serialized) ----
         LineGraph _graph = new LineGraph();
@@ -66,18 +76,37 @@ namespace NetworkDesigner.Terrain
 
         public void AddNode(ITerrainSurface field, Vector3 hit)
         {
-            int idx = Graph.AddNode(new Vector2(hit.x, hit.z));
-            if (_chainTail >= 0)
+            Vector2 p = new Vector2(hit.x, hit.z);
+            if (_chainTail < 0)   // start a chain: grab an existing node/edge so corridors branch + join
             {
-                int before = Graph.Edges.Count;
-                Graph.AddEdge(_chainTail, idx);
-                if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
+                int near = Graph.NearestNode(p, NodePickRadius);
+                if (near >= 0) _chainTail = near;
+                else if (Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _)) { _chainTail = Graph.SplitEdge(ei, tt); Rebuild(field); }
+                else _chainTail = Graph.AddNode(p);
+                return;
             }
-            _chainTail = idx;
+            int end = NearestOrNew(p);   // join an existing node → a real intersection
+            int before = Graph.Edges.Count;
+            Graph.AddEdge(_chainTail, end);
+            if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
+            _chainTail = end;
             Rebuild(field);
         }
 
-        public void EndChain() { _chainTail = -1; }
+        int NearestOrNew(Vector2 p)
+        {
+            int near = Graph.NearestNode(p, NodePickRadius);
+            return (near >= 0 && near != _chainTail) ? near : Graph.AddNode(p);
+        }
+
+        public void EndChain()
+        {
+            // Cancelling a just-started chain leaves a lone node with no edges — drop it.
+            if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count && !NodeHasEdge(_chainTail)) Graph.RemoveNode(_chainTail);
+            _chainTail = -1;
+        }
+
+        bool NodeHasEdge(int n) { foreach (LineEdge e in Graph.Edges) if (e.A == n || e.B == n) return true; return false; }
 
         public void ClearAll(ITerrainSurface field)
         {
@@ -107,7 +136,72 @@ namespace NetworkDesigner.Terrain
             return true;
         }
 
-        // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) ----
+        // ---- snapping (extension guide + node join), mirroring the rail plan tool ----
+
+        // Heading continuing straight out of the chain tail (collinear with the incoming segment);
+        // the cursor side picks which leg to extend when the tail has several edges.
+        bool IncomingDirection(Vector2 toward, out Vector2 dir)
+        {
+            dir = Vector2.zero;
+            if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            Vector2 side = toward - Graph.Nodes[_chainTail];
+            float bestDot = float.NegativeInfinity; bool found = false;
+            foreach (LineEdge e in Graph.Edges)
+            {
+                if (e.A != _chainTail && e.B != _chainTail) continue;
+                EdgeBezier(e, out Vector2 p0, out Vector2 q1, out Vector2 q2, out Vector2 p3);
+                Vector2 cont = e.B == _chainTail ? LineGraph.BezierTangent(p0, q1, q2, p3, 1f) : -LineGraph.BezierTangent(p0, q1, q2, p3, 0f);
+                if (cont.sqrMagnitude < 1e-6f) cont = e.B == _chainTail ? p3 - p0 : p0 - p3;
+                if (cont.sqrMagnitude < 1e-6f) continue;
+                cont = cont.normalized;
+                float dot = Vector2.Dot(cont, side);
+                if (dot > bestDot) { bestDot = dot; dir = cont; found = true; }
+            }
+            return found;
+        }
+
+        public bool TryGetTailXZ(out Vector2 pos)
+        {
+            pos = Vector2.zero;
+            if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            pos = Graph.Nodes[_chainTail]; return true;
+        }
+
+        // SOFT-snap the cursor onto the straight-ahead extension of the previous segment (within
+        // ExtensionSnapRadius, ahead of the tail). Roads turn freely, so this assists, it doesn't lock.
+        public bool TrySnapToExtension(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            float r = Mathf.Max(0f, ExtensionSnapRadius);
+            if (r <= 0f || !IncomingDirection(cursor, out Vector2 dir)) return false;
+            Vector2 origin = Graph.Nodes[_chainTail];
+            float along = Vector2.Dot(cursor - origin, dir);
+            if (along <= 0f || along > ExtensionGuideLength) return false;
+            Vector2 proj = origin + dir * along;
+            if ((cursor - proj).sqrMagnitude > r * r) return false;
+            snapped = proj; return true;
+        }
+
+        // Snap onto the plan's own nearest node/edge within EndSnapRadius (excluding the active anchor) —
+        // so segments join existing nodes into intersections, and you can resume from any end.
+        public bool TrySnapToOwnNode(Vector2 p, out Vector2 snapped)
+        {
+            snapped = p;
+            float r = Mathf.Max(0f, EndSnapRadius);
+            if (r <= 0f) return false;
+            int best = -1; float bestSq = r * r;
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                if (i == _chainTail) continue;
+                float d = (Graph.Nodes[i] - p).sqrMagnitude;
+                if (d <= bestSq) { bestSq = d; best = i; }
+            }
+            if (best >= 0) { snapped = Graph.Nodes[best]; return true; }
+            if (Graph.NearestPointOnEdge(p, r, out _, out _, out Vector2 pt)) { snapped = pt; return true; }
+            return false;
+        }
+
+        // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) + node pucks ----
 
         public void Rebuild(ITerrainSurface field)
         {
@@ -121,6 +215,7 @@ namespace NetworkDesigner.Terrain
                 float half = Mathf.Max(0.1f, EdgeWidth(e) * 0.5f);   // each segment at its own profile width
                 BuildCorridorEdge(field, p0, p1, p2, p3, half, tieEvery);
             }
+            foreach (Vector2 n in Graph.Nodes) DrawPuck(field, n);   // visible node markers (move/curve/delete handles)
 
             _mesh.Clear();
             _mesh.SetVertices(_v);
@@ -173,6 +268,20 @@ namespace NetworkDesigner.Terrain
             => new Vector3(xz.x, (field != null ? field.SampleHeight(xz.x, xz.y) : 0f) + Lift, xz.y);
 
         void AddSeg(Vector3 a, Vector3 b) { int s = _v.Count; _v.Add(a); _v.Add(b); _idx.Add(s); _idx.Add(s + 1); }
+
+        // A draped ring at a node — the visible marker you grab to move / curve / delete.
+        void DrawPuck(ITerrainSurface field, Vector2 c)
+        {
+            const int N = 16; float r = Mathf.Max(0.2f, NodePuckRadius);
+            Vector3 prev = default;
+            for (int i = 0; i <= N; i++)
+            {
+                float a = i / (float)N * Mathf.PI * 2f;
+                Vector3 cur = Drape(field, new Vector2(c.x + Mathf.Cos(a) * r, c.y + Mathf.Sin(a) * r));
+                if (i > 0) AddSeg(prev, cur);
+                prev = cur;
+            }
+        }
 
         void EnsureRoot()
         {
@@ -231,6 +340,20 @@ namespace NetworkDesigner.Terrain
                         if (i > 0 && (i % 2 == 0)) AddPv(dPrev, cur);   // dashed
                         dPrev = cur;
                     }
+                }
+            }
+            // Collinear extension guide: a dashed line straight out of the tail (where the cursor soft-snaps).
+            if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count
+                && IncomingDirection(new Vector2(cursor.x, cursor.z), out Vector2 gdir))
+            {
+                Vector2 o = Graph.Nodes[_chainTail];
+                const int gn = 30;
+                Vector3 gp = default;
+                for (int i = 0; i <= gn; i++)
+                {
+                    Vector3 cur = Drape(field, o + gdir * ((float)i / gn * ExtensionGuideLength));
+                    if (i > 0 && (i % 2 == 0)) AddPv(gp, cur);   // dashed
+                    gp = cur;
                 }
             }
             _pvMesh.Clear(); _pvMesh.SetVertices(_pv); _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0); _pvMesh.RecalculateBounds();
