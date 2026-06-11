@@ -211,6 +211,7 @@ namespace NetworkDesigner.Terrain
                  "edge — drawn like a fence; gauge/tie-spacing under the Rail tunables.")]
         public RailTrackLayer RailLayer = new RailTrackLayer { Name = "Rail" };
         public RailPlanLayer PlanLayer = new RailPlanLayer { Name = "Plan" };
+        public RoadPlanLayer RoadPlanLayer = new RoadPlanLayer { Name = "Road Plan" };
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -712,6 +713,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             if (!DemBackend) ApplyWater(); // low-poly water only; DEM water handled by LoadDemWorld
 
@@ -1115,6 +1117,10 @@ namespace NetworkDesigner.Terrain
             if (PlanLayer.CurveLever <= 0f) PlanLayer.CurveLever = 0.55f;
             if (PlanLayer.ExtensionGuideLength <= 0f) PlanLayer.ExtensionGuideLength = 120f;
             if (PlanLayer.ExtensionSnapRadius <= 0f) PlanLayer.ExtensionSnapRadius = 4f;
+            if (RoadPlanLayer == null) RoadPlanLayer = new RoadPlanLayer();
+            if (string.IsNullOrEmpty(RoadPlanLayer.Name)) RoadPlanLayer.Name = "Road Plan";
+            if (RoadPlanLayer.RoadWidth <= 0f) RoadPlanLayer.RoadWidth = 14f;
+            if (RoadPlanLayer.SampleStep <= 0f) RoadPlanLayer.SampleStep = 2f;
             if (PlanLayer.EndSnapRadius <= 0f) PlanLayer.EndSnapRadius = 8f;
             // New fields on the serialized layer can deserialize as 0 (Unity
             // footgun); 0 lateral-g would blow the required radius up ~100x.
@@ -1947,6 +1953,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             ApplyWater();
             _dirtySince = Time.realtimeSinceStartup;
@@ -2016,6 +2023,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             _dirtySince = Time.realtimeSinceStartup;
             Debug.Log($"[Grade] Flattened {targets.Count} corridor samples to the rail grade line.");
         }
@@ -2068,6 +2076,8 @@ namespace NetworkDesigner.Terrain
         public bool IsRailBuildMode => ReferenceEquals(_lineActive, RailLayer);
         public bool IsRailPlanMode => ReferenceEquals(_lineActive, PlanLayer);
         public bool IsRailMode => IsRailBuildMode || IsRailPlanMode;
+        public bool IsRoadPlanMode => ReferenceEquals(_lineActive, RoadPlanLayer);
+        public void EnterRoadPlanMode() { if (!IsRoadPlanMode) SetLineMode(RoadPlanLayer); }
         // Default terrain (sculpt) mode: no line layer and no scatter layer active.
         public bool IsSculptMode => _lineActive == null && _active == null;
         // Exit any line/scatter mode back to the terrain brush (used when a palette that
@@ -2145,7 +2155,7 @@ namespace NetworkDesigner.Terrain
                 }
             }
         }
-        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RailLayer.HideConnectPreview(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RoadPlanLayer.HidePreview(); RailLayer.HideConnectPreview(); }
 
         // Live preview while a connect end is armed (C held + rail mode): the join to the
         // endpoint under the cursor, green/red, with a HUD line.
@@ -2326,6 +2336,7 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) { SetLineMode(RailLayer); SyncPaletteToMode(); }
             if (Input.GetKeyDown(KeyCode.K)) { SetLineMode(PlanLayer); SyncPaletteToMode(); }
+            if (Input.GetKeyDown(KeyCode.Semicolon)) SetLineMode(RoadPlanLayer);   // ';' = road plan corridor
             // Launcher palette hotkeys (radio toggle, same as the launcher buttons).
             if (Input.GetKeyDown(KeyCode.N)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Terrain");
             if (Input.GetKeyDown(KeyCode.Y)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("System");
@@ -3629,6 +3640,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             ApplyWater();
             ResetCamera();
@@ -3660,6 +3672,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             ApplyWater();
             _dirtySince = Time.realtimeSinceStartup;
@@ -3704,6 +3717,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
         }
@@ -3779,6 +3793,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             _dirtySince = Time.realtimeSinceStartup;
 
@@ -4100,6 +4115,7 @@ namespace NetworkDesigner.Terrain
             PowerLineLayer.Rebuild(Surf);
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf);
             RebuildContours();
             ApplyWater();
             if (_havePendingCam) { ApplyCameraPose(_pendingCamPos, _pendingCamYaw, _pendingCamPitch); _havePendingCam = false; }
