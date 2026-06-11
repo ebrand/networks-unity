@@ -19,13 +19,15 @@ namespace NetworkDesigner.Terrain
         public string Name = "Road Plan";
         string ITerrainLineLayer.LayerName => Name;
 
-        [Tooltip("Id/Name of the road-config.json profile bound to this corridor; empty = use RoadWidth.")]
-        public string ProfileId = "";
-        [Tooltip("Fallback width (m) when no profile is bound — the corridor footprint either side of the centreline.")]
+        [Tooltip("Profile (road-config.json id/name) applied to NEW segments as you draw them; empty = use RoadWidth.")]
+        public string ActiveProfileId = "";
+        [Tooltip("Fallback width (m) for segments with no profile — corridor footprint either side of the centreline.")]
         public float RoadWidth = 14f;
 
-        // The corridor footprint width: the bound profile's total cross-section, else RoadWidth.
-        public float EffectiveWidth() => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(ProfileId, RoadWidth);
+        // Footprint width for a single segment: its profile's total cross-section, else the fallback width.
+        public float EdgeWidth(LineEdge e) => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(e?.Profile, RoadWidth);
+        // The active profile's width (for the placement preview).
+        public float ActiveWidth() => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(ActiveProfileId, RoadWidth);
         [Tooltip("Straight edges with hard corners. Off = auto-smoothed bezier through the nodes.")]
         public bool Straight = false;
         [Tooltip("Metres between draped samples along the curve.")]
@@ -65,7 +67,12 @@ namespace NetworkDesigner.Terrain
         public void AddNode(ITerrainSurface field, Vector3 hit)
         {
             int idx = Graph.AddNode(new Vector2(hit.x, hit.z));
-            if (_chainTail >= 0) Graph.AddEdge(_chainTail, idx);
+            if (_chainTail >= 0)
+            {
+                int before = Graph.Edges.Count;
+                Graph.AddEdge(_chainTail, idx);
+                if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
+            }
             _chainTail = idx;
             Rebuild(field);
         }
@@ -106,12 +113,12 @@ namespace NetworkDesigner.Terrain
         {
             EnsureRoot();
             _v.Clear(); _idx.Clear();
-            float half = Mathf.Max(0.1f, EffectiveWidth() * 0.5f);
             float tieEvery = Mathf.Max(1f, TieSpacing);
 
             foreach (LineEdge e in Graph.Edges)
             {
                 EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+                float half = Mathf.Max(0.1f, EdgeWidth(e) * 0.5f);   // each segment at its own profile width
                 BuildCorridorEdge(field, p0, p1, p2, p3, half, tieEvery);
             }
 

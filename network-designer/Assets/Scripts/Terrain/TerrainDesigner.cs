@@ -4413,7 +4413,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(12); // version (12 added the road-plan corridor)
+                    w.Write(13); // version (13 added per-edge road profiles)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -4508,7 +4508,7 @@ namespace NetworkDesigner.Terrain
             return list;
         }
         static int GraphBytes(LineGraphSave g) =>
-            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 32) + 16;
+            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 48) + 16;
 
         static void WriteTrees(System.IO.BinaryWriter w, List<PlacedTreeData> list)
         {
@@ -4561,6 +4561,7 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.ControlA.x); w.Write(e.ControlA.y);
                 w.Write(e.ControlB.x); w.Write(e.ControlB.y);
                 w.Write(e.SpeedLimit);                     // v4+
+                w.Write(e.Profile ?? "");                  // v13+ (road-plan per-segment profile)
             }
         }
 
@@ -4756,6 +4757,7 @@ namespace NetworkDesigner.Terrain
                     e.ControlB = new Vector2(r.ReadSingle(), r.ReadSingle());
                 }
                 if (version >= 4) e.SpeedLimit = r.ReadSingle(); // section speed
+                if (version >= 13) e.Profile = r.ReadString();   // road-plan per-segment profile
                 g.Edges.Add(e);
             }
             return g;

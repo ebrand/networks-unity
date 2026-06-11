@@ -24,6 +24,7 @@ namespace NetworkDesigner.Terrain
         public Vector2 ControlA;
         public Vector2 ControlB;
         public float SpeedLimit;   // km/h the section was laid at (0 = unset)
+        public string Profile;     // road plan: the road-config.json profile id/name for this segment (null = none)
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }
@@ -128,6 +129,7 @@ namespace NetworkDesigner.Terrain
             if (t >= 0.98f) return e.B;
             int origA = e.A, origB = e.B;
             float spd = e.SpeedLimit;
+            string prof = e.Profile;
             bool curved = e.HasCurve;
             Vector2 p0 = Nodes[origA], p3 = Nodes[origB], q1, q2;
             if (curved) { q1 = e.ControlA; q2 = e.ControlB; }
@@ -141,8 +143,8 @@ namespace NetworkDesigner.Terrain
             Vector2 m = Vector2.Lerp(ab, bc, t);
             int mi = AddNode(m);
             Edges.RemoveAt(edgeIndex);
-            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd };
-            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd };
+            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd, Profile = prof };
+            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd, Profile = prof };
             if (curved)
             {
                 e1.HasCurve = true; e1.ControlA = a; e1.ControlB = ab;

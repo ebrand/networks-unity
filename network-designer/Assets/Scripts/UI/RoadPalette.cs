@@ -44,20 +44,18 @@ namespace NetworkDesigner.UI
             body.Add(planBtn);
             _sync.Add(() => StyleActive(planBtn, Designer.IsRoadPlanMode));
 
-            // Profile: a road-config.json preset whose total width sets the corridor footprint.
+            // Active profile: the road-config.json preset tagged onto NEW segments as you draw. Each segment
+            // keeps its own profile, so one plan can carry a hierarchy (highway · arterial · local).
             // "Custom" falls back to the width slider below.
             const string custom = "Custom (width)";
             var names = new System.Collections.Generic.List<string> { custom };
             foreach (var c in NetworkDesigner.Roads.RoadProfileLibrary.Configs)
                 if (c != null && !string.IsNullOrEmpty(c.Name)) names.Add(c.Name);
-            string cur = string.IsNullOrEmpty(Designer.RoadPlanLayer.ProfileId) ? custom : Designer.RoadPlanLayer.ProfileId;
+            string cur = string.IsNullOrEmpty(Designer.RoadPlanLayer.ActiveProfileId) ? custom : Designer.RoadPlanLayer.ActiveProfileId;
             if (!names.Contains(cur)) cur = custom;
-            var profDd = new DropdownField { choices = names, value = cur, label = "Profile" };
+            var profDd = new DropdownField { choices = names, value = cur, label = "New segment" };
             profDd.RegisterValueChangedCallback(e =>
-            {
-                Designer.RoadPlanLayer.ProfileId = e.newValue == custom ? "" : e.newValue;
-                Designer.RebuildRoadPlan();
-            });
+                Designer.RoadPlanLayer.ActiveProfileId = e.newValue == custom ? "" : e.newValue);
             profDd.style.marginBottom = 6; body.Add(profDd);
 
             var reload = MakeButton("Reload profiles", () => { NetworkDesigner.Roads.RoadProfileLibrary.Reload(); Rebuild(); });
@@ -76,7 +74,7 @@ namespace NetworkDesigner.UI
             body.Add(clear);
 
             body.Add(Divider());
-            var note = new Label("Click to chain corridor nodes. Profile binding, excavation + 3D road sweep coming next.");
+            var note = new Label("Pick a profile, then click to chain segments — each new segment is tagged with it. Switch the profile to draw a different road type; the plan holds the whole hierarchy. Excavation + 3D road sweep coming next.");
             note.style.color = Sub; note.style.fontSize = 11; note.style.whiteSpace = WhiteSpace.Normal;
             body.Add(note);
         }
