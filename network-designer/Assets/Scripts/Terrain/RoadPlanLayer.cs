@@ -19,8 +19,13 @@ namespace NetworkDesigner.Terrain
         public string Name = "Road Plan";
         string ITerrainLineLayer.LayerName => Name;
 
-        [Tooltip("Total road width (m) drawn either side of the centreline — the corridor footprint.")]
+        [Tooltip("Id/Name of the road-config.json profile bound to this corridor; empty = use RoadWidth.")]
+        public string ProfileId = "";
+        [Tooltip("Fallback width (m) when no profile is bound — the corridor footprint either side of the centreline.")]
         public float RoadWidth = 14f;
+
+        // The corridor footprint width: the bound profile's total cross-section, else RoadWidth.
+        public float EffectiveWidth() => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(ProfileId, RoadWidth);
         [Tooltip("Straight edges with hard corners. Off = auto-smoothed bezier through the nodes.")]
         public bool Straight = false;
         [Tooltip("Metres between draped samples along the curve.")]
@@ -101,7 +106,7 @@ namespace NetworkDesigner.Terrain
         {
             EnsureRoot();
             _v.Clear(); _idx.Clear();
-            float half = Mathf.Max(0.1f, RoadWidth * 0.5f);
+            float half = Mathf.Max(0.1f, EffectiveWidth() * 0.5f);
             float tieEvery = Mathf.Max(1f, TieSpacing);
 
             foreach (LineEdge e in Graph.Edges)

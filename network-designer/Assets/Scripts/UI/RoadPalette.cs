@@ -44,7 +44,27 @@ namespace NetworkDesigner.UI
             body.Add(planBtn);
             _sync.Add(() => StyleActive(planBtn, Designer.IsRoadPlanMode));
 
-            body.Add(NumberRow("Road width", "m",
+            // Profile: a road-config.json preset whose total width sets the corridor footprint.
+            // "Custom" falls back to the width slider below.
+            const string custom = "Custom (width)";
+            var names = new System.Collections.Generic.List<string> { custom };
+            foreach (var c in NetworkDesigner.Roads.RoadProfileLibrary.Configs)
+                if (c != null && !string.IsNullOrEmpty(c.Name)) names.Add(c.Name);
+            string cur = string.IsNullOrEmpty(Designer.RoadPlanLayer.ProfileId) ? custom : Designer.RoadPlanLayer.ProfileId;
+            if (!names.Contains(cur)) cur = custom;
+            var profDd = new DropdownField { choices = names, value = cur, label = "Profile" };
+            profDd.RegisterValueChangedCallback(e =>
+            {
+                Designer.RoadPlanLayer.ProfileId = e.newValue == custom ? "" : e.newValue;
+                Designer.RebuildRoadPlan();
+            });
+            profDd.style.marginBottom = 6; body.Add(profDd);
+
+            var reload = MakeButton("Reload profiles", () => { NetworkDesigner.Roads.RoadProfileLibrary.Reload(); Rebuild(); });
+            reload.style.marginBottom = 8; body.Add(reload);
+
+            // Custom-width fallback (used when no profile is selected; a profile overrides this).
+            body.Add(NumberRow("Width (custom)", "m",
                 () => Designer.RoadPlanLayer.RoadWidth,
                 v => { Designer.RoadPlanLayer.RoadWidth = v; Designer.RebuildRoadPlan(); }, 3f, 60f, "0"));
             body.Add(ToggleRow("Straight (hard corners)",
