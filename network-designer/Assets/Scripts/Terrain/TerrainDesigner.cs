@@ -2077,12 +2077,9 @@ namespace NetworkDesigner.Terrain
         public void ExcavateRoadCorridor()
         {
             var beds = new List<(List<Vector3> pts, float flatHalf)>();
-            // Grade off the ORIGINAL (un-edited) ground so re-excavating cuts to the same fixed bed — idempotent.
-            // Chunk world has a source sampler; DEM-direct falls back to the current surface (re-cuts deepen).
-            System.Func<float, float, float> groundAt = ChunkWorld.Active
-                ? (System.Func<float, float, float>)ChunkWorld.SampleSourceHeight
-                : (x, z) => Surf.SampleHeight(x, z);
-            RoadPlanLayer.CollectExcavationBeds(Surf, beds, groundAt);
+            // Node grades come from the per-node DESIGN elevation (captured from the SHAPED surface and
+            // stored) — so the cut respects terrain you carved/flattened and re-running is idempotent.
+            RoadPlanLayer.CollectExcavationBeds(Surf, beds);
             if (beds.Count == 0) { Debug.LogWarning("[Road] No road plan to excavate — draw a corridor first (;)."); return; }
             float feather = Mathf.Max(0.1f, RoadPlanLayer.CutFeather);
 
@@ -2128,12 +2125,14 @@ namespace NetworkDesigner.Terrain
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph == null || graph.Edges.Count == 0) { Debug.LogWarning("[Road] No road plan to build — draw a corridor first (;)."); return; }
             ClearRoadBuild();
-            System.Func<float, float, float> ground = ChunkWorld.Active
-                ? (System.Func<float, float, float>)ChunkWorld.SampleSourceHeight
-                : (x, z) => Surf.SampleHeight(x, z);
+            // Per-node DESIGN elevation (vertex "v{i}" ↔ node i) — the same heights Excavate cut to, captured
+            // from the shaped surface — so the swept road sits in its cut and respects carved/flattened terrain.
+            var nodeElev = new System.Collections.Generic.Dictionary<string, float>(graph.Nodes.Count);
+            for (int i = 0; i < graph.Nodes.Count; i++) nodeElev["v" + i] = RoadPlanLayer.DesignElevation(i, Surf);
             NetworkDesigner.Model.Network net = NetworkDesigner.Roads.RoadNetworkBridge.Build(
                 graph, NetworkDesigner.Model.DriveSide.Right, RoadPlanLayer.RoadWidth);
-            _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(net, ground, RoadPlanLayer.ExcavationDepth, null);
+            _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(
+                net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null);
         }
 
         public void ClearRoadBuild()
@@ -4571,7 +4570,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(13); // version (13 added per-edge road profiles)
+                    w.Write(14); // version (14 added per-node design elevation)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -4666,7 +4665,7 @@ namespace NetworkDesigner.Terrain
             return list;
         }
         static int GraphBytes(LineGraphSave g) =>
-            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 48) + 16;
+            ((g?.Nodes?.Count ?? 0) * 8) + ((g?.Edges?.Count ?? 0) * 48) + ((g?.NodeY?.Count ?? 0) * 4) + 20;
 
         static void WriteTrees(System.IO.BinaryWriter w, List<PlacedTreeData> list)
         {
@@ -4721,6 +4720,9 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.SpeedLimit);                     // v4+
                 w.Write(e.Profile ?? "");                  // v13+ (road-plan per-segment profile)
             }
+            int ny = g?.NodeY?.Count ?? 0;                 // v14+: per-node design elevation
+            w.Write(ny);
+            for (int i = 0; i < ny; i++) w.Write(g.NodeY[i]);
         }
 
         TerrainField TryLoadTerrain() => TryLoadTerrainFrom(ResolveAutosavePath());
@@ -4917,6 +4919,12 @@ namespace NetworkDesigner.Terrain
                 if (version >= 4) e.SpeedLimit = r.ReadSingle(); // section speed
                 if (version >= 13) e.Profile = r.ReadString();   // road-plan per-segment profile
                 g.Edges.Add(e);
+            }
+            if (version >= 14)   // per-node design elevation
+            {
+                g.NodeY = new List<float>();
+                int ny = r.ReadInt32();
+                for (int i = 0; i < ny; i++) g.NodeY.Add(r.ReadSingle());
             }
             return g;
         }

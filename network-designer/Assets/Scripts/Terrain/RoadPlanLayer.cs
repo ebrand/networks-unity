@@ -588,21 +588,19 @@ namespace NetworkDesigner.Terrain
         // One bed per edge: the centreline sampled as (X, bedY, Z) targets — bedY = the NODE-TO-NODE grade
         // line (straight in elevation from node A's ground to node B's ground) dropped ExcavationDepth below
         // — plus that edge's flat half-width (its profile footprint). Both edges at a shared node anchor to
-        // that node's ground height, so adjacent segments meet flush. The caller carves each bed flat to bedY.
-        // `groundAt` supplies the node elevations; pass the ORIGINAL/source height (not the already-cut
-        // surface) so re-excavating grades off the same ground and the cut is idempotent.
-        public void CollectExcavationBeds(ITerrainSurface field, List<(List<Vector3> pts, float flatHalf)> outBeds,
-                                          System.Func<float, float, float> groundAt = null)
+        // that node's DESIGN elevation, so adjacent segments meet flush. The caller carves each bed flat to
+        // bedY. Node elevations come from DesignElevation (the per-node design height, captured from the
+        // SHAPED surface and stored) so the cut respects terrain you carved/flattened and is idempotent.
+        public void CollectExcavationBeds(ITerrainSurface field, List<(List<Vector3> pts, float flatHalf)> outBeds)
         {
             if (Graph == null || outBeds == null) return;
-            System.Func<float, float, float> G = groundAt ?? ((x, z) => field != null ? field.SampleHeight(x, z) : 0f);
             float s = Mathf.Max(1f, GradeSampleStep);
             float depth = Mathf.Max(0f, ExcavationDepth);
             foreach (LineEdge e in Graph.Edges)
             {
                 EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
-                float yA = G(p0.x, p0.y);
-                float yB = G(p3.x, p3.y);
+                float yA = DesignElevation(e.A, field);
+                float yB = DesignElevation(e.B, field);
                 float chord = Vector2.Distance(p0, p3);
                 int n = Mathf.Max(2, Mathf.CeilToInt(chord / s));
                 var pts = new List<Vector3>(n + 1);
@@ -616,6 +614,24 @@ namespace NetworkDesigner.Terrain
                 outBeds.Add((pts, flatHalf));
             }
         }
+
+        // The road grade elevation (world Y) at a node — the per-node DESIGN height. Captured lazily from the
+        // CURRENT (shaped) surface the first time it's needed and stored, so it reflects terrain the user
+        // carved/flattened, stays consistent between Excavate and Build, and is idempotent (re-running reuses
+        // it). Edit it via the node elevation handles, or ClearNodeElevations to re-capture after re-shaping.
+        public float DesignElevation(int nodeIdx, ITerrainSurface field)
+        {
+            if (nodeIdx < 0 || nodeIdx >= Graph.Nodes.Count) return 0f;
+            float y = Graph.GetNodeY(nodeIdx);
+            if (!float.IsNaN(y)) return y;
+            Vector2 nd = Graph.Nodes[nodeIdx];
+            y = field != null ? field.SampleHeight(nd.x, nd.y) : 0f;
+            Graph.SetNodeY(nodeIdx, y);
+            return y;
+        }
+
+        // Drop all captured design elevations so they re-capture from the current surface on the next run.
+        public void ClearNodeElevations() { for (int i = 0; i < Graph.NodeY.Count; i++) Graph.NodeY[i] = float.NaN; }
 
         // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) + node pucks ----
 
@@ -1218,7 +1234,7 @@ namespace NetworkDesigner.Terrain
 
         // ---- save / load (the node/edge graph; geometry regenerated on load) ----
 
-        public LineGraphSave CollectData() => new LineGraphSave { Nodes = new List<Vector2>(Graph.Nodes), Edges = new List<LineEdge>(Graph.Edges) };
+        public LineGraphSave CollectData() => new LineGraphSave { Nodes = new List<Vector2>(Graph.Nodes), Edges = new List<LineEdge>(Graph.Edges), NodeY = new List<float>(Graph.NodeY) };
 
         public void LoadState(LineGraphSave save)
         {
@@ -1228,7 +1244,11 @@ namespace NetworkDesigner.Terrain
             {
                 if (save.Nodes != null) _graph.Nodes.AddRange(save.Nodes);
                 if (save.Edges != null) _graph.Edges.AddRange(save.Edges);
+                if (save.NodeY != null) _graph.NodeY.AddRange(save.NodeY);
             }
+            // Keep NodeY strictly parallel to Nodes (older saves / partial data → pad/trim with NaN).
+            while (_graph.NodeY.Count < _graph.Nodes.Count) _graph.NodeY.Add(float.NaN);
+            if (_graph.NodeY.Count > _graph.Nodes.Count) _graph.NodeY.RemoveRange(_graph.Nodes.Count, _graph.NodeY.Count - _graph.Nodes.Count);
         }
     }
 }

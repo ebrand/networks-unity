@@ -34,8 +34,15 @@ namespace NetworkDesigner.Terrain
     {
         public List<Vector2> Nodes = new List<Vector2>();
         public List<LineEdge> Edges = new List<LineEdge>();
+        // Per-node DESIGN elevation (world Y), parallel to Nodes; NaN = unset → fall back to the terrain
+        // height. The road plan uses this so a node's road grade is the surface the user SHAPED (and can be
+        // edited via drag handles), not the raw DEM. Other line layers (fence/power/rail) just leave it NaN.
+        public List<float> NodeY = new List<float>();
 
-        public int AddNode(Vector2 p) { Nodes.Add(p); return Nodes.Count - 1; }
+        public int AddNode(Vector2 p) { Nodes.Add(p); NodeY.Add(float.NaN); return Nodes.Count - 1; }
+
+        public float GetNodeY(int i) => i >= 0 && i < NodeY.Count ? NodeY[i] : float.NaN;
+        public void SetNodeY(int i, float y) { if (i < 0) return; while (NodeY.Count <= i) NodeY.Add(float.NaN); NodeY[i] = y; }
 
         public void AddEdge(int a, int b)
         {
@@ -45,7 +52,7 @@ namespace NetworkDesigner.Terrain
             Edges.Add(new LineEdge(a, b));
         }
 
-        public void Clear() { Nodes.Clear(); Edges.Clear(); }
+        public void Clear() { Nodes.Clear(); Edges.Clear(); NodeY.Clear(); }
 
         // Remove a single edge by index, KEEPING both endpoint nodes — for chopping a gap mid-line
         // (split twice, then delete the middle edge to leave the two nodes for a bridge, etc.).
@@ -63,6 +70,7 @@ namespace NetworkDesigner.Terrain
             if (idx < 0 || idx >= Nodes.Count) return;
             Edges.RemoveAll(e => e.A == idx || e.B == idx);
             Nodes.RemoveAt(idx);
+            if (idx < NodeY.Count) NodeY.RemoveAt(idx);
             foreach (LineEdge e in Edges)
             {
                 if (e.A > idx) e.A--;
@@ -201,5 +209,6 @@ namespace NetworkDesigner.Terrain
     {
         public List<Vector2> Nodes;
         public List<LineEdge> Edges;
+        public List<float> NodeY;   // per-node design elevation (NaN = unset); parallel to Nodes
     }
 }

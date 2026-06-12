@@ -12,16 +12,17 @@ using System.Collections.Generic;
 using UnityEngine;
 using NetworkDesigner.Model;
 using NetworkDesigner.Geometry;
+using NetworkDesigner.Rendering;   // PipelineMaterials
 
 namespace NetworkDesigner.Roads
 {
     public static class RoadPlanBuilder
     {
         // Resolve `net` and sweep every road body, parented under a fresh "RoadPlanBuild" GO (returned).
-        // `ground(x,z)` gives the grade elevation at a node (pass the ORIGINAL source height so the road sits
-        // at the same grade the excavation cut to). `excavationDepth` sets the minimum slab thickness so the
-        // body fills the cut. Returns the root even when nothing builds (caller owns its lifetime).
-        public static GameObject Build(Network net, Func<float, float, float> ground, float excavationDepth, Transform parent)
+        // `vertexElev(vertexId)` gives the per-node DESIGN elevation (the same height Excavate graded/cut to,
+        // captured from the shaped surface) so the road sits in its cut. `excavationDepth` sets the minimum
+        // slab thickness so the body fills the cut. Returns the root even when nothing builds.
+        public static GameObject Build(Network net, Func<string, float> vertexElev, float excavationDepth, Transform parent)
         {
             var root = new GameObject("RoadPlanBuild");
             if (parent != null) root.transform.SetParent(parent, false);
@@ -56,9 +57,9 @@ namespace NetworkDesigner.Roads
 
                 SubCubic(p0, c1, c2, p3, tA, tB, out Vector2 a, out Vector2 ca, out Vector2 cb, out Vector2 b);
 
-                // Road surface rides the node-to-node grade line (same as the excavation); thickness fills the cut.
-                float yA = ground != null ? ground(p0.x, p0.y) : 0f;
-                float yB = ground != null ? ground(p3.x, p3.y) : 0f;
+                // Road surface rides the node-to-node DESIGN grade (same as the excavation); thickness fills the cut.
+                float yA = vertexElev != null ? vertexElev(road.EndA) : 0f;
+                float yB = vertexElev != null ? vertexElev(road.EndB) : 0f;
                 float hA = Mathf.Lerp(yA, yB, tA), hB = Mathf.Lerp(yA, yB, tB);
 
                 RoadCrossSection xs = RoadCrossSectionBuilder.FromProfile(road.Profile);
@@ -67,7 +68,24 @@ namespace NetworkDesigner.Roads
                 RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB);
                 built++;
             }
-            Debug.Log($"[Road] Build Plan: swept {built}/{net.Roads.Count} road bodies (setback-trimmed)"
+
+            // Intersection fill: extrude each resolved vertex's asphalt OUTLINE (setback edges + bezier
+            // fillets — the resolver's junction algo) into a flat pad at the node grade, Thickness deep, so
+            // it fills the cut and the gap the road setbacks left. Degenerate outlines (lone termini) skip.
+            int pads = 0;
+            if (resolved != null)
+                foreach (VertexGeometry vg in resolved)
+                {
+                    if (vg == null || vg.Outline == null || vg.Outline.Count < 2) continue;
+                    if (!vById.TryGetValue(vg.VertexId, out Vertex v)) continue;
+                    List<Vector2> ring = SampleOutlineRing(vg.Outline);
+                    if (ring.Count < 3) continue;
+                    float gy = vertexElev != null ? vertexElev(vg.VertexId) : 0f;
+                    BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId);
+                    pads++;
+                }
+
+            Debug.Log($"[Road] Build Plan: swept {built}/{net.Roads.Count} road bodies + {pads} intersection pads"
                       + (skipped > 0 ? $", {skipped} skipped (no profile / too short / fully set back)." : "."));
             return root;
         }
@@ -99,5 +117,74 @@ namespace NetworkDesigner.Roads
         }
 
         static class V { public static Vector2 L(Vector2 p, Vector2 q, float t) => p + (q - p) * t; }
+
+        // The vertex's closed asphalt outline sampled to a ring of XZ points. Each segment contributes its
+        // From (+ interior points for fillets); the next segment's From == this segment's To, so the ring
+        // closes without duplicates.
+        static List<Vector2> SampleOutlineRing(List<OutlineSegment> outline)
+        {
+            var pts = new List<Vector2>();
+            foreach (OutlineSegment s in outline)
+            {
+                if (s == null) continue;
+                switch (s.Kind)
+                {
+                    case SegmentKind.QuadraticBezier:
+                        for (int i = 0; i < 8; i++) pts.Add(GeometryResolver.SampleQuadratic(s.From, s.Control, s.To, i / 8f));
+                        break;
+                    case SegmentKind.CubicBezier:
+                        for (int i = 0; i < 10; i++) pts.Add(GeometryResolver.SampleCubic(s.From, s.Control, s.Control2, s.To, i / 10f));
+                        break;
+                    default:   // Line
+                        pts.Add(s.From);
+                        break;
+                }
+            }
+            return pts;
+        }
+
+        static readonly Color AsphaltColor = new Color(0.18f, 0.18f, 0.20f);
+
+        // Build the junction pad: a flat asphalt fan over the outline ring at gradeY, extruded `depth` down
+        // (rim wall + bottom fan) so it fills the excavated cut. SINGLE-sided with consistent winding (top up,
+        // bottom down, rim out) so RecalculateNormals lights it correctly — double-siding cancels the normals
+        // and renders the pad black. The ring is first oriented CW in (x,z) so the fixed windings face right.
+        static void BuildIntersectionPad(List<Vector2> ring, Vector2 center, float gradeY, float depth, Transform parent, string name)
+        {
+            int n = ring.Count;
+            double sa = 0.0;   // signed area in (x,z); >0 = CCW → reverse so the ring is CW
+            for (int i = 0; i < n; i++) { int j = (i + 1) % n; sa += (double)ring[i].x * ring[j].y - (double)ring[j].x * ring[i].y; }
+            if (sa > 0.0) ring.Reverse();
+
+            float botY = gradeY - Mathf.Max(0f, depth);
+            var verts = new List<Vector3>(2 * n + 2);
+            for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, gradeY, ring[i].y));   // 0..n-1   top ring
+            for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, botY, ring[i].y));      // n..2n-1  bottom ring
+            int ct = verts.Count; verts.Add(new Vector3(center.x, gradeY, center.y));            // 2n       top centre
+            int cb = verts.Count; verts.Add(new Vector3(center.x, botY, center.y));              // 2n+1     bottom centre
+
+            var tris = new List<int>(n * 12);
+            for (int i = 0; i < n; i++)
+            {
+                int j = (i + 1) % n;
+                tris.Add(ct); tris.Add(i); tris.Add(j);              // top fan (faces up)
+                tris.Add(cb); tris.Add(n + j); tris.Add(n + i);      // bottom fan (faces down)
+                tris.Add(i); tris.Add(n + i); tris.Add(n + j);       // rim wall (faces out)
+                tris.Add(i); tris.Add(n + j); tris.Add(j);
+            }
+
+            var mesh = new Mesh { name = "RoadXFill" };
+            if (verts.Count > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts);
+            mesh.SetTriangles(tris, 0);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+
+            var go = new GameObject(name);
+            if (parent != null) go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            go.AddComponent<MeshRenderer>().sharedMaterial = PipelineMaterials.CreateLitMatte(AsphaltColor, "RoadXFill");
+            go.AddComponent<MeshCollider>().sharedMesh = mesh;
+        }
     }
 }
