@@ -37,6 +37,7 @@ namespace NetworkDesigner.Terrain
         {
             WaterLevel = Mathf.Round(y);   // snap to whole metres (0 = sea level), for both the slider + React
             if (_water != null) { var p = _water.transform.position; p.y = WaterLevel; _water.transform.position = p; }
+            if (ChunkWorld.Active) ChunkWorld.GroundSeaLevel = WaterLevel;   // keep the beach sand banded at the water
         }
 
         public static void SetWaterColor(Color c)

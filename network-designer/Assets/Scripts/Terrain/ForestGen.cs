@@ -149,6 +149,20 @@ namespace NetworkDesigner.Terrain
         }
 
         public static float MaxRenderDistance = 2200f;  // trees in cells past this (m) aren't drawn
+        // Far LODs are flat cross-card impostors that catch full light (no self-shadowing) and read much
+        // BRIGHTER than the self-shadowed near mesh — a jarring pop as you approach. Tint each LOD toward
+        // this factor (1 at LOD0 → FarLodDarken at the last) so the brightness matches across the transition.
+        public static float FarLodDarken = 0.6f;
+        static MaterialPropertyBlock[] _lodMpb;
+        static MaterialPropertyBlock LodTint(int li, int lodN)
+        {
+            if (li <= 0 || FarLodDarken >= 0.999f) return null;
+            if (_lodMpb == null) { _lodMpb = new MaterialPropertyBlock[MaxLods]; for (int i = 0; i < MaxLods; i++) _lodMpb[i] = new MaterialPropertyBlock(); }
+            float t = lodN > 1 ? li / (float)(lodN - 1) : 1f;
+            float d = Mathf.Lerp(1f, Mathf.Clamp01(FarLodDarken), t);
+            _lodMpb[li].SetColor("_BaseColor", new Color(d, d, d, 1f));
+            return _lodMpb[li];
+        }
 
         struct LodLevel
         {
@@ -367,6 +381,7 @@ namespace NetworkDesigner.Terrain
                     int total = acc.Count;
                     if (total == 0) continue;
                     LodLevel lod = sp.lods[li];
+                    MaterialPropertyBlock mpb = LodTint(li, lodN);   // darken far cross-card LODs to match the near mesh
                     int subCount = Mathf.Max(1, lod.mesh.subMeshCount);
                     for (int s = 0; s < subCount; s++)
                     {
@@ -375,9 +390,10 @@ namespace NetworkDesigner.Terrain
                         if (mat == null) continue;
                         var rp = new RenderParams(mat)
                         {
-                            shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off,
-                            receiveShadows = false,
-                            worldBounds = bigBounds   // already CPU-culled; keep Unity from re-culling the batch
+                            shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On,   // cast onto terrain
+                            receiveShadows = true,                                            // and darken in shadow like the terrain
+                            worldBounds = bigBounds,  // already CPU-culled; keep Unity from re-culling the batch
+                            matProps = mpb
                         };
                         for (int off = 0; off < total; off += 1023)
                             Graphics.RenderMeshInstanced(rp, lod.mesh, s, acc, Mathf.Min(1023, total - off), off);

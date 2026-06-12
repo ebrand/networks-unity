@@ -123,6 +123,11 @@ network-designer/Assets/Mountain Forest/
 network-designer/Assets/Mountain Forest.meta
 network-designer/Assets/Resources/Trees/Conifer*.prefab*
 network-designer/Assets/Resources/Trees/Juniper*.prefab*
+# Tree/foliage prefabs copied from the gitignored NatureManufacture / Mountain Forest packs into Resources.
+network-designer/Assets/Resources/Trees/Beech Trees/
+network-designer/Assets/Resources/Trees/Beech Trees.meta
+network-designer/Assets/Resources/Trees/Trees/
+network-designer/Assets/Resources/Trees/Trees.meta
 
 # Purchased Unity ground-texture pack (NatureManufacture Landscape Ground Pack) — re-importable from the
 # Asset Store, kept out of git.

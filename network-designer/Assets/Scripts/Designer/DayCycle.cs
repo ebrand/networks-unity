@@ -72,6 +72,10 @@ namespace NetworkDesigner.Designer
             if (ManageSky) UpdateSky(elev); else RestoreSky();
         }
 
+        // Environment-palette ambient multiplier — scales the sky ambient so the bright daytime fill can be
+        // tamed (high ambient washes out shadows/form on trees + ground). 1 = default.
+        public static float AmbientScale = 1f;
+
         static void UpdateSky(float elev)
         {
             EnsureSky();
@@ -82,7 +86,7 @@ namespace NetworkDesigner.Designer
             _sky.SetFloat("_Exposure", Mathf.Lerp(0.12f, 1.3f, day));      // dark night → bright day
             _sky.SetFloat("_AtmosphereThickness", Mathf.Lerp(0.6f, 1.0f, day));
             RenderSettings.ambientMode = AmbientMode.Skybox;
-            RenderSettings.ambientIntensity = Mathf.Lerp(0.22f, 1f, day);
+            RenderSettings.ambientIntensity = Mathf.Lerp(0.22f, 1f, day) * Mathf.Max(0f, AmbientScale);
             // GI environment is the expensive bit — refresh on manual edits, but throttle auto-advance.
             if (!AutoAdvance || Time.unscaledTime - _lastGi > 0.4f)
             { DynamicGI.UpdateEnvironment(); _lastGi = Time.unscaledTime; }

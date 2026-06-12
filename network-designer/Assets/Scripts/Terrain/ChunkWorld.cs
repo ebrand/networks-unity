@@ -295,6 +295,15 @@ namespace NetworkDesigner.Terrain
             if (grassN != null) m.SetTexture("_GrassNormal", grassN);
             if (midN != null) m.SetTexture("_MidNormal", midN);
             if (gravelN != null) m.SetTexture("_GravelNormal", gravelN);
+            // Optional high-frequency detail-overlay texture (breaks up the base tile up close).
+            var detail = Resources.Load<Texture2D>("TerrainGround/detail");
+            if (detail != null) m.SetTexture("_DetailTex", detail);
+            // Sand (4th, height-based) layer + the water surface it bands above.
+            var sand = Resources.Load<Texture2D>("TerrainGround/sand");
+            var sandN = Resources.Load<Texture2D>("TerrainGround/sand_normal");
+            if (sand != null) m.SetTexture("_SandTex", sand);
+            if (sandN != null) m.SetTexture("_SandNormal", sandN);
+            if (m.HasProperty("_SeaLevel")) m.SetFloat("_SeaLevel", ChunkOverlays.WaterLevel);
             return m;
         }
 
@@ -331,6 +340,8 @@ namespace NetworkDesigner.Terrain
         }
         public static float GroundDirtPatches { get => GroundGet("_DirtPatchAmount", 0.6f); set => GroundSet("_DirtPatchAmount", Mathf.Clamp01(value)); }
         public static float GroundNormalStrength { get => GroundGet("_NormalStrength", 1f); set => GroundSet("_NormalStrength", value); }
+        // Master texture toggle — off = the slope/noise TINT blend only (no texture/normal/stochastic samples).
+        public static bool GroundTextures { get => GroundGet("_UseTextures", 1f) > 0.5f; set => GroundSet("_UseTextures", value ? 1f : 0f); }
         public static bool GroundStochastic { get => GroundGet("_Stochastic", 1f) > 0.5f; set => GroundSet("_Stochastic", value ? 1f : 0f); }
         public static float GroundMacroAmount { get => GroundGet("_MacroAmount", 0.28f); set => GroundSet("_MacroAmount", Mathf.Clamp(value, 0f, 0.8f)); }
         public static float GroundMacroSize   // metres per macro-variation cycle
@@ -338,6 +349,15 @@ namespace NetworkDesigner.Terrain
             get { float s = GroundGet("_MacroScale", 0.004f); return s > 1e-6f ? 1f / s : 250f; }
             set { GroundSet("_MacroScale", value > 1f ? 1f / value : 0.004f); }
         }
+        public static float GroundDetailStrength { get => GroundGet("_DetailStrength", 0.5f); set => GroundSet("_DetailStrength", Mathf.Clamp01(value)); }
+        public static float GroundSeaLevel { get => GroundGet("_SeaLevel", 0f); set => GroundSet("_SeaLevel", value); }
+        public static float GroundSandHeight { get => GroundGet("_SandHeight", 3f); set => GroundSet("_SandHeight", Mathf.Max(0f, value)); }
+        public static float GroundDetailSize   // metres per detail-overlay repeat
+        {
+            get { float s = GroundGet("_DetailScale", 0.6f); return s > 1e-4f ? 1f / s : 1.7f; }
+            set { GroundSet("_DetailScale", value > 0.01f ? 1f / value : 0.6f); }
+        }
+        public static float GroundBrightness { get => GroundGet("_GroundBrightness", 0.8f); set => GroundSet("_GroundBrightness", Mathf.Clamp(value, 0f, 2f)); }
 
         static void ApplyGridMaterial()
         {

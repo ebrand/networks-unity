@@ -17,26 +17,39 @@ Shader "NetworkDesigner/TerrainGround"
 {
     Properties
     {
-        [MainColor] _GrassTint ("Grass Tint", Color) = (0.34, 0.50, 0.26, 1)
+        [MainColor] _GrassTint ("Grass Tint", Color) = (0.40, 0.45, 0.33, 1)
         _GrassTex   ("Grass (triplanar)", 2D) = "white" {}
         _GrassScale ("Grass Scale (1/world units)", Float) = 0.15
+        _GroundBrightness ("Ground Brightness", Range(0, 2)) = 0.8
 
         _MidTint  ("Grass+Dirt Tint", Color) = (0.42, 0.40, 0.24, 1)
         _MidTex   ("Grass+Dirt (triplanar)", 2D) = "white" {}
         _MidScale ("Grass+Dirt Scale", Float) = 0.15
 
-        _GravelTint  ("Dirt+Gravel Tint", Color) = (0.40, 0.36, 0.31, 1)
-        _GravelTex   ("Dirt+Gravel (triplanar)", 2D) = "white" {}
-        _GravelScale ("Dirt+Gravel Scale", Float) = 0.18
+        _GravelTint  ("Dirt+Gravel/Rock Tint", Color) = (0.40, 0.36, 0.31, 1)
+        _GravelTex   ("Dirt+Gravel/Rock (triplanar)", 2D) = "white" {}
+        _GravelScale ("Dirt+Gravel/Rock Scale", Float) = 0.18
+
+        _SandTint    ("Sand Tint", Color) = (0.76, 0.71, 0.52, 1)
+        _SandTex     ("Sand (triplanar)", 2D) = "white" {}
+        _SandScale   ("Sand Scale", Float) = 0.15
+        [Normal] _SandNormal ("Sand Normal", 2D) = "bump" {}
+        _SeaLevel    ("Sea Level (world Y)", Float) = 0
+        _SandHeight  ("Sand Band Height (m)", Float) = 3
 
         [Normal] _GrassNormal  ("Grass Normal", 2D) = "bump" {}
         [Normal] _MidNormal    ("Grass+Dirt Normal", 2D) = "bump" {}
         [Normal] _GravelNormal ("Dirt+Gravel Normal", 2D) = "bump" {}
         _NormalStrength ("Normal Strength", Range(0, 2)) = 1
 
+        [Toggle] _UseTextures ("Use Textures (off = tint blend)", Float) = 1
         [Toggle] _Stochastic ("Stochastic Tiling (anti-repeat)", Float) = 1
         _MacroScale  ("Macro Variation Scale (1/m)", Float) = 0.004
         _MacroAmount ("Macro Variation Amount", Range(0, 0.8)) = 0.28
+
+        _DetailTex      ("Detail (triplanar, overlay)", 2D) = "gray" {}
+        _DetailScale    ("Detail Scale (1/m)", Float) = 0.6
+        _DetailStrength ("Detail Strength", Range(0, 1)) = 0.5
 
         _NoiseScale ("Blend Noise Scale (1/world units)", Float) = 0.01
         _SlopeNoise ("Slope Threshold Jitter (deg)", Range(0, 40)) = 14
@@ -88,11 +101,19 @@ Shader "NetworkDesigner/TerrainGround"
                 float4 _GrassTint;   float4 _GrassTex_ST;   float _GrassScale;
                 float4 _MidTint;     float4 _MidTex_ST;     float _MidScale;
                 float4 _GravelTint;  float4 _GravelTex_ST;  float _GravelScale;
+                float4 _SandTint;    float4 _SandTex_ST;    float _SandScale;  float4 _SandNormal_ST;
+                float  _SeaLevel;
+                float  _SandHeight;
                 float4 _GrassNormal_ST; float4 _MidNormal_ST; float4 _GravelNormal_ST;
                 float  _NormalStrength;
+                float  _UseTextures;
                 float  _Stochastic;
                 float  _MacroScale;
                 float  _MacroAmount;
+                float4 _DetailTex_ST;
+                float  _DetailScale;
+                float  _DetailStrength;
+                float  _GroundBrightness;
                 float  _NoiseScale;
                 float  _SlopeNoise;
                 float  _MidSlopeStart;
@@ -117,6 +138,9 @@ Shader "NetworkDesigner/TerrainGround"
             TEXTURE2D(_GrassNormal);  SAMPLER(sampler_GrassNormal);
             TEXTURE2D(_MidNormal);    SAMPLER(sampler_MidNormal);
             TEXTURE2D(_GravelNormal); SAMPLER(sampler_GravelNormal);
+            TEXTURE2D(_SandTex);      SAMPLER(sampler_SandTex);
+            TEXTURE2D(_SandNormal);   SAMPLER(sampler_SandNormal);
+            TEXTURE2D(_DetailTex);    SAMPLER(sampler_DetailTex);
 
             struct Attributes { float4 positionOS : POSITION; float3 normalOS : NORMAL; };
             struct Varyings
@@ -182,6 +206,14 @@ Shader "NetworkDesigner/TerrainGround"
                 float3 cz = AxisSample(TEXTURE2D_ARGS(tex, smp), wp.xy * sc);
                 return cx * bw.x + cy * bw.y + cz * bw.z;
             }
+            // Plain (non-stochastic) triplanar — for the cheap high-frequency detail overlay.
+            float3 TriPlain(TEXTURE2D_PARAM(tex, smp), float3 wp, float3 bw, float sc)
+            {
+                float3 cx = SAMPLE_TEXTURE2D(tex, smp, wp.zy * sc).rgb;
+                float3 cy = SAMPLE_TEXTURE2D(tex, smp, wp.xz * sc).rgb;
+                float3 cz = SAMPLE_TEXTURE2D(tex, smp, wp.xy * sc).rgb;
+                return cx * bw.x + cy * bw.y + cz * bw.z;
+            }
 
             // Triplanar tangent-space normal map → world normal (Ben Golus "whiteout" blend). `gn` = the
             // geometric world normal; returns a perturbed world normal. Flat ("bump") default → returns gn.
@@ -229,11 +261,16 @@ Shader "NetworkDesigner/TerrainGround"
                 float noise = FBM(wp.xz * _NoiseScale);        // 0..1
                 float jit = (noise - 0.5) * 2.0 * _SlopeNoise;  // ±_SlopeNoise degrees
 
-                // Per-layer triplanar albedo (texture × tint).
+                // Per-layer albedo (texture × tint) — or just the tint when textures are toggled off.
                 float3 bw = pow(abs(nrm), 4.0); bw /= max(bw.x + bw.y + bw.z, 1e-4);
-                float3 grass  = TriSample(TEXTURE2D_ARGS(_GrassTex, sampler_GrassTex),   wp, bw, _GrassScale)  * _GrassTint.rgb;
-                float3 mid    = TriSample(TEXTURE2D_ARGS(_MidTex, sampler_MidTex),       wp, bw, _MidScale)    * _MidTint.rgb;
-                float3 gravel = TriSample(TEXTURE2D_ARGS(_GravelTex, sampler_GravelTex), wp, bw, _GravelScale) * _GravelTint.rgb;
+                float3 grass, mid, gravel;
+                if (_UseTextures > 0.5)
+                {
+                    grass  = TriSample(TEXTURE2D_ARGS(_GrassTex, sampler_GrassTex),   wp, bw, _GrassScale)  * _GrassTint.rgb;
+                    mid    = TriSample(TEXTURE2D_ARGS(_MidTex, sampler_MidTex),       wp, bw, _MidScale)    * _MidTint.rgb;
+                    gravel = TriSample(TEXTURE2D_ARGS(_GravelTex, sampler_GravelTex), wp, bw, _GravelScale) * _GravelTint.rgb;
+                }
+                else { grass = _GrassTint.rgb; mid = _MidTint.rgb; gravel = _GravelTint.rgb; }
 
                 // Blend weights: grass base → grass+dirt by gentle slope + noise patches → gravel by steep slope.
                 float midT    = smoothstep(_MidSlopeStart,    max(_MidSlopeStart + 0.001, _MidSlopeFull),       ang + jit);
@@ -249,11 +286,38 @@ Shader "NetworkDesigner/TerrainGround"
                 float macro = FBM(wp.xz * _MacroScale);
                 albedo *= lerp(1.0 - _MacroAmount, 1.0 + _MacroAmount, macro);
 
-                // Per-layer triplanar normals, blended by the same slope/noise weights → perturbed world normal.
-                float3 nGrass  = TriNormal(TEXTURE2D_ARGS(_GrassNormal, sampler_GrassNormal),   wp, nrm, bw, _GrassScale,  _NormalStrength);
-                float3 nMid    = TriNormal(TEXTURE2D_ARGS(_MidNormal, sampler_MidNormal),       wp, nrm, bw, _MidScale,    _NormalStrength);
-                float3 nGravel = TriNormal(TEXTURE2D_ARGS(_GravelNormal, sampler_GravelNormal), wp, nrm, bw, _GravelScale, _NormalStrength);
-                float3 N = normalize(lerp(lerp(nGrass, nMid, midT), nGravel, saturate(gravelT)));
+                // Detail overlay: a high-frequency texture modulates the albedo (overlay, gray = neutral) so the
+                // base tile breaks up at close range. Gray default → no effect until a detail map is assigned.
+                if (_UseTextures > 0.5 && _DetailStrength > 0.001)
+                {
+                    float3 det = TriPlain(TEXTURE2D_ARGS(_DetailTex, sampler_DetailTex), wp, bw, _DetailScale);
+                    albedo *= lerp(float3(1, 1, 1), det * 2.0, _DetailStrength);
+                }
+
+                // Per-layer triplanar normals, blended by the same slope/noise weights → perturbed world normal
+                // (skipped, geometric normal, when textures are off).
+                float3 N = nrm;
+                if (_UseTextures > 0.5)
+                {
+                    float3 nGrass  = TriNormal(TEXTURE2D_ARGS(_GrassNormal, sampler_GrassNormal),   wp, nrm, bw, _GrassScale,  _NormalStrength);
+                    float3 nMid    = TriNormal(TEXTURE2D_ARGS(_MidNormal, sampler_MidNormal),       wp, nrm, bw, _MidScale,    _NormalStrength);
+                    float3 nGravel = TriNormal(TEXTURE2D_ARGS(_GravelNormal, sampler_GravelNormal), wp, nrm, bw, _GravelScale, _NormalStrength);
+                    N = normalize(lerp(lerp(nGrass, nMid, midT), nGravel, saturate(gravelT)));
+                }
+
+                // Sand: 4th layer blended by HEIGHT near the water (low + flat = beach), over the slope layers.
+                // _SeaLevel = water surface Y; sand fades out _SandHeight m above it, and off slopes steeper than ~30°.
+                float sandT = saturate(1.0 - (wp.y - _SeaLevel) / max(0.3, _SandHeight)) * saturate(1.0 - ang / 30.0);
+                if (sandT > 0.001)
+                {
+                    float3 sandCol = (_UseTextures > 0.5)
+                        ? TriSample(TEXTURE2D_ARGS(_SandTex, sampler_SandTex), wp, bw, _SandScale) * _SandTint.rgb : _SandTint.rgb;
+                    albedo = lerp(albedo, sandCol, sandT);
+                    if (_UseTextures > 0.5)
+                        N = normalize(lerp(N, TriNormal(TEXTURE2D_ARGS(_SandNormal, sampler_SandNormal), wp, nrm, bw, _SandScale, _NormalStrength), sandT));
+                }
+
+                albedo *= _GroundBrightness;   // overall ground tone — pull down so it sits under the tree canopy
 
                 if (_GridStrength > 0.0)
                 {

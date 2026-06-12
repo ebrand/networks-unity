@@ -46,6 +46,8 @@ namespace NetworkDesigner.UI
                 v => { DayCycle.NorthYaw = v; DayCycle.Apply(); }, 0f, 360f, "0"));
             body.Add(SliderRow("Brightness", () => DayCycle.Intensity,
                 v => { DayCycle.Intensity = v; DayCycle.Apply(); }, 0f, 3f, "0.00"));
+            body.Add(SliderRow("Ambient", () => DayCycle.AmbientScale,
+                v => { DayCycle.AmbientScale = v; DayCycle.Apply(); }, 0f, 1.5f, "0.00"));
             body.Add(ToggleRow("Auto-advance", () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v));
             body.Add(SliderRow("Day length (min)", () => DayCycle.DayLengthMinutes,
                 v => DayCycle.DayLengthMinutes = v, 0.5f, 30f, "0.0"));
@@ -76,14 +78,22 @@ namespace NetworkDesigner.UI
             // Ground texture blend (TerrainGround shader). Live via the shared chunk material — no rebuild.
             body.Add(Divider());
             body.Add(SectionLabel("GROUND TEXTURE"));
+            body.Add(ToggleRow("Textures", () => ChunkWorld.GroundTextures,
+                v => ChunkWorld.GroundTextures = v));
             body.Add(ToggleRow("Anti-repeat (stochastic)", () => ChunkWorld.GroundStochastic,
                 v => ChunkWorld.GroundStochastic = v));
+            body.Add(SliderRow("Ground brightness", () => ChunkWorld.GroundBrightness,
+                v => ChunkWorld.GroundBrightness = v, 0f, 1.5f, "0.00"));
             body.Add(SliderRow("Macro variation", () => ChunkWorld.GroundMacroAmount,
                 v => ChunkWorld.GroundMacroAmount = v, 0f, 0.8f, "0.00"));
             body.Add(SliderRow("Macro size (m)", () => ChunkWorld.GroundMacroSize,
                 v => ChunkWorld.GroundMacroSize = v, 50f, 800f, "0"));
             body.Add(SliderRow("Texture size (m)", () => ChunkWorld.GroundTexSize,
                 v => ChunkWorld.GroundTexSize = v, 2f, 80f, "0.0"));
+            body.Add(SliderRow("Detail strength", () => ChunkWorld.GroundDetailStrength,
+                v => ChunkWorld.GroundDetailStrength = v, 0f, 1f, "0.00"));
+            body.Add(SliderRow("Detail size (m)", () => ChunkWorld.GroundDetailSize,
+                v => ChunkWorld.GroundDetailSize = v, 0.3f, 8f, "0.0"));
             body.Add(SliderRow("Patch size (m)", () => ChunkWorld.GroundNoiseSize,
                 v => ChunkWorld.GroundNoiseSize = v, 20f, 600f, "0"));
             body.Add(SliderRow("Dirt patches", () => ChunkWorld.GroundDirtPatches,
@@ -92,6 +102,8 @@ namespace NetworkDesigner.UI
                 v => ChunkWorld.GroundDirtSlope = v, 0f, 60f, "0"));
             body.Add(SliderRow("Gravel slope (deg)", () => ChunkWorld.GroundGravelSlope,
                 v => ChunkWorld.GroundGravelSlope = v, 0f, 80f, "0"));
+            body.Add(SliderRow("Beach sand (m above water)", () => ChunkWorld.GroundSandHeight,
+                v => ChunkWorld.GroundSandHeight = v, 0f, 15f, "0.0"));
             body.Add(SliderRow("Seam jitter (deg)", () => ChunkWorld.GroundSlopeJitter,
                 v => ChunkWorld.GroundSlopeJitter = v, 0f, 40f, "0"));
             body.Add(SliderRow("Normal strength", () => ChunkWorld.GroundNormalStrength,
