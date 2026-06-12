@@ -1,0 +1,270 @@
+{
+  "version": 1,
+  "configs": [
+    {
+      "id": "1x-c-s",
+      "name": "1x-c-s",
+      "category": "One-Way",
+      "road": {
+        "id": "1x-c-s",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": true,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "new-road-profile",
+      "name": "new-road-profile",
+      "category": "One-Way",
+      "road": {
+        "id": "new-road-profile",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x-c-2",
+      "name": "2x-c-2",
+      "category": "One-Way",
+      "road": {
+        "id": "2x-c-2",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": true,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x1-c-s",
+      "name": "2x1-c-s",
+      "category": "Small",
+      "road": {
+        "id": "2x1-c-s",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2.0
+        },
+        "shoulderBA": {
+          "width": 2.0
+        },
+        "curbs": true,
+        "sidewalks": true,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x1-c-sh",
+      "name": "2x1-c-sh",
+      "category": "Small",
+      "road": {
+        "id": "2x1-c-sh",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2.0
+        },
+        "shoulderBA": {
+          "width": 2.0
+        },
+        "curbs": true,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x-c-sh",
+      "name": "2x-c-sh",
+      "category": "One-Way",
+      "road": {
+        "id": "2x-c-sh",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": true,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x1-c-si",
+      "name": "2x1-c-si",
+      "category": "Small",
+      "road": {
+        "id": "2x1-c-si",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2.0
+        },
+        "shoulderBA": {
+          "width": 2.0
+        },
+        "curbs": true,
+        "sidewalks": true,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    }
+  ]
+}
