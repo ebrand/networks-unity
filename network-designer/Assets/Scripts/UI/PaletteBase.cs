@@ -634,7 +634,7 @@ namespace NetworkDesigner.UI
 
             float modalW = Mathf.Max(640f, Screen.width - 80f);
             float modalH = Mathf.Max(460f, Screen.height - 80f);
-            var modal = BeginModal($"Add map areas — “{world}”", modalW, modalH, out System.Action close, closeOnBackdropClick: false);
+            var modal = BeginModal($"Add map areas : “{world}”", modalW, modalH, out System.Action close, closeOnBackdropClick: false);
             if (modal == null) return;
 
             float leftW = 230f;
