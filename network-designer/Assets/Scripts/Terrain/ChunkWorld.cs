@@ -824,6 +824,11 @@ namespace NetworkDesigner.Terrain
             return Mathf.Lerp(Mathf.Lerp(h00, h10, tx), Mathf.Lerp(h01, h11, tx), tz);
         }
 
+        // Original (un-edited) source ground height at a world XZ — the DEM/procedural surface BEFORE any
+        // sculpt overlay. Use this (not SampleHeight) when an edit must be idempotent w.r.t. its own prior
+        // cuts (e.g. road excavation grading off the node ground, so re-running doesn't dig progressively).
+        public static float SampleSourceHeight(float x, float z) => SourceAt(ChunkOf(x, z), x, z);
+
         public static float SampleSlopeDegrees(float x, float z)
         {
             const float e = 2f;

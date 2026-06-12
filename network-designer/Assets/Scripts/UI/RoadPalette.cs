@@ -78,13 +78,18 @@ namespace NetworkDesigner.UI
 
             // ---- actions ----
             var acts = HBox(); acts.style.marginTop = 8; acts.style.marginBottom = 10;
-            var exc = MakeButton("Excavate", () => { }); exc.SetEnabled(false); exc.style.flexGrow = 1; exc.style.marginRight = 6;
-            exc.tooltip = "Cut the roadbed — coming next";
-            var bop = MakeButton("Build on Plan", () => { }); bop.SetEnabled(false); bop.style.flexGrow = 1; bop.style.marginRight = 6;
+            var exc = MakeButton("Excavate", () => Designer.ExcavateRoadCorridor()); exc.style.flexGrow = 1; exc.style.marginRight = 6;
+            exc.tooltip = "Smooth + cut the roadbed into the terrain along the plan";
+            var bop = MakeButton("Build Plan", () => { }); bop.SetEnabled(false); bop.style.flexGrow = 1; bop.style.marginRight = 6;
             bop.tooltip = "Sweep the 3D road along the plan — coming next";
             var clr = MakeButton("Clear Plan", () => Designer.ClearRoadPlan()); clr.style.flexGrow = 1;
             acts.Add(exc); acts.Add(bop); acts.Add(clr);
             body.Add(acts);
+
+            // ---- excavation tuning ----
+            body.Add(NumberRow("Excavate depth", "m",
+                () => Designer.RoadPlanLayer.ExcavationDepth,
+                v => Designer.RoadPlanLayer.ExcavationDepth = v, 0f, 5f, "0.0"));
 
             // ---- toggles ----
             body.Add(ToggleRow("Show crosswalks", () => Designer.RoadPlanLayer.ShowCrosswalks,

@@ -2071,6 +2071,52 @@ namespace NetworkDesigner.Terrain
             Debug.Log($"[Grade] Flattened {targets.Count} corridor samples to the rail grade line.");
         }
 
+        // Cut a smoothed, slightly-sunken roadbed along the road plan: each segment is flattened to its
+        // own smoothed terrain-follow elevation (dropped ExcavationDepth below ground) across its profile
+        // footprint, feathering out beyond. Routes through the chunk overlay or the DEM backend like rail.
+        public void ExcavateRoadCorridor()
+        {
+            var beds = new List<(List<Vector3> pts, float flatHalf)>();
+            // Grade off the ORIGINAL (un-edited) ground so re-excavating cuts to the same fixed bed — idempotent.
+            // Chunk world has a source sampler; DEM-direct falls back to the current surface (re-cuts deepen).
+            System.Func<float, float, float> groundAt = ChunkWorld.Active
+                ? (System.Func<float, float, float>)ChunkWorld.SampleSourceHeight
+                : (x, z) => Surf.SampleHeight(x, z);
+            RoadPlanLayer.CollectExcavationBeds(Surf, beds, groundAt);
+            if (beds.Count == 0) { Debug.LogWarning("[Road] No road plan to excavate — draw a corridor first (;)."); return; }
+            float feather = Mathf.Max(0.1f, RoadPlanLayer.CutFeather);
+
+            if (ChunkWorld.Active)
+            {
+                int n = 0;
+                foreach (var b in beds)
+                {
+                    float r = b.flatHalf + feather;               // flat plateau = the road footprint, feather beyond
+                    ChunkWorld.GradeCorridor(b.pts, r, b.flatHalf / r);
+                    n += b.pts.Count;
+                }
+                RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+                ConformScatterAndLines();   // re-settle scatter/fences onto the carved bed
+                _dirtySince = Time.realtimeSinceStartup;
+                Debug.Log($"[Road] Excavated {beds.Count} road segments ({n} samples, chunk world).");
+                return;
+            }
+
+            if (!DemTerrainWorld.HasWorld) { Debug.LogWarning("[Road] Excavation needs the chunk or DEM world."); return; }
+            int m = 0;
+            foreach (var b in beds)
+            {
+                float r = b.flatHalf + feather; float innerFrac = b.flatHalf / r;
+                foreach (Vector3 p in b.pts) { DemTerrainWorld.FlattenStamp(p, r, innerFrac, p.y); m++; }
+            }
+            DemTerrainWorld.StitchAllSeams();
+            TreeLayer.ConformToSurface(Surf); RockLayer.ConformToSurface(Surf);
+            FenceLayer.Rebuild(Surf); PowerLineLayer.Rebuild(Surf);
+            RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[Road] Excavated {beds.Count} road segments ({m} samples) into the DEM bed.");
+        }
+
         // Box-blur the carved cells (CutSmoothPasses) to round the coarse-grid wall
         // steps, writing ONLY affected cells (untouched terrain is read but never
         // modified, so the cut blends into its surroundings at the edge). The flat

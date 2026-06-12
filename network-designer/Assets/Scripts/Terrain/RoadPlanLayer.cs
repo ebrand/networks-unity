@@ -51,6 +51,13 @@ namespace NetworkDesigner.Terrain
         public float Lift = 0.2f;
         [Tooltip("Metres between the cross-ties drawn across the corridor.")]
         public float TieSpacing = 8f;
+        // ── excavation: cut a smoothed, slightly-sunken roadbed along the plan ──
+        [Tooltip("Excavate the roadbed this far (m) below the node-to-node grade line — a consistent flat-bottomed corridor cut.")]
+        public float ExcavationDepth = 0.75f;
+        [Tooltip("Metres between graded-bed samples along the corridor when excavating.")]
+        public float GradeSampleStep = 2f;
+        [Tooltip("Width (m) of the feathered batter BEYOND the corridor edge. 0 = vertical walls at the corridor edge (the cut is exactly the corridor width).")]
+        public float CutFeather = 0f;
         public Color PlanColor = new Color(1f, 0.55f, 0.12f, 0.95f);   // amber-orange (rail plan is yellow)
         // Guide/snap controls — shared by all plan tools via PlanGuides (tune in the Guides palette).
         public float NodePickRadius { get => PlanGuides.NodePickRadius; set => PlanGuides.NodePickRadius = value; }
@@ -574,6 +581,40 @@ namespace NetworkDesigner.Terrain
             if (along <= 0.1f) { offAxis = true; return false; }                   // behind the tail → suppress
             snapped = tail + best * along;
             return true;
+        }
+
+        // ---- excavation: per-edge smoothed, sunken roadbed targets ----
+
+        // One bed per edge: the centreline sampled as (X, bedY, Z) targets — bedY = the NODE-TO-NODE grade
+        // line (straight in elevation from node A's ground to node B's ground) dropped ExcavationDepth below
+        // — plus that edge's flat half-width (its profile footprint). Both edges at a shared node anchor to
+        // that node's ground height, so adjacent segments meet flush. The caller carves each bed flat to bedY.
+        // `groundAt` supplies the node elevations; pass the ORIGINAL/source height (not the already-cut
+        // surface) so re-excavating grades off the same ground and the cut is idempotent.
+        public void CollectExcavationBeds(ITerrainSurface field, List<(List<Vector3> pts, float flatHalf)> outBeds,
+                                          System.Func<float, float, float> groundAt = null)
+        {
+            if (Graph == null || outBeds == null) return;
+            System.Func<float, float, float> G = groundAt ?? ((x, z) => field != null ? field.SampleHeight(x, z) : 0f);
+            float s = Mathf.Max(1f, GradeSampleStep);
+            float depth = Mathf.Max(0f, ExcavationDepth);
+            foreach (LineEdge e in Graph.Edges)
+            {
+                EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+                float yA = G(p0.x, p0.y);
+                float yB = G(p3.x, p3.y);
+                float chord = Vector2.Distance(p0, p3);
+                int n = Mathf.Max(2, Mathf.CeilToInt(chord / s));
+                var pts = new List<Vector3>(n + 1);
+                for (int i = 0; i <= n; i++)
+                {
+                    float u = i / (float)n;
+                    Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
+                    pts.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, u) - depth, xz.y));
+                }
+                float flatHalf = Mathf.Max(1f, EdgeWidth(e) * 0.5f);
+                outBeds.Add((pts, flatHalf));
+            }
         }
 
         // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) + node pucks ----

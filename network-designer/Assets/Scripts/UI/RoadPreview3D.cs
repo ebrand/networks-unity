@@ -125,7 +125,7 @@ namespace NetworkDesigner.UI
         static RoadCrossSection BuildXS(RoadProfile p)
         {
             var xs = new RoadCrossSection();
-            if (p.Elevated) xs.Thickness = 0.6f;   // deck slab
+            if (p.Elevated) xs.Thickness = 1f;   // 1 m elevated road bed (deck slab); supports/haunch/trestle run every 100 m (path-level)
             RoadSurface edge = (p.Sidewalks && !p.Elevated) ? RoadSurface.Sidewalk : RoadSurface.Shoulder;
             float shBA = p.ShoulderBA != null ? p.ShoulderBA.Width : 0f;
             float shAB = p.ShoulderAB != null ? p.ShoulderAB.Width : 0f;
