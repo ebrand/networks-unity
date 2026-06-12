@@ -182,7 +182,7 @@ namespace NetworkDesigner.Terrain
             try { if (!string.IsNullOrEmpty(_editDir)) Directory.CreateDirectory(_editDir); } catch { }
             LoadExclusions();   // restore this map's trimmed-chunk set
             _root = new GameObject(RootName);
-            if (_mat == null) _mat = NetworkDesigner.PipelineMaterials.CreateLitMatte(Color.white, "ChunkGround");
+            if (_mat == null) _mat = GroundMaterial();
             ApplyGridMaterial();
             _center = new Vector2Int(int.MinValue, int.MinValue);
             _lastLodCenter = new Vector2Int(int.MinValue, int.MinValue);
@@ -273,9 +273,78 @@ namespace NetworkDesigner.Terrain
         }
 
         // The shared chunk material is white × the grid texture when ShowGrid, else flat green.
+        // The realistic ground material: triplanar grass / grass-dirt / dirt-gravel blended by slope + noise
+        // (NetworkDesigner/TerrainGround). Optional textures load from Resources/TerrainGround/{grass,
+        // grass_dirt,gravel}; missing ones just leave the layer as its tint. Falls back to a flat green
+        // lit material if the shader isn't in the project.
+        static Material GroundMaterial()
+        {
+            Shader sh = Shader.Find("NetworkDesigner/TerrainGround");
+            if (sh == null) return NetworkDesigner.PipelineMaterials.CreateLitMatte(new Color(0.34f, 0.5f, 0.26f), "ChunkGround");
+            var m = new Material(sh) { name = "ChunkGround" };
+            var grass = Resources.Load<Texture2D>("TerrainGround/grass");
+            var mid = Resources.Load<Texture2D>("TerrainGround/grass_dirt");
+            var gravel = Resources.Load<Texture2D>("TerrainGround/gravel");
+            if (grass != null) m.SetTexture("_GrassTex", grass);
+            if (mid != null) m.SetTexture("_MidTex", mid);
+            if (gravel != null) m.SetTexture("_GravelTex", gravel);
+            // Optional normal maps — same names with a _normal suffix (import them as Normal map type).
+            var grassN = Resources.Load<Texture2D>("TerrainGround/grass_normal");
+            var midN = Resources.Load<Texture2D>("TerrainGround/grass_dirt_normal");
+            var gravelN = Resources.Load<Texture2D>("TerrainGround/gravel_normal");
+            if (grassN != null) m.SetTexture("_GrassNormal", grassN);
+            if (midN != null) m.SetTexture("_MidNormal", midN);
+            if (gravelN != null) m.SetTexture("_GravelNormal", gravelN);
+            return m;
+        }
+
+        // ── Live ground-blend tunables (TerrainGround shader) ────────────────────────────────────
+        // Drive the shared chunk material's blend properties live — every chunk updates instantly, no
+        // rebuild. No-op (returns defaults) when the slope/ground shader isn't the active material.
+        static float GroundGet(string p, float dflt) => (_mat != null && _mat.HasProperty(p)) ? _mat.GetFloat(p) : dflt;
+        static void GroundSet(string p, float v) { if (_mat != null && _mat.HasProperty(p)) _mat.SetFloat(p, v); }
+
+        // Texture tile size in METRES (world units per texture repeat) — larger = bigger features, less obvious
+        // tiling. Drives all three layers together. (Shader stores 1/size as _*Scale.)
+        public static float GroundTexSize
+        {
+            get { float s = GroundGet("_GrassScale", 0.15f); return s > 1e-4f ? 1f / s : 6.7f; }
+            set { float s = value > 0.01f ? 1f / value : 0.15f; GroundSet("_GrassScale", s); GroundSet("_MidScale", s); GroundSet("_GravelScale", s); }
+        }
+        // Blend-noise feature size in METRES — how big the dirt/grass patches are.
+        public static float GroundNoiseSize
+        {
+            get { float s = GroundGet("_NoiseScale", 0.01f); return s > 1e-6f ? 1f / s : 100f; }
+            set { GroundSet("_NoiseScale", value > 1f ? 1f / value : 0.01f); }
+        }
+        public static float GroundSlopeJitter { get => GroundGet("_SlopeNoise", 14f); set => GroundSet("_SlopeNoise", value); }
+        // Slope (deg) where grass starts turning to dirt / dirt to gravel; the transition band is fixed-width.
+        public static float GroundDirtSlope
+        {
+            get => GroundGet("_MidSlopeStart", 8f);
+            set { GroundSet("_MidSlopeStart", value); GroundSet("_MidSlopeFull", value + 16f); }
+        }
+        public static float GroundGravelSlope
+        {
+            get => GroundGet("_GravelSlopeStart", 28f);
+            set { GroundSet("_GravelSlopeStart", value); GroundSet("_GravelSlopeFull", value + 18f); }
+        }
+        public static float GroundDirtPatches { get => GroundGet("_DirtPatchAmount", 0.6f); set => GroundSet("_DirtPatchAmount", Mathf.Clamp01(value)); }
+        public static float GroundNormalStrength { get => GroundGet("_NormalStrength", 1f); set => GroundSet("_NormalStrength", value); }
+        public static bool GroundStochastic { get => GroundGet("_Stochastic", 1f) > 0.5f; set => GroundSet("_Stochastic", value ? 1f : 0f); }
+        public static float GroundMacroAmount { get => GroundGet("_MacroAmount", 0.28f); set => GroundSet("_MacroAmount", Mathf.Clamp(value, 0f, 0.8f)); }
+        public static float GroundMacroSize   // metres per macro-variation cycle
+        {
+            get { float s = GroundGet("_MacroScale", 0.004f); return s > 1e-6f ? 1f / s : 250f; }
+            set { GroundSet("_MacroScale", value > 1f ? 1f / value : 0.004f); }
+        }
+
         static void ApplyGridMaterial()
         {
             if (_mat == null) return;
+            // TerrainGround/TerrainSlope shaders draw the grid as a world-space overlay (_GridStrength).
+            if (_mat.HasProperty("_GridStrength")) { _mat.SetFloat("_GridStrength", ShowGrid ? 0.85f : 0f); return; }
+            // Legacy fallback material (no slope shader): swap a baked grid texture / flat green base colour.
             if (ShowGrid)
             {
                 if (_gridTex == null) _gridTex = BuildGridTexture();

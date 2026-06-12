@@ -72,6 +72,30 @@ namespace NetworkDesigner.UI
                 v => { DemLighting.BloomIntensity = v; DemLighting.Apply(); }, 0f, 1.5f, "0.00"));
             body.Add(SliderRow("Vignette", () => DemLighting.VignetteAmount,
                 v => { DemLighting.VignetteAmount = v; DemLighting.Apply(); }, 0f, 0.6f, "0.00"));
+
+            // Ground texture blend (TerrainGround shader). Live via the shared chunk material — no rebuild.
+            body.Add(Divider());
+            body.Add(SectionLabel("GROUND TEXTURE"));
+            body.Add(ToggleRow("Anti-repeat (stochastic)", () => ChunkWorld.GroundStochastic,
+                v => ChunkWorld.GroundStochastic = v));
+            body.Add(SliderRow("Macro variation", () => ChunkWorld.GroundMacroAmount,
+                v => ChunkWorld.GroundMacroAmount = v, 0f, 0.8f, "0.00"));
+            body.Add(SliderRow("Macro size (m)", () => ChunkWorld.GroundMacroSize,
+                v => ChunkWorld.GroundMacroSize = v, 50f, 800f, "0"));
+            body.Add(SliderRow("Texture size (m)", () => ChunkWorld.GroundTexSize,
+                v => ChunkWorld.GroundTexSize = v, 2f, 80f, "0.0"));
+            body.Add(SliderRow("Patch size (m)", () => ChunkWorld.GroundNoiseSize,
+                v => ChunkWorld.GroundNoiseSize = v, 20f, 600f, "0"));
+            body.Add(SliderRow("Dirt patches", () => ChunkWorld.GroundDirtPatches,
+                v => ChunkWorld.GroundDirtPatches = v, 0f, 1f, "0.00"));
+            body.Add(SliderRow("Dirt slope (deg)", () => ChunkWorld.GroundDirtSlope,
+                v => ChunkWorld.GroundDirtSlope = v, 0f, 60f, "0"));
+            body.Add(SliderRow("Gravel slope (deg)", () => ChunkWorld.GroundGravelSlope,
+                v => ChunkWorld.GroundGravelSlope = v, 0f, 80f, "0"));
+            body.Add(SliderRow("Seam jitter (deg)", () => ChunkWorld.GroundSlopeJitter,
+                v => ChunkWorld.GroundSlopeJitter = v, 0f, 40f, "0"));
+            body.Add(SliderRow("Normal strength", () => ChunkWorld.GroundNormalStrength,
+                v => ChunkWorld.GroundNormalStrength = v, 0f, 2f, "0.0"));
         }
     }
 }
