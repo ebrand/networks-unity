@@ -213,6 +213,10 @@ namespace NetworkDesigner.UI
 
         // Rebuild the panel body in place (e.g. after a download adds a new map to the list).
         protected void Rebuild() { if (_built && _doc != null) BuildPanel(_doc.rootVisualElement); }
+        // Force a rebuild from outside (e.g. the Road Designer telling the Road palette a profile changed).
+        public void RebuildNow() => Rebuild();
+        // Rebuild every live palette with the given id.
+        public static void RebuildId(string id) { foreach (var p in _all) if (p.PaletteId == id) p.RebuildNow(); }
 
         void BuildPanel(VisualElement root)
         {

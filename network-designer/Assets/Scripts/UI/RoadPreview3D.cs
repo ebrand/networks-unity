@@ -63,25 +63,25 @@ namespace NetworkDesigner.UI
         void BuildLaneLines(RoadProfile p)
         {
             if (_lines != null) DestroySafe(_lines);
-            var lay = Layout(p);
+            var lay = RoadLayout.Of(p);
+            int Trn = RoadLayout.TurnLane;
             float totalU = 0f; foreach (var (w, _) in lay) totalU += w;
             if (totalU < 0.5f) return;
 
             _lv.Clear(); _lc.Clear(); _lt.Clear();
-            bool IsLn(int kk) => kk == KLnBA || kk == KLnAB;
             float cum = 0f;
             for (int i = 0; i <= lay.Count; i++)
             {
                 int left = i > 0 ? lay[i - 1].k : -1;
                 int right = i < lay.Count ? lay[i].k : -1;
                 float uOff = cum - totalU * 0.5f;
-                if (IsLn(left) || IsLn(right))   // only paint where a lane meets something
+                if (RoadLayout.IsLane(left) || RoadLayout.IsLane(right))   // only paint where a lane meets something
                 {
-                    if (IsLn(left) && IsLn(right) && left != right)
+                    if (RoadLayout.IsLane(left) && RoadLayout.IsLane(right) && left != right)
                     { Stripe(uOff - 0.16f, Yellow, false); Stripe(uOff + 0.16f, Yellow, false); }   // double-yellow centreline
-                    else if (left == KTrn || right == KTrn)
-                    { float toTurn = right == KTrn ? +1f : -1f; Stripe(uOff - 0.18f * toTurn, Yellow, false); Stripe(uOff + 0.18f * toTurn, Yellow, true); }
-                    else if (IsLn(left) && IsLn(right))
+                    else if (left == Trn || right == Trn)
+                    { float toTurn = right == Trn ? +1f : -1f; Stripe(uOff - 0.18f * toTurn, Yellow, false); Stripe(uOff + 0.18f * toTurn, Yellow, true); }
+                    else if (RoadLayout.IsLane(left) && RoadLayout.IsLane(right))
                         Stripe(uOff, White, true);    // same-direction lane divider (dashed)
                     else
                         Stripe(uOff, White, false);   // pavement edge / median edge (solid)
@@ -117,44 +117,6 @@ namespace NetworkDesigner.UI
             _lv.Add(new Vector3(xb, y, zb)); _lv.Add(new Vector3(xa, y, zb));
             for (int i = 0; i < 4; i++) _lc.Add(col);
             _lt.Add(s); _lt.Add(s + 1); _lt.Add(s + 2); _lt.Add(s); _lt.Add(s + 2); _lt.Add(s + 3);   // Cull Off → winding irrelevant
-        }
-
-        // Cross-section kinds, left→right. Shared by the 3D mesh (BuildXS) and the lane markings
-        // (BuildLaneLines) so they always line up: parapet (elevated) · shoulder/sidewalk · curb · lanes ·
-        // median / turn lane. Curb, median and parapet are raised boxes; shoulders are consistent in all modes.
-        public const int KPar = 0, KEdge = 1, KCurb = 2, KLnBA = 3, KMed = 4, KTrn = 5, KLnAB = 6;
-
-        // Colour for a layout kind (for the 2D cross-section strip in the designer / palette).
-        public static Color LayoutColor(int k, bool sidewalk)
-        {
-            switch (k)
-            {
-                case KPar:  return new Color(0.50f, 0.51f, 0.54f);                         // parapet (steel/concrete)
-                case KEdge: return sidewalk ? new Color(0.85f, 0.85f, 0.86f) : new Color(0.20f, 0.21f, 0.22f);  // sidewalk / shoulder
-                case KCurb: return new Color(0.72f, 0.72f, 0.72f);                         // curb (light gray)
-                case KMed:  return new Color(0.32f, 0.42f, 0.26f);                         // median (planted)
-                case KTrn:  return new Color(0.42f, 0.36f, 0.14f);                         // turn lane
-                default:    return new Color(0.30f, 0.31f, 0.33f);                         // lanes
-            }
-        }
-
-        public static System.Collections.Generic.List<(float w, int k)> Layout(RoadProfile p)
-        {
-            var s = new System.Collections.Generic.List<(float, int)>();
-            void A(float w, int k) { if (w > 0.01f) s.Add((w, k)); }
-            float shBA = p.ShoulderBA != null ? p.ShoulderBA.Width : 0f;
-            float shAB = p.ShoulderAB != null ? p.ShoulderAB.Width : 0f;
-            if (p.Elevated && !p.Guardrails) A(0.3f, KPar);   // guardrail replaces the concrete parapet
-            A(shBA, KEdge);
-            if (p.Curbs) A(0.5f, KCurb);
-            for (int i = p.BA.Lanes.Count - 1; i >= 0; i--) A(p.BA.Lanes[i].Width, KLnBA);
-            if (p.Median != null) A(p.Median.Width, KMed);
-            else if (p.TurnLane != null) A(p.TurnLane.Width, KTrn);
-            for (int i = 0; i < p.AB.Lanes.Count; i++) A(p.AB.Lanes[i].Width, KLnAB);
-            if (p.Curbs) A(0.5f, KCurb);
-            A(shAB, KEdge);
-            if (p.Elevated && !p.Guardrails) A(0.3f, KPar);   // guardrail replaces the concrete parapet
-            return s;
         }
 
         // RoadProfile → RoadCrossSection. With curbs the shoulder/sidewalk is RAISED even with the curb top
@@ -211,12 +173,13 @@ namespace NetworkDesigner.UI
             if (_guard != null) DestroySafe(_guard);
             bool shoulders = !(p.Sidewalks && !p.Elevated);
             if (!p.Guardrails || !shoulders) return;
-            float totalU = 0f; foreach (var (w, _) in Layout(p)) totalU += w;
+            float totalU = RoadLayout.Width(p);
             if (totalU < 0.5f) return;
             float baseY = Far.y + (p.Curbs ? 0.25f : 0f);
+            float half = totalU * 0.5f - RoadLayout.GuardWidth * 0.5f;   // centre of the outer guard strip
             _gv.Clear(); _gtPost.Clear(); _gtRail.Clear();
-            GuardrailSide(Far.z - totalU * 0.5f, baseY);
-            GuardrailSide(Far.z + totalU * 0.5f, baseY);
+            GuardrailSide(Far.z - half, baseY);
+            GuardrailSide(Far.z + half, baseY);
 
             var m = new Mesh { name = "RoadPreviewGuardrail" };
             m.SetVertices(_gv); m.subMeshCount = 2;

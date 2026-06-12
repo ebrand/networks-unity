@@ -98,21 +98,31 @@ namespace NetworkDesigner.UI
         // A scrollable grid of profile thumbnails (mini cross-sections); click to make it the active profile.
         VisualElement BuildThumbGrid()
         {
-            var sv = ScrollBox(170);
+            var sv = ScrollBox(190);
             sv.style.marginBottom = 8;
             SetBorder(sv, 1, new Color(0.3f, 0.32f, 0.36f));
             Radius(sv, 8);
-            var grid = new VisualElement();
-            grid.style.flexDirection = FlexDirection.Row; grid.style.flexWrap = Wrap.Wrap;
-            grid.style.paddingLeft = 6; grid.style.paddingTop = 6;
-            sv.Add(grid);
+            sv.style.paddingLeft = 6; sv.style.paddingTop = 4;
 
             string active = Designer.RoadPlanLayer.ActiveProfileId;
+            // Group profiles by category (preserving first-seen category order).
+            var order = new List<string>();
+            var byCat = new System.Collections.Generic.Dictionary<string, List<SavedConfig>>();
             foreach (var c in RoadProfileLibrary.Configs)
             {
                 if (c?.Road == null) continue;
-                bool sel = active == c.Id || active == c.Name;
-                grid.Add(BuildThumb(c, sel));
+                string cat = string.IsNullOrWhiteSpace(c.Category) ? "Uncategorized" : c.Category.Trim();
+                if (!byCat.TryGetValue(cat, out var list)) { list = new List<SavedConfig>(); byCat[cat] = list; order.Add(cat); }
+                list.Add(c);
+            }
+            foreach (string cat in order)
+            {
+                sv.Add(SectionLabel(cat.ToUpperInvariant()));
+                var grid = new VisualElement();
+                grid.style.flexDirection = FlexDirection.Row; grid.style.flexWrap = Wrap.Wrap; grid.style.marginBottom = 4;
+                foreach (var c in byCat[cat])
+                    grid.Add(BuildThumb(c, active == c.Id || active == c.Name));
+                sv.Add(grid);
             }
             return sv;
         }
@@ -131,10 +141,10 @@ namespace NetworkDesigner.UI
             var strip = HBox();
             strip.style.height = 26; strip.style.alignItems = Align.Stretch;
             bool sidewalk = c.Road.Sidewalks && !c.Road.Elevated;
-            foreach (var (w, k) in RoadPreview3D.Layout(c.Road))
+            foreach (var (w, k) in NetworkDesigner.Roads.RoadLayout.Of(c.Road))
             {
                 var box = new VisualElement();
-                box.style.flexGrow = w; box.style.backgroundColor = RoadPreview3D.LayoutColor(k, sidewalk);
+                box.style.flexGrow = w; box.style.backgroundColor = NetworkDesigner.Roads.RoadLayout.KindColor(k, sidewalk);
                 strip.Add(box);
             }
             cell.Add(strip);

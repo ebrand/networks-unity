@@ -32,7 +32,8 @@ namespace NetworkDesigner.UI
         // ---- editing state ----
         string _name = "new-road-profile";
         int _aLanes = 2, _bLanes = 2;
-        bool _oneWay, _highway;
+        bool _oneWay;
+        string _category = "";
         bool _curbs, _sidewalks, _elevated, _guardrails;
         Center _center = Center.None;
         float _laneW = 4.0f, _medianW = 1.5f, _shoulderW = 1.0f;
@@ -130,7 +131,12 @@ namespace NetworkDesigner.UI
             nameField.style.marginBottom = 6;
             nameField.RegisterValueChangedCallback(e => _name = e.newValue);
             left.Add(nameField);
-            var createBtn = MakeButton("Create", () => { _name = nameField.value; SaveCurrent(); RefreshList(); });
+            left.Add(Cap("Category:"));
+            var catField = new TextField { value = _category };
+            catField.style.marginBottom = 6;
+            catField.RegisterValueChangedCallback(e => _category = e.newValue);
+            left.Add(catField);
+            var createBtn = MakeButton("Create", () => { _name = nameField.value; _category = catField.value; SaveCurrent(); RefreshList(); });
             createBtn.style.marginBottom = 10; left.Add(createBtn);
 
             _listBox = ScrollBox(150);
@@ -145,7 +151,6 @@ namespace NetworkDesigner.UI
                 v => { int.TryParse(v, out _bLanes); RefreshPreview(); }));
 
             left.Add(ToggleRow("One-Way", () => _oneWay, v => { _oneWay = v; RefreshPreview(); }));
-            left.Add(ToggleRow("Highway", () => _highway, v => { _highway = v; RefreshPreview(); }));
             // Turn Lane / Wide Median / Normal Median are mutually exclusive (one centre treatment).
             left.Add(ToggleRow("Turn Lane", () => _center == Center.TurnLane,
                 v => { _center = v ? Center.TurnLane : Center.None; RefreshPreview(); }));
@@ -238,12 +243,14 @@ namespace NetworkDesigner.UI
             p.Elevated = _elevated;
             p.Sidewalks = _sidewalks && !_elevated;                       // elevated forces shoulders
             p.Guardrails = _guardrails && !(p.Sidewalks);                 // guardrails only with shoulders
-            return new SavedConfig { Id = p.Id, Name = _name, Category = _highway ? "Highway" : "Custom", Road = p };
+            string cat = string.IsNullOrWhiteSpace(_category) ? "Uncategorized" : _category.Trim();
+            return new SavedConfig { Id = p.Id, Name = _name, Category = cat, Road = p };
         }
 
         void SaveCurrent()
         {
             RoadProfileLibrary.SaveUserConfig(BuildConfig());
+            RebuildId("Road");   // refresh the Road palette dropdown + thumbnails live
         }
 
         void LoadConfig(SavedConfig c)
@@ -263,7 +270,7 @@ namespace NetworkDesigner.UI
             }
             else { _center = Center.None; }
             _shoulderW = p.ShoulderAB != null ? p.ShoulderAB.Width : 2f;
-            _highway = (c.Category ?? "") == "Highway";
+            _category = c.Category ?? "";
             _curbs = p.Curbs;
             _elevated = p.Elevated;
             _sidewalks = p.Sidewalks && !p.Elevated;
@@ -314,7 +321,7 @@ namespace NetworkDesigner.UI
 
             bool sidewalk = prof.Sidewalks && !prof.Elevated;
             var total = new Label($"{prof.TotalWidth:0.#} m · {prof.AB.Lanes.Count}×{prof.BA.Lanes.Count} lanes"
-                                  + (_highway ? " · Highway" : "") + (prof.Elevated ? " · Elevated" : "")
+                                  + (string.IsNullOrWhiteSpace(_category) ? "" : " · " + _category) + (prof.Elevated ? " · Elevated" : "")
                                   + "   (drag to orbit · wheel to zoom)");
             total.style.color = Sub; total.style.fontSize = 11; total.style.marginBottom = 4;
             _preview.Add(total);
@@ -322,12 +329,12 @@ namespace NetworkDesigner.UI
             var sec = HBox();
             sec.style.height = 56; sec.style.alignItems = Align.Stretch;
             SetBorder(sec, 1, new Color(1f, 1f, 1f, 0.4f));
-            foreach (var (w, k) in RoadPreview3D.Layout(prof))
+            foreach (var (w, k) in RoadLayout.Of(prof))
             {
                 var box = new VisualElement();
                 box.style.flexGrow = w;
-                box.style.backgroundColor = RoadPreview3D.LayoutColor(k, sidewalk);
-                if (k == RoadPreview3D.KLnBA || k == RoadPreview3D.KLnAB)
+                box.style.backgroundColor = RoadLayout.KindColor(k, sidewalk);
+                if (RoadLayout.IsLane(k))
                 { box.style.borderRightWidth = 1; box.style.borderRightColor = new Color(1f, 1f, 1f, 0.45f); }
                 sec.Add(box);
             }

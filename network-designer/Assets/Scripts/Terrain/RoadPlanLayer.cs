@@ -25,9 +25,16 @@ namespace NetworkDesigner.Terrain
         public float RoadWidth = 14f;
 
         // Footprint width for a single segment: its profile's total cross-section, else the fallback width.
-        public float EdgeWidth(LineEdge e) => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(e?.Profile, RoadWidth);
+        public float EdgeWidth(LineEdge e) => ProfileCorridorWidth(e?.Profile);
         // The active profile's width (for the placement preview).
-        public float ActiveWidth() => NetworkDesigner.Roads.RoadProfileLibrary.TotalWidth(ActiveProfileId, RoadWidth);
+        public float ActiveWidth() => ProfileCorridorWidth(ActiveProfileId);
+
+        // Full corridor footprint (lanes + shoulders + curbs + parapets/guardrails) for a profile, else the fallback width.
+        float ProfileCorridorWidth(string id)
+        {
+            var prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(id);
+            return prof != null && prof.TotalWidth > 0.1f ? NetworkDesigner.Roads.RoadLayout.Width(prof) : RoadWidth;
+        }
         [Tooltip("Guided drawing: a continuing straight locks to colinear; turns must be a speed-based curve, or a 90° corner where the speed allows. Off = freehand straights at any angle.")]
         public bool GuidedTurns = true;
         [Tooltip("At/below this design speed (km/h), a straight may snap a hard 90° corner; above it, turns must be curves.")]
@@ -723,7 +730,7 @@ namespace NetworkDesigner.Terrain
         Color32 ColFoot => new Color32((byte)(PlanColor.r * 255f), (byte)(PlanColor.g * 255f), (byte)(PlanColor.b * 255f), 170); // shoulder/footprint (plan amber, dashed)
 
         // strip kinds across the cross-section (BA side → centre → AB side)
-        const int KOut = -1, KShBA = 0, KLnBA = 1, KMed = 2, KTrn = 3, KLnAB = 4, KShAB = 5;
+        const int KOut = -1;   // strip kinds come from the shared NetworkDesigner.Roads.RoadLayout
 
         // Lay the segment's lanes/median/turn-lane/shoulders out as draped markings, draped along the bezier.
         void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, LineEdge e, float trimA, float trimB)
@@ -748,42 +755,27 @@ namespace NetworkDesigner.Terrain
                 return;
             }
 
-            float W = prof.TotalWidth;
-            // Build the strip order across the section.
-            var w = new List<float>(8); var k = new List<int>(8);
-            void S(float width, int kind) { if (width > 0.01f) { w.Add(width); k.Add(kind); } }
-            S(prof.ShoulderBA.Width, KShBA);
-            for (int i = prof.BA.Lanes.Count - 1; i >= 0; i--) S(prof.BA.Lanes[i].Width, KLnBA);
-            if (prof.Median != null) S(prof.Median.Width, KMed);
-            else if (prof.TurnLane != null) S(prof.TurnLane.Width, KTrn);
-            for (int i = 0; i < prof.AB.Lanes.Count; i++) S(prof.AB.Lanes[i].Width, KLnAB);
-            S(prof.ShoulderAB.Width, KShAB);
+            // Shared cross-section layout (curbs, sidewalks, parapets, guardrails all included).
+            var lay = NetworkDesigner.Roads.RoadLayout.Of(prof);
+            float W = 0f; foreach (var (sw, _) in lay) W += sw;
 
             float u = -W * 0.5f;
-            EmitBoundary(field, p0, p1, p2, p3, n, u, KOut, k.Count > 0 ? k[0] : KOut);
-            for (int i = 0; i < w.Count; i++)
+            EmitBoundary(field, p0, p1, p2, p3, n, u, KOut, lay.Count > 0 ? lay[0].k : KOut);
+            for (int i = 0; i < lay.Count; i++)
             {
-                if (k[i] == KMed) EmitMedianHatch(field, p0, p1, p2, p3, n, len, u, u + w[i]);
-                u += w[i];
-                EmitBoundary(field, p0, p1, p2, p3, n, u, k[i], (i + 1 < k.Count) ? k[i + 1] : KOut);
+                if (lay[i].k == NetworkDesigner.Roads.RoadLayout.Median) EmitMedianHatch(field, p0, p1, p2, p3, n, len, u, u + lay[i].w);
+                u += lay[i].w;
+                EmitBoundary(field, p0, p1, p2, p3, n, u, lay[i].k, (i + 1 < lay.Count) ? lay[i + 1].k : KOut);
             }
         }
 
-        // Pick the marking style for the line between two strip kinds, then emit it.
+        // Pick the marking style for the line between two RoadLayout strip kinds, then emit it.
         void EmitBoundary(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float u, int left, int right)
         {
-            bool isSh(int kk) => kk == KShBA || kk == KShAB;
-            bool isLn(int kk) => kk == KLnBA || kk == KLnAB;
+            int Med = NetworkDesigner.Roads.RoadLayout.Median, Trn = NetworkDesigner.Roads.RoadLayout.TurnLane;
+            bool isLn(int kk) => NetworkDesigner.Roads.RoadLayout.IsLane(kk);
             if (left == KOut || right == KOut)
-            {
-                int s = left == KOut ? right : left;
-                if (isSh(s)) EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColFoot, 3f, 2.2f);   // footprint/shoulder edge (dashed amber)
-                else EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f);             // pavement edge (solid)
-                return;
-            }
-            if (isSh(left) || isSh(right)) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f); return; }  // shoulder|lane edge
-            if (left == KMed || right == KMed) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f); return; } // median edge (solid white)
-            if (left == KTrn || right == KTrn) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColTurn, 0f, 0f); return; } // turn-lane edge (yellow)
+            { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColFoot, 3f, 2.2f); return; }           // corridor footprint edge (dashed amber)
             if (isLn(left) && isLn(right))
             {
                 if (left == right) EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColLane, 1.5f, 2.2f);   // same dir → dashed lane divider
@@ -791,6 +783,10 @@ namespace NetworkDesigner.Terrain
                        EmitOffsetLine(field, p0, p1, p2, p3, n, u + 0.25f, ColCenter, 0f, 0f); }
                 return;
             }
+            if (left == Trn || right == Trn) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColTurn, 0f, 0f); return; }   // turn-lane edge (yellow)
+            if (left == Med || right == Med) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f); return; }   // median edge (white)
+            // lane meets shoulder/sidewalk/curb → pavement edge; structure boundaries (edge|curb, edge|guard,
+            // edge|parapet) drawn as a thin solid line so curbs/sidewalks/guards read in the plan.
             EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f);
         }
 
