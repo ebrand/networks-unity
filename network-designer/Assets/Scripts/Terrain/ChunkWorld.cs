@@ -304,14 +304,28 @@ namespace NetworkDesigner.Terrain
             if (sand != null) m.SetTexture("_SandTex", sand);
             if (sandN != null) m.SetTexture("_SandNormal", sandN);
             if (m.HasProperty("_SeaLevel")) m.SetFloat("_SeaLevel", ChunkOverlays.WaterLevel);
+            // Re-apply any ground-blend values set BEFORE this material existed (persisted settings loaded at
+            // startup, or values held across a material rebuild) so they aren't lost — see _groundProps.
+            foreach (var kv in _groundProps)
+                if (m.HasProperty(kv.Key)) m.SetFloat(kv.Key, kv.Value);
             return m;
         }
 
         // ── Live ground-blend tunables (TerrainGround shader) ────────────────────────────────────
         // Drive the shared chunk material's blend properties live — every chunk updates instantly, no
-        // rebuild. No-op (returns defaults) when the slope/ground shader isn't the active material.
-        static float GroundGet(string p, float dflt) => (_mat != null && _mat.HasProperty(p)) ? _mat.GetFloat(p) : dflt;
-        static void GroundSet(string p, float v) { if (_mat != null && _mat.HasProperty(p)) _mat.SetFloat(p, v); }
+        // rebuild. Values are cached in _groundProps so a Set that arrives BEFORE the material is built
+        // (persisted settings loaded at startup) — or a later material rebuild — still applies them
+        // (GroundMaterial replays the cache). The cache is the source of truth for the getter, so the
+        // palette/registry reads the desired value even when no material exists yet.
+        static readonly Dictionary<string, float> _groundProps = new Dictionary<string, float>();
+        static float GroundGet(string p, float dflt)
+            => _groundProps.TryGetValue(p, out float v) ? v
+             : (_mat != null && _mat.HasProperty(p)) ? _mat.GetFloat(p) : dflt;
+        static void GroundSet(string p, float v)
+        {
+            _groundProps[p] = v;
+            if (_mat != null && _mat.HasProperty(p)) _mat.SetFloat(p, v);
+        }
 
         // Texture tile size in METRES (world units per texture repeat) — larger = bigger features, less obvious
         // tiling. Drives all three layers together. (Shader stores 1/size as _*Scale.)

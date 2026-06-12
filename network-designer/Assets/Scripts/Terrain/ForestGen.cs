@@ -12,6 +12,7 @@
 
 using System.Collections.Generic;
 using UnityEngine;
+using NetworkDesigner.Designer;   // DayCycle.SunLight01 for night canopy darkening
 
 namespace NetworkDesigner.Terrain
 {
@@ -153,13 +154,19 @@ namespace NetworkDesigner.Terrain
         // BRIGHTER than the self-shadowed near mesh — a jarring pop as you approach. Tint each LOD toward
         // this factor (1 at LOD0 → FarLodDarken at the last) so the brightness matches across the transition.
         public static float FarLodDarken = 0.6f;
+        public static float NearLodTint = 0.8f;        // even the close LOD0 mesh catches full sun + reads a touch bright; knock it down
+        public static float NightFoliageTint = 0.12f;  // canopy albedo at full night (sun fully down) — kills the glow against a black sky
         static MaterialPropertyBlock[] _lodMpb;
         static MaterialPropertyBlock LodTint(int li, int lodN)
         {
-            if (li <= 0 || FarLodDarken >= 0.999f) return null;
             if (_lodMpb == null) { _lodMpb = new MaterialPropertyBlock[MaxLods]; for (int i = 0; i < MaxLods; i++) _lodMpb[i] = new MaterialPropertyBlock(); }
             float t = lodN > 1 ? li / (float)(lodN - 1) : 1f;
-            float d = Mathf.Lerp(1f, Mathf.Clamp01(FarLodDarken), t);
+            float d = Mathf.Lerp(Mathf.Clamp01(NearLodTint), Mathf.Clamp01(FarLodDarken), t);
+            // Darken the whole canopy as the sun sets (DayCycle.SunLight01: 1 = day → 0 = night). The NM
+            // foliage shader otherwise keeps catching residual skybox ambient and glows after dusk. Read live
+            // each render frame, so it tracks the clock (and stays at 1 when the day cycle is off).
+            d *= Mathf.Lerp(Mathf.Clamp01(NightFoliageTint), 1f, Mathf.Clamp01(DayCycle.SunLight01));
+            if (d >= 0.999f) return null;   // nothing to tint (LOD0, full day, no near-tint)
             _lodMpb[li].SetColor("_BaseColor", new Color(d, d, d, 1f));
             return _lodMpb[li];
         }

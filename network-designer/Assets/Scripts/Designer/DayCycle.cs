@@ -30,7 +30,12 @@ namespace NetworkDesigner.Designer
         static bool _skyInstalled;
         static float _lastGi = -999f;
 
-        public static void SetEnabled(bool on) { Enabled = on; if (on) Apply(); else RestoreSky(); }
+        // 0 at night → 1 in full day (the same twilight-faded factor that drives sun intensity). Read by
+        // foliage rendering (ForestGen) to darken the canopy after dusk so trees don't glow against a black
+        // sky — the NM foliage shader otherwise keeps catching residual skybox ambient. 1 when the cycle's off.
+        public static float SunLight01 = 1f;
+
+        public static void SetEnabled(bool on) { Enabled = on; if (on) Apply(); else { SunLight01 = 1f; RestoreSky(); } }
 
         // Advance the clock when auto-advancing; otherwise the palette drives Apply on edits.
         public static void Tick(float dt)
@@ -55,6 +60,7 @@ namespace NetworkDesigner.Designer
             // Intensity: full above ~6°, smooth twilight fade, 0 once the sun is below the horizon.
             float lit = Mathf.Clamp01((elev + 1.5f) / 7f);
             sun.intensity = Intensity * lit;
+            SunLight01 = lit;   // published for foliage night-darkening (ForestGen)
 
             // Quality: physically-based colour temperature, warm low → cool high. Let the Kelvin drive
             // the hue (white base) instead of a baked tint.
@@ -111,6 +117,17 @@ namespace NetworkDesigner.Designer
             _skyInstalled = false;
         }
 
+        // Called by the ticker each frame until it succeeds: re-applies the (possibly just-loaded-from-disk)
+        // settings once a sun exists. Persistence loads the statics in TerrainTuningSetup.OnEnable, which can
+        // run before SceneAmbiance has created the directional light — in which case the load's Apply() no-ops.
+        // Returns true once there's a sun to drive (so the ticker stops retrying).
+        public static bool TryPostLoadApply()
+        {
+            if (FindSun() == null) return false;
+            if (Enabled) Apply();
+            return true;
+        }
+
         static Light FindSun()
         {
             Light best = null;
@@ -131,6 +148,13 @@ namespace NetworkDesigner.Designer
             go.AddComponent<DayCycleTicker>();
         }
 
-        void Update() => DayCycle.Tick(Time.deltaTime);
+        bool _postLoadApplied;
+
+        void Update()
+        {
+            // Re-apply persisted settings once a sun exists (the disk load can land before the sun is created).
+            if (!_postLoadApplied && DayCycle.TryPostLoadApply()) _postLoadApplied = true;
+            DayCycle.Tick(Time.deltaTime);
+        }
     }
 }

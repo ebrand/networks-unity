@@ -75,6 +75,7 @@ namespace NetworkDesigner.Terrain
             // on purpose — it re-frames on the terrain each Play, so you can't get
             // stuck in a bad saved viewpoint. Fly settings below do persist.)
             if (!PersistChanges) return;
+            PollEnvironmentForChanges();   // catch in-game Environment-palette edits (they bypass the registry)
             if (_dirtySinceRealtime < 0f) return;
             if (Time.realtimeSinceStartup - _dirtySinceRealtime < PersistDebounceSeconds) return;
             TuningRegistry.SaveToFile(ResolvePersistencePath());
@@ -729,6 +730,151 @@ namespace NetworkDesigner.Terrain
             // Render scale — fill-rate lever for full-screen / high-DPI lag.
             TuningRegistry.RegisterFloat("quality.renderScale", "Camera", "Render scale (lower = faster)",
                 () => t.RenderScaleValue, v => t.RenderScaleValue = v, 0.4f, 1.5f);
+
+            // --- Environment: time of day (DayCycle) ---
+            // These mirror the in-game Environment palette (hotkey U). Registering them here is what makes
+            // the palette PERSIST (it writes the statics directly; the poll in Update saves them) and brings
+            // them into the React panel for parity. Setters re-Apply so a loaded value drives the scene.
+            TuningRegistry.RegisterBool("env.dayCycle", "Time of day", "Day cycle",
+                () => DayCycle.Enabled, v => DayCycle.SetEnabled(v));
+            TuningRegistry.RegisterBool("env.manageSky", "Time of day", "Sky + ambient",
+                () => DayCycle.ManageSky, v => { DayCycle.ManageSky = v; DayCycle.Apply(); });
+            TuningRegistry.RegisterFloat("env.timeOfDay", "Time of day", "Time (h)",
+                () => DayCycle.TimeOfDay, v => { DayCycle.TimeOfDay = v; DayCycle.Apply(); }, 0f, 24f);
+            TuningRegistry.RegisterFloat("env.sunHeight", "Time of day", "Sun height (deg)",
+                () => DayCycle.PeakElevation, v => { DayCycle.PeakElevation = v; DayCycle.Apply(); }, 5f, 89f);
+            TuningRegistry.RegisterFloat("env.sunDir", "Time of day", "Sun direction (deg)",
+                () => DayCycle.NorthYaw, v => { DayCycle.NorthYaw = v; DayCycle.Apply(); }, 0f, 360f);
+            TuningRegistry.RegisterFloat("env.brightness", "Time of day", "Brightness",
+                () => DayCycle.Intensity, v => { DayCycle.Intensity = v; DayCycle.Apply(); }, 0f, 3f);
+            TuningRegistry.RegisterFloat("env.ambient", "Time of day", "Ambient",
+                () => DayCycle.AmbientScale, v => { DayCycle.AmbientScale = v; DayCycle.Apply(); }, 0f, 1.5f,
+                description: "Multiplier on sky ambient — pull down to tame the bright-sky wash-out that flattens trees.");
+            TuningRegistry.RegisterBool("env.autoAdvance", "Time of day", "Auto-advance",
+                () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v);
+            TuningRegistry.RegisterFloat("env.dayLength", "Time of day", "Day length (min)",
+                () => DayCycle.DayLengthMinutes, v => DayCycle.DayLengthMinutes = v, 0.5f, 30f);
+
+            // --- Environment: atmosphere + colour grade (DemLighting) ---
+            TuningRegistry.RegisterBool("env.atmosphere", "Atmosphere", "Atmosphere enable",
+                () => DemLighting.Enabled, v => DemLighting.SetEnabled(v));
+            TuningRegistry.RegisterFloat("env.fog", "Atmosphere", "Haze (fog)",
+                () => DemLighting.FogDensity, v => { DemLighting.FogDensity = v; DemLighting.Apply(); }, 0f, 0.0006f);
+            TuningRegistry.RegisterFloat("env.exposure", "Atmosphere", "Exposure",
+                () => DemLighting.Exposure, v => { DemLighting.Exposure = v; DemLighting.Apply(); }, -2f, 2f);
+            TuningRegistry.RegisterFloat("env.contrast", "Atmosphere", "Contrast",
+                () => DemLighting.Contrast, v => { DemLighting.Contrast = v; DemLighting.Apply(); }, -50f, 50f);
+            TuningRegistry.RegisterFloat("env.saturation", "Atmosphere", "Saturation",
+                () => DemLighting.Saturation, v => { DemLighting.Saturation = v; DemLighting.Apply(); }, -50f, 50f);
+            TuningRegistry.RegisterFloat("env.warmth", "Atmosphere", "Warmth",
+                () => DemLighting.Warmth, v => { DemLighting.Warmth = v; DemLighting.Apply(); }, 0f, 1f);
+            TuningRegistry.RegisterFloat("env.bloom", "Atmosphere", "Bloom",
+                () => DemLighting.BloomIntensity, v => { DemLighting.BloomIntensity = v; DemLighting.Apply(); }, 0f, 1.5f);
+            TuningRegistry.RegisterFloat("env.vignette", "Atmosphere", "Vignette",
+                () => DemLighting.VignetteAmount, v => { DemLighting.VignetteAmount = v; DemLighting.Apply(); }, 0f, 0.6f);
+
+            // --- Environment: ground texture (TerrainGround shader, via ChunkWorld) ---
+            TuningRegistry.RegisterBool("ground.textures", "Ground texture", "Textures",
+                () => ChunkWorld.GroundTextures, v => ChunkWorld.GroundTextures = v);
+            TuningRegistry.RegisterBool("ground.stochastic", "Ground texture", "Anti-repeat (stochastic)",
+                () => ChunkWorld.GroundStochastic, v => ChunkWorld.GroundStochastic = v);
+            TuningRegistry.RegisterFloat("ground.brightness", "Ground texture", "Ground brightness",
+                () => ChunkWorld.GroundBrightness, v => ChunkWorld.GroundBrightness = v, 0f, 1.5f);
+            TuningRegistry.RegisterFloat("ground.macroAmount", "Ground texture", "Macro variation",
+                () => ChunkWorld.GroundMacroAmount, v => ChunkWorld.GroundMacroAmount = v, 0f, 0.8f);
+            TuningRegistry.RegisterFloat("ground.macroSize", "Ground texture", "Macro size (m)",
+                () => ChunkWorld.GroundMacroSize, v => ChunkWorld.GroundMacroSize = v, 50f, 800f);
+            TuningRegistry.RegisterFloat("ground.texSize", "Ground texture", "Texture size (m)",
+                () => ChunkWorld.GroundTexSize, v => ChunkWorld.GroundTexSize = v, 2f, 80f);
+            TuningRegistry.RegisterFloat("ground.detailStrength", "Ground texture", "Detail strength",
+                () => ChunkWorld.GroundDetailStrength, v => ChunkWorld.GroundDetailStrength = v, 0f, 1f);
+            TuningRegistry.RegisterFloat("ground.detailSize", "Ground texture", "Detail size (m)",
+                () => ChunkWorld.GroundDetailSize, v => ChunkWorld.GroundDetailSize = v, 0.3f, 8f);
+            TuningRegistry.RegisterFloat("ground.noiseSize", "Ground texture", "Patch size (m)",
+                () => ChunkWorld.GroundNoiseSize, v => ChunkWorld.GroundNoiseSize = v, 20f, 600f);
+            TuningRegistry.RegisterFloat("ground.dirtPatches", "Ground texture", "Dirt patches",
+                () => ChunkWorld.GroundDirtPatches, v => ChunkWorld.GroundDirtPatches = v, 0f, 1f);
+            TuningRegistry.RegisterFloat("ground.dirtSlope", "Ground texture", "Dirt slope (deg)",
+                () => ChunkWorld.GroundDirtSlope, v => ChunkWorld.GroundDirtSlope = v, 0f, 60f);
+            TuningRegistry.RegisterFloat("ground.gravelSlope", "Ground texture", "Gravel slope (deg)",
+                () => ChunkWorld.GroundGravelSlope, v => ChunkWorld.GroundGravelSlope = v, 0f, 80f);
+            TuningRegistry.RegisterFloat("ground.sandHeight", "Ground texture", "Beach sand (m above water)",
+                () => ChunkWorld.GroundSandHeight, v => ChunkWorld.GroundSandHeight = v, 0f, 15f);
+            TuningRegistry.RegisterFloat("ground.slopeJitter", "Ground texture", "Seam jitter (deg)",
+                () => ChunkWorld.GroundSlopeJitter, v => ChunkWorld.GroundSlopeJitter = v, 0f, 40f);
+            TuningRegistry.RegisterFloat("ground.normalStrength", "Ground texture", "Normal strength",
+                () => ChunkWorld.GroundNormalStrength, v => ChunkWorld.GroundNormalStrength = v, 0f, 2f);
+
+            // --- Foliage shading (instanced trees) ---
+            TuningRegistry.RegisterFloat("foliage.nearLodTint", "Foliage", "Near LOD tint",
+                () => ForestGen.NearLodTint, v => ForestGen.NearLodTint = v, 0.3f, 1f,
+                description: "Brightness of the closest full-detail trees (1 = untinted). Lower if near trees read too bright vs the shaded scene.");
+            TuningRegistry.RegisterFloat("foliage.farLodDarken", "Foliage", "Far LOD darken",
+                () => ForestGen.FarLodDarken, v => ForestGen.FarLodDarken = v, 0.3f, 1f,
+                description: "Brightness of the farthest cross-card LOD (1 = untinted). Far impostors catch full light and pop bright on approach; lower this to match the near mesh.");
+            TuningRegistry.RegisterFloat("foliage.nightTint", "Foliage", "Night canopy tint",
+                () => ForestGen.NightFoliageTint, v => ForestGen.NightFoliageTint = v, 0f, 0.6f,
+                description: "Canopy brightness at full night (0 = black). Counters the foliage shader glowing against the dark sky when the day cycle is on.");
+        }
+
+        // Persisted-settings changes made through the in-game Environment palette write the statics directly
+        // (they don't flow through TrySet → OnValueChanged), so poll them here and mark the file dirty when they
+        // move. Cheap: a hash of the values, compared frame-to-frame. Primed on the first frame (post-load) so
+        // loading doesn't immediately re-save.
+        bool _envSigInit;
+        int _lastEnvSig;
+        void PollEnvironmentForChanges()
+        {
+            int sig = EnvSignature();
+            if (_envSigInit && sig != _lastEnvSig) _dirtySinceRealtime = Time.realtimeSinceStartup;
+            _lastEnvSig = sig;
+            _envSigInit = true;
+        }
+
+        static int EnvSignature()
+        {
+            unchecked
+            {
+                int h = 17;
+                h = h * 31 + DayCycle.Enabled.GetHashCode();
+                h = h * 31 + DayCycle.ManageSky.GetHashCode();
+                // Skip the running clock while auto-advancing, or it would re-save every debounce tick forever.
+                // A manual Time drag (auto-advance off) still registers and persists.
+                if (!DayCycle.AutoAdvance) h = h * 31 + DayCycle.TimeOfDay.GetHashCode();
+                h = h * 31 + DayCycle.PeakElevation.GetHashCode();
+                h = h * 31 + DayCycle.NorthYaw.GetHashCode();
+                h = h * 31 + DayCycle.Intensity.GetHashCode();
+                h = h * 31 + DayCycle.AmbientScale.GetHashCode();
+                h = h * 31 + DayCycle.AutoAdvance.GetHashCode();
+                h = h * 31 + DayCycle.DayLengthMinutes.GetHashCode();
+                h = h * 31 + DemLighting.Enabled.GetHashCode();
+                h = h * 31 + DemLighting.FogDensity.GetHashCode();
+                h = h * 31 + DemLighting.Exposure.GetHashCode();
+                h = h * 31 + DemLighting.Contrast.GetHashCode();
+                h = h * 31 + DemLighting.Saturation.GetHashCode();
+                h = h * 31 + DemLighting.Warmth.GetHashCode();
+                h = h * 31 + DemLighting.BloomIntensity.GetHashCode();
+                h = h * 31 + DemLighting.VignetteAmount.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundTextures.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundStochastic.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundBrightness.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundMacroAmount.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundMacroSize.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundTexSize.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundDetailStrength.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundDetailSize.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundNoiseSize.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundDirtPatches.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundDirtSlope.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundGravelSlope.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundSandHeight.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundSlopeJitter.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundNormalStrength.GetHashCode();
+                h = h * 31 + ForestGen.NearLodTint.GetHashCode();
+                h = h * 31 + ForestGen.FarLodDarken.GetHashCode();
+                h = h * 31 + ForestGen.NightFoliageTint.GetHashCode();
+                return h;
+            }
         }
     }
 }
