@@ -66,6 +66,7 @@ namespace NetworkDesigner.Roads
                 if (xs.Thickness < depth) xs.Thickness = depth;
 
                 RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB);
+                BuildRoadMarkings(road.Profile, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks");
                 built++;
             }
 
@@ -185,6 +186,103 @@ namespace NetworkDesigner.Roads
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             go.AddComponent<MeshRenderer>().sharedMaterial = PipelineMaterials.CreateLitMatte(AsphaltColor, "RoadXFill");
             go.AddComponent<MeshCollider>().sharedMesh = mesh;
+        }
+
+        // ---- lane markings on the built asphalt ----
+
+        static readonly Color MarkWhite = new Color(0.93f, 0.93f, 0.93f);
+        static readonly Color MarkYellow = new Color(0.96f, 0.80f, 0.18f);
+        const float MarkWidth = 0.15f, MarkLift = 0.05f, MarkDash = 3f, MarkGap = 2.5f, DblYellowSep = 0.18f;
+
+        // Paint lane markings on the swept road surface from the profile's RoadLayout: dashed white divider
+        // between same-direction lanes, double-yellow centre between opposing lanes, solid white edge/median
+        // lines. Thin double-sided UNLIT quads lifted just above the asphalt, following the same trimmed curve
+        // + design grade as the road body so they sit flush. (Lane-flow arrows come with phase 3 proper.)
+        static void BuildRoadMarkings(RoadProfile prof, Vector2 a, Vector2 ca, Vector2 cb, Vector2 b, bool curve,
+                                      float hA, float hB, Transform parent, string name)
+        {
+            if (prof == null) return;
+            List<(float w, int k)> lay = RoadLayout.Of(prof);
+            if (lay.Count < 2) return;
+            float W = 0f; foreach (var s in lay) W += s.w;
+            float half = W * 0.5f;
+            int Med = RoadLayout.Median, Trn = RoadLayout.TurnLane;
+
+            // Markings as (lateral offset from path centre, yellow?, dashed?).
+            var marks = new List<(float u, bool yellow, bool dashed)>();
+            float acc = 0f;
+            for (int i = 0; i < lay.Count - 1; i++)
+            {
+                acc += lay[i].w;
+                int L = lay[i].k, R = lay[i + 1].k;
+                bool lnL = RoadLayout.IsLane(L), lnR = RoadLayout.IsLane(R);
+                float off = acc - half;
+                if (lnL && lnR)
+                {
+                    if (L == R) marks.Add((off, false, true));                                  // same dir → dashed white
+                    else { marks.Add((off - DblYellowSep, true, false)); marks.Add((off + DblYellowSep, true, false)); }  // opposing → double yellow
+                }
+                else if (L == Trn || R == Trn) marks.Add((off, true, false));                   // turn-lane edge (yellow)
+                else if (L == Med || R == Med) marks.Add((off, false, false));                  // median edge (white)
+                else if (lnL || lnR) marks.Add((off, false, false));                            // lane ↔ shoulder/curb → pavement edge
+            }
+            if (marks.Count == 0) return;
+
+            // Subdivide by LENGTH (straight too) at ~0.5 m so dashed markings have segments to alternate over —
+            // a 2-frame straight would draw each divider as one solid quad.
+            float mlen = curve ? GeometryResolver.CubicArcLength(a, ca, cb, b) : Vector2.Distance(a, b);
+            int frames = Mathf.Clamp(Mathf.CeilToInt(mlen / 0.5f) + 1, 2, 2048);
+            var fp = new Vector3[frames]; var fr = new Vector3[frames];
+            for (int f = 0; f < frames; f++)
+            {
+                float t = f / (float)(frames - 1);
+                Vector2 p, tan;
+                if (curve) { p = GeometryResolver.SampleCubic(a, ca, cb, b, t); tan = GeometryResolver.CubicTangent(a, ca, cb, b, t); }
+                else { p = Vector2.Lerp(a, b, t); tan = b - a; }
+                Vector3 fwd = new Vector3(tan.x, 0f, tan.y); fwd = fwd.sqrMagnitude < 1e-8f ? Vector3.forward : fwd.normalized;
+                fp[f] = new Vector3(p.x, Mathf.Lerp(hA, hB, t) + MarkLift, p.y);
+                fr[f] = Vector3.Cross(Vector3.up, fwd).normalized;
+            }
+
+            var verts = new List<Vector3>();
+            var triW = new List<int>(); var triY = new List<int>();
+            float hw = MarkWidth * 0.5f, period = MarkDash + MarkGap;
+            foreach (var m in marks)
+            {
+                List<int> tl = m.yellow ? triY : triW;
+                float walked = 0f;
+                for (int f = 0; f < frames - 1; f++)
+                {
+                    float segLen = (fp[f + 1] - fp[f]).magnitude;
+                    bool on = !m.dashed || (walked % period) < MarkDash;
+                    walked += segLen;
+                    if (!on) continue;
+                    Vector3 l0 = fp[f] + fr[f] * (m.u - hw), r0 = fp[f] + fr[f] * (m.u + hw);
+                    Vector3 l1 = fp[f + 1] + fr[f + 1] * (m.u - hw), r1 = fp[f + 1] + fr[f + 1] * (m.u + hw);
+                    int s = verts.Count;
+                    verts.Add(l0); verts.Add(r0); verts.Add(r1); verts.Add(l1);
+                    tl.Add(s); tl.Add(s + 1); tl.Add(s + 2); tl.Add(s); tl.Add(s + 2); tl.Add(s + 3);   // up
+                    tl.Add(s); tl.Add(s + 2); tl.Add(s + 1); tl.Add(s); tl.Add(s + 3); tl.Add(s + 2);   // down (unlit, 2-sided)
+                }
+            }
+            if (verts.Count == 0) return;
+
+            var mesh = new Mesh { name = "RoadMarks" };
+            if (verts.Count > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts);
+            mesh.subMeshCount = 2;
+            mesh.SetTriangles(triW, 0);
+            mesh.SetTriangles(triY, 1);
+            mesh.RecalculateBounds();
+
+            var go = new GameObject(name);
+            if (parent != null) go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            go.AddComponent<MeshRenderer>().sharedMaterials = new[]
+            {
+                PipelineMaterials.CreateUnlitColor(MarkWhite, "RoadMarkWhite"),
+                PipelineMaterials.CreateUnlitColor(MarkYellow, "RoadMarkYellow"),
+            };
         }
     }
 }
