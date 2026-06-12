@@ -25,7 +25,7 @@ namespace NetworkDesigner.Terrain
         public static int Cols { get; private set; }
         public static float TileMetersX { get; private set; }   // measured per-tile ground size
         public static float TileMetersZ { get; private set; }
-        public static float OriginX { get; private set; }       // SW corner in world XZ (mosaic centred on origin)
+        public static float OriginX { get; private set; }       // SW corner in world XZ (anchored to the global tile lattice, stable as regions are added)
         public static float OriginZ { get; private set; }
         public static string Folder { get; private set; }
         public static int TileCacheCap = 64;   // max decoded tiles kept (LRU); ~4 MB each at 1025²
@@ -105,19 +105,46 @@ namespace NetworkDesigner.Terrain
                 _path[gr, gc] = t.path; _tMin[gr, gc] = t.tmin; _tMax[gr, gc] = t.tmax;
             }
 
-            // Per-tile ground size from the lat/lon span (tile PITCH = span / intervals). Fall back to a
-            // flat tile size if geo is unavailable.
+            // For a WORLD, read its manifest so the frame stays stable across region loads.
+            string worldJson = isWorld ? Path.Combine(dir, "world.json") : null;
+            WorldInfo wi = null;
+            if (isWorld) try { wi = JsonUtility.FromJson<WorldInfo>(File.ReadAllText(worldJson)); } catch { }
+
+            // Per-tile ground size from the lat/lon span (tile PITCH = span / intervals). The longitude→metres
+            // factor uses the WORLD's anchor latitude (world.json RefLat) when available, so tile size stays
+            // STABLE as regions are added — using the loaded subset's centre latitude would drift the scale
+            // when you load a distant area. Fall back to a flat tile size if geo is unavailable.
             if (haveGeo && Rows > 1 && Cols > 1 && maxLat > minLat && maxLon > minLon)
             {
-                double centerLat = (maxLat + minLat) * 0.5;
-                TileMetersX = (float)((maxLon - minLon) / (Cols - 1) * 111320.0 * System.Math.Cos(centerLat * System.Math.PI / 180.0));
+                double latForCos = (wi != null && wi.Anchored) ? wi.RefLat : (maxLat + minLat) * 0.5;
+                TileMetersX = (float)((maxLon - minLon) / (Cols - 1) * 111320.0 * System.Math.Cos(latForCos * System.Math.PI / 180.0));
                 TileMetersZ = (float)((maxLat - minLat) / (Rows - 1) * 111320.0);
             }
             else { TileMetersX = TileMetersZ = Mathf.Max(1f, fallbackTileMeters); }
 
-            // Centre the mosaic on the origin so the most-used middle is the float-precise spot.
-            OriginX = -Cols * TileMetersX * 0.5f;
-            OriginZ = -Rows * TileMetersZ * 0.5f;
+            // World XZ origin. For a WORLD it's anchored to a frame LOCKED in world.json on first load, so a
+            // later region never re-centres the world (which would shift road plans / chunk edits stored in
+            // absolute world XZ). FrameX0/Z0 = world X/Z of the global lattice col-0 / row-0 edge; the live
+            // origin is FrameX0 + minCol·tile / FrameZ0 − (maxRow+1)·tile (grid row 0 = north, Z grows north).
+            // This keeps the _path index [globalRow−minRow, globalCol−minCol] consistent. The frame is locked
+            // so the FIRST mosaic is centred on the origin; plain (non-world) games stay centred as before.
+            if (isWorld && wi != null)
+            {
+                if (!wi.FrameLocked)
+                {
+                    wi.FrameX0 = -Cols * TileMetersX * 0.5;
+                    wi.FrameZ0 = Rows * TileMetersZ * 0.5;
+                    wi.FrameLocked = true;
+                    try { File.WriteAllText(worldJson, JsonUtility.ToJson(wi, true)); } catch { }
+                }
+                OriginX = (float)(wi.FrameX0 + minCol * TileMetersX);
+                OriginZ = (float)(wi.FrameZ0 - (maxRow + 1) * TileMetersZ);
+            }
+            else
+            {
+                OriginX = -Cols * TileMetersX * 0.5f;   // plain single-region game: centred (never expands)
+                OriginZ = -Rows * TileMetersZ * 0.5f;
+            }
 
             NormMin = wmin; NormMax = wmax; Folder = folder; Active = true;
             Debug.Log($"[DemChunkSource] {found.Count} tiles ({Rows}×{Cols}) → world " +

@@ -25,6 +25,13 @@ namespace NetworkDesigner.Terrain
         public double TileMercM;        // 1 km tile size in mercator metres (1000 / cos(refLat))
         public double OriginMercX;      // lattice origin = first map set's NW corner (mercator)
         public double OriginMercY;
+        // World-XZ frame, locked once so loading an ADDITIONAL region never re-centres the world (which
+        // would shift road plans / chunk edits, all stored in absolute world XZ). FrameX0 = world X of the
+        // global lattice col-0 west edge; FrameZ0 = world Z of the global lattice row-0 north edge. The live
+        // origin is then FrameX0 + minCol·tile / FrameZ0 − (maxRow+1)·tile — stable as the mosaic grows.
+        public bool FrameLocked;
+        public double FrameX0;
+        public double FrameZ0;
     }
 
     [Serializable]
