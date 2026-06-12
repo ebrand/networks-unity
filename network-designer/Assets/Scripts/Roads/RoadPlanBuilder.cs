@@ -222,7 +222,11 @@ namespace NetworkDesigner.Roads
                     if (L == R) marks.Add((off, false, true));                                  // same dir → dashed white
                     else { marks.Add((off - DblYellowSep, true, false)); marks.Add((off + DblYellowSep, true, false)); }  // opposing → double yellow
                 }
-                else if (L == Trn || R == Trn) marks.Add((off, true, false));                   // turn-lane edge (yellow)
+                else if (L == Trn || R == Trn)                                                 // TWLTL turn-lane edge:
+                {
+                    marks.Add((off, true, false));                                              //   solid yellow outer (lane edge)
+                    marks.Add((R == Trn ? off + DblYellowSep : off - DblYellowSep, true, true)); //   dashed yellow inner (turn-lane side)
+                }
                 else if (L == Med || R == Med) marks.Add((off, false, false));                  // median edge (white)
                 else if (lnL || lnR) marks.Add((off, false, false));                            // lane ↔ shoulder/curb → pavement edge
             }
