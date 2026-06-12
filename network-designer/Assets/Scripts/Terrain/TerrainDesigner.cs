@@ -431,7 +431,7 @@ namespace NetworkDesigner.Terrain
                 // low-poly/DEM and pins speed to the minimum → crawl). And pick a pace suited to
                 // the scale; the System-palette Camera Speed still overrides this live.
                 fly.GroundHeight = p => ChunkWorld.SampleHeight(p.x, p.z);
-                fly.MoveSpeed = Mathf.Max(fly.MoveSpeed, 500f);
+                fly.MoveSpeed = 500f; fly.ZoomStep = 10f;   // "Overview off" baseline (matches DemTerrainWorld.FrameCamera); palette toggles it on live
             }
             var streamer = FindFirstObjectByType<ChunkStreamer>();
             if (streamer == null) streamer = new GameObject("ChunkStreamer").AddComponent<ChunkStreamer>();
@@ -2115,6 +2115,31 @@ namespace NetworkDesigner.Terrain
             RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
             _dirtySince = Time.realtimeSinceStartup;
             Debug.Log($"[Road] Excavated {beds.Count} road segments ({m} samples) into the DEM bed.");
+        }
+
+        GameObject _roadBuildRoot;   // runtime 3D road meshes from the last Build Plan (regenerated, not saved)
+
+        // Build Plan (phase 1): convert the road plan to a Network, resolve it with the GeometryResolver brain
+        // (setbacks / intersections / lane flow), then sweep each road BODY — setback-trimmed, draped at the
+        // node-to-node grade line — into the excavated bed. Junction fill + markings come in later phases.
+        // Re-runs replace the previous build.
+        public void BuildRoadPlan()
+        {
+            LineGraph graph = RoadPlanLayer.Graph;
+            if (graph == null || graph.Edges.Count == 0) { Debug.LogWarning("[Road] No road plan to build — draw a corridor first (;)."); return; }
+            ClearRoadBuild();
+            System.Func<float, float, float> ground = ChunkWorld.Active
+                ? (System.Func<float, float, float>)ChunkWorld.SampleSourceHeight
+                : (x, z) => Surf.SampleHeight(x, z);
+            NetworkDesigner.Model.Network net = NetworkDesigner.Roads.RoadNetworkBridge.Build(
+                graph, NetworkDesigner.Model.DriveSide.Right, RoadPlanLayer.RoadWidth);
+            _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(net, ground, RoadPlanLayer.ExcavationDepth, null);
+        }
+
+        public void ClearRoadBuild()
+        {
+            if (_roadBuildRoot != null) DestroySafe(_roadBuildRoot);
+            _roadBuildRoot = null;
         }
 
         // Box-blur the carved cells (CutSmoothPasses) to round the coarse-grid wall
