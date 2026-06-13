@@ -434,6 +434,7 @@ namespace NetworkDesigner.Terrain
             GameObject go = UnityEngine.Object.Instantiate(prefab, new Vector3(wx, wy, wz),
                 Quaternion.Euler(0f, rotY, 0f), _root.transform);
             if (scale > 0f && !Mathf.Approximately(scale, 1f)) go.transform.localScale *= scale;
+            // (LOD thresholds are fixed once on the prefab at load — Instantiate inherits them.)
             // No physics: strip colliders so they cost nothing and can't be hit by
             // the sculpt/cursor raycast (which treats any MeshCollider as terrain).
             Collider[] cols = go.GetComponentsInChildren<Collider>();
@@ -453,6 +454,53 @@ namespace NetworkDesigner.Terrain
                 _byCell[cellKey] = bucket = new List<PlacedTree>();
             bucket.Add(pt);
             return pt;
+        }
+
+        // Some packs (NatureManufacture / Vegetation Studio beech) author LODGroup screenRelativeHeight > 1
+        // (e.g. 2.1, 1.5) which Unity can never satisfy, so every instance stays pinned at LOD0 — dense + heavy,
+        // and visibly different from the forest tool (which fixes the same bug in code). If the set isn't a sane
+        // descending (0,1] sequence, replace it with the same geometric progression ForestGen uses.
+        static void FixLodGroup(GameObject go)
+        {
+            var lg = go.GetComponentInChildren<LODGroup>();
+            if (lg == null) return;
+            var lods = lg.GetLODs();
+            if (lods == null || lods.Length == 0) return;
+            bool sane = true;
+            for (int i = 0; i < lods.Length && sane; i++)
+                if (lods[i].screenRelativeTransitionHeight <= 0f || lods[i].screenRelativeTransitionHeight > 1f ||
+                    (i > 0 && lods[i].screenRelativeTransitionHeight >= lods[i - 1].screenRelativeTransitionHeight)) sane = false;
+            if (sane) return;
+            // Sane descending (0,1] thresholds; Unity's lodBias then holds higher LODs. The forest tool applies
+            // the same lodBias in code, so brush- and forest-placed trees now switch LODs at the same on-screen size.
+            for (int i = 0; i < lods.Length; i++)
+                lods[i].screenRelativeTransitionHeight = (i == lods.Length - 1) ? 0.01f : 0.5f * Mathf.Pow(0.4f, i); // 0.5,0.2,0.08,…
+            lg.SetLODs(lods);
+        }
+
+        // Brush-placed TREES rendered a hair darker to match the forest tool (whose night-darkening factor dims
+        // it below full noon). Multiply-preserving per-instance block keeps the prefab's hue/alpha. 1 = off.
+        public static float TreeBrushDarken = 0.92f;
+        static MaterialPropertyBlock _darkenMpb;
+        static readonly string[] _darkenProps =
+            { "_BaseColor", "_Color", "_HealthyColor", "_DryColor", "_TrunkBaseColor", "_BarkBaseColor", "_EmissionColor" };
+        void DarkenInstance(GameObject go)
+        {
+            if (Name != "Trees" || TreeBrushDarken >= 0.999f) return;
+            float f = TreeBrushDarken;
+            _darkenMpb ??= new MaterialPropertyBlock();
+            var rends = go.GetComponentsInChildren<MeshRenderer>();
+            for (int ri = 0; ri < rends.Length; ri++)
+            {
+                var mat = rends[ri].sharedMaterial;
+                if (mat == null) continue;
+                _darkenMpb.Clear();
+                bool any = false;
+                for (int p = 0; p < _darkenProps.Length; p++)
+                    if (mat.HasProperty(_darkenProps[p]))
+                    { Color c = mat.GetColor(_darkenProps[p]); _darkenMpb.SetColor(_darkenProps[p], new Color(c.r * f, c.g * f, c.b * f, c.a)); any = true; }
+                if (any) rends[ri].SetPropertyBlock(_darkenMpb);
+            }
         }
 
         // Erase items within the brush. Visits only overlapping lattice cells.
@@ -654,6 +702,9 @@ namespace NetworkDesigner.Terrain
             list.Sort((a, b) => string.CompareOrdinal(a.name, b.name));
             if (list.Count == 0 || SamePrefabList(list, Prefabs)) return false;
             Prefabs = list;
+            // Remap broken LOD thresholds ONCE per prefab — Instantiate then inherits the fix, so painting
+            // doesn't pay a per-tree hierarchy traversal. Also fixes the forest tool (ExtractLods reads these).
+            for (int i = 0; i < Prefabs.Count; i++) FixLodGroup(Prefabs[i]);
             _enabled = null;   // re-sync include toggles
             Debug.Log($"[ScatterLayer:{Name}] loaded {list.Count} prefab(s) from Resources/{resFolder}.");
             return true;

@@ -150,12 +150,12 @@ namespace NetworkDesigner.Terrain
         }
 
         public static float MaxRenderDistance = 2200f;  // trees in cells past this (m) aren't drawn
-        public static int ShadowCasterMaxLod = 1;        // only LOD indices ≤ this cast shadows (near trees only) — big perf lever
+        public static int ShadowCasterMaxLod = 2;        // LOD indices ≤ this cast shadows (near trees) — perf lever
         // Far LODs are flat cross-card impostors that catch full light (no self-shadowing) and read much
         // BRIGHTER than the self-shadowed near mesh — a jarring pop as you approach. Tint each LOD toward
         // this factor (1 at LOD0 → FarLodDarken at the last) so the brightness matches across the transition.
-        public static float FarLodDarken = 0.6f;
-        public static float NearLodTint = 0.8f;        // even the close LOD0 mesh catches full sun + reads a touch bright; knock it down
+        public static float FarLodDarken = 1.0f;       // 1 = no LOD darkening (mesh LODs need none; matches brush-placed trees). Lower only for cross-card impostor packs.
+        public static float NearLodTint = 1.0f;        // 1 = LOD0 renders at the prefab's real colour (same as the tree brush). Was 0.8 (made forest darker than brush).
         public static float NightFoliageTint = 0.12f;  // canopy albedo at full night (sun fully down) — kills the glow against a black sky
 
         // Combined darken scalar for a LOD: near→far tint (1 at LOD0 → FarLodDarken at the last) × day→night
@@ -479,6 +479,7 @@ namespace NetworkDesigner.Terrain
         {
             Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
             float fovTan = Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+            float lodBias = Mathf.Max(0.01f, QualitySettings.lodBias);   // hold higher LODs like Unity's GameObject LODGroups (the tree brush)
             float maxD2 = MaxRenderDistance * MaxRenderDistance;
             foreach (var sp in _species)
             {
@@ -497,7 +498,7 @@ namespace NetworkDesigner.Terrain
                     float d2 = (cell.bounds.center - camPos).sqrMagnitude;
                     if (d2 > maxD2) continue;                                          // distance cap
                     if (!GeometryUtility.TestPlanesAABB(planes, cell.bounds)) continue; // off-screen
-                    float screenH = sp.height / (2f * Mathf.Max(1f, Mathf.Sqrt(d2)) * fovTan); // ~viewport fraction
+                    float screenH = sp.height / (2f * Mathf.Max(1f, Mathf.Sqrt(d2)) * fovTan) * lodBias; // ~viewport fraction × lodBias
                     int li = 0;
                     while (li < lodN - 1 && screenH < sp.lods[li].threshold) li++;     // first LOD small enough
                     sp.vis[li].AddRange(cell.items);
