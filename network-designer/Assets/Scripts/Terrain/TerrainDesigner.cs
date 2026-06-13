@@ -534,6 +534,11 @@ namespace NetworkDesigner.Terrain
         public bool ChunkContours { get => ChunkWorld.ShowContours; set => ChunkWorld.SetContours(value); }
         public float ChunkContourInterval { get => ChunkWorld.ContourMinor; set => ChunkWorld.SetContourMinor(value); }
         public float ChunkContourStrength { get => ChunkWorld.ContourStrength; set => ChunkWorld.SetContourStrength(value); }
+        // Ridge / valley overlay: highlights convex crests + concave hollows from baked terrain curvature.
+        public bool ChunkRidges { get => ChunkWorld.ShowRidges; set => ChunkWorld.SetRidges(value); }
+        public float ChunkRidgeScale { get => ChunkWorld.RidgeScaleMeters; set => ChunkWorld.SetRidgeScale(value); }
+        public float ChunkRidgeThreshold { get => ChunkWorld.RidgeThreshold; set => ChunkWorld.SetRidgeThreshold(value); }
+        public float ChunkRidgeStrength { get => ChunkWorld.RidgeStrength; set => ChunkWorld.SetRidgeStrength(value); }
         // Force the bubble to the FULL Radius regardless of zoom (streams in over frames). Heavy:
         // (2·Radius+1)² chunks — e.g. Radius 40 = 6,561. Following the camera; overrides Lock while on.
         public bool ChunkFillRadius
@@ -1706,6 +1711,7 @@ namespace NetworkDesigner.Terrain
             DrawWorldText(cam, s, ToWorldXZ(rd.PreviewCorner, 2f), $"{rd.PreviewDeflectionDeg:0}°", col);
         }
 
+
         // Curve-inspection readout for the hovered curve: leg distances + deflection angle
         // at the construction geometry, and a metrics block (decel / radius+max-speed /
         // grade / rated) anchored near the curve. Fed by the active layer's Inspect* fields.
@@ -1901,7 +1907,10 @@ namespace NetworkDesigner.Terrain
         public void RebuildPlan() { PlanLayer.Rebuild(Surf); }
         public void ClearPlan() { PlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
         public void RebuildRoadPlan() { RoadPlanLayer.Rebuild(Surf); }
-        public void ClearRoadPlan() { RoadPlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
+        // Clear the editable plan linework only. The BUILT 3D roads are committed geometry → they stay standing
+        // (use "Remove roads" to delete those). We DO drop the built-edge tracking set, since its indices point
+        // at the now-deleted graph; a fresh plan + build starts clean, and the old meshes survive until then.
+        public void ClearRoadPlan() { RoadPlanLayer.ClearAll(Surf); _builtRoadEdges.Clear(); _dirtySince = Time.realtimeSinceStartup; }
 
         // ── Named road-plan library: per-world snapshots under <world>/RoadPlans/<name>.json, so you can
         // save a work-in-progress, revert to it, load another, etc. (JsonUtility round-trips LineGraphSave). ──
@@ -2171,10 +2180,12 @@ namespace NetworkDesigner.Terrain
             if (ChunkWorld.Active)
             {
                 int n = 0;
+                float batter = Mathf.Max(0.25f, RoadPlanLayer.CutBatter);
                 foreach (var b in beds)
                 {
-                    float r = b.flatHalf + feather;               // flat plateau = the road footprint, feather beyond
-                    ChunkWorld.GradeCorridor(b.pts, r, b.flatHalf / r);
+                    // Flat bed (road footprint + margin shoulder) then cut/fill batters daylighting into the
+                    // terrain — proper bench, no floating shelf or scalloped disc edges.
+                    ChunkWorld.GradeBatter(b.pts, b.flatHalf, batter);
                     n += b.pts.Count;
                 }
                 RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
@@ -2199,25 +2210,79 @@ namespace NetworkDesigner.Terrain
             Debug.Log($"[Road] Excavated {beds.Count} road segments ({m} samples) into the DEM bed.");
         }
 
-        GameObject _roadBuildRoot;   // runtime 3D road meshes from the last Build Plan (regenerated, not saved)
+        // Excavate just ONE segment (driven by its in-world Excavate button) and mark that edge Excavated.
+        public void ExcavateRoadSegment(int edgeIndex)
+        {
+            if (!RoadPlanLayer.EdgeExcavationBed(Surf, edgeIndex, out var pts, out float flatHalf)) return;
+            float feather = Mathf.Max(0.1f, RoadPlanLayer.CutFeather);
+            float r = flatHalf + feather; float innerFrac = flatHalf / r;   // (DEM backend still uses the feathered stamp)
+            if (ChunkWorld.Active)
+            {
+                ChunkWorld.GradeBatter(pts, flatHalf, Mathf.Max(0.25f, RoadPlanLayer.CutBatter));   // daylighting bench
+                RoadPlanLayer.SetEdgeExcavated(edgeIndex, true);
+                RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+                ConformScatterAndLines();
+            }
+            else if (DemTerrainWorld.HasWorld)
+            {
+                foreach (Vector3 p in pts) DemTerrainWorld.FlattenStamp(p, r, innerFrac, p.y);
+                DemTerrainWorld.StitchAllSeams();
+                TreeLayer.ConformToSurface(Surf); RockLayer.ConformToSurface(Surf);
+                FenceLayer.Rebuild(Surf); PowerLineLayer.Rebuild(Surf);
+                RoadPlanLayer.SetEdgeExcavated(edgeIndex, true);
+                RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+            }
+            else { Debug.LogWarning("[Road] Excavation needs the chunk or DEM world."); return; }
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[Road] Excavated segment {edgeIndex}.");
+        }
+
+        GameObject _roadBuildRoot;   // runtime 3D road meshes from the last build (regenerated, not saved)
+        // Which plan edges currently have 3D road built. Build Plan = all edges; Build Mode = one edge per click.
+        // Runtime-only (the meshes aren't saved); cleared with the plan / on world switch / by "Remove roads".
+        readonly System.Collections.Generic.HashSet<int> _builtRoadEdges = new System.Collections.Generic.HashSet<int>();
 
         // Build Plan (phase 1): convert the road plan to a Network, resolve it with the GeometryResolver brain
         // (setbacks / intersections / lane flow), then sweep each road BODY — setback-trimmed, draped at the
         // node-to-node grade line — into the excavated bed. Junction fill + markings come in later phases.
-        // Re-runs replace the previous build.
+        // Marks EVERY edge built, then re-sweeps.
         public void BuildRoadPlan()
         {
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph == null || graph.Edges.Count == 0) { Debug.LogWarning("[Road] No road plan to build — draw a corridor first (;)."); return; }
+            _builtRoadEdges.Clear();
+            for (int e = 0; e < graph.Edges.Count; e++) _builtRoadEdges.Add(e);
+            RebuildBuiltRoads();
+        }
+
+        // Build a SINGLE plan segment (Build Mode: click an excavated segment). Adds it to the built set and
+        // re-sweeps; the whole network still resolves, so this segment's junctions set back correctly.
+        public void BuildRoadSegment(int edgeIndex)
+        {
+            LineGraph graph = RoadPlanLayer.Graph;
+            if (graph == null || edgeIndex < 0 || edgeIndex >= graph.Edges.Count) return;
+            _builtRoadEdges.Add(edgeIndex);
+            RebuildBuiltRoads();
+            Debug.Log($"[Road] Built segment {edgeIndex} ({_builtRoadEdges.Count} built).");
+        }
+
+        // (Re)sweep exactly the edges in _builtRoadEdges into a fresh build root. The whole network resolves for
+        // correct setbacks; only the built edges emit geometry (RoadPlanBuilder's onlyRoads filter).
+        void RebuildBuiltRoads()
+        {
+            LineGraph graph = RoadPlanLayer.Graph;
             ClearRoadBuild();
+            if (graph == null || _builtRoadEdges.Count == 0) return;
             // Per-node DESIGN elevation (vertex "v{i}" ↔ node i) — the same heights Excavate cut to, captured
             // from the shaped surface — so the swept road sits in its cut and respects carved/flattened terrain.
             var nodeElev = new System.Collections.Generic.Dictionary<string, float>(graph.Nodes.Count);
             for (int i = 0; i < graph.Nodes.Count; i++) nodeElev["v" + i] = RoadPlanLayer.DesignElevation(i, Surf);
             NetworkDesigner.Model.Network net = NetworkDesigner.Roads.RoadNetworkBridge.Build(
                 graph, NetworkDesigner.Model.DriveSide.Right, RoadPlanLayer.RoadWidth);
+            var only = new System.Collections.Generic.HashSet<string>();
+            foreach (int e in _builtRoadEdges) if (e >= 0 && e < graph.Edges.Count) only.Add("r" + e);
             _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(
-                net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null);
+                net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null, only);
         }
 
         public void ClearRoadBuild()
@@ -2225,6 +2290,9 @@ namespace NetworkDesigner.Terrain
             if (_roadBuildRoot != null) DestroySafe(_roadBuildRoot);
             _roadBuildRoot = null;
         }
+
+        // "Remove roads" / world switch: drop the built meshes AND forget which segments were built.
+        public void ClearBuiltRoads() { _builtRoadEdges.Clear(); ClearRoadBuild(); }
 
         // Tear down ALL live network geometry (rail / rail-plan / road-plan / fence / power / built roads)
         // WITHOUT marking the save dirty. Used on world switch + return-to-menu so one world's networks don't
@@ -2237,7 +2305,7 @@ namespace NetworkDesigner.Terrain
             RoadPlanLayer.ClearAll(Surf);
             FenceLayer.ClearAll(Surf);
             PowerLineLayer.ClearAll(Surf);
-            ClearRoadBuild();
+            ClearBuiltRoads();
         }
 
         // Launcher/menu state: clear leftover networks and hide every terrain backend so the startup picker
@@ -2255,9 +2323,139 @@ namespace NetworkDesigner.Terrain
         public bool RoadElevationEdit => RoadPlanLayer.ElevationEditMode;
         public void SetRoadElevationEdit(bool on)
         {
-            if (on) EnterRoadPlanMode();
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); }
             RoadPlanLayer.SetElevationEditMode(on);
             RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // ---- road plan path-excavation sub-mode (palette "Excavate Mode") ----
+
+        public bool RoadExcavateMode => RoadPlanLayer.ExcavateSelectMode;
+        public void SetRoadExcavateMode(bool on)
+        {
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetBuildSegmentMode(false); }
+            RoadPlanLayer.SetExcavateSelectMode(on);
+            RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // ---- road plan per-segment build sub-mode (palette "Build Mode") ----
+
+        public bool RoadBuildSegmentMode => RoadPlanLayer.BuildSegmentMode;
+        public void SetRoadBuildSegmentMode(bool on)
+        {
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetExcavateSelectMode(false); }
+            RoadPlanLayer.SetBuildSegmentMode(on);
+            RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // Screen-space node pick under the cursor (robust to camera angle / zoom — fixes the "click a few times"
+        // friction of world-radius picking). Shared by the Excavate-path and Build-path sub-modes.
+        int PickRoadNode(RoadPlanLayer rd)
+        {
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            Vector2 sp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+            return rd.PickNodeScreen(cam, Surf, sp, 30f);
+        }
+
+        // Build Mode (mirrors Excavate Mode): click a START node (amber ring), then an END node → build every
+        // EXCAVATED segment on the path between them. Un-excavated segments on the path are skipped (with a note).
+        void HandleRoadBuildInput(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            if (MouseOverActivePanel() || !overTerrain) return;
+            if (!Input.GetMouseButtonDown(0)) return;
+            int n = PickRoadNode(rd);
+            if (n < 0) return;
+            if (rd.BuildStartNode < 0)
+            {
+                rd.BuildStartNode = n;                              // arm the start node
+                rd.Rebuild(Surf);
+                Debug.Log($"[Road] Build start = node {n}. Click an end node.");
+                return;
+            }
+            if (n == rd.BuildStartNode)                             // click the start again → cancel
+            { rd.BuildStartNode = -1; rd.Rebuild(Surf); return; }
+            var edges = rd.EdgePathBetween(rd.BuildStartNode, n);
+            rd.BuildStartNode = -1;
+            if (edges == null || edges.Count == 0)
+            { Debug.LogWarning("[Road] No connected path between those two nodes."); rd.Rebuild(Surf); return; }
+            BuildRoadPath(edges);
+        }
+
+        // Build every EXCAVATED segment in a path (skip un-excavated, with a note); one re-sweep at the end.
+        public void BuildRoadPath(System.Collections.Generic.List<int> edgeIndices)
+        {
+            if (edgeIndices == null || edgeIndices.Count == 0) return;
+            int added = 0, skipped = 0;
+            foreach (int e in edgeIndices)
+            {
+                if (RoadPlanLayer.IsEdgeExcavated(e)) { _builtRoadEdges.Add(e); added++; }
+                else skipped++;
+            }
+            if (added == 0) { Debug.LogWarning("[Road] None of those segments are excavated — Excavate the path first."); return; }
+            RebuildBuiltRoads();
+            Debug.Log($"[Road] Built {added} segment(s)" + (skipped > 0 ? $", skipped {skipped} un-excavated." : "."));
+        }
+
+        // Click a START node (armed → green ring), then an END node → excavate every plan segment on the
+        // shortest path between them (cut high ground, fill low), mark them Excavated, rebuild once.
+        void HandleRoadExcavateInput(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            if (MouseOverActivePanel() || !overTerrain) return;
+            if (!Input.GetMouseButtonDown(0)) return;
+            Vector2 xz = new Vector2(hit.point.x, hit.point.z);
+            int n = rd.PickNode(xz);
+            if (n < 0) return;
+            if (rd.ExcavateStartNode < 0)
+            {
+                rd.ExcavateStartNode = n;                          // arm the start node
+                rd.Rebuild(Surf);
+                Debug.Log($"[Road] Excavate start = node {n}. Click an end node.");
+                return;
+            }
+            if (n == rd.ExcavateStartNode)                          // click the start again → cancel the arming
+            { rd.ExcavateStartNode = -1; rd.Rebuild(Surf); return; }
+            var edges = rd.EdgePathBetween(rd.ExcavateStartNode, n);
+            rd.ExcavateStartNode = -1;
+            if (edges == null || edges.Count == 0)
+            { Debug.LogWarning("[Road] No connected path between those two nodes."); rd.Rebuild(Surf); return; }
+            ExcavateRoadPath(edges);
+        }
+
+        // Excavate a set of plan edges (cut+fill their beds) in one pass, then a single rebuild + conform.
+        public void ExcavateRoadPath(System.Collections.Generic.List<int> edgeIndices)
+        {
+            if (edgeIndices == null || edgeIndices.Count == 0) return;
+            float feather = Mathf.Max(0.1f, RoadPlanLayer.CutFeather);
+            int done = 0;
+            if (ChunkWorld.Active)
+            {
+                float batter = Mathf.Max(0.25f, RoadPlanLayer.CutBatter);
+                foreach (int ei in edgeIndices)
+                {
+                    if (!RoadPlanLayer.EdgeExcavationBed(Surf, ei, out var pts, out float flatHalf)) continue;
+                    ChunkWorld.GradeBatter(pts, flatHalf, batter);   // daylighting cut/fill bench
+                    RoadPlanLayer.SetEdgeExcavated(ei, true); done++;
+                }
+                RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+                ConformScatterAndLines();
+            }
+            else if (DemTerrainWorld.HasWorld)
+            {
+                foreach (int ei in edgeIndices)
+                {
+                    if (!RoadPlanLayer.EdgeExcavationBed(Surf, ei, out var pts, out float flatHalf)) continue;
+                    float r = flatHalf + feather; float innerFrac = flatHalf / r;
+                    foreach (Vector3 p in pts) DemTerrainWorld.FlattenStamp(p, r, innerFrac, p.y);
+                    RoadPlanLayer.SetEdgeExcavated(ei, true); done++;
+                }
+                DemTerrainWorld.StitchAllSeams();
+                TreeLayer.ConformToSurface(Surf); RockLayer.ConformToSurface(Surf);
+                FenceLayer.Rebuild(Surf); PowerLineLayer.Rebuild(Surf);
+                RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
+            }
+            else { Debug.LogWarning("[Road] Excavation needs the chunk or DEM world."); return; }
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[Road] Excavated path: {done} segment(s).");
         }
 
         // Drive the elevation-edit interactions from the per-frame mouse state.
@@ -2389,15 +2587,17 @@ namespace NetworkDesigner.Terrain
         // Snap + topo + minimap toggles routed through here so they persist (footer buttons / hotkeys call these).
         public void ToggleSnap() { SnapToGrid = !SnapToGrid; SaveViewPrefs(); }
         public void ToggleTopo() { ChunkContours = !ChunkContours; SaveViewPrefs(); }
+        public void ToggleRidges() { ChunkRidges = !ChunkRidges; SaveViewPrefs(); }
         public void ToggleMinimap() { _showMinimap = !_showMinimap; SaveViewPrefs(); }
 
-        // The grid / snap / topo / minimap view toggles persist across worlds in PlayerPrefs.
-        const string ViewSnapKey = "ViewSnap", ViewGridKey = "ViewGrid", ViewTopoKey = "ViewTopo", ViewMiniKey = "ViewMinimap";
+        // The grid / snap / topo / ridge / minimap view toggles persist across worlds in PlayerPrefs.
+        const string ViewSnapKey = "ViewSnap", ViewGridKey = "ViewGrid", ViewTopoKey = "ViewTopo", ViewRidgeKey = "ViewRidge", ViewMiniKey = "ViewMinimap";
         void SaveViewPrefs()
         {
             PlayerPrefs.SetInt(ViewSnapKey, SnapToGrid ? 1 : 0);
             PlayerPrefs.SetInt(ViewGridKey, GridOn ? 1 : 0);
             PlayerPrefs.SetInt(ViewTopoKey, ChunkContours ? 1 : 0);
+            PlayerPrefs.SetInt(ViewRidgeKey, ChunkRidges ? 1 : 0);
             PlayerPrefs.SetInt(ViewMiniKey, _showMinimap ? 1 : 0);
             PlayerPrefs.Save();
         }
@@ -2407,6 +2607,7 @@ namespace NetworkDesigner.Terrain
             bool grid = PlayerPrefs.GetInt(ViewGridKey, 0) == 1;
             if (ChunkWorld.Active) ChunkShowGrid = grid; else { GridEnabled = grid; ApplyTerrainMaterial(); }
             ChunkContours = PlayerPrefs.GetInt(ViewTopoKey, 0) == 1;
+            ChunkRidges = PlayerPrefs.GetInt(ViewRidgeKey, 0) == 1;
             _showMinimap = PlayerPrefs.GetInt(ViewMiniKey, 1) == 1;   // default on
         }
 
@@ -2958,6 +3159,12 @@ namespace NetworkDesigner.Terrain
                 // (de)select, right-click a node to level all selected to it. Skips the normal draw/delete.
                 if (_lineActive is RoadPlanLayer rdElev && rdElev.ElevationEditMode)
                 { rdElev.HidePreview(); HandleRoadElevationInput(rdElev, hit, overTerrain); return; }
+                // Path-excavation sub-mode owns the mouse too: click a start node, then an end node → excavate between.
+                if (_lineActive is RoadPlanLayer rdExc && rdExc.ExcavateSelectMode)
+                { rdExc.HidePreview(); HandleRoadExcavateInput(rdExc, hit, overTerrain); return; }
+                // Per-segment build sub-mode: click an excavated segment → sweep the 3D road on it.
+                if (_lineActive is RoadPlanLayer rdBld && rdBld.BuildSegmentMode)
+                { rdBld.HidePreview(); HandleRoadBuildInput(rdBld, hit, overTerrain); return; }
                 _lineActive.UpdatePreview(Surf, place, overTerrain);
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);
@@ -4799,7 +5006,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(14); // version (14 added per-node design elevation)
+                    w.Write(15); // version (15 added per-edge Excavated flag)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -4948,6 +5155,7 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.ControlB.x); w.Write(e.ControlB.y);
                 w.Write(e.SpeedLimit);                     // v4+
                 w.Write(e.Profile ?? "");                  // v13+ (road-plan per-segment profile)
+                w.Write(e.Excavated);                      // v15+ (road-plan per-segment excavated flag)
             }
             int ny = g?.NodeY?.Count ?? 0;                 // v14+: per-node design elevation
             w.Write(ny);
@@ -5147,6 +5355,7 @@ namespace NetworkDesigner.Terrain
                 }
                 if (version >= 4) e.SpeedLimit = r.ReadSingle(); // section speed
                 if (version >= 13) e.Profile = r.ReadString();   // road-plan per-segment profile
+                if (version >= 15) e.Excavated = r.ReadBoolean(); // road-plan per-segment excavated flag
                 g.Edges.Add(e);
             }
             if (version >= 14)   // per-node design elevation

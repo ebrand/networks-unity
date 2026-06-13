@@ -1,6 +1,7 @@
-// In-game road tool palette (UI Toolkit). Plan drawing today; the cross-section designer ("…" → Road
-// Designer) + the excavate / build-on-plan sweep pipeline as they land (Build / Excavate are scaffolded
-// until that pipeline exists). Self-spawns at runtime; all shared plumbing lives in PaletteBase.
+// In-game road tool palette (UI Toolkit). MODES (Plan/Build) · DESIGN PROFILE (category-filtered thumbnail
+// picker + Excavate/Build interactive sub-modes) · PLANS (named save/load library) · an ADVANCED foldout
+// holding width/depth/margin, whole-plan excavate/build, clear/remove, and the marking toggles.
+// Self-spawns at runtime; all shared plumbing lives in PaletteBase.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -32,7 +33,7 @@ namespace NetworkDesigner.UI
             go.AddComponent<RoadPalette>();
         }
 
-        const string Custom = "Custom (width)";
+        string _profileCategory;   // currently-shown DESIGN PROFILE category (drives the thumbnail grid)
 
         protected override void BuildBody(VisualElement body)
         {
@@ -44,113 +45,166 @@ namespace NetworkDesigner.UI
                 if (Designer.IsRoadPlanMode) Designer.EnterSculptMode(); else Designer.EnterRoadPlanMode();
             });
             planBtn.style.flexGrow = 1; planBtn.style.marginRight = 6;
-            var buildBtn = MakeButton("Build", () => { });   // 3D sweep pipeline — not built yet
+            var buildBtn = MakeButton("Build", () => { });   // top-level build view — pipeline not built yet
             buildBtn.style.flexGrow = 1; buildBtn.SetEnabled(false);
             buildBtn.tooltip = "Excavate + 3D road sweep — coming next";
             modes.Add(planBtn); modes.Add(buildBtn);
             body.Add(modes);
             _sync.Add(() => StyleActive(planBtn, Designer.IsRoadPlanMode));
 
-            // ---- profile type + designer ----
-            body.Add(Cap("Road profile type:"));
-            var ptRow = HBox(); ptRow.style.marginBottom = 8;
-            var names = new List<string> { Custom };
-            foreach (var c in RoadProfileLibrary.Configs)
-                if (c != null && !string.IsNullOrEmpty(c.Name)) names.Add(c.Name);
-            string cur = string.IsNullOrEmpty(Designer.RoadPlanLayer.ActiveProfileId) ? Custom : Designer.RoadPlanLayer.ActiveProfileId;
-            if (!names.Contains(cur)) cur = Custom;
-            var profDd = new DropdownField { choices = names, value = cur };
-            profDd.style.flexGrow = 1;
-            profDd.RegisterValueChangedCallback(e => { Designer.RoadPlanLayer.ActiveProfileId = e.newValue == Custom ? "" : e.newValue; Rebuild(); });
+            // ---- DESIGN PROFILE ----
+            body.Add(Divider());
+            body.Add(SectionLabel("DESIGN PROFILE"));
+            body.Add(Cap("Road profile category:"));
+
+            var cats = ProfileCategories();
+            if (string.IsNullOrEmpty(_profileCategory) || !cats.Contains(_profileCategory))
+                _profileCategory = ActiveProfileCategory(cats);
+
+            var catRow = HBox(); catRow.style.marginBottom = 8;
+            var catDd = new DropdownField { choices = cats, value = _profileCategory };
+            catDd.style.flexGrow = 1;
+            catDd.RegisterValueChangedCallback(e => { _profileCategory = e.newValue; Rebuild(); });
             var dots = MakeButton("…", () => PaletteBase.ToggleQuick("RoadDesigner"));
             dots.style.width = 42; dots.style.flexGrow = 0; dots.style.marginLeft = 6;
             dots.tooltip = "Open the Road Designer";
-            ptRow.Add(profDd); ptRow.Add(dots);
-            body.Add(ptRow);
+            catRow.Add(catDd); catRow.Add(dots);
+            body.Add(catRow);
 
-            // ---- visual profile picker (thumbnails) ----
-            body.Add(BuildThumbGrid());
+            // visual profile picker (thumbnails), filtered to the selected category
+            body.Add(BuildThumbGrid(_profileCategory));
 
-            // Custom-width fallback (used when the Custom profile is active).
-            body.Add(NumberRow("Custom width", "m",
-                () => Designer.RoadPlanLayer.RoadWidth,
-                v => { Designer.RoadPlanLayer.RoadWidth = v; Designer.RebuildRoadPlan(); }, 3f, 60f, "0"));
+            // ---- Excavate Mode / Build Mode (interactive sub-modes) ----
+            var subModes = HBox(); subModes.style.marginTop = 4; subModes.style.marginBottom = 10;
+            var excBtn = MakeButton("Excavate Mode", () => Designer.SetRoadExcavateMode(!Designer.RoadExcavateMode));
+            excBtn.style.flexGrow = 1; excBtn.style.marginRight = 6;
+            excBtn.tooltip = "Click a START node (green ring), then an END node — cuts + fills every segment between them";
+            var bldBtn = MakeButton("Build Mode", () => Designer.SetRoadBuildSegmentMode(!Designer.RoadBuildSegmentMode));
+            bldBtn.style.flexGrow = 1;
+            bldBtn.tooltip = "Click an EXCAVATED segment to sweep the 3D road onto it (excavate it first)";
+            subModes.Add(excBtn); subModes.Add(bldBtn);
+            body.Add(subModes);
+            _sync.Add(() => { StyleActive(excBtn, Designer.RoadExcavateMode); StyleActive(bldBtn, Designer.RoadBuildSegmentMode); });
 
-            // ---- actions ----
-            var acts = HBox(); acts.style.marginTop = 8; acts.style.marginBottom = 10;
-            var exc = MakeButton("Excavate", () => Designer.ExcavateRoadCorridor()); exc.style.flexGrow = 1; exc.style.marginRight = 6;
-            exc.tooltip = "Smooth + cut the roadbed into the terrain along the plan";
-            var bop = MakeButton("Build Plan", () => Designer.BuildRoadPlan()); bop.style.flexGrow = 1; bop.style.marginRight = 6;
-            bop.tooltip = "Sweep the resolved 3D roads (setback-trimmed) into the excavated bed";
-            var clr = MakeButton("Clear Plan", () => Designer.ClearRoadPlan()); clr.style.flexGrow = 1;
-            acts.Add(exc); acts.Add(bop); acts.Add(clr);
-            body.Add(acts);
-
-            var rmRow = HBox(); rmRow.style.marginBottom = 8;
-            var rm = MakeButton("Remove roads", () => Designer.ClearRoadBuild()); rm.style.flexGrow = 1;
-            rm.tooltip = "Delete the built 3D road meshes (keeps the plan) — for testing";
-            rmRow.Add(rm);
-            body.Add(rmRow);
-
-            // ---- excavation tuning ----
-            body.Add(NumberRow("Excavate depth", "m",
-                () => Designer.RoadPlanLayer.ExcavationDepth,
-                v => Designer.RoadPlanLayer.ExcavationDepth = v, 0f, 5f, "0.0"));
-            body.Add(NumberRow("Excavate margin", "m",
-                () => Designer.RoadPlanLayer.ExcavationMargin,
-                v => { Designer.RoadPlanLayer.ExcavationMargin = v; Designer.RebuildRoadPlan(); }, 0f, 20f, "0.0"));
-
-            // ---- node elevations ----
-            var elevBtn = MakeButton("Edit elevations", () => Designer.SetRoadElevationEdit(!Designer.RoadElevationEdit));
-            elevBtn.style.marginTop = 8;
-            elevBtn.tooltip = "Drag a node up/down to set its height; click a node to select; right-click a node to level all selected nodes to it";
-            body.Add(elevBtn);
-            _sync.Add(() => StyleActive(elevBtn, Designer.RoadElevationEdit));
-            var elevNote = Cap("Drag = set height · click = select · right-click = level selected to that node");
-            elevNote.style.fontSize = 10; elevNote.style.marginBottom = 4;
-            body.Add(elevNote);
-
-            // ---- toggles ----
-            body.Add(ToggleRow("Show crosswalks", () => Designer.RoadPlanLayer.ShowCrosswalks,
-                v => { Designer.RoadPlanLayer.ShowCrosswalks = v; Designer.RebuildRoadPlan(); }));
-            body.Add(ToggleRow("Show stop lines", () => Designer.RoadPlanLayer.ShowStopBars,
-                v => { Designer.RoadPlanLayer.ShowStopBars = v; Designer.RebuildRoadPlan(); }));
-            body.Add(ToggleRow("Guided turns (lock)", () => Designer.RoadPlanLayer.GuidedTurns,
-                v => Designer.RoadPlanLayer.GuidedTurns = v));
-
-            // ---- named plan library (per-world): save WIP, load, revert, delete ----
+            // ---- PLANS (named per-world library) ----
             body.Add(Divider());
             body.Add(SectionLabel("PLANS"));
-            string sel = Designer.CurrentRoadPlanName;
-            var planDd = DropdownRow(() => Designer.ListRoadPlans(), () => sel, v => sel = v);
-            body.Add(planDd);
-            var planActs = HBox();
-            var loadBtn = MakeButton("Load", () => { if (!string.IsNullOrEmpty(sel)) Designer.LoadRoadPlan(sel); });
-            loadBtn.style.flexGrow = 1; loadBtn.style.marginRight = 6;
+            body.Add(Cap("Current Plan:"));
+            string sel = Designer.CurrentRoadPlanName ?? string.Empty;
+            TextField nameField = null;   // assigned below; planDd's callback only fires after that
+            var planRow = HBox(); planRow.style.marginBottom = 6;
+            var planDd = new DropdownField { choices = Designer.ListRoadPlans(), value = sel };
+            planDd.style.flexGrow = 1; planDd.style.marginRight = 6;
+            planDd.RegisterValueChangedCallback(e => { sel = e.newValue; nameField?.SetValueWithoutNotify(e.newValue); });
             var revertBtn = MakeButton("Revert", () => Designer.RevertRoadPlan());
-            revertBtn.style.flexGrow = 1; revertBtn.style.marginRight = 6;
+            revertBtn.style.width = 80;
             revertBtn.tooltip = "Reload the last saved/loaded plan, discarding edits since.";
-            var delBtn = MakeButton("Delete", () => { if (!string.IsNullOrEmpty(sel)) Designer.DeleteRoadPlan(sel); });
-            delBtn.style.flexGrow = 1;
-            planActs.Add(loadBtn); planActs.Add(revertBtn); planActs.Add(delBtn);
-            body.Add(planActs);
+            planRow.Add(planDd); planRow.Add(revertBtn);
+            body.Add(planRow);
 
-            var saveRow = HBox(); saveRow.style.marginTop = 6;
-            var nameField = new TextField(); nameField.style.flexGrow = 1; nameField.style.marginRight = 6;
-            nameField.SetValueWithoutNotify(Designer.CurrentRoadPlanName);
-            var savePlanBtn = MakeButton("Save plan", () => { Designer.SaveRoadPlanAs(nameField.value); sel = SanitizeShown(nameField.value); });
-            savePlanBtn.style.width = 90;
-            saveRow.Add(nameField); saveRow.Add(savePlanBtn);
-            body.Add(saveRow);
+            // Editable name: picking a plan above fills it; edit it to Save a new copy.
+            nameField = new TextField(); nameField.style.marginBottom = 6;
+            nameField.SetValueWithoutNotify(sel);
+            body.Add(nameField);
+
+            var planActs = HBox();
+            var saveBtn = MakeButton("Save", () =>
+            {
+                string nm = string.IsNullOrWhiteSpace(nameField.value) ? sel : nameField.value;
+                Designer.SaveRoadPlanAs(nm); sel = SanitizeShown(nm);
+            });
+            saveBtn.style.flexGrow = 1; saveBtn.style.marginRight = 6;
+            saveBtn.tooltip = "Save the current plan under the name above (edit the name to save a new copy).";
+            var delBtn = MakeButton("Delete", () => { if (!string.IsNullOrEmpty(sel)) Designer.DeleteRoadPlan(sel); });
+            delBtn.style.flexGrow = 1; delBtn.style.marginRight = 6;
+            var loadBtn = MakeButton("Load", () => { if (!string.IsNullOrEmpty(sel)) Designer.LoadRoadPlan(sel); });
+            loadBtn.style.flexGrow = 1;
+            planActs.Add(saveBtn); planActs.Add(delBtn); planActs.Add(loadBtn);
+            body.Add(planActs);
             var planNote = Cap("Save names a snapshot · Revert reloads it · Load swaps to another");
             planNote.style.fontSize = 10; planNote.style.marginTop = 2;
             body.Add(planNote);
+
+            // ---- ADVANCED (collapsed by default): everything the simplified palette tucks away ----
+            var adv = Section(body, "ADVANCED");
+            adv.Add(NumberRow("Custom width", "m",
+                () => Designer.RoadPlanLayer.RoadWidth,
+                v => { Designer.RoadPlanLayer.RoadWidth = v; Designer.RebuildRoadPlan(); }, 3f, 60f, "0"));
+            adv.Add(NumberRow("Excavate depth", "m",
+                () => Designer.RoadPlanLayer.ExcavationDepth,
+                v => Designer.RoadPlanLayer.ExcavationDepth = v, 0f, 5f, "0.0"));
+            adv.Add(NumberRow("Excavate margin", "m",
+                () => Designer.RoadPlanLayer.ExcavationMargin,
+                v => { Designer.RoadPlanLayer.ExcavationMargin = v; Designer.RebuildRoadPlan(); }, 0f, 20f, "0.0"));
+            adv.Add(NumberRow("Cut/fill slope 1:", "",
+                () => Designer.RoadPlanLayer.CutBatter,
+                v => Designer.RoadPlanLayer.CutBatter = v, 0.5f, 6f, "0.0"));
+
+            var elevBtn = MakeButton("Edit elevations", () => Designer.SetRoadElevationEdit(!Designer.RoadElevationEdit));
+            elevBtn.style.marginTop = 6;
+            elevBtn.tooltip = "Drag a node up/down to set its height; click a node to select; right-click a node to level all selected nodes to it";
+            adv.Add(elevBtn);
+            _sync.Add(() => StyleActive(elevBtn, Designer.RoadElevationEdit));
+            var elevNote = Cap("Drag = set height · click = select · right-click = level selected to that node");
+            elevNote.style.fontSize = 10; elevNote.style.marginBottom = 6;
+            adv.Add(elevNote);
+
+            var advActs = HBox(); advActs.style.marginBottom = 6;
+            var excavateAll = MakeButton("Excavate", () => Designer.ExcavateRoadCorridor());
+            excavateAll.style.flexGrow = 1; excavateAll.style.marginRight = 6;
+            excavateAll.tooltip = "Smooth + cut the WHOLE roadbed into the terrain along the plan";
+            var buildAll = MakeButton("Build Plan", () => Designer.BuildRoadPlan());
+            buildAll.style.flexGrow = 1;
+            buildAll.tooltip = "Sweep the whole resolved 3D road network into the excavated bed";
+            advActs.Add(excavateAll); advActs.Add(buildAll);
+            adv.Add(advActs);
+
+            var advActs2 = HBox(); advActs2.style.marginBottom = 8;
+            var clr = MakeButton("Clear Plan", () => Designer.ClearRoadPlan());
+            clr.style.flexGrow = 1; clr.style.marginRight = 6;
+            var rm = MakeButton("Remove roads", () => Designer.ClearBuiltRoads());
+            rm.style.flexGrow = 1;
+            rm.tooltip = "Delete the built 3D road meshes (keeps the plan) — for testing";
+            advActs2.Add(clr); advActs2.Add(rm);
+            adv.Add(advActs2);
+
+            adv.Add(ToggleRow("Show crosswalks", () => Designer.RoadPlanLayer.ShowCrosswalks,
+                v => { Designer.RoadPlanLayer.ShowCrosswalks = v; Designer.RebuildRoadPlan(); }));
+            adv.Add(ToggleRow("Show stop lines", () => Designer.RoadPlanLayer.ShowStopBars,
+                v => { Designer.RoadPlanLayer.ShowStopBars = v; Designer.RebuildRoadPlan(); }));
+            adv.Add(ToggleRow("Guided turns (lock)", () => Designer.RoadPlanLayer.GuidedTurns,
+                v => Designer.RoadPlanLayer.GuidedTurns = v));
         }
 
         static string SanitizeShown(string n) => (n ?? "").Trim();
 
-        // A scrollable grid of profile thumbnails (mini cross-sections); click to make it the active profile.
-        VisualElement BuildThumbGrid()
+        // Distinct profile categories in first-seen order (for the DESIGN PROFILE dropdown).
+        static List<string> ProfileCategories()
+        {
+            var order = new List<string>();
+            foreach (var c in RoadProfileLibrary.Configs)
+            {
+                if (c?.Road == null) continue;
+                string cat = string.IsNullOrWhiteSpace(c.Category) ? "Uncategorized" : c.Category.Trim();
+                if (!order.Contains(cat)) order.Add(cat);
+            }
+            if (order.Count == 0) order.Add("Uncategorized");
+            return order;
+        }
+
+        // Category of the currently-active profile (so the dropdown lands on it), else the first category.
+        string ActiveProfileCategory(List<string> cats)
+        {
+            string active = Designer.RoadPlanLayer.ActiveProfileId;
+            if (!string.IsNullOrEmpty(active))
+                foreach (var c in RoadProfileLibrary.Configs)
+                    if (c?.Road != null && (c.Id == active || c.Name == active))
+                        return string.IsNullOrWhiteSpace(c.Category) ? "Uncategorized" : c.Category.Trim();
+            return cats.Count > 0 ? cats[0] : "Uncategorized";
+        }
+
+        // A scrollable grid of profile thumbnails (mini cross-sections) for ONE category; click to activate.
+        VisualElement BuildThumbGrid(string category)
         {
             var sv = ScrollBox(190);
             sv.style.marginBottom = 8;
@@ -159,25 +213,19 @@ namespace NetworkDesigner.UI
             sv.style.paddingLeft = 6; sv.style.paddingTop = 4;
 
             string active = Designer.RoadPlanLayer.ActiveProfileId;
-            // Group profiles by category (preserving first-seen category order).
-            var order = new List<string>();
-            var byCat = new System.Collections.Generic.Dictionary<string, List<SavedConfig>>();
+            var grid = new VisualElement();
+            grid.style.flexDirection = FlexDirection.Row; grid.style.flexWrap = Wrap.Wrap; grid.style.marginBottom = 4;
+            int n = 0;
             foreach (var c in RoadProfileLibrary.Configs)
             {
                 if (c?.Road == null) continue;
                 string cat = string.IsNullOrWhiteSpace(c.Category) ? "Uncategorized" : c.Category.Trim();
-                if (!byCat.TryGetValue(cat, out var list)) { list = new List<SavedConfig>(); byCat[cat] = list; order.Add(cat); }
-                list.Add(c);
+                if (cat != category) continue;
+                grid.Add(BuildThumb(c, active == c.Id || active == c.Name));
+                n++;
             }
-            foreach (string cat in order)
-            {
-                sv.Add(SectionLabel(cat.ToUpperInvariant()));
-                var grid = new VisualElement();
-                grid.style.flexDirection = FlexDirection.Row; grid.style.flexWrap = Wrap.Wrap; grid.style.marginBottom = 4;
-                foreach (var c in byCat[cat])
-                    grid.Add(BuildThumb(c, active == c.Id || active == c.Name));
-                sv.Add(grid);
-            }
+            if (n == 0) sv.Add(Cap("No profiles in this category."));
+            else sv.Add(grid);
             return sv;
         }
 
@@ -211,32 +259,6 @@ namespace NetworkDesigner.UI
             SavedConfig cc = c;
             cell.RegisterCallback<ClickEvent>(_ => { Designer.RoadPlanLayer.ActiveProfileId = cc.Id; Designer.RebuildRoadPlan(); Rebuild(); });
             return cell;
-        }
-
-        // Cross-section strips (width, kind) for a mini preview — shoulders, lanes, median / turn lane.
-        static List<(float w, string kind)> Strips(NetworkDesigner.Model.RoadProfile p)
-        {
-            var s = new List<(float, string)>();
-            void Add(float w, string k) { if (w > 0.01f) s.Add((w, k)); }
-            Add(p.ShoulderBA != null ? p.ShoulderBA.Width : 0f, "shoulder");
-            for (int i = p.BA.Lanes.Count - 1; i >= 0; i--) Add(p.BA.Lanes[i].Width, "lane");
-            if (p.Median != null) Add(p.Median.Width, "median");
-            else if (p.TurnLane != null) Add(p.TurnLane.Width, "turn");
-            for (int i = 0; i < p.AB.Lanes.Count; i++) Add(p.AB.Lanes[i].Width, "lane");
-            Add(p.ShoulderAB != null ? p.ShoulderAB.Width : 0f, "shoulder");
-            return s;
-        }
-
-        static Color StripColor(string kind)
-        {
-            switch (kind)
-            {
-                case "lane": return new Color(0.30f, 0.31f, 0.33f);
-                case "shoulder": return new Color(0.19f, 0.20f, 0.21f);
-                case "median": return new Color(0.32f, 0.42f, 0.26f);
-                case "turn": return new Color(0.42f, 0.36f, 0.14f);
-                default: return new Color(0.25f, 0.25f, 0.25f);
-            }
         }
 
         Label Cap(string t)

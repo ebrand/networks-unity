@@ -22,7 +22,10 @@ namespace NetworkDesigner.Roads
         // `vertexElev(vertexId)` gives the per-node DESIGN elevation (the same height Excavate graded/cut to,
         // captured from the shaped surface) so the road sits in its cut. `excavationDepth` sets the minimum
         // slab thickness so the body fills the cut. Returns the root even when nothing builds.
-        public static GameObject Build(Network net, Func<string, float> vertexElev, float excavationDepth, Transform parent)
+        // `onlyRoads` (road ids "r{e}") restricts which road bodies get swept — the WHOLE network still resolves
+        // (so junction setbacks stay correct as segments are built one at a time), but only the listed roads emit
+        // geometry. Pass null to sweep every road (the whole-plan build).
+        public static GameObject Build(Network net, Func<string, float> vertexElev, float excavationDepth, Transform parent, HashSet<string> onlyRoads = null)
         {
             var root = new GameObject("RoadPlanBuild");
             if (parent != null) root.transform.SetParent(parent, false);
@@ -39,6 +42,7 @@ namespace NetworkDesigner.Roads
             foreach (NetworkRoad road in net.Roads)
             {
                 if (road == null || road.Profile == null) { skipped++; continue; }
+                if (onlyRoads != null && !onlyRoads.Contains(road.Id)) { skipped++; continue; }   // segment-build filter
                 if (!vById.TryGetValue(road.EndA, out Vertex va) || !vById.TryGetValue(road.EndB, out Vertex vb)) { skipped++; continue; }
 
                 Vector2 p0 = va.Position, p3 = vb.Position, c1, c2;

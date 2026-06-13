@@ -309,6 +309,183 @@
       },
       "driveSide": "right",
       "updatedAt": 0
+    },
+    {
+      "id": "2x2-turn",
+      "name": "2x2-turn",
+      "category": "Medium",
+      "road": {
+        "id": "2x2-turn",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "turnLane": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x2-median",
+      "name": "2x2-median",
+      "category": "Medium",
+      "road": {
+        "id": "2x2-median",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "median": {
+          "width": 1.5
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x2-turn-median",
+      "name": "2x2-turn-median",
+      "category": "Medium",
+      "road": {
+        "id": "2x2-turn-median",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "median": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1x1",
+      "name": "1x1",
+      "category": "Small",
+      "road": {
+        "id": "1x1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": true
+      },
+      "driveSide": "right",
+      "updatedAt": 0
     }
   ]
 }

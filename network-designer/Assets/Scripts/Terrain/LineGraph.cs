@@ -25,6 +25,7 @@ namespace NetworkDesigner.Terrain
         public Vector2 ControlB;
         public float SpeedLimit;   // km/h the section was laid at (0 = unset)
         public string Profile;     // road plan: the road-config.json profile id/name for this segment (null = none)
+        public bool Excavated;     // road plan: this segment's bed has been cut → renders distinctly + becomes Build-able
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }

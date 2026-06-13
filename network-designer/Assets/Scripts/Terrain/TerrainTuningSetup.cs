@@ -223,6 +223,16 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.chunkTopoStrength", "Chunk", "Topo strength",
                 () => t.ChunkContourStrength, v => t.ChunkContourStrength = v, 0.05f, 1f, 0.05f,
                 description: "Opacity/contrast of the chunk-world topo contour overlay.");
+            TuningRegistry.RegisterFloat("terrain.chunkRidgeScale", "Chunk", "Ridge scale (m)",
+                () => t.ChunkRidgeScale, v => t.ChunkRidgeScale = v, 2f, 200f, 1f,
+                description: "Curvature stencil arm for the ridge/valley overlay (⛰ footer toggle). Bigger = broader " +
+                             "ridges, smoother, ignores fine DEM noise. Changing this re-bakes every loaded chunk (a brief hitch).");
+            TuningRegistry.RegisterFloat("terrain.chunkRidgeThreshold", "Chunk", "Ridge sensitivity (1/m)",
+                () => t.ChunkRidgeThreshold, v => t.ChunkRidgeThreshold = v, 0.001f, 0.06f, 0.001f,
+                description: "Curvature a crest/hollow must exceed to light up. LOWER = more sensitive (fainter ridges show).");
+            TuningRegistry.RegisterFloat("terrain.chunkRidgeStrength", "Chunk", "Ridge strength",
+                () => t.ChunkRidgeStrength, v => t.ChunkRidgeStrength = v, 0.05f, 1f, 0.05f,
+                description: "Opacity of the ridge/valley overlay.");
             TuningRegistry.RegisterFloat("terrain.seaTolerance", "Chunk", "Sea tool: tolerance (m)",
                 () => t.SeaTolerance, v => t.SeaTolerance = v, 0.5f, 30f, 0.5f,
                 description: "Sea brush (6): how close in altitude counts as the same flooded area. One click floods " +
@@ -842,8 +852,11 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("road.excavateMargin", "Road plan", "Excavate margin (m/side)",
                 () => t.RoadPlanLayer.ExcavationMargin, v => { t.RoadPlanLayer.ExcavationMargin = v; t.RebuildRoadPlan(); }, 0f, 20f,
                 description: "Extra flat corridor excavated beyond the road footprint on EACH side (shoulder space for deeper cuts / larger fills). Shown as the cyan skirt in plan view.");
+            TuningRegistry.RegisterFloat("road.cutBatter", "Road plan", "Cut/fill slope 1:N",
+                () => t.RoadPlanLayer.CutBatter, v => t.RoadPlanLayer.CutBatter = v, 0.5f, 6f,
+                description: "Side-slope ratio (1 vertical : N horizontal) the excavation ramps beyond the flat bed until it DAYLIGHTS into the existing terrain — prevents the road sitting on a floating shelf / cliff. Bigger = gentler, wider earthwork. Applies to the chunk world; the DEM backend still uses a feathered stamp.");
             TuningRegistry.RegisterAction("road.removeBuilt", "Road plan", "Remove built roads",
-                () => t.ClearRoadBuild(),
+                () => t.ClearBuiltRoads(),
                 description: "Delete the built 3D road meshes (keeps the plan) — for testing.");
         }
 

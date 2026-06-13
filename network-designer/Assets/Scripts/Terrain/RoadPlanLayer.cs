@@ -60,6 +60,8 @@ namespace NetworkDesigner.Terrain
         public float GradeSampleStep = 2f;
         [Tooltip("Width (m) of the feathered batter BEYOND the corridor edge. 0 = vertical walls at the corridor edge (the cut is exactly the corridor width).")]
         public float CutFeather = 0f;
+        [Tooltip("Cut/fill side-slope ratio 1:N (1 vertical : N horizontal). The excavation ramps the ground at this slope beyond the flat bed until it DAYLIGHTS into the existing terrain — no floating shelf / cliff. Bigger = gentler, wider earthwork.")]
+        public float CutBatter = 2f;
         public Color PlanColor = new Color(1f, 0.55f, 0.12f, 0.95f);   // amber-orange (rail plan is yellow)
         // Guide/snap controls — shared by all plan tools via PlanGuides (tune in the Guides palette).
         public float NodePickRadius { get => PlanGuides.NodePickRadius; set => PlanGuides.NodePickRadius = value; }
@@ -823,25 +825,51 @@ namespace NetworkDesigner.Terrain
         public void CollectExcavationBeds(ITerrainSurface field, List<(List<Vector3> pts, float flatHalf)> outBeds)
         {
             if (Graph == null || outBeds == null) return;
+            foreach (LineEdge e in Graph.Edges)
+            { BuildEdgeBed(field, e, out var pts, out float flatHalf); if (pts != null) outBeds.Add((pts, flatHalf)); }
+        }
+
+        // The smoothed sunken roadbed for ONE edge: centreline sampled at the node-to-node grade line minus depth.
+        void BuildEdgeBed(ITerrainSurface field, LineEdge e, out List<Vector3> pts, out float flatHalf)
+        {
             float s = Mathf.Max(1f, GradeSampleStep);
             float depth = Mathf.Max(0f, ExcavationDepth);
-            foreach (LineEdge e in Graph.Edges)
+            EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            float yA = DesignElevation(e.A, field), yB = DesignElevation(e.B, field);
+            float chord = Vector2.Distance(p0, p3);
+            int n = Mathf.Max(2, Mathf.CeilToInt(chord / s));
+            pts = new List<Vector3>(n + 1);
+            for (int i = 0; i <= n; i++)
             {
-                EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
-                float yA = DesignElevation(e.A, field);
-                float yB = DesignElevation(e.B, field);
-                float chord = Vector2.Distance(p0, p3);
-                int n = Mathf.Max(2, Mathf.CeilToInt(chord / s));
-                var pts = new List<Vector3>(n + 1);
-                for (int i = 0; i <= n; i++)
-                {
-                    float u = i / (float)n;
-                    Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
-                    pts.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, u) - depth, xz.y));
-                }
-                float flatHalf = Mathf.Max(1f, EdgeWidth(e) * 0.5f + Mathf.Max(0f, ExcavationMargin));
-                outBeds.Add((pts, flatHalf));
+                float u = i / (float)n;
+                Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
+                pts.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, u) - depth, xz.y));
             }
+            flatHalf = Mathf.Max(1f, EdgeWidth(e) * 0.5f + Mathf.Max(0f, ExcavationMargin));
+        }
+
+        // ── per-segment excavate support (drives the in-world Excavate/Build buttons) ──
+        public int EdgeCount => Graph?.Edges?.Count ?? 0;
+        public bool IsEdgeExcavated(int i) => Graph != null && i >= 0 && i < Graph.Edges.Count && Graph.Edges[i].Excavated;
+        public void SetEdgeExcavated(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Excavated = on; }
+
+        public bool EdgeExcavationBed(ITerrainSurface field, int i, out List<Vector3> pts, out float flatHalf)
+        {
+            pts = null; flatHalf = 0f;
+            if (Graph == null || i < 0 || i >= Graph.Edges.Count) return false;
+            BuildEdgeBed(field, Graph.Edges[i], out pts, out flatHalf);
+            return pts != null && pts.Count >= 2;
+        }
+
+        // World position over a segment's midpoint (draped + lifted), for the in-world Excavate/Build button.
+        public bool EdgeMidpointWorld(ITerrainSurface field, int i, out Vector3 mid)
+        {
+            mid = default;
+            if (Graph == null || i < 0 || i >= Graph.Edges.Count) return false;
+            EdgeBezier(Graph.Edges[i], out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, 0.5f);
+            mid = Drape(field, xz) + Vector3.up * 2f;
+            return true;
         }
 
         // The road grade elevation (world Y) at a node — the per-node DESIGN height. Captured lazily from the
@@ -872,6 +900,65 @@ namespace NetworkDesigner.Terrain
         [System.NonSerialized] bool _elevMoved;
 
         public void SetElevationEditMode(bool on) { ElevationEditMode = on; if (!on) { _selected.Clear(); _elevDrag = -1; } }
+
+        // ── path excavation mode: click a start node, then an end node → excavate the connecting path ──
+        [System.NonSerialized] public bool ExcavateSelectMode;
+        [System.NonSerialized] public int ExcavateStartNode = -1;
+        public void SetExcavateSelectMode(bool on) { ExcavateSelectMode = on; if (!on) ExcavateStartNode = -1; }
+
+        // ── build-segment mode: click a start node, then an end node → build the path between (like Excavate) ──
+        [System.NonSerialized] public bool BuildSegmentMode;
+        [System.NonSerialized] public int BuildStartNode = -1;
+        public void SetBuildSegmentMode(bool on) { BuildSegmentMode = on; if (!on) BuildStartNode = -1; }
+
+        // Nearest edge whose bezier passes within maxDist of a world XZ; -1 if none.
+        public int PickEdge(Vector2 xz, float maxDist)
+            => Graph != null && Graph.NearestPointOnEdge(xz, maxDist, out int ei, out _, out _) ? ei : -1;
+
+        // SCREEN-SPACE node pick: nearest node whose puck projects within `pixelRadius` of the cursor. Robust to
+        // camera angle and zoom (terrain-XZ picking drifts under oblique views and shrinks to sub-pixel when zoomed
+        // out — the cause of "click a few times to select"). -1 if none.
+        public int PickNodeScreen(Camera cam, ITerrainSurface field, Vector2 screenPos, float pixelRadius)
+        {
+            if (cam == null || Graph == null || Graph.Nodes.Count == 0) return -1;
+            int best = -1; float bestSq = pixelRadius * pixelRadius;
+            float puck = Mathf.Max(0.02f, PlanGuides.NodePuckHeight) * 0.5f;
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                Vector2 c = Graph.Nodes[i];
+                Vector3 sp = cam.WorldToScreenPoint(new Vector3(c.x, DesignElevation(i, field) + puck, c.y));
+                if (sp.z <= 0f) continue;   // behind the camera
+                float dsq = (new Vector2(sp.x, sp.y) - screenPos).sqrMagnitude;
+                if (dsq < bestSq) { bestSq = dsq; best = i; }
+            }
+            return best;
+        }
+
+        // Shortest path of EDGE indices from node a to node b (BFS by edge count). Empty if same/unreachable.
+        public List<int> EdgePathBetween(int a, int b)
+        {
+            var path = new List<int>();
+            if (Graph == null || a < 0 || b < 0 || a == b || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) return path;
+            var cameFrom = new Dictionary<int, int>();   // node → previous node
+            var viaEdge = new Dictionary<int, int>();     // node → edge index used to reach it
+            var q = new Queue<int>(); q.Enqueue(a); cameFrom[a] = -1;
+            while (q.Count > 0)
+            {
+                int cur = q.Dequeue();
+                if (cur == b) break;
+                for (int ei = 0; ei < Graph.Edges.Count; ei++)
+                {
+                    LineEdge e = Graph.Edges[ei];
+                    int nb = e.A == cur ? e.B : (e.B == cur ? e.A : -1);
+                    if (nb < 0 || cameFrom.ContainsKey(nb)) continue;
+                    cameFrom[nb] = cur; viaEdge[nb] = ei; q.Enqueue(nb);
+                }
+            }
+            if (!cameFrom.ContainsKey(b)) return path;    // unreachable
+            for (int n = b; n != a && viaEdge.ContainsKey(n); n = cameFrom[n]) path.Add(viaEdge[n]);
+            path.Reverse();
+            return path;
+        }
 
         public int PickNode(Vector2 xz) => Graph.NearestNode(xz, NodePickRadius);
         public bool IsDraggingElevation => _elevDrag >= 0;
@@ -942,7 +1029,7 @@ namespace NetworkDesigner.Terrain
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
-            _nodeMr.enabled = PlanGuides.ShowNodes;
+            _nodeMr.enabled = PlanGuides.ShowNodes || ElevationEditMode || ExcavateSelectMode || BuildSegmentMode;   // always show nodes while editing
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
         }
 
@@ -1068,6 +1155,7 @@ namespace NetworkDesigner.Terrain
         static readonly Color32 ColMedian = new Color32(200, 165, 110, 220);   // median hatch (warm tan — reads as raised, not drivable)
         Color32 ColFoot => new Color32((byte)(PlanColor.r * 255f), (byte)(PlanColor.g * 255f), (byte)(PlanColor.b * 255f), 170); // shoulder/footprint (plan amber, dashed)
         static readonly Color32 ColSkirt = new Color32(70, 190, 235, 150);  // excavation skirt at ±(footprint + margin) — cyan, dashed, distinct from the amber footprint
+        static readonly Color32 ColExcavated = new Color32(70, 220, 110, 240); // excavated segment marker — solid green centreline
 
         // The two skirt lines marking the full excavated corridor (road footprint + ExcavationMargin per side).
         void EmitSkirt(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float footHalf)
@@ -1093,6 +1181,7 @@ namespace NetworkDesigner.Terrain
             _tEnd = 1f - Mathf.Clamp01(trimB / len);
             if (_tEnd - _tStart < 0.02f) { _tStart = 0f; _tEnd = 1f; return; }   // wholly inside junction boxes
             int n = Mathf.Clamp(Mathf.CeilToInt(len * (_tEnd - _tStart) / 1.5f), 2, 2048);   // fine enough for dashed markings
+            if (e != null && e.Excavated) EmitOffsetLine(field, p0, p1, p2, p3, n, 0f, ColExcavated, 0f, 0f);  // solid green centreline = this segment is cut
 
             NetworkDesigner.Model.RoadProfile prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(e?.Profile);
             if (prof == null || prof.TotalWidth < 0.5f)
@@ -1192,6 +1281,8 @@ namespace NetworkDesigner.Terrain
         { int s = _v.Count; _v.Add(a); _v.Add(b); _col.Add(col); _col.Add(col); _idx.Add(s); _idx.Add(s + 1); }
         static readonly Color32 StemCol = new Color32(200, 200, 210, 200);   // node lifted off the terrain → vertical stem
         static readonly Color32 SelCol  = new Color32(90, 220, 255, 255);    // selected node ring (cyan)
+        static readonly Color32 ExcStartCol = new Color32(80, 230, 120, 255); // path-excavation START node ring (green)
+        static readonly Color32 BuildStartCol = new Color32(245, 150, 40, 255); // path-build START node ring (amber)
 
         // A short 3D cylinder puck (top cap + side wall, manual outward normals) at a node — the visible
         // handle you grab to move / curve / delete. Sits at the node's DESIGN elevation (so an elevation
@@ -1223,6 +1314,20 @@ namespace NetworkDesigner.Terrain
                         if (i > 0) AddSeg(pr, p, SelCol);
                         pr = p;
                     }
+                }
+            }
+
+            // Path-excavation / path-build: ring the armed START node so it's clear which end you've picked.
+            if ((ExcavateSelectMode && idx == ExcavateStartNode) || (BuildSegmentMode && idx == BuildStartNode))
+            {
+                Color32 ringCol = ExcavateSelectMode ? ExcStartCol : BuildStartCol;
+                float rr = radius * 1.9f; Vector3 pr = default;
+                for (int i = 0; i <= 24; i++)
+                {
+                    float a = i / 24f * Mathf.PI * 2f;
+                    Vector3 p = new Vector3(c.x + Mathf.Cos(a) * rr, topY + 0.06f, c.y + Mathf.Sin(a) * rr);
+                    if (i > 0) AddSeg(pr, p, ringCol);
+                    pr = p;
                 }
             }
 

@@ -48,6 +48,13 @@ namespace NetworkDesigner.Terrain
         public static float ContourMajorEvery = 10f; // every Nth minor is a thicker major (→ 10 m)
         public static float ContourStrength = 0.55f; // line opacity 0..1
         static Material _contourMat;
+        // ── Ridge / valley overlay (per-pixel shader over a per-vertex CURVATURE signal baked into uv2) ──
+        public static bool ShowRidges = false;
+        public static float RidgeScaleMeters = 25f;   // curvature stencil arm (m): bigger = smoother, broader features, less DEM noise
+        public static float RidgeThreshold = 0.006f;  // |curvature| (1/m) a crest/hollow must exceed to light up
+        public static float RidgeStrength = 0.6f;     // overlay opacity 0..1
+        static Material _ridgeMat;
+        static readonly Dictionary<int, Vector2[]> _ridgeByRes = new Dictionary<int, Vector2[]>();
         const string RootName = "ChunkWorld";
         public static float AmpMeters = 0f;       // max terrain height (multi-octave); 0 = flat
         static readonly int[] ResLevels = { 65, 129, 257, 513, 1025 };
@@ -66,6 +73,7 @@ namespace NetworkDesigner.Terrain
             public Mesh Mesh;
             public Vector2Int Coord;   // this chunk's grid coordinate (for collider-distance gating)
             public GameObject ContourGo; // child renderer drawing the contour-overlay shader over this mesh
+            public GameObject RidgeGo;   // child renderer drawing the ridge/valley-overlay shader over this mesh
             public JobHandle BakeHandle; // in-flight async collision-bake (valid only while BakePending)
             public bool BakePending;   // a BakeMeshJob is baking this chunk's collider on a worker thread
             public float[] H;          // render heights at LodRes (= source DEM/proc + Edit)
@@ -720,6 +728,66 @@ namespace NetworkDesigner.Terrain
         public static void SetContourMinor(float m) { ContourMinor = Mathf.Clamp(m, 0.1f, 1000f); ApplyContourParams(); }
         public static void SetContourStrength(float s) { ContourStrength = Mathf.Clamp01(s); ApplyContourParams(); }
 
+        // ── Ridge / valley overlay ───────────────────────────────────────────────────────────
+        // 2nd renderer over each chunk mesh, reading the per-vertex curvature signal baked into uv2 by
+        // BuildMesh. Threshold/strength/colours are cheap shader params; the SCALE (stencil arm) is baked
+        // into the mesh, so changing it re-bakes every loaded chunk (RebuildAllMeshes).
+        static Material RidgeMat()
+        {
+            if (_ridgeMat == null)
+            {
+                var sh = Shader.Find("NetworkDesigner/RidgeValleyOverlay");
+                if (sh == null) { Debug.LogWarning("[ChunkWorld] RidgeValleyOverlay shader not found."); return null; }
+                _ridgeMat = new Material(sh) { name = "RidgeValleyOverlay" };
+                ApplyRidgeParams();
+            }
+            return _ridgeMat;
+        }
+
+        static void ApplyRidgeParams()
+        {
+            if (_ridgeMat == null) return;
+            _ridgeMat.SetFloat("_Threshold", Mathf.Max(1e-4f, RidgeThreshold));
+            _ridgeMat.SetFloat("_Strength", Mathf.Clamp01(RidgeStrength));
+        }
+
+        static void EnsureRidgeChild(Chunk ch)
+        {
+            if (ch.RidgeGo != null || ch.Go == null) return;
+            var mat = RidgeMat(); if (mat == null) return;
+            var go = new GameObject("RidgeValley");
+            go.transform.SetParent(ch.Go.transform, false);
+            go.AddComponent<MeshFilter>().sharedMesh = ch.Mesh;   // SHARED → tracks mesh + uv2 rebuilds for free
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            ch.RidgeGo = go;
+        }
+
+        public static void SetRidges(bool on)
+        {
+            if (on && RidgeMat() == null) { ShowRidges = false; return; }   // shader missing → no-op
+            bool was = ShowRidges;
+            ShowRidges = on;
+            if (on != was) RebuildAllMeshes();   // re-bake uv2 (populate when turning on, drop it when turning off)
+            foreach (var kv in _chunks)
+            {
+                if (on) EnsureRidgeChild(kv.Value);
+                if (kv.Value.RidgeGo != null) kv.Value.RidgeGo.SetActive(on);
+            }
+        }
+
+        public static void SetRidgeScale(float m)
+        {
+            float v = Mathf.Clamp(m, 2f, 400f);
+            if (Mathf.Approximately(v, RidgeScaleMeters)) return;
+            RidgeScaleMeters = v;
+            if (ShowRidges) RebuildAllMeshes();   // arm is baked into uv2 → re-bake
+        }
+        public static void SetRidgeThreshold(float t) { RidgeThreshold = Mathf.Max(1e-4f, t); ApplyRidgeParams(); }
+        public static void SetRidgeStrength(float s) { RidgeStrength = Mathf.Clamp01(s); ApplyRidgeParams(); }
+
         // ── Load / unload / LOD rebuild ──────────────────────────────────────────────────────
         static void LoadChunk(Vector2Int c)
         {
@@ -739,6 +807,7 @@ namespace NetworkDesigner.Terrain
             ch.Mr = go.AddComponent<MeshRenderer>(); ch.Mr.sharedMaterial = _mat;
             ch.Mc = go.AddComponent<MeshCollider>(); CookCollider(ch, true);   // only cooks if near the centre
             if (ShowContours) EnsureContourChild(ch);   // 2nd renderer for the topo overlay
+            if (ShowRidges) EnsureRidgeChild(ch);       // 2nd renderer for the ridge/valley overlay
 
             _chunks[c] = ch;
             _everLoaded.Add(c);
@@ -880,7 +949,48 @@ namespace NetworkDesigner.Terrain
             var normals = NormalsBuf(res);
             ComputeChunkNormals(ch, res, sp, perim, normals);
             m.normals = normals;
+            // Ridge/valley overlay rides a baked per-vertex CURVATURE signal in uv2.x (only computed when the
+            // overlay is on, so normal streaming/sculpt rebuilds don't pay for it). Cleared to free the stream
+            // when the overlay is off so toggling off reclaims the memory on the next rebuild.
+            m.uv2 = ShowRidges ? RidgeBuf(ch, res, sp, perim) : null;   // uv2 == TEXCOORD1 (what the ridge shader reads)
             m.RecalculateBounds();
+        }
+
+        // Per-vertex curvature signal = -Laplacian(H) over a physical stencil arm (RidgeScaleMeters): > 0 on
+        // convex crests (ridges), < 0 in concave hollows (valleys). The stencil samples in WORLD space across
+        // chunk borders (HCurv) so both sides of a seam agree → no overlay seam, same trick as the normals.
+        static Vector2[] RidgeBuf(Chunk ch, int res, float sp, int[] perim)
+        {
+            int vCount = res * res + 2 * perim.Length;
+            if (!_ridgeByRes.TryGetValue(res, out var buf) || buf.Length != vCount) { buf = new Vector2[vCount]; _ridgeByRes[res] = buf; }
+            var H = ch.H;
+            float ox = ch.Coord.x * ChunkSize, oz = ch.Coord.y * ChunkSize;
+            int k = Mathf.Clamp(Mathf.RoundToInt(RidgeScaleMeters / sp), 1, Mathf.Max(1, (res - 1) / 2));
+            float arm = sp * k;
+            float invArm2 = 1f / (arm * arm);
+            for (int z = 0; z < res; z++)
+                for (int x = 0; x < res; x++)
+                {
+                    int i = z * res + x;
+                    float hC  = H[i];
+                    float hxm = HCurv(ch, res, sp, ox, oz, x - k, z);
+                    float hxp = HCurv(ch, res, sp, ox, oz, x + k, z);
+                    float hzm = HCurv(ch, res, sp, ox, oz, x, z - k);
+                    float hzp = HCurv(ch, res, sp, ox, oz, x, z + k);
+                    float lap = (hxm + hxp + hzm + hzp - 4f * hC) * invArm2;   // ∇²H (1/m); ridge → negative
+                    buf[i] = new Vector2(-lap, 0f);                            // store -∇²H: ridge positive
+                }
+            int topBase = res * res, botBase = res * res + perim.Length;       // skirt rings inherit their edge vert
+            for (int e = 0; e < perim.Length; e++) { buf[topBase + e] = buf[perim[e]]; buf[botBase + e] = buf[perim[e]]; }
+            return buf;   // assigning to m.uv2 copies it → reusing the scratch next build is safe
+        }
+
+        // Height at grid (x,z), reading ch.H in-range or the neighbour's surface across the border (world-space,
+        // seam-consistent) when the stencil reaches outside this chunk.
+        static float HCurv(Chunk ch, int res, float sp, float ox, float oz, int x, int z)
+        {
+            if (x >= 0 && x < res && z >= 0 && z < res) return ch.H[z * res + x];
+            return EdgeHeight(ox + x * sp, oz + z * sp);
         }
 
         // Reused per-res scratch for the analytic normals (copied into the mesh on assign, so reuse is safe).

@@ -57,6 +57,7 @@ namespace NetworkDesigner.UI
             // Grid (1 km/100 m) and Topo contours (J) toggles below the lock.
             ChunkToggle("▦", () => Designer.ChunkShowGrid, v => Designer.ChunkShowGrid = v);
             ChunkToggle("〰", () => Designer.ChunkContours, v => Designer.ChunkContours = v);
+            ChunkToggle("⛰", () => Designer.ChunkRidges, _ => Designer.ToggleRidges());   // ridge/valley curvature overlay (persisted)
 
             void ChunkToggle(string icon, System.Func<bool> get, System.Action<bool> set)
             {
