@@ -54,6 +54,8 @@ namespace NetworkDesigner.Terrain
         // ── excavation: cut a smoothed, slightly-sunken roadbed along the plan ──
         [Tooltip("Excavate the roadbed this far (m) below the node-to-node grade line — a consistent flat-bottomed corridor cut.")]
         public float ExcavationDepth = 0.75f;
+        [Tooltip("Extra flat corridor (m) excavated BEYOND the road's footprint on EACH side — shoulder space for deeper cuts / larger fills.")]
+        public float ExcavationMargin = 5f;
         [Tooltip("Metres between graded-bed samples along the corridor when excavating.")]
         public float GradeSampleStep = 2f;
         [Tooltip("Width (m) of the feathered batter BEYOND the corridor edge. 0 = vertical walls at the corridor edge (the cut is exactly the corridor width).")]
@@ -154,7 +156,7 @@ namespace NetworkDesigner.Terrain
             {
                 int near = Graph.NearestNode(p, NodePickRadius);
                 if (near >= 0) _chainTail = near;
-                else if (Graph.NearestPointOnEdge(p, NodePickRadius, out int ei, out float tt, out _)) { _chainTail = Graph.SplitEdge(ei, tt); Rebuild(field); }
+                else if (NearestRoadEdge(p, out int ei, out float tt)) { _chainTail = Graph.SplitEdge(ei, tt); Rebuild(field); }  // click anywhere on a road's footprint → split + continue
                 else _chainTail = Graph.AddNode(p);
                 _cornerPending = false;
                 return;
@@ -181,6 +183,20 @@ namespace NetworkDesigner.Terrain
             SplitSegmentCrossings(start, end, ActiveProfileId);   // drawn OVER existing roads → make intersection nodes
             _chainTail = end;
             Rebuild(field);
+        }
+
+        // Snap to an existing road's CENTRELINE when the click lands anywhere within its corridor footprint
+        // (not just within NodePickRadius of the thin centreline) — so you can continue a plan by clicking the
+        // road itself. Searches out to the widest corridor, then accepts only if within the matched edge's reach.
+        bool NearestRoadEdge(Vector2 p, out int ei, out float tt)
+        {
+            ei = -1; tt = 0f;
+            if (Graph == null || Graph.Edges.Count == 0) return false;
+            float maxHalf = NodePickRadius;
+            for (int i = 0; i < Graph.Edges.Count; i++) maxHalf = Mathf.Max(maxHalf, EdgeWidth(Graph.Edges[i]) * 0.5f);
+            if (!Graph.NearestPointOnEdge(p, maxHalf + NodePickRadius, out ei, out tt, out Vector2 pt)) return false;
+            float reach = EdgeWidth(Graph.Edges[ei]) * 0.5f + NodePickRadius;
+            return Vector2.Distance(p, pt) <= reach;
         }
 
         // After laying a STRAIGHT edge start→end, split it (and every road it crosses) at each interior
@@ -610,7 +626,7 @@ namespace NetworkDesigner.Terrain
                     Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
                     pts.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, u) - depth, xz.y));
                 }
-                float flatHalf = Mathf.Max(1f, EdgeWidth(e) * 0.5f);
+                float flatHalf = Mathf.Max(1f, EdgeWidth(e) * 0.5f + Mathf.Max(0f, ExcavationMargin));
                 outBeds.Add((pts, flatHalf));
             }
         }
@@ -838,6 +854,16 @@ namespace NetworkDesigner.Terrain
         static readonly Color32 ColTurn   = new Color32(245, 205, 45, 255);    // turn-lane boundary (yellow)
         static readonly Color32 ColMedian = new Color32(200, 165, 110, 220);   // median hatch (warm tan — reads as raised, not drivable)
         Color32 ColFoot => new Color32((byte)(PlanColor.r * 255f), (byte)(PlanColor.g * 255f), (byte)(PlanColor.b * 255f), 170); // shoulder/footprint (plan amber, dashed)
+        static readonly Color32 ColSkirt = new Color32(70, 190, 235, 150);  // excavation skirt at ±(footprint + margin) — cyan, dashed, distinct from the amber footprint
+
+        // The two skirt lines marking the full excavated corridor (road footprint + ExcavationMargin per side).
+        void EmitSkirt(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float footHalf)
+        {
+            if (ExcavationMargin <= 0.01f) return;
+            float s = footHalf + ExcavationMargin;
+            EmitOffsetLine(field, p0, p1, p2, p3, n,  s, ColSkirt, 3f, 2.2f);
+            EmitOffsetLine(field, p0, p1, p2, p3, n, -s, ColSkirt, 3f, 2.2f);
+        }
 
         // strip kinds across the cross-section (BA side → centre → AB side)
         const int KOut = -1;   // strip kinds come from the shared NetworkDesigner.Roads.RoadLayout
@@ -862,6 +888,7 @@ namespace NetworkDesigner.Terrain
                 EmitOffsetLine(field, p0, p1, p2, p3, n, half, ColEdge, 0f, 0f);   // generic: two solid edges + dashed centre
                 EmitOffsetLine(field, p0, p1, p2, p3, n, -half, ColEdge, 0f, 0f);
                 EmitOffsetLine(field, p0, p1, p2, p3, n, 0f, ColCenter, 2f, 2f);
+                EmitSkirt(field, p0, p1, p2, p3, n, half);
                 return;
             }
 
@@ -877,6 +904,7 @@ namespace NetworkDesigner.Terrain
                 u += lay[i].w;
                 EmitBoundary(field, p0, p1, p2, p3, n, u, lay[i].k, (i + 1 < lay.Count) ? lay[i + 1].k : KOut);
             }
+            EmitSkirt(field, p0, p1, p2, p3, n, W * 0.5f);   // excavation skirt = footprint (W/2) + margin per side
         }
 
         // Pick the marking style for the line between two RoadLayout strip kinds, then emit it.

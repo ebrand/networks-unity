@@ -86,10 +86,19 @@ namespace NetworkDesigner.UI
             acts.Add(exc); acts.Add(bop); acts.Add(clr);
             body.Add(acts);
 
+            var rmRow = HBox(); rmRow.style.marginBottom = 8;
+            var rm = MakeButton("Remove roads", () => Designer.ClearRoadBuild()); rm.style.flexGrow = 1;
+            rm.tooltip = "Delete the built 3D road meshes (keeps the plan) — for testing";
+            rmRow.Add(rm);
+            body.Add(rmRow);
+
             // ---- excavation tuning ----
             body.Add(NumberRow("Excavate depth", "m",
                 () => Designer.RoadPlanLayer.ExcavationDepth,
                 v => Designer.RoadPlanLayer.ExcavationDepth = v, 0f, 5f, "0.0"));
+            body.Add(NumberRow("Excavate margin", "m",
+                () => Designer.RoadPlanLayer.ExcavationMargin,
+                v => { Designer.RoadPlanLayer.ExcavationMargin = v; Designer.RebuildRoadPlan(); }, 0f, 20f, "0.0"));
 
             // ---- node elevations ----
             var elevBtn = MakeButton("Edit elevations", () => Designer.SetRoadElevationEdit(!Designer.RoadElevationEdit));

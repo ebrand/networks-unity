@@ -834,6 +834,17 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("foliage.nightTint", "Foliage", "Night canopy tint",
                 () => ForestGen.NightFoliageTint, v => ForestGen.NightFoliageTint = v, 0f, 0.6f,
                 description: "Canopy brightness at full night (0 = black). Counters the foliage shader glowing against the dark sky when the day cycle is on.");
+
+            // --- Road plan excavation ---
+            TuningRegistry.RegisterFloat("road.excavateDepth", "Road plan", "Excavate depth (m)",
+                () => t.RoadPlanLayer.ExcavationDepth, v => t.RoadPlanLayer.ExcavationDepth = v, 0f, 5f,
+                description: "How far below the node-to-node grade line the roadbed is cut.");
+            TuningRegistry.RegisterFloat("road.excavateMargin", "Road plan", "Excavate margin (m/side)",
+                () => t.RoadPlanLayer.ExcavationMargin, v => { t.RoadPlanLayer.ExcavationMargin = v; t.RebuildRoadPlan(); }, 0f, 20f,
+                description: "Extra flat corridor excavated beyond the road footprint on EACH side (shoulder space for deeper cuts / larger fills). Shown as the cyan skirt in plan view.");
+            TuningRegistry.RegisterAction("road.removeBuilt", "Road plan", "Remove built roads",
+                () => t.ClearRoadBuild(),
+                description: "Delete the built 3D road meshes (keeps the plan) — for testing.");
         }
 
         // Persisted-settings changes made through the in-game Environment palette write the statics directly

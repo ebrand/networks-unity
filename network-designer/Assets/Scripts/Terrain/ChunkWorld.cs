@@ -874,8 +874,58 @@ namespace NetworkDesigner.Terrain
             m.vertices = verts;
             m.uv = uvs;
             m.triangles = tris;
-            m.RecalculateNormals();
+            // Analytic normals from the height GRADIENT (not mesh-local RecalculateNormals): edge vertices sample
+            // the neighbour's height across the chunk border, so both sides of a seam get matching normals → no
+            // shading step. Interior reads ch.H directly; only the perimeter pays a cross-chunk SampleHeight.
+            var normals = NormalsBuf(res);
+            ComputeChunkNormals(ch, res, sp, perim, normals);
+            m.normals = normals;
             m.RecalculateBounds();
+        }
+
+        // Reused per-res scratch for the analytic normals (copied into the mesh on assign, so reuse is safe).
+        static readonly Dictionary<int, Vector3[]> _normalsByRes = new Dictionary<int, Vector3[]>();
+        static Vector3[] NormalsBuf(int res)
+        {
+            int vCount = res * res + 2 * PerimCount(res);
+            if (!_normalsByRes.TryGetValue(res, out var nrm) || nrm.Length != vCount) { nrm = new Vector3[vCount]; _normalsByRes[res] = nrm; }
+            return nrm;
+        }
+
+        // Per-vertex normal = normalize(-dH/dx, 1, -dH/dz). Interior uses ch.H; edge verts read the neighbour's
+        // height across the border so seam normals match. Skirt rings inherit their perimeter vertex's normal.
+        static void ComputeChunkNormals(Chunk ch, int res, float sp, int[] perim, Vector3[] normals)
+        {
+            var H = ch.H;
+            float ox = ch.Coord.x * ChunkSize, oz = ch.Coord.y * ChunkSize;
+            float inv2sp = 1f / (2f * sp);
+            for (int z = 0; z < res; z++)
+                for (int x = 0; x < res; x++)
+                {
+                    int i = z * res + x;
+                    float hl = x > 0        ? H[i - 1]   : EdgeHeight(ox + (x - 1) * sp, oz + z * sp);
+                    float hr = x < res - 1  ? H[i + 1]   : EdgeHeight(ox + (x + 1) * sp, oz + z * sp);
+                    float hd = z > 0        ? H[i - res] : EdgeHeight(ox + x * sp, oz + (z - 1) * sp);
+                    float hu = z < res - 1  ? H[i + res] : EdgeHeight(ox + x * sp, oz + (z + 1) * sp);
+                    float nx = -(hr - hl) * inv2sp, nz = -(hu - hd) * inv2sp;
+                    float invLen = 1f / Mathf.Sqrt(nx * nx + 1f + nz * nz);
+                    normals[i] = new Vector3(nx * invLen, invLen, nz * invLen);
+                }
+            int topBase = res * res, botBase = res * res + perim.Length;
+            for (int e = 0; e < perim.Length; e++)
+            {
+                Vector3 pn = normals[perim[e]];
+                normals[topBase + e] = pn;
+                normals[botBase + e] = pn;
+            }
+        }
+
+        // Height just outside a chunk edge for the normal gradient: the neighbour's EDITED surface if it's
+        // loaded, else the continuous SOURCE (avoids SampleHeight's 0 for an unloaded neighbour mid-stream).
+        static float EdgeHeight(float wx, float wz)
+        {
+            var c = ChunkOf(wx, wz);
+            return (_chunks.TryGetValue(c, out var ch) && ch.H != null) ? SampleHeight(wx, wz) : SourceAt(c, wx, wz);
         }
 
         // ── Procedural heights ───────────────────────────────────────────────────────────────
