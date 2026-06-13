@@ -48,6 +48,8 @@ namespace NetworkDesigner.UI
                 v => { DayCycle.Intensity = v; DayCycle.Apply(); }, 0f, 3f, "0.00"));
             body.Add(SliderRow("Ambient", () => DayCycle.AmbientScale,
                 v => { DayCycle.AmbientScale = v; DayCycle.Apply(); }, 0f, 1.5f, "0.00"));
+            body.Add(SliderRow("Shadow distance (m)", () => Designer.ShadowDistanceValue,
+                v => Designer.ShadowDistanceValue = v, 50f, 3000f, "0"));
             body.Add(ToggleRow("Auto-advance", () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v));
             body.Add(SliderRow("Day length (min)", () => DayCycle.DayLengthMinutes,
                 v => DayCycle.DayLengthMinutes = v, 0.5f, 30f, "0.0"));

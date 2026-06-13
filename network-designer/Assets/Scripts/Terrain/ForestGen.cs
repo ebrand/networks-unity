@@ -156,26 +156,50 @@ namespace NetworkDesigner.Terrain
         public static float FarLodDarken = 0.6f;
         public static float NearLodTint = 0.8f;        // even the close LOD0 mesh catches full sun + reads a touch bright; knock it down
         public static float NightFoliageTint = 0.12f;  // canopy albedo at full night (sun fully down) — kills the glow against a black sky
-        static MaterialPropertyBlock[] _lodMpb;
-        static MaterialPropertyBlock LodTint(int li, int lodN)
+
+        // Combined darken scalar for a LOD: near→far tint (1 at LOD0 → FarLodDarken at the last) × day→night
+        // factor (DayCycle.SunLight01: 1 day → 0 night). 1 = no darkening. Read live each frame so it tracks the clock.
+        static float LodDarken(int li, int lodN)
         {
-            if (_lodMpb == null) { _lodMpb = new MaterialPropertyBlock[MaxLods]; for (int i = 0; i < MaxLods; i++) _lodMpb[i] = new MaterialPropertyBlock(); }
             float t = lodN > 1 ? li / (float)(lodN - 1) : 1f;
             float d = Mathf.Lerp(Mathf.Clamp01(NearLodTint), Mathf.Clamp01(FarLodDarken), t);
-            // Darken the whole canopy as the sun sets (DayCycle.SunLight01: 1 = day → 0 = night). The NM
-            // foliage shader otherwise keeps catching residual skybox ambient and glows after dusk. Read live
-            // each render frame, so it tracks the clock (and stays at 1 when the day cycle is off).
             d *= Mathf.Lerp(Mathf.Clamp01(NightFoliageTint), 1f, Mathf.Clamp01(DayCycle.SunLight01));
-            if (d >= 0.999f) return null;   // nothing to tint (LOD0, full day, no near-tint)
-            _lodMpb[li].SetColor("_BaseColor", new Color(d, d, d, 1f));
-            return _lodMpb[li];
+            return d;
+        }
+
+        // Colour properties we darken. Different tree shaders expose different ones, so we MULTIPLY each
+        // material's OWN base value (preserving hue + alpha) rather than slamming a grey _BaseColor that only
+        // URP Lit (conifers) honours: URP Lit → _BaseColor/_Color; NatureManufacture foliage → _HealthyColor/
+        // _DryColor (+ _EmissionColor, so darkening also kills the night glow); NM bark → _Trunk/_BarkBaseColor.
+        static readonly string[] TintProps =
+            { "_BaseColor", "_Color", "_HealthyColor", "_DryColor", "_TrunkBaseColor", "_BarkBaseColor", "_EmissionColor" };
+
+        // Darkens submesh `s` of `lod` by `d`, multiplying that material's captured base colours. Each
+        // (species,LOD,submesh) owns a PERSISTENT block (allocated at extract) so reuse can't cross-contaminate
+        // if RenderMeshInstanced defers the read — different submeshes (leaves/trunk) carry different tints.
+        static MaterialPropertyBlock TintMpb(in LodLevel lod, int s, float d)
+        {
+            if (d >= 0.999f || lod.tintProp == null || s >= lod.tintProp.Length) return null;
+            string[] props = lod.tintProp[s]; Color[] bases = lod.tintBase[s];
+            if (props == null || props.Length == 0) return null;
+            MaterialPropertyBlock mpb = lod.tintMpb[s];
+            mpb.Clear();
+            for (int k = 0; k < props.Length; k++)
+            {
+                Color c = bases[k];
+                mpb.SetColor(props[k], new Color(c.r * d, c.g * d, c.b * d, c.a));
+            }
+            return mpb;
         }
 
         struct LodLevel
         {
             public Mesh mesh;
             public Material[] mats;
-            public float threshold;     // LODGroup screenRelativeTransitionHeight (LOD0 largest → last smallest)
+            public float threshold;       // LODGroup screenRelativeTransitionHeight (LOD0 largest → last smallest)
+            public string[][] tintProp;   // [submesh][k] = darken-able colour property on that material's shader
+            public Color[][]  tintBase;   // [submesh][k] = that property's base value (multiplied by LodDarken)
+            public MaterialPropertyBlock[] tintMpb;  // [submesh] persistent block, updated per frame
         }
 
         const int MaxLods = 8;
@@ -230,6 +254,7 @@ namespace NetworkDesigner.Terrain
             cell.boundsDirty = true;
             sp.count++;
             TreeCount++;
+            _hadLiveTrees = true;   // we've held a real instance this session — a later empty is a user erase, not a failed import
             _visDirty = true;   // force a re-cull so the new tree shows
         }
 
@@ -238,9 +263,9 @@ namespace NetworkDesigner.Terrain
         public static void PresetLightDusting()
         {
             Density = 0.37f;
-            DensityFreq = 0.0056f;
-            Threshold = 0.24f;
-            SeamStrength = 0.25f;
+            DensityFreq = 0.0030f;
+            Threshold = 0.16f;
+            SeamStrength = 0.43f;
             DensityWarp = 1.2f;
         }
 
@@ -248,9 +273,9 @@ namespace NetworkDesigner.Terrain
         public static void PresetClumps()
         {
             Density = 1.02f;
-            DensityFreq = 0.0021f;
-            Threshold = 0.27f;
-            SeamStrength = 0.45f;
+            DensityFreq = 0.0042f;
+            Threshold = 0.42f;
+            SeamStrength = 0.65f;
             DensityWarp = 0.3f;
         }
 
@@ -356,6 +381,40 @@ namespace NetworkDesigner.Terrain
             }
             lods = list.ToArray();
             height = Mathf.Max(1f, lods[0].mesh.bounds.size.y * Mathf.Abs(baseScale.y));
+
+            // Capture each LOD material's darken-able tint properties + base colours (see TintProps) so the
+            // LOD/night darkening can MULTIPLY them per draw. Without this, only URP-Lit trees (conifers, via
+            // _BaseColor) darken; NM trees tint via _HealthyColor/_DryColor/_Trunk/_Bark and would stay bright.
+            for (int i = 0; i < lods.Length; i++)
+            {
+                Material[] ms = lods[i].mats; int mc = ms?.Length ?? 0;
+                // Cover the mesh's actual submesh count too (a draw indexes submesh s; mats can be shorter).
+                int sc = Mathf.Max(mc, lods[i].mesh != null ? lods[i].mesh.subMeshCount : 0);
+                var tp = new string[sc][]; var tb = new Color[sc][]; var mb = new MaterialPropertyBlock[sc];
+                for (int mi = 0; mi < sc; mi++)
+                {
+                    var props = new List<string>(); var cols = new List<Color>();
+                    Material mat = mi < mc ? ms[mi] : (mc > 0 ? ms[0] : null);   // mirror the draw-time material fallback
+                    if (mat != null) for (int p = 0; p < TintProps.Length; p++)
+                        if (mat.HasProperty(TintProps[p])) { props.Add(TintProps[p]); cols.Add(mat.GetColor(TintProps[p])); }
+                    tp[mi] = props.ToArray(); tb[mi] = cols.ToArray(); mb[mi] = new MaterialPropertyBlock();
+                }
+                lods[i].tintProp = tp; lods[i].tintBase = tb; lods[i].tintMpb = mb;
+            }
+
+            // Threshold sanity: RebuildVisible selects the LOD by comparing a real screen-height FRACTION
+            // (always ≤ ~1) against each LOD's screenRelativeHeight. Some packs (Vegetation Studio /
+            // NatureManufacture beech) author values > 1 (e.g. 2.1, 1.5) which our selector can never satisfy,
+            // so LOD0/LOD1 get skipped and every tree pins to one low LOD at all distances — looks like "no
+            // LODs". If the set isn't a clean descending (0,1] sequence, replace it with an even geometric
+            // progression so LOD switches with distance. Sane packs (conifers: 0.30/0.10/0.01) are kept as-is.
+            bool sane = lods.Length > 0;
+            for (int i = 0; i < lods.Length && sane; i++)
+                if (lods[i].threshold <= 0f || lods[i].threshold > 1f ||
+                    (i > 0 && lods[i].threshold >= lods[i - 1].threshold)) sane = false;
+            if (!sane)
+                for (int i = 0; i < lods.Length; i++)
+                    lods[i].threshold = (i == lods.Length - 1) ? 0f : 0.5f * Mathf.Pow(0.4f, i); // 0.5, 0.2, 0.08, … ; last = 0 (keep to horizon)
             return true;
         }
 
@@ -388,7 +447,7 @@ namespace NetworkDesigner.Terrain
                     int total = acc.Count;
                     if (total == 0) continue;
                     LodLevel lod = sp.lods[li];
-                    MaterialPropertyBlock mpb = LodTint(li, lodN);   // darken far cross-card LODs to match the near mesh
+                    float darken = LodDarken(li, lodN);   // near→far LOD match × day→night dim (1 = none)
                     int subCount = Mathf.Max(1, lod.mesh.subMeshCount);
                     for (int s = 0; s < subCount; s++)
                     {
@@ -400,7 +459,7 @@ namespace NetworkDesigner.Terrain
                             shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On,   // cast onto terrain
                             receiveShadows = true,                                            // and darken in shadow like the terrain
                             worldBounds = bigBounds,  // already CPU-culled; keep Unity from re-culling the batch
-                            matProps = mpb
+                            matProps = TintMpb(lod, s, darken)
                         };
                         for (int off = 0; off < total; off += 1023)
                             Graphics.RenderMeshInstanced(rp, lod.mesh, s, acc, Mathf.Min(1023, total - off), off);
@@ -455,9 +514,20 @@ namespace NetworkDesigner.Terrain
             return b;
         }
 
-        public static void ClearForest()
+        // Last forest we were asked to RESTORE (ImportForest) or successfully exported — the anti-clobber
+        // guard. A failed import (prefabs unresolved) or a transition teardown empties _species; without this
+        // the next autosave would ExportForest()==empty and overwrite a good save with nothing. ExportForest
+        // re-emits this when the live forest is unexpectedly empty. Reset only on an INTENTIONAL clear.
+        static List<ForestSpeciesSave> _lastSave;
+        static bool _hadLiveTrees;   // has a real instance existed since the last clear? distinguishes failed-import-empty from user-erased-empty
+
+        // forget: true only for the user's deliberate "clear forest" — drops the preserved save so the empty
+        // state actually persists. Teardown/import clears pass false so a transition can't lose the data.
+        public static void ClearForest(bool forget = false)
         {
             _species.Clear(); _byPrefab.Clear(); TreeCount = 0; _visDirty = true;
+            _hadLiveTrees = false;
+            if (forget) _lastSave = null;
         }
 
         // Erase forest instances within `radius` (m) of a world XZ point — the Forest-tool brush eraser
@@ -525,6 +595,18 @@ namespace NetworkDesigner.Terrain
                     }
                 outp.Add(rec);
             }
+            int total = 0; foreach (var r in outp) total += r.X?.Length ?? 0;
+            // Anti-clobber: if the live forest is empty but we loaded a non-empty one this session (import
+            // couldn't resolve the prefabs, or a transition tore it down), DON'T overwrite the good save with
+            // nothing — re-emit what we loaded. A deliberate "clear forest" sets _lastSave=null, so a genuine
+            // empty still persists.
+            if (total == 0 && !_hadLiveTrees && _lastSave != null && _lastSave.Count > 0)
+            {
+                Debug.LogWarning("[Forest] live forest empty but a saved forest was loaded this session and never rendered — preserving it instead of overwriting the save with empty (prefabs unresolved on import?).");
+                return _lastSave;
+            }
+            Debug.Log($"[Forest] export: {outp.Count} species / {total} instances (live TreeCount={TreeCount}, _species={_species.Count}).");
+            _lastSave = outp;
             return outp;
         }
 
@@ -533,15 +615,17 @@ namespace NetworkDesigner.Terrain
         public static void ImportForest(ScatterLayer layer, List<ForestSpeciesSave> data)
         {
             ClearForest();
+            _lastSave = data;   // remember what we were ASKED to restore, even if prefabs don't resolve below
             if (layer == null || data == null) return;
             var ps = layer.Prefabs;
             int missing = 0;
+            var missingNames = new List<string>();
             foreach (var rec in data)
             {
                 if (rec == null || string.IsNullOrEmpty(rec.Prefab) || rec.X == null) continue;
                 GameObject prefab = null;
                 for (int i = 0; i < ps.Count; i++) if (ps[i] != null && ps[i].name == rec.Prefab) { prefab = ps[i]; break; }
-                if (prefab == null) { missing++; continue; }    // pack/prefab gone — skip that species
+                if (prefab == null) { missing++; if (missingNames.Count < 8) missingNames.Add(rec.Prefab); continue; }    // pack/prefab gone — skip that species
                 Species sp = SpeciesFor(prefab);
                 if (sp == null) { missing++; continue; }
                 int n = rec.X.Length;
@@ -555,7 +639,9 @@ namespace NetworkDesigner.Terrain
                         new Vector3(sc, sc, sc)));
                 }
             }
-            if (missing > 0) Debug.LogWarning($"[Forest] {missing} saved species had no matching prefab in the tree layer — skipped.");
+            if (missing > 0) Debug.LogWarning($"[Forest] {missing} saved species had no matching prefab among the tree layer's {ps.Count} prefab(s) — skipped. " +
+                $"Unresolved: {string.Join(", ", missingNames)}{(missing > missingNames.Count ? ", …" : "")}. " +
+                "(The saved forest data is preserved and will re-appear once these prefabs are loaded.)");
         }
 
         // Domain-warped + ridged fBM, in ~[0,1]. Warp gives flowing structure; the ridge blend turns

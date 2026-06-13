@@ -2024,7 +2024,7 @@ namespace NetworkDesigner.Terrain
         // Clear the whole instanced forest (and persist the empty state).
         public void ClearForestTrees()
         {
-            ForestGen.ClearForest();
+            ForestGen.ClearForest(forget: true);   // deliberate clear → drop the anti-clobber guard so empty persists
             _dirtySince = Time.realtimeSinceStartup;
         }
 
@@ -2139,6 +2139,62 @@ namespace NetworkDesigner.Terrain
         {
             if (_roadBuildRoot != null) DestroySafe(_roadBuildRoot);
             _roadBuildRoot = null;
+        }
+
+        // ---- road plan elevation-edit sub-mode (palette "Edit elevations") ----
+
+        public bool RoadElevationEdit => RoadPlanLayer.ElevationEditMode;
+        public void SetRoadElevationEdit(bool on)
+        {
+            if (on) EnterRoadPlanMode();
+            RoadPlanLayer.SetElevationEditMode(on);
+            RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // Drive the elevation-edit interactions from the per-frame mouse state.
+        void HandleRoadElevationInput(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            Vector2 mouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+            if (rd.IsDraggingElevation)
+            {
+                if (Input.GetMouseButton(0))
+                {
+                    if (VerticalAxisY(rd.DragNodeXZ, out float y) && rd.UpdateElevationDrag(y, mouse))
+                    { rd.Rebuild(Surf); _dirtySince = Time.realtimeSinceStartup; }
+                }
+                else { rd.EndElevationDrag(); rd.Rebuild(Surf); }
+                return;
+            }
+            if (MouseOverActivePanel() || !overTerrain) return;
+            Vector2 xz = new Vector2(hit.point.x, hit.point.z);
+            if (Input.GetMouseButtonDown(0))
+            {
+                int n = rd.PickNode(xz);
+                if (n >= 0) { VerticalAxisY(rd.Graph.Nodes[n], out float y0); rd.BeginElevationDrag(Surf, n, y0, mouse); }
+            }
+            else if (Input.GetMouseButtonDown(1))
+            {
+                int n = rd.PickNode(xz);
+                if (n >= 0) { rd.LevelSelectedTo(Surf, n); rd.Rebuild(Surf); _dirtySince = Time.realtimeSinceStartup; }
+            }
+        }
+
+        // World Y on the vertical axis through `nodeXZ` that's closest to the camera ray under the cursor —
+        // i.e. "what height is the cursor pointing at, at this node's XZ". Used for 1:1 elevation dragging.
+        bool VerticalAxisY(Vector2 nodeXZ, out float y)
+        {
+            y = 0f;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return false;
+            Ray ray = cam.ScreenPointToRay(Input.mousePosition);
+            Vector3 d = ray.direction.normalized;
+            Vector3 r = ray.origin - new Vector3(nodeXZ.x, 0f, nodeXZ.y);   // axis base at Y=0 under the node
+            float b = d.y;                       // dot(up, d)
+            float denom = 1f - b * b;
+            if (denom < 1e-5f) return false;     // ray ~parallel to vertical → no stable solution
+            float s = (b * Vector3.Dot(d, r) - r.y) / denom;   // param along the vertical axis → its world Y
+            y = s;
+            return true;
         }
 
         // Box-blur the carved cells (CutSmoothPasses) to round the coarse-grid wall
@@ -2430,6 +2486,25 @@ namespace NetworkDesigner.Terrain
                 var a = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
                         as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
                 if (a != null) a.renderScale = Mathf.Clamp(value, 0.3f, 2f);
+            }
+        }
+
+        // Live URP shadow distance (metres). Writes the pipeline asset directly AND keeps the serialized
+        // ShadowDistance field in sync so SceneAmbiance.Apply (setup/rebuild) and the persisted default agree.
+        public float ShadowDistanceValue
+        {
+            get
+            {
+                var a = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                        as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
+                return a != null ? a.shadowDistance : ShadowDistance;
+            }
+            set
+            {
+                ShadowDistance = Mathf.Clamp(value, 20f, 4000f);
+                var a = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                        as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
+                if (a != null) a.shadowDistance = ShadowDistance;
             }
         }
 
@@ -2752,6 +2827,10 @@ namespace NetworkDesigner.Terrain
                 // The snapped placement point (same one the ring shows). Deletes use
                 // the raw hit so you can remove a node you're not snapping to.
                 Vector3 place = cursorVis;
+                // Road elevation-edit sub-mode owns the mouse: drag a node puck to set its height, click to
+                // (de)select, right-click a node to level all selected to it. Skips the normal draw/delete.
+                if (_lineActive is RoadPlanLayer rdElev && rdElev.ElevationEditMode)
+                { rdElev.HidePreview(); HandleRoadElevationInput(rdElev, hit, overTerrain); return; }
                 _lineActive.UpdatePreview(Surf, place, overTerrain);
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);

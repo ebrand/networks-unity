@@ -91,6 +91,16 @@ namespace NetworkDesigner.UI
                 () => Designer.RoadPlanLayer.ExcavationDepth,
                 v => Designer.RoadPlanLayer.ExcavationDepth = v, 0f, 5f, "0.0"));
 
+            // ---- node elevations ----
+            var elevBtn = MakeButton("Edit elevations", () => Designer.SetRoadElevationEdit(!Designer.RoadElevationEdit));
+            elevBtn.style.marginTop = 8;
+            elevBtn.tooltip = "Drag a node up/down to set its height; click a node to select; right-click a node to level all selected nodes to it";
+            body.Add(elevBtn);
+            _sync.Add(() => StyleActive(elevBtn, Designer.RoadElevationEdit));
+            var elevNote = Cap("Drag = set height · click = select · right-click = level selected to that node");
+            elevNote.style.fontSize = 10; elevNote.style.marginBottom = 4;
+            body.Add(elevNote);
+
             // ---- toggles ----
             body.Add(ToggleRow("Show crosswalks", () => Designer.RoadPlanLayer.ShowCrosswalks,
                 v => { Designer.RoadPlanLayer.ShowCrosswalks = v; Designer.RebuildRoadPlan(); }));

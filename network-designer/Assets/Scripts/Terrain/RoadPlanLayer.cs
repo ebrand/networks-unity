@@ -633,6 +633,59 @@ namespace NetworkDesigner.Terrain
         // Drop all captured design elevations so they re-capture from the current surface on the next run.
         public void ClearNodeElevations() { for (int i = 0; i < Graph.NodeY.Count; i++) Graph.NodeY[i] = float.NaN; }
 
+        // ---- elevation-edit sub-mode: drag a node puck to set its height; multi-select + right-click to level ----
+
+        [System.NonSerialized] public bool ElevationEditMode;
+        [System.NonSerialized] readonly HashSet<int> _selected = new HashSet<int>();
+        [System.NonSerialized] int _elevDrag = -1;
+        [System.NonSerialized] float _elevGrabOffset;
+        [System.NonSerialized] Vector2 _elevStartMouse;
+        [System.NonSerialized] bool _elevMoved;
+
+        public void SetElevationEditMode(bool on) { ElevationEditMode = on; if (!on) { _selected.Clear(); _elevDrag = -1; } }
+
+        public int PickNode(Vector2 xz) => Graph.NearestNode(xz, NodePickRadius);
+        public bool IsDraggingElevation => _elevDrag >= 0;
+        public Vector2 DragNodeXZ => (_elevDrag >= 0 && _elevDrag < Graph.Nodes.Count) ? Graph.Nodes[_elevDrag] : Vector2.zero;
+
+        // Start a potential drag on a node. `axisY0` = the world Y of the vertical axis at the node under the
+        // cursor right now; the grab offset keeps the puck from jumping to the cursor when the drag begins.
+        public void BeginElevationDrag(ITerrainSurface field, int node, float axisY0, Vector2 mouseScreen)
+        {
+            if (node < 0 || node >= Graph.Nodes.Count) return;
+            _elevDrag = node;
+            _elevGrabOffset = DesignElevation(node, field) - axisY0;
+            _elevStartMouse = mouseScreen;
+            _elevMoved = false;
+        }
+
+        // Update the dragged node to follow the vertical axis (axisY = world Y on that axis under the cursor).
+        // Returns true once it's a real drag (moved past a small threshold) so the caller knows to rebuild.
+        public bool UpdateElevationDrag(float axisY, Vector2 mouseScreen)
+        {
+            if (_elevDrag < 0) return false;
+            if (!_elevMoved && (mouseScreen - _elevStartMouse).sqrMagnitude > 16f) _elevMoved = true;
+            if (_elevMoved) { Graph.SetNodeY(_elevDrag, axisY + _elevGrabOffset); return true; }
+            return false;
+        }
+
+        // End the drag. A no-move drag is treated as a CLICK → toggle the node's selection.
+        public void EndElevationDrag()
+        {
+            if (_elevDrag >= 0 && !_elevMoved) ToggleSelect(_elevDrag);
+            _elevDrag = -1;
+        }
+
+        public void ToggleSelect(int node) { if (node >= 0 && !_selected.Remove(node)) _selected.Add(node); }
+
+        // Set every selected node's design elevation to the reference node's height (level a set to one node).
+        public void LevelSelectedTo(ITerrainSurface field, int refNode)
+        {
+            if (refNode < 0 || refNode >= Graph.Nodes.Count) return;
+            float targetY = DesignElevation(refNode, field);
+            foreach (int s in _selected) if (s >= 0 && s < Graph.Nodes.Count) Graph.SetNodeY(s, targetY);
+        }
+
         // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) + node pucks ----
 
         public void Rebuild(ITerrainSurface field)
@@ -656,7 +709,7 @@ namespace NetworkDesigner.Terrain
                 BuildCorridorEdge(field, p0, p1, p2, p3, e, ta, tb);   // lane schematic, trimmed back to the box
             }
             for (int v = 0; v < nc; v++) if (treated[v]) BuildJunction(field, v, boxHalf[v], boxAx[v], isX[v]);
-            foreach (Vector2 n in Graph.Nodes) DrawPuck(field, n);   // into the node mesh (own colour + toggle)
+            for (int i = 0; i < Graph.Nodes.Count; i++) DrawPuck(field, i);   // into the node mesh (own colour + toggle)
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
@@ -896,14 +949,41 @@ namespace NetworkDesigner.Terrain
 
         void AddSeg(Vector3 a, Vector3 b, Color32 col)
         { int s = _v.Count; _v.Add(a); _v.Add(b); _col.Add(col); _col.Add(col); _idx.Add(s); _idx.Add(s + 1); }
-        // A short draped 3D cylinder puck (top cap + side wall, manual outward normals) at a node — the
-        // visible handle you grab to move / curve / delete. Lit-transparent so the alpha shows. Mirrors rail.
-        void DrawPuck(ITerrainSurface field, Vector2 c)
+        static readonly Color32 StemCol = new Color32(200, 200, 210, 200);   // node lifted off the terrain → vertical stem
+        static readonly Color32 SelCol  = new Color32(90, 220, 255, 255);    // selected node ring (cyan)
+
+        // A short 3D cylinder puck (top cap + side wall, manual outward normals) at a node — the visible
+        // handle you grab to move / curve / delete. Sits at the node's DESIGN elevation (so an elevation
+        // drag is visible); in elevation-edit mode a stem drops to the terrain when lifted and selected nodes
+        // get a cyan ring. Lit-transparent so the alpha shows. Mirrors rail.
+        void DrawPuck(ITerrainSurface field, int idx)
         {
+            Vector2 c = Graph.Nodes[idx];
             const int N = 16;
             float radius = Mathf.Max(0.2f, NodePuckRadius);
-            float baseY = (field != null ? field.SampleHeight(c.x, c.y) : 0f) + Lift;   // coplanar with the corridor ribbon
+            float terrainY = field != null ? field.SampleHeight(c.x, c.y) : 0f;
+            float designY = Graph.GetNodeY(idx);
+            float dispY = float.IsNaN(designY) ? terrainY : designY;
+            float baseY = dispY + Lift;
             float topY = baseY + Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+
+            // Elevation-edit affordances (into the line mesh): a stem to the terrain when lifted + a selection ring.
+            if (ElevationEditMode)
+            {
+                if (Mathf.Abs(dispY - terrainY) > 0.05f)
+                    AddSeg(new Vector3(c.x, terrainY + Lift, c.y), new Vector3(c.x, baseY, c.y), StemCol);
+                if (_selected.Contains(idx))
+                {
+                    float rr = radius * 1.7f; Vector3 pr = default;
+                    for (int i = 0; i <= 24; i++)
+                    {
+                        float a = i / 24f * Mathf.PI * 2f;
+                        Vector3 p = new Vector3(c.x + Mathf.Cos(a) * rr, topY + 0.05f, c.y + Mathf.Sin(a) * rr);
+                        if (i > 0) AddSeg(pr, p, SelCol);
+                        pr = p;
+                    }
+                }
+            }
 
             int capC = _nv.Count;
             _nv.Add(new Vector3(c.x, topY, c.y)); _nn.Add(Vector3.up);

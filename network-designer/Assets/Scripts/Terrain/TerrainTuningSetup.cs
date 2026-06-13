@@ -650,17 +650,21 @@ namespace NetworkDesigner.Terrain
                 v => { if (t.ChunkTestActive) t.ChunkWaterLevel = v; else { t.WaterLevel = v; t.ApplyWater(); } }, -50f, 1000f, 1f,
                 description: "World height of the water surface (chunk water snaps to whole metres; 0 ≈ sea level). " +
                              "Raise it to flood low ground / fill a gorge.");
+            // Water LOOK (colour/alpha/smoothness) isn't stored per-game, so it relies on this global tunable.
+            // The persisted value loads during Start, BEFORE the chunk world is up (ChunkTestActive=false) — so
+            // write BOTH backends, else the loaded colour lands on the unused low-poly water and the chunk water
+            // (ChunkOverlays statics) keeps its default. ApplyWater only when the low-poly water is the live one.
             TuningRegistry.RegisterColor("water.color", "Water", "Color",
                 () => t.ChunkTestActive ? t.ChunkWaterColor : t.WaterColor,
-                v => { if (t.ChunkTestActive) t.ChunkWaterColor = v; else { t.WaterColor = v; t.ApplyWater(); } },
+                v => { t.WaterColor = v; t.ChunkWaterColor = v; if (!t.ChunkTestActive) t.ApplyWater(); },
                 description: "Water colour. Its alpha controls transparency (lower = see the bed through it).");
             TuningRegistry.RegisterFloat("water.alpha", "Water", "Alpha (transparency)",
                 () => (t.ChunkTestActive ? t.ChunkWaterColor : t.WaterColor).a,
-                v => { if (t.ChunkTestActive) { Color cc = t.ChunkWaterColor; cc.a = v; t.ChunkWaterColor = cc; } else { Color c = t.WaterColor; c.a = v; t.WaterColor = c; t.ApplyWater(); } }, 0.05f, 1f,
+                v => { Color c = t.WaterColor; c.a = v; t.WaterColor = c; Color cc = t.ChunkWaterColor; cc.a = v; t.ChunkWaterColor = cc; if (!t.ChunkTestActive) t.ApplyWater(); }, 0.05f, 1f,
                 description: "Water transparency — lower = clearer (see the bed through it), 1 = opaque. (Same as the colour's alpha channel; min 0.05 so it isn't reset by the 0-alpha guard.)");
             TuningRegistry.RegisterFloat("water.smoothness", "Water", "Smoothness",
                 () => t.ChunkTestActive ? t.ChunkWaterSmoothness : t.WaterSmoothness,
-                v => { if (t.ChunkTestActive) t.ChunkWaterSmoothness = v; else { t.WaterSmoothness = v; t.ApplyWater(); } }, 0f, 1f,
+                v => { t.WaterSmoothness = v; t.ChunkWaterSmoothness = v; if (!t.ChunkTestActive) t.ApplyWater(); }, 0f, 1f,
                 description: "Surface gloss — higher gives more of a reflective sheen.");
 
             // --- World grid ---
@@ -754,6 +758,9 @@ namespace NetworkDesigner.Terrain
                 () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v);
             TuningRegistry.RegisterFloat("env.dayLength", "Time of day", "Day length (min)",
                 () => DayCycle.DayLengthMinutes, v => DayCycle.DayLengthMinutes = v, 0.5f, 30f);
+            TuningRegistry.RegisterFloat("env.shadowDistance", "Time of day", "Shadow distance (m)",
+                () => t.ShadowDistanceValue, v => t.ShadowDistanceValue = v, 50f, 3000f, 10f,
+                description: "How far from the camera URP renders real-time shadows. Larger = shadows on distant terrain/trees, but costlier.");
 
             // --- Environment: atmosphere + colour grade (DemLighting) ---
             TuningRegistry.RegisterBool("env.atmosphere", "Atmosphere", "Atmosphere enable",
@@ -873,6 +880,9 @@ namespace NetworkDesigner.Terrain
                 h = h * 31 + ForestGen.NearLodTint.GetHashCode();
                 h = h * 31 + ForestGen.FarLodDarken.GetHashCode();
                 h = h * 31 + ForestGen.NightFoliageTint.GetHashCode();
+                var urp = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                          as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
+                h = h * 31 + (urp != null ? urp.shadowDistance : -1f).GetHashCode();
                 return h;
             }
         }
