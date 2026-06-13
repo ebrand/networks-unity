@@ -544,6 +544,47 @@ namespace NetworkDesigner.Terrain
             snapped = proj; return true;
         }
 
+        // The collinear extension of an existing ENDPOINT (degree-1 node) near `p`, excluding the chain tail:
+        // origin = that node, dir = its outward heading (continuing its single edge). This is the guide you snap
+        // a new road onto so it meets the EXISTING road straight-on. False if none is in range / ahead.
+        bool TargetExtension(Vector2 p, out Vector2 origin, out Vector2 dir)
+        {
+            origin = default; dir = default;
+            if (Graph == null) return false;
+            float reach = Mathf.Max(1f, ExtensionGuideLength);
+            float bestPerp2 = float.MaxValue;
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                if (i == _chainTail) continue;
+                int deg = 0, nb = -1;
+                for (int e = 0; e < Graph.Edges.Count; e++)
+                { var le = Graph.Edges[e]; if (le.A == i) { deg++; nb = le.B; } else if (le.B == i) { deg++; nb = le.A; } }
+                if (deg != 1 || nb < 0) continue;                    // only endpoints have a clean collinear extension
+                Vector2 np = Graph.Nodes[i];
+                Vector2 ext = np - Graph.Nodes[nb];
+                if (ext.sqrMagnitude < 1e-6f) continue;
+                ext.Normalize();
+                float along = Vector2.Dot(p - np, ext);
+                if (along <= 0f || along > reach) continue;          // must be ahead of the node, within guide length
+                float perp2 = (p - (np + ext * along)).sqrMagnitude;
+                if (perp2 < bestPerp2) { bestPerp2 = perp2; origin = np; dir = ext; }
+            }
+            return bestPerp2 < float.MaxValue;
+        }
+
+        // SOFT-snap the cursor onto a nearby existing endpoint's collinear extension (within ExtensionSnapRadius)
+        // so the new road can connect straight-on to it.
+        public bool TrySnapToTargetExtension(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            float r = Mathf.Max(0f, ExtensionSnapRadius);
+            if (r <= 0f || !TargetExtension(cursor, out Vector2 o, out Vector2 dir)) return false;
+            float along = Vector2.Dot(cursor - o, dir);
+            Vector2 proj = o + dir * along;
+            if ((cursor - proj).sqrMagnitude > r * r) return false;
+            snapped = proj; return true;
+        }
+
         // Snap onto the plan's own nearest node/edge within EndSnapRadius (excluding the active anchor) —
         // so segments join existing nodes into intersections, and you can resume from any end.
         public bool TrySnapToOwnNode(Vector2 p, out Vector2 snapped)
@@ -1219,6 +1260,11 @@ namespace NetworkDesigner.Terrain
                 prev = cur;
             }
 
+            // Collinear extension guide of a nearby existing endpoint (the road you'd meet head-on) — shown in
+            // every placement mode so you can align the new corridor to it; TrySnapToTargetExtension snaps to it.
+            if (TargetExtension(new Vector2(cursor.x, cursor.z), out Vector2 tgo, out Vector2 tgd))
+                DashGuide(field, tgo, tgd, ExtensionGuideLength);
+
             // Shift-curve in progress: the bend is armed, so draw the curve tail→corner→cursor (red when too
             // tight for the design speed), plus the two construction legs and a marker at the corner.
             if (_cornerPending && _chainTail >= 0 && _chainTail < Graph.Nodes.Count)
@@ -1285,7 +1331,7 @@ namespace NetworkDesigner.Terrain
         // A dashed ray from origin `o` along unit `dir` for `len` metres (a heading guide).
         void DashGuide(ITerrainSurface field, Vector2 o, Vector2 dir, float len)
         {
-            const int gn = 30;
+            int gn = Mathf.Clamp(Mathf.CeilToInt(len / 1.2f), 4, 800);   // ~1.2 m dash + 1.2 m gap (small dashes)
             Vector3 gp = default;
             for (int i = 0; i <= gn; i++)
             {

@@ -925,6 +925,7 @@ namespace NetworkDesigner.Terrain
                     bool rsnap = rdp.SnapStraightConstrained(flat, out Vector2 rsh, out bool roff);
                     rdp.StraightOffAxis = roff;
                     if (rsnap) return new Vector3(rsh.x, raw.y, rsh.y);
+                    if (rdp.TrySnapToTargetExtension(flat, out Vector2 rdt)) return new Vector3(rdt.x, raw.y, rdt.y);  // meet an existing road's extension head-on
                     if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
                 }
                 // Grid snap makes no sense while shaping an arc that EXTENDS existing track —
