@@ -582,6 +582,52 @@ namespace NetworkDesigner.UI
             return l;
         }
 
+        // Collapsible section: a Foldout whose contentContainer is returned for the caller to fill. Defaults to
+        // COLLAPSED. Add rows to the returned element, not to `parent`.
+        protected VisualElement Section(VisualElement parent, string title, bool startCollapsed = true)
+        {
+            var fold = new Foldout { text = title, value = !startCollapsed };
+            fold.style.marginBottom = 6;
+            var header = fold.Q<Label>();
+            if (header != null)
+            {
+                header.style.color = Sub; header.style.fontSize = 11;
+                header.style.unityFontStyleAndWeight = FontStyle.Bold;
+            }
+            fold.contentContainer.style.marginTop = 6;
+            parent.Add(fold);
+            return fold.contentContainer;
+        }
+
+        // Compact colour control: label + swatch, with R/G/B sliders below (runtime-safe; no editor colour picker).
+        protected VisualElement ColorRow(string label, Func<Color> get, Action<Color> set)
+        {
+            var wrap = new VisualElement(); wrap.style.marginBottom = 10;
+            var head = HBox();
+            var l = new Label(label); l.style.color = Ink; l.style.fontSize = 13; l.style.flexGrow = 1; head.Add(l);
+            var swatch = new VisualElement();
+            swatch.style.width = 30; swatch.style.height = 14; swatch.style.backgroundColor = get();
+            Radius(swatch, 3);
+            head.Add(swatch);
+            wrap.Add(head);
+
+            var sliders = HBox(); sliders.style.marginTop = 3;
+            void Chan(int idx)
+            {
+                var s = new Slider(0f, 1f) { value = Mathf.Clamp01(get()[idx]) };
+                s.style.flexGrow = 1; s.style.marginLeft = 2; s.style.marginRight = 2;
+                s.RegisterValueChangedCallback(e =>
+                {
+                    Color c = get(); c[idx] = e.newValue; set(c); swatch.style.backgroundColor = c;
+                });
+                _sync.Add(() => { Color c = get(); s.SetValueWithoutNotify(Mathf.Clamp01(c[idx])); swatch.style.backgroundColor = c; });
+                sliders.Add(s);
+            }
+            Chan(0); Chan(1); Chan(2);
+            wrap.Add(sliders);
+            return wrap;
+        }
+
         protected VisualElement Divider()
         {
             var d = new VisualElement();

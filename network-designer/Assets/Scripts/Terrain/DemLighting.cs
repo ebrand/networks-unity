@@ -24,6 +24,7 @@ namespace NetworkDesigner.Terrain
         public static float BloomIntensity = 0.25f;
         public static float VignetteAmount = 0.28f;
         public static float FogDensity = 0.00012f; // aerial-perspective depth (exp² fog)
+        public static bool UseACES = true;          // ACES filmic tonemap (punchy/clear, CS2-like) vs Neutral
         public static bool Enabled { get; private set; }
 
         static readonly Color FogTint = new Color(0.42f, 0.50f, 0.60f);   // moody blue-grey haze
@@ -31,6 +32,7 @@ namespace NetworkDesigner.Terrain
 
         static Volume _vol;
         static VolumeProfile _profile;
+        static Tonemapping _tone;
         static ColorAdjustments _col;
         static Bloom _bloom;
         static Vignette _vig;
@@ -90,6 +92,7 @@ namespace NetworkDesigner.Terrain
             }
             if (_bloom != null) _bloom.intensity.value = BloomIntensity;
             if (_vig != null) _vig.intensity.value = VignetteAmount;
+            if (_tone != null) _tone.mode.value = UseACES ? TonemappingMode.ACES : TonemappingMode.Neutral;
         }
 
         static void BuildProfile()
@@ -98,8 +101,9 @@ namespace NetworkDesigner.Terrain
             var p = ScriptableObject.CreateInstance<VolumeProfile>();
             p.name = "DEM Custom Grade";
 
-            var tone = p.Add<Tonemapping>();
-            tone.mode.overrideState = true; tone.mode.value = TonemappingMode.Neutral;
+            _tone = p.Add<Tonemapping>();
+            _tone.mode.overrideState = true;
+            _tone.mode.value = UseACES ? TonemappingMode.ACES : TonemappingMode.Neutral;
 
             _col = p.Add<ColorAdjustments>();
             _col.postExposure.overrideState = true;

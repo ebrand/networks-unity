@@ -150,6 +150,7 @@ namespace NetworkDesigner.Terrain
         }
 
         public static float MaxRenderDistance = 2200f;  // trees in cells past this (m) aren't drawn
+        public static int ShadowCasterMaxLod = 1;        // only LOD indices ≤ this cast shadows (near trees only) — big perf lever
         // Far LODs are flat cross-card impostors that catch full light (no self-shadowing) and read much
         // BRIGHTER than the self-shadowed near mesh — a jarring pop as you approach. Tint each LOD toward
         // this factor (1 at LOD0 → FarLodDarken at the last) so the brightness matches across the transition.
@@ -454,10 +455,15 @@ namespace NetworkDesigner.Terrain
                         Material mat = (lod.mats != null && s < lod.mats.Length && lod.mats[s] != null) ? lod.mats[s]
                                      : (lod.mats != null && lod.mats.Length > 0 ? lod.mats[0] : null);
                         if (mat == null) continue;
+                        // Only NEAR LODs cast shadows. Casting from all 20k+ trees out to the shadow distance
+                        // (re-rendered per cascade) is the forest's dominant cost; distant trees' shadows are
+                        // imperceptible. ShadowCasterMaxLod caps which LOD indices cast.
                         var rp = new RenderParams(mat)
                         {
-                            shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On,   // cast onto terrain
-                            receiveShadows = true,                                            // and darken in shadow like the terrain
+                            shadowCastingMode = li <= ShadowCasterMaxLod
+                                ? UnityEngine.Rendering.ShadowCastingMode.On
+                                : UnityEngine.Rendering.ShadowCastingMode.Off,
+                            receiveShadows = true,                                            // still darken in shadow like the terrain
                             worldBounds = bigBounds,  // already CPU-culled; keep Unity from re-culling the batch
                             matProps = TintMpb(lod, s, darken)
                         };

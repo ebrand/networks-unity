@@ -765,6 +765,9 @@ namespace NetworkDesigner.Terrain
             // --- Environment: atmosphere + colour grade (DemLighting) ---
             TuningRegistry.RegisterBool("env.atmosphere", "Atmosphere", "Atmosphere enable",
                 () => DemLighting.Enabled, v => DemLighting.SetEnabled(v));
+            TuningRegistry.RegisterBool("env.aces", "Atmosphere", "ACES tonemap (vs Neutral)",
+                () => DemLighting.UseACES, v => { DemLighting.UseACES = v; DemLighting.Apply(); },
+                description: "Filmic ACES tonemapping (punchy, CS2-like) vs flat Neutral. Pair with exposure ~0.");
             TuningRegistry.RegisterFloat("env.fog", "Atmosphere", "Haze (fog)",
                 () => DemLighting.FogDensity, v => { DemLighting.FogDensity = v; DemLighting.Apply(); }, 0f, 0.0006f);
             TuningRegistry.RegisterFloat("env.exposure", "Atmosphere", "Exposure",
@@ -783,6 +786,15 @@ namespace NetworkDesigner.Terrain
             // --- Environment: ground texture (TerrainGround shader, via ChunkWorld) ---
             TuningRegistry.RegisterBool("ground.textures", "Ground texture", "Textures",
                 () => ChunkWorld.GroundTextures, v => ChunkWorld.GroundTextures = v);
+            TuningRegistry.RegisterColor("ground.grassFlat", "Ground texture", "Flat grass colour",
+                () => ChunkWorld.GroundGrassColor, v => ChunkWorld.GroundGrassColor = v,
+                description: "Untextured terrain grass/flat colour (only visible with Textures off).");
+            TuningRegistry.RegisterColor("ground.slopeFlat", "Ground texture", "Flat slope colour",
+                () => ChunkWorld.GroundSlopeColor, v => ChunkWorld.GroundSlopeColor = v,
+                description: "Untextured terrain mid-slope colour (Textures off).");
+            TuningRegistry.RegisterColor("ground.rockFlat", "Ground texture", "Flat rock colour",
+                () => ChunkWorld.GroundRockColor, v => ChunkWorld.GroundRockColor = v,
+                description: "Untextured terrain steep/rock colour (Textures off).");
             TuningRegistry.RegisterBool("ground.stochastic", "Ground texture", "Anti-repeat (stochastic)",
                 () => ChunkWorld.GroundStochastic, v => ChunkWorld.GroundStochastic = v);
             TuningRegistry.RegisterFloat("ground.brightness", "Ground texture", "Ground brightness",
@@ -855,6 +867,7 @@ namespace NetworkDesigner.Terrain
                 h = h * 31 + DayCycle.AutoAdvance.GetHashCode();
                 h = h * 31 + DayCycle.DayLengthMinutes.GetHashCode();
                 h = h * 31 + DemLighting.Enabled.GetHashCode();
+                h = h * 31 + DemLighting.UseACES.GetHashCode();
                 h = h * 31 + DemLighting.FogDensity.GetHashCode();
                 h = h * 31 + DemLighting.Exposure.GetHashCode();
                 h = h * 31 + DemLighting.Contrast.GetHashCode();
@@ -863,6 +876,9 @@ namespace NetworkDesigner.Terrain
                 h = h * 31 + DemLighting.BloomIntensity.GetHashCode();
                 h = h * 31 + DemLighting.VignetteAmount.GetHashCode();
                 h = h * 31 + ChunkWorld.GroundTextures.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundGrassColor.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundSlopeColor.GetHashCode();
+                h = h * 31 + ChunkWorld.GroundRockColor.GetHashCode();
                 h = h * 31 + ChunkWorld.GroundStochastic.GetHashCode();
                 h = h * 31 + ChunkWorld.GroundBrightness.GetHashCode();
                 h = h * 31 + ChunkWorld.GroundMacroAmount.GetHashCode();

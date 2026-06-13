@@ -34,81 +34,85 @@ namespace NetworkDesigner.UI
         protected override void BuildBody(VisualElement body)
         {
             // Time-of-day sun arc (warm/low ↔ cool/high via colour temperature). Drives the sun; the
-            // warm-sun + cool-sky-ambient contrast is what gives the cinematic forest look.
-            body.Add(SectionLabel("TIME OF DAY"));
-            body.Add(ToggleRow("Day cycle", () => DayCycle.Enabled, v => DayCycle.SetEnabled(v)));
-            body.Add(ToggleRow("Sky + ambient", () => DayCycle.ManageSky, v => { DayCycle.ManageSky = v; DayCycle.Apply(); }));
-            body.Add(SliderRow("Time (h)", () => DayCycle.TimeOfDay,
+            // warm-sun + cool-sky-ambient contrast is what gives the cinematic forest look. All sections are
+            // collapsible Foldouts, collapsed by default (the palette is long).
+            var tod = Section(body, "TIME OF DAY");
+            tod.Add(ToggleRow("Day cycle", () => DayCycle.Enabled, v => DayCycle.SetEnabled(v)));
+            tod.Add(ToggleRow("Sky + ambient", () => DayCycle.ManageSky, v => { DayCycle.ManageSky = v; DayCycle.Apply(); }));
+            tod.Add(SliderRow("Time (h)", () => DayCycle.TimeOfDay,
                 v => { DayCycle.TimeOfDay = v; DayCycle.Apply(); }, 0f, 24f, "0.0"));
-            body.Add(SliderRow("Sun height", () => DayCycle.PeakElevation,
+            tod.Add(SliderRow("Sun height", () => DayCycle.PeakElevation,
                 v => { DayCycle.PeakElevation = v; DayCycle.Apply(); }, 5f, 89f, "0"));
-            body.Add(SliderRow("Sun dir", () => DayCycle.NorthYaw,
+            tod.Add(SliderRow("Sun dir", () => DayCycle.NorthYaw,
                 v => { DayCycle.NorthYaw = v; DayCycle.Apply(); }, 0f, 360f, "0"));
-            body.Add(SliderRow("Brightness", () => DayCycle.Intensity,
+            tod.Add(SliderRow("Brightness", () => DayCycle.Intensity,
                 v => { DayCycle.Intensity = v; DayCycle.Apply(); }, 0f, 3f, "0.00"));
-            body.Add(SliderRow("Ambient", () => DayCycle.AmbientScale,
+            tod.Add(SliderRow("Ambient", () => DayCycle.AmbientScale,
                 v => { DayCycle.AmbientScale = v; DayCycle.Apply(); }, 0f, 1.5f, "0.00"));
-            body.Add(SliderRow("Shadow distance (m)", () => Designer.ShadowDistanceValue,
+            tod.Add(SliderRow("Shadow distance (m)", () => Designer.ShadowDistanceValue,
                 v => Designer.ShadowDistanceValue = v, 50f, 3000f, "0"));
-            body.Add(ToggleRow("Auto-advance", () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v));
-            body.Add(SliderRow("Day length (min)", () => DayCycle.DayLengthMinutes,
+            tod.Add(ToggleRow("Auto-advance", () => DayCycle.AutoAdvance, v => DayCycle.AutoAdvance = v));
+            tod.Add(SliderRow("Day length (min)", () => DayCycle.DayLengthMinutes,
                 v => DayCycle.DayLengthMinutes = v, 0.5f, 30f, "0.0"));
 
             // Master toggle: builds/tears down the fog + mood sky + post-FX volume. The sliders below
             // take effect live while it's on.
-            body.Add(Divider());
-            body.Add(SectionLabel("ATMOSPHERE"));
-            body.Add(ToggleRow("Enable", () => DemLighting.Enabled, v => DemLighting.SetEnabled(v)));
-            body.Add(SliderRow("Haze (fog)", () => DemLighting.FogDensity,
+            var atmo = Section(body, "ATMOSPHERE");
+            atmo.Add(ToggleRow("Enable", () => DemLighting.Enabled, v => DemLighting.SetEnabled(v)));
+            atmo.Add(ToggleRow("ACES tonemap (vs Neutral)", () => DemLighting.UseACES,
+                v => { DemLighting.UseACES = v; DemLighting.Apply(); }));
+            atmo.Add(SliderRow("Haze (fog)", () => DemLighting.FogDensity,
                 v => { DemLighting.FogDensity = v; DemLighting.Apply(); }, 0f, 0.0006f, "0.00000"));
 
-            body.Add(Divider());
-            body.Add(SectionLabel("COLOUR GRADE"));
-            body.Add(SliderRow("Exposure", () => DemLighting.Exposure,
+            var grade = Section(body, "COLOUR GRADE");
+            grade.Add(SliderRow("Exposure", () => DemLighting.Exposure,
                 v => { DemLighting.Exposure = v; DemLighting.Apply(); }, -2f, 2f, "0.00"));
-            body.Add(SliderRow("Contrast", () => DemLighting.Contrast,
+            grade.Add(SliderRow("Contrast", () => DemLighting.Contrast,
                 v => { DemLighting.Contrast = v; DemLighting.Apply(); }, -50f, 50f, "0"));
-            body.Add(SliderRow("Saturation", () => DemLighting.Saturation,
+            grade.Add(SliderRow("Saturation", () => DemLighting.Saturation,
                 v => { DemLighting.Saturation = v; DemLighting.Apply(); }, -50f, 50f, "0"));
-            body.Add(SliderRow("Warmth", () => DemLighting.Warmth,
+            grade.Add(SliderRow("Warmth", () => DemLighting.Warmth,
                 v => { DemLighting.Warmth = v; DemLighting.Apply(); }, 0f, 1f, "0.00"));
-            body.Add(SliderRow("Bloom", () => DemLighting.BloomIntensity,
+            grade.Add(SliderRow("Bloom", () => DemLighting.BloomIntensity,
                 v => { DemLighting.BloomIntensity = v; DemLighting.Apply(); }, 0f, 1.5f, "0.00"));
-            body.Add(SliderRow("Vignette", () => DemLighting.VignetteAmount,
+            grade.Add(SliderRow("Vignette", () => DemLighting.VignetteAmount,
                 v => { DemLighting.VignetteAmount = v; DemLighting.Apply(); }, 0f, 0.6f, "0.00"));
 
             // Ground texture blend (TerrainGround shader). Live via the shared chunk material — no rebuild.
-            body.Add(Divider());
-            body.Add(SectionLabel("GROUND TEXTURE"));
-            body.Add(ToggleRow("Textures", () => ChunkWorld.GroundTextures,
+            var ground = Section(body, "GROUND TEXTURE");
+            ground.Add(ToggleRow("Textures", () => ChunkWorld.GroundTextures,
                 v => ChunkWorld.GroundTextures = v));
-            body.Add(ToggleRow("Anti-repeat (stochastic)", () => ChunkWorld.GroundStochastic,
+            // Untextured (flat) terrain colours — only visible with Textures OFF.
+            ground.Add(ColorRow("Grass (flat)", () => ChunkWorld.GroundGrassColor, v => ChunkWorld.GroundGrassColor = v));
+            ground.Add(ColorRow("Slope (flat)", () => ChunkWorld.GroundSlopeColor, v => ChunkWorld.GroundSlopeColor = v));
+            ground.Add(ColorRow("Rock (flat)",  () => ChunkWorld.GroundRockColor,  v => ChunkWorld.GroundRockColor  = v));
+            ground.Add(ToggleRow("Anti-repeat (stochastic)", () => ChunkWorld.GroundStochastic,
                 v => ChunkWorld.GroundStochastic = v));
-            body.Add(SliderRow("Ground brightness", () => ChunkWorld.GroundBrightness,
+            ground.Add(SliderRow("Ground brightness", () => ChunkWorld.GroundBrightness,
                 v => ChunkWorld.GroundBrightness = v, 0f, 1.5f, "0.00"));
-            body.Add(SliderRow("Macro variation", () => ChunkWorld.GroundMacroAmount,
+            ground.Add(SliderRow("Macro variation", () => ChunkWorld.GroundMacroAmount,
                 v => ChunkWorld.GroundMacroAmount = v, 0f, 0.8f, "0.00"));
-            body.Add(SliderRow("Macro size (m)", () => ChunkWorld.GroundMacroSize,
+            ground.Add(SliderRow("Macro size (m)", () => ChunkWorld.GroundMacroSize,
                 v => ChunkWorld.GroundMacroSize = v, 50f, 800f, "0"));
-            body.Add(SliderRow("Texture size (m)", () => ChunkWorld.GroundTexSize,
+            ground.Add(SliderRow("Texture size (m)", () => ChunkWorld.GroundTexSize,
                 v => ChunkWorld.GroundTexSize = v, 2f, 80f, "0.0"));
-            body.Add(SliderRow("Detail strength", () => ChunkWorld.GroundDetailStrength,
+            ground.Add(SliderRow("Detail strength", () => ChunkWorld.GroundDetailStrength,
                 v => ChunkWorld.GroundDetailStrength = v, 0f, 1f, "0.00"));
-            body.Add(SliderRow("Detail size (m)", () => ChunkWorld.GroundDetailSize,
+            ground.Add(SliderRow("Detail size (m)", () => ChunkWorld.GroundDetailSize,
                 v => ChunkWorld.GroundDetailSize = v, 0.3f, 8f, "0.0"));
-            body.Add(SliderRow("Patch size (m)", () => ChunkWorld.GroundNoiseSize,
+            ground.Add(SliderRow("Patch size (m)", () => ChunkWorld.GroundNoiseSize,
                 v => ChunkWorld.GroundNoiseSize = v, 20f, 600f, "0"));
-            body.Add(SliderRow("Dirt patches", () => ChunkWorld.GroundDirtPatches,
+            ground.Add(SliderRow("Dirt patches", () => ChunkWorld.GroundDirtPatches,
                 v => ChunkWorld.GroundDirtPatches = v, 0f, 1f, "0.00"));
-            body.Add(SliderRow("Dirt slope (deg)", () => ChunkWorld.GroundDirtSlope,
+            ground.Add(SliderRow("Dirt slope (deg)", () => ChunkWorld.GroundDirtSlope,
                 v => ChunkWorld.GroundDirtSlope = v, 0f, 60f, "0"));
-            body.Add(SliderRow("Gravel slope (deg)", () => ChunkWorld.GroundGravelSlope,
+            ground.Add(SliderRow("Gravel slope (deg)", () => ChunkWorld.GroundGravelSlope,
                 v => ChunkWorld.GroundGravelSlope = v, 0f, 80f, "0"));
-            body.Add(SliderRow("Beach sand (m above water)", () => ChunkWorld.GroundSandHeight,
+            ground.Add(SliderRow("Beach sand (m above water)", () => ChunkWorld.GroundSandHeight,
                 v => ChunkWorld.GroundSandHeight = v, 0f, 15f, "0.0"));
-            body.Add(SliderRow("Seam jitter (deg)", () => ChunkWorld.GroundSlopeJitter,
+            ground.Add(SliderRow("Seam jitter (deg)", () => ChunkWorld.GroundSlopeJitter,
                 v => ChunkWorld.GroundSlopeJitter = v, 0f, 40f, "0"));
-            body.Add(SliderRow("Normal strength", () => ChunkWorld.GroundNormalStrength,
+            ground.Add(SliderRow("Normal strength", () => ChunkWorld.GroundNormalStrength,
                 v => ChunkWorld.GroundNormalStrength = v, 0f, 2f, "0.0"));
         }
     }

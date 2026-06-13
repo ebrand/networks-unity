@@ -2141,6 +2141,30 @@ namespace NetworkDesigner.Terrain
             _roadBuildRoot = null;
         }
 
+        // Tear down ALL live network geometry (rail / rail-plan / road-plan / fence / power / built roads)
+        // WITHOUT marking the save dirty. Used on world switch + return-to-menu so one world's networks don't
+        // ride onto the next (or float over the launcher). Not marking dirty is essential: otherwise an autosave
+        // would fire after the clear and overwrite the just-exited world's saved networks with the empty state.
+        public void ClearAllNetworks()
+        {
+            RailLayer.ClearAll(Surf);
+            PlanLayer.ClearAll(Surf);
+            RoadPlanLayer.ClearAll(Surf);
+            FenceLayer.ClearAll(Surf);
+            PowerLineLayer.ClearAll(Surf);
+            ClearRoadBuild();
+        }
+
+        // Launcher/menu state: clear leftover networks and hide every terrain backend so the startup picker
+        // sits over empty space — no low-poly block, no floating networks from the world you just left.
+        public void EnterMenuState()
+        {
+            ClearAllNetworks();
+            if (_chunkRoot != null) _chunkRoot.SetActive(false);
+            DemTerrainWorld.SetVisible(false);
+            if (_waterGo != null) _waterGo.SetActive(false);
+        }
+
         // ---- road plan elevation-edit sub-mode (palette "Edit elevations") ----
 
         public bool RoadElevationEdit => RoadPlanLayer.ElevationEditMode;
@@ -2646,8 +2670,10 @@ namespace NetworkDesigner.Terrain
                 _lastCamPos = cp; _lastCamYaw = cy; _lastCamPitch = cpi; _haveLastCam = true;
             }
 
-            // Debounced autosave: write once sculpting/flying has paused.
-            if (Autosave && _dirtySince >= 0f
+            // Debounced autosave: write once sculpting/flying has paused. Suppressed while a modal (tree
+            // pack manager, etc.) is open — nothing's changing in there, and the ~8 MB BuildSnapshot landing
+            // ~1×/sec was the periodic frame spike. _dirtySince is kept, so it flushes once on modal close.
+            if (Autosave && _dirtySince >= 0f && !NetworkDesigner.UI.PaletteBase.ModalOpen
                 && Time.realtimeSinceStartup - _dirtySince >= AutosaveDebounceSeconds)
             {
                 SaveTerrain(); // clears _dirtySince only if a write actually starts
@@ -4210,10 +4236,14 @@ namespace NetworkDesigner.Terrain
 
         // Tree/rock packs live in their OWN file next to the autosave, so they're a
         // reusable preset library that survives deleting/resetting the terrain.
+        // GLOBAL pack library — one file shared by ALL worlds (not per-world, or each world drifts its own
+        // pack set). Editor: project root; Player: persistentDataPath. Mirrors TuningOverrides' location.
         string ResolvePacksPath()
-            => System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(ResolveAutosavePath())),
-                "TerrainPacks.json");
+#if UNITY_EDITOR
+            => System.IO.Path.Combine(Application.dataPath, "..", "TerrainPacks.json");
+#else
+            => System.IO.Path.Combine(Application.persistentDataPath, "TerrainPacks.json");
+#endif
 
         class PacksFile { public List<TreePack> TreePacks; public List<TreePack> RockPacks; }
 
@@ -4475,6 +4505,9 @@ namespace NetworkDesigner.Terrain
             DemChunkSource.NormMin = info.NormMin; DemChunkSource.NormMax = info.NormMax;
 
             if (ChunkWorld.Active) StopChunkTest();
+            // Drop the previous world's live networks BEFORE staging this one, so a direct world→world switch
+            // can't leave the old rail/road/plans draped on the new terrain. (No dirty flag — see ClearAllNetworks.)
+            ClearAllNetworks();
             // Restore the object build (rail / scatter / fences / power) from this game's snapshot if it
             // exists (new games have none yet). The low-poly field rides along but gets hidden by
             // StartChunkDem below, which runs LAST so the chunk world ends up on top.
@@ -4504,6 +4537,7 @@ namespace NetworkDesigner.Terrain
                 ForestGen.ImportForest(TreeLayer, _pendingForest);
                 Debug.Log($"[Forest] restored {ForestGen.TreeCount} trees from save.");
             }
+            LoadPacks();        // global pack library overrides this world's embedded packs — one set for all worlds
             GameManager.SetActive(name);
             ApplyViewPrefs();   // restore grid / snap / topo from the last session (persist across worlds)
             Debug.Log($"[Game] loaded “{name}” (DEM {info.DemSet}, range {info.NormMin:0}..{info.NormMax:0}).");

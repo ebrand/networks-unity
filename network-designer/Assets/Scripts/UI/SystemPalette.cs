@@ -75,8 +75,9 @@ namespace NetworkDesigner.UI
             body.Add(Divider());
             var menuBtn = MakeButton("Save & exit to menu", () =>
             {
-                Designer.SaveNow();           // write the game snapshot
+                Designer.SaveNow();           // write the game snapshot (with its networks)
                 Designer.StopChunkTest();     // tear down the chunk/DEM world (also saves dirty chunks)
+                Designer.EnterMenuState();    // clear leftover networks + hide all terrain so the menu is clean
                 GameManager.SetActive(null);  // clear active game → the startup picker reappears
             });
             menuBtn.style.marginTop = 4;

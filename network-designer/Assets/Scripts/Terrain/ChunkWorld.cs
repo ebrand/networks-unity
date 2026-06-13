@@ -308,6 +308,8 @@ namespace NetworkDesigner.Terrain
             // startup, or values held across a material rebuild) so they aren't lost — see _groundProps.
             foreach (var kv in _groundProps)
                 if (m.HasProperty(kv.Key)) m.SetFloat(kv.Key, kv.Value);
+            foreach (var kv in _groundColors)
+                if (m.HasProperty(kv.Key)) m.SetColor(kv.Key, kv.Value);
             return m;
         }
 
@@ -326,6 +328,23 @@ namespace NetworkDesigner.Terrain
             _groundProps[p] = v;
             if (_mat != null && _mat.HasProperty(p)) _mat.SetFloat(p, v);
         }
+
+        // Same cache/replay story for Color properties (e.g. the untextured flat colours).
+        static readonly Dictionary<string, Color> _groundColors = new Dictionary<string, Color>();
+        static Color GroundGetColor(string p, Color dflt)
+            => _groundColors.TryGetValue(p, out Color v) ? v
+             : (_mat != null && _mat.HasProperty(p)) ? _mat.GetColor(p) : dflt;
+        static void GroundSetColor(string p, Color v)
+        {
+            _groundColors[p] = v;
+            if (_mat != null && _mat.HasProperty(p)) _mat.SetColor(p, v);
+        }
+
+        // Untextured "flat" terrain colours (TerrainGround _GrassFlat/_MidFlat/_GravelFlat) — only visible when
+        // Textures is OFF. Independent of the textured tints so they can be set without shifting the textured look.
+        public static Color GroundGrassColor  { get => GroundGetColor("_GrassFlat",  new Color(0.32f, 0.42f, 0.20f)); set => GroundSetColor("_GrassFlat",  value); }
+        public static Color GroundSlopeColor  { get => GroundGetColor("_MidFlat",    new Color(0.40f, 0.34f, 0.20f)); set => GroundSetColor("_MidFlat",    value); }
+        public static Color GroundRockColor   { get => GroundGetColor("_GravelFlat", new Color(0.44f, 0.41f, 0.36f)); set => GroundSetColor("_GravelFlat", value); }
 
         // Texture tile size in METRES (world units per texture repeat) — larger = bigger features, less obvious
         // tiling. Drives all three layers together. (Shader stores 1/size as _*Scale.)

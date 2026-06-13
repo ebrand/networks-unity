@@ -30,6 +30,11 @@ Shader "NetworkDesigner/TerrainGround"
         _GravelTex   ("Dirt+Gravel/Rock (triplanar)", 2D) = "white" {}
         _GravelScale ("Dirt+Gravel/Rock Scale", Float) = 0.18
 
+        // Flat-mode colours: used ONLY when textures are off, so they're independent of the textured tints above.
+        _GrassFlat  ("Flat Grass Colour",  Color) = (0.32, 0.42, 0.20, 1)
+        _MidFlat    ("Flat Slope Colour",  Color) = (0.40, 0.34, 0.20, 1)
+        _GravelFlat ("Flat Rock Colour",   Color) = (0.44, 0.41, 0.36, 1)
+
         _SandTint    ("Sand Tint", Color) = (0.76, 0.71, 0.52, 1)
         _SandTex     ("Sand (triplanar)", 2D) = "white" {}
         _SandScale   ("Sand Scale", Float) = 0.15
@@ -101,6 +106,7 @@ Shader "NetworkDesigner/TerrainGround"
                 float4 _GrassTint;   float4 _GrassTex_ST;   float _GrassScale;
                 float4 _MidTint;     float4 _MidTex_ST;     float _MidScale;
                 float4 _GravelTint;  float4 _GravelTex_ST;  float _GravelScale;
+                float4 _GrassFlat;   float4 _MidFlat;       float4 _GravelFlat;
                 float4 _SandTint;    float4 _SandTex_ST;    float _SandScale;  float4 _SandNormal_ST;
                 float  _SeaLevel;
                 float  _SandHeight;
@@ -270,7 +276,7 @@ Shader "NetworkDesigner/TerrainGround"
                     mid    = TriSample(TEXTURE2D_ARGS(_MidTex, sampler_MidTex),       wp, bw, _MidScale)    * _MidTint.rgb;
                     gravel = TriSample(TEXTURE2D_ARGS(_GravelTex, sampler_GravelTex), wp, bw, _GravelScale) * _GravelTint.rgb;
                 }
-                else { grass = _GrassTint.rgb; mid = _MidTint.rgb; gravel = _GravelTint.rgb; }
+                else { grass = _GrassFlat.rgb; mid = _MidFlat.rgb; gravel = _GravelFlat.rgb; }   // untextured: dedicated flat colours
 
                 // Blend weights: grass base → grass+dirt by gentle slope + noise patches → gravel by steep slope.
                 float midT    = smoothstep(_MidSlopeStart,    max(_MidSlopeStart + 0.001, _MidSlopeFull),       ang + jit);

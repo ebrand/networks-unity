@@ -284,54 +284,72 @@ namespace NetworkDesigner.UI
             delRow.Add(delBtn);
             modal.Add(delRow);
 
-            // --- live rotatable 3D preview ---
-            var prevLbl = new Label("Preview  (drag to rotate)");
-            prevLbl.style.color = Sub; prevLbl.style.marginBottom = 4;
-            modal.Add(prevLbl);
+            // --- rotatable 3D preview — OFF by default (rendering a full NM tree every frame is costly).
+            // A button builds the viewer on first click and shows/hides it; the render loop no-ops while hidden.
+            NetworkDesigner.Terrain.RuntimePrefabViewer viewer = null;
+            Image previewImg = null;
+            bool dragging = false; Vector2 dragLast = default;
+            GameObject lastShown = null; float spinAccum = 0f;
+
             var preview = new VisualElement();
             preview.style.height = previewH; preview.style.flexShrink = 0;
             preview.style.backgroundColor = DarkInk; Radius(preview, 8);
             preview.style.overflow = Overflow.Hidden;
+            preview.style.display = DisplayStyle.None;   // hidden until expanded
+            preview.style.marginTop = 4;
+
+            Button prevToggle = null;
+            prevToggle = MakeButton("Show 3D preview", () =>
+            {
+                bool show = preview.style.display == DisplayStyle.None;
+                if (show && viewer == null)   // lazy-build on first expand
+                {
+                    viewer = new NetworkDesigner.Terrain.RuntimePrefabViewer(
+                        (int)previewW, (int)previewH, new Color(0.06f, 0.07f, 0.08f, 1f));
+                    modal.RegisterCallback<DetachFromPanelEvent>(_ => viewer.Dispose());
+                    previewImg = new Image { image = viewer.Texture, scaleMode = ScaleMode.ScaleToFit };
+                    previewImg.style.flexGrow = 1;
+                    preview.Add(previewImg);
+                    previewImg.RegisterCallback<PointerDownEvent>(e =>
+                    { dragging = true; dragLast = new Vector2(e.position.x, e.position.y); previewImg.CapturePointer(e.pointerId); });
+                    previewImg.RegisterCallback<PointerMoveEvent>(e =>
+                    {
+                        if (!dragging) return;
+                        Vector2 p = new Vector2(e.position.x, e.position.y);
+                        Vector2 d = p - dragLast; dragLast = p;
+                        viewer.Yaw += d.x * 0.5f;
+                        viewer.Pitch = Mathf.Clamp(viewer.Pitch - d.y * 0.5f, -85f, 85f);
+                    });
+                    previewImg.RegisterCallback<PointerUpEvent>(e =>
+                    { dragging = false; previewImg.ReleasePointer(e.pointerId); });
+                    lastShown = null;   // force a render on first show
+                }
+                preview.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+                prevToggle.text = show ? "Hide 3D preview" : "Show 3D preview";
+            });
+            prevToggle.style.marginTop = 6;
+            modal.Add(prevToggle);
             modal.Add(preview);
 
-            // Wide RT (matches the full-width preview area) so the render fills the width
-            // rather than sitting as a centered square.
-            var viewer = new NetworkDesigner.Terrain.RuntimePrefabViewer(
-                (int)previewW, (int)previewH, new Color(0.06f, 0.07f, 0.08f, 1f));
-            modal.RegisterCallback<DetachFromPanelEvent>(_ => viewer.Dispose());
-
-            var previewImg = new Image { image = viewer.Texture, scaleMode = ScaleMode.ScaleToFit };
-            previewImg.style.flexGrow = 1;
-            preview.Add(previewImg);
-
-            // Drag-to-orbit; auto-spins gently when not being dragged.
-            bool dragging = false; Vector2 dragLast = default;
-            previewImg.RegisterCallback<PointerDownEvent>(e =>
-            { dragging = true; dragLast = new Vector2(e.position.x, e.position.y); previewImg.CapturePointer(e.pointerId); });
-            previewImg.RegisterCallback<PointerMoveEvent>(e =>
-            {
-                if (!dragging) return;
-                Vector2 p = new Vector2(e.position.x, e.position.y);
-                Vector2 d = p - dragLast; dragLast = p;
-                viewer.Yaw += d.x * 0.5f;
-                viewer.Pitch = Mathf.Clamp(viewer.Pitch - d.y * 0.5f, -85f, 85f);
-            });
-            previewImg.RegisterCallback<PointerUpEvent>(e =>
-            { dragging = false; previewImg.ReleasePointer(e.pointerId); });
-
-            // Drive the prefab choice + render each frame the modal is open.
+            // Render only when expanded — on a new prefab, while dragging, and a throttled ~12 fps auto-spin.
             _sync.Add(() =>
             {
+                if (viewer == null || preview.style.display == DisplayStyle.None) return;   // collapsed → no render at all
                 GameObject show = selectedPrefab;
                 if (show == null)
                 {
                     for (int i = 0; i < count; i++) if (layer.IsEnabled(i)) { show = layer.PrefabAt(i); break; }
                     if (show == null) show = layer.PrefabAt(0);
                 }
-                viewer.SetPrefab(show);
-                if (!dragging) viewer.Yaw += 18f * Time.deltaTime;
-                viewer.Render();
-                previewImg.MarkDirtyRepaint();
+                bool needRender = false;
+                if (show != lastShown) { viewer.SetPrefab(show); lastShown = show; needRender = true; }
+                if (dragging) needRender = true;                       // smooth while orbiting
+                else
+                {
+                    spinAccum += Time.deltaTime;
+                    if (spinAccum >= 0.08f) { viewer.Yaw += 18f * spinAccum; spinAccum = 0f; needRender = true; }  // ~12 fps idle spin
+                }
+                if (needRender) { viewer.Render(); previewImg.MarkDirtyRepaint(); }
             });
 
             // --- close (warn first if the selected pack has unsaved edits) ---
