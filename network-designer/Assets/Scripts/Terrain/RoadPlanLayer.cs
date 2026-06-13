@@ -585,6 +585,178 @@ namespace NetworkDesigner.Terrain
             snapped = proj; return true;
         }
 
+        // ════ Auto-connect (mirrors the rail auto-connect): pick node A and node B, and a tangent-matched fillet
+        // — bend at the extension intersection P, equal legs, a straight auto-filling the longer side — joins them.
+        public float ConnectHoverRadius = 30f;
+
+        public struct ConnectResult
+        {
+            public bool Valid; public string Reason;
+            public int NodeA, NodeB;
+            public Vector2 Apos, Bpos, P, CurveStartA, CurveEndB;
+            public float LegA, LegB, Leg, Radius;
+            public bool NeedStraightA, NeedStraightB, HasP, DirectTangent;
+        }
+
+        public int NodeDegree(int n)
+        {
+            if (Graph == null || n < 0 || n >= Graph.Nodes.Count) return 0;
+            int deg = 0;
+            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) deg++; }
+            return deg;
+        }
+        public bool IsEndpoint(int n) => NodeDegree(n) == 1;
+
+        // Outgoing tangent from node n along edge e (unit, pointing AWAY from n into open space).
+        bool EdgeTangentAtNode(LineEdge e, int n, out Vector2 dir)
+        {
+            dir = Vector2.zero;
+            if (e.A != n && e.B != n) return false;
+            EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            dir = (e.B == n) ? LineGraph.BezierTangent(p0, p1, p2, p3, 1f) : -LineGraph.BezierTangent(p0, p1, p2, p3, 0f);
+            if (dir.sqrMagnitude < 1e-6f) dir = (e.B == n) ? (p3 - p0) : (p0 - p3);
+            if (dir.sqrMagnitude < 1e-6f) return false;
+            dir.Normalize(); return true;
+        }
+
+        static readonly System.Collections.Generic.List<Vector2> _connTangents = new System.Collections.Generic.List<Vector2>();
+        // Heading the connect should leave/arrive along at node n. Endpoint → its outgoing heading; through-node
+        // (degree ≥ 2) → the trunk axis (a near-opposite pair of incident edges), so a branch curves off the trunk.
+        bool NodeTangent(int n, out Vector2 dir)
+        {
+            dir = Vector2.zero;
+            int deg = NodeDegree(n);
+            if (deg == 0) return false;
+            if (deg == 1)
+            {
+                for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) return EdgeTangentAtNode(e, n, out dir); }
+                return false;
+            }
+            _connTangents.Clear();
+            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if ((e.A == n || e.B == n) && EdgeTangentAtNode(e, n, out Vector2 t)) _connTangents.Add(t); }
+            for (int i = 0; i < _connTangents.Count; i++)
+                for (int j = i + 1; j < _connTangents.Count; j++)
+                    if (Vector2.Dot(_connTangents[i], _connTangents[j]) < -0.9f) { dir = _connTangents[i]; return true; }
+            if (_connTangents.Count > 0) { dir = _connTangents[0]; return true; }
+            return false;
+        }
+
+        static bool LineIntersect(Vector2 a, Vector2 da, Vector2 b, Vector2 db, out Vector2 p)
+        {
+            p = default;
+            float denom = da.x * db.y - da.y * db.x;
+            if (Mathf.Abs(denom) < 1e-9f) return false;               // parallel / collinear
+            float t = ((b.x - a.x) * db.y - (b.y - a.y) * db.x) / denom;
+            p = a + da * t; return true;
+        }
+
+        // Compute the fillet joining nodes a and b. Through-node involved → a single tangent curve between them;
+        // else a symmetric fillet (equal legs, straight filling the longer side). Honours the design-speed radius.
+        public bool TryConnectGeometry(int a, int b, out ConnectResult r)
+        {
+            r = new ConnectResult { NodeA = a, NodeB = b };
+            if (Graph == null || a < 0 || b < 0 || a == b || a >= Graph.Nodes.Count || b >= Graph.Nodes.Count) { r.Reason = "pick two nodes"; return false; }
+            int degA = NodeDegree(a), degB = NodeDegree(b);
+            if (degA < 1 || degB < 1) { r.Reason = "pick two road nodes"; return false; }
+            bool through = degA >= 2 || degB >= 2;
+            r.Apos = Graph.Nodes[a]; r.Bpos = Graph.Nodes[b];
+            if (!NodeTangent(a, out Vector2 extA) || !NodeTangent(b, out Vector2 extB)) { r.Reason = "no heading"; return false; }
+            if (!LineIntersect(r.Apos, extA, r.Bpos, extB, out Vector2 P)) { r.Reason = "lines parallel"; return false; }
+            if (degA == 1 && Vector2.Dot(P - r.Apos, extA) <= 0f) { r.Reason = "intersection behind A"; return false; }
+            if (degB == 1 && Vector2.Dot(P - r.Bpos, extB) <= 0f) { r.Reason = "intersection behind B"; return false; }
+            r.P = P; r.HasP = true;
+            r.LegA = Vector2.Distance(r.Apos, P); r.LegB = Vector2.Distance(r.Bpos, P);
+            if (Mathf.Max(r.LegA, r.LegB) > 4000f) { r.Reason = "ends too far apart"; return false; }
+            Vector2 c1, c2;
+            if (through)
+            {
+                r.DirectTangent = true; r.CurveStartA = r.Apos; r.CurveEndB = r.Bpos;
+                CurveControls(r.Apos, r.Bpos, P, out c1, out c2);
+                r.Radius = MinCurveRadius(r.Apos, c1, c2, r.Bpos);
+            }
+            else
+            {
+                r.Leg = Mathf.Min(r.LegA, r.LegB);
+                r.CurveStartA = P - extA * r.Leg; r.CurveEndB = P - extB * r.Leg;
+                r.NeedStraightA = r.LegA > r.Leg + 0.01f; r.NeedStraightB = r.LegB > r.Leg + 0.01f;
+                CurveControls(r.CurveStartA, r.CurveEndB, P, out c1, out c2);
+                r.Radius = MinCurveRadius(r.CurveStartA, c1, c2, r.CurveEndB);
+            }
+            if (LimitCurveRadius && r.Radius < MinRadiusForSpeed) { r.Reason = $"too tight (R {r.Radius:0} < {MinRadiusForSpeed:0} m)"; return false; }
+            r.Valid = true; r.Reason = "OK"; return true;
+        }
+
+        public void CommitConnect(ITerrainSurface field, in ConnectResult r)
+        {
+            if (!r.Valid) return;
+            string prof = ActiveProfileId;
+            if (r.DirectTangent)
+            {
+                Graph.AddEdge(r.NodeA, r.NodeB);
+                int bei = FindEdgeIndex(r.NodeA, r.NodeB);
+                if (bei >= 0) { LineEdge be = Graph.Edges[bei]; CurveControls(r.Apos, r.Bpos, r.P, out Vector2 bc1, out Vector2 bc2); be.HasCurve = true; be.ControlA = bc1; be.ControlB = bc2; be.Profile = prof; }
+                Rebuild(field); return;
+            }
+            int sa = r.NodeA;
+            if (r.NeedStraightA) { sa = Graph.AddNode(r.CurveStartA); Graph.AddEdge(r.NodeA, sa); int ei = FindEdgeIndex(r.NodeA, sa); if (ei >= 0) Graph.Edges[ei].Profile = prof; }
+            int sb = r.NodeB;
+            if (r.NeedStraightB) { sb = Graph.AddNode(r.CurveEndB); Graph.AddEdge(r.NodeB, sb); int ei = FindEdgeIndex(r.NodeB, sb); if (ei >= 0) Graph.Edges[ei].Profile = prof; }
+            Graph.AddEdge(sa, sb);
+            int cei = FindEdgeIndex(sa, sb);
+            if (cei >= 0) { LineEdge ce = Graph.Edges[cei]; CurveControls(Graph.Nodes[sa], Graph.Nodes[sb], r.P, out Vector2 c1, out Vector2 c2); ce.HasCurve = true; ce.ControlA = c1; ce.ControlB = c2; ce.Profile = prof; }
+            Rebuild(field);
+        }
+
+        // ---- connect preview overlay (vertex-coloured: green buildable / red not) ----
+        GameObject _connGo; MeshFilter _connMf; MeshRenderer _connMr; Mesh _connMesh; Material _connMat;
+        readonly System.Collections.Generic.List<Vector3> _connV = new System.Collections.Generic.List<Vector3>();
+        readonly System.Collections.Generic.List<int> _connIdx = new System.Collections.Generic.List<int>();
+        readonly System.Collections.Generic.List<Color32> _connCol = new System.Collections.Generic.List<Color32>();
+
+        void EnsureConnectOverlay()
+        {
+            if (_connMf != null) return;
+            _connGo = new GameObject(RootName + "_Connect") { hideFlags = HideFlags.DontSave };
+            if (_root != null) _connGo.transform.SetParent(_root.transform, false);
+            _connMf = _connGo.AddComponent<MeshFilter>();
+            _connMr = _connGo.AddComponent<MeshRenderer>();
+            _connMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _connMr.receiveShadows = false;
+            _connMesh = new Mesh { name = "RoadConnectMesh" };
+            _connMf.sharedMesh = _connMesh;
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            _connMat = sh != null ? new Material(sh) { name = "RoadConnectMat" } : NetworkDesigner.PipelineMaterials.CreateUnlitColor(Color.green, "RoadConnectMat");
+            _connMr.sharedMaterial = _connMat;
+        }
+
+        public void HideConnectPreview() { if (_connMr != null) _connMr.enabled = false; }
+
+        public void RenderConnectPreview(ITerrainSurface field, in ConnectResult r)
+        {
+            EnsureConnectOverlay();
+            _connV.Clear(); _connIdx.Clear(); _connCol.Clear();
+            Color32 col = r.Valid ? new Color32(60, 220, 90, 235) : new Color32(235, 70, 55, 235);
+            const float lift = 0.4f;
+            if (!r.HasP) ConnSeg(field, r.Apos, r.Bpos, lift, col);
+            else
+            {
+                if (r.NeedStraightA) ConnSeg(field, r.Apos, r.CurveStartA, lift, col);
+                CurveControls(r.CurveStartA, r.CurveEndB, r.P, out Vector2 c1, out Vector2 c2);
+                Vector2 prev = r.CurveStartA; const int N = 24;
+                for (int i = 1; i <= N; i++) { Vector2 cur = LineGraph.Bezier(r.CurveStartA, c1, c2, r.CurveEndB, i / (float)N); ConnSeg(field, prev, cur, lift, col); prev = cur; }
+                if (r.NeedStraightB) ConnSeg(field, r.CurveEndB, r.Bpos, lift, col);
+            }
+            _connMesh.Clear(); _connMesh.SetVertices(_connV); _connMesh.SetColors(_connCol);
+            _connMesh.SetIndices(_connIdx, MeshTopology.Lines, 0); _connMesh.RecalculateBounds();
+            _connMr.enabled = true;
+        }
+
+        void ConnSeg(ITerrainSurface field, Vector2 a, Vector2 b, float lift, Color32 col)
+        {
+            int s = _connV.Count;
+            _connV.Add(Drape(field, a) + Vector3.up * lift); _connV.Add(Drape(field, b) + Vector3.up * lift);
+            _connCol.Add(col); _connCol.Add(col); _connIdx.Add(s); _connIdx.Add(s + 1);
+        }
+
         // Snap onto the plan's own nearest node/edge within EndSnapRadius (excluding the active anchor) —
         // so segments join existing nodes into intersections, and you can resume from any end.
         public bool TrySnapToOwnNode(Vector2 p, out Vector2 snapped)

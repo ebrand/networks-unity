@@ -117,7 +117,37 @@ namespace NetworkDesigner.UI
                 v => { Designer.RoadPlanLayer.ShowStopBars = v; Designer.RebuildRoadPlan(); }));
             body.Add(ToggleRow("Guided turns (lock)", () => Designer.RoadPlanLayer.GuidedTurns,
                 v => Designer.RoadPlanLayer.GuidedTurns = v));
+
+            // ---- named plan library (per-world): save WIP, load, revert, delete ----
+            body.Add(Divider());
+            body.Add(SectionLabel("PLANS"));
+            string sel = Designer.CurrentRoadPlanName;
+            var planDd = DropdownRow(() => Designer.ListRoadPlans(), () => sel, v => sel = v);
+            body.Add(planDd);
+            var planActs = HBox();
+            var loadBtn = MakeButton("Load", () => { if (!string.IsNullOrEmpty(sel)) Designer.LoadRoadPlan(sel); });
+            loadBtn.style.flexGrow = 1; loadBtn.style.marginRight = 6;
+            var revertBtn = MakeButton("Revert", () => Designer.RevertRoadPlan());
+            revertBtn.style.flexGrow = 1; revertBtn.style.marginRight = 6;
+            revertBtn.tooltip = "Reload the last saved/loaded plan, discarding edits since.";
+            var delBtn = MakeButton("Delete", () => { if (!string.IsNullOrEmpty(sel)) Designer.DeleteRoadPlan(sel); });
+            delBtn.style.flexGrow = 1;
+            planActs.Add(loadBtn); planActs.Add(revertBtn); planActs.Add(delBtn);
+            body.Add(planActs);
+
+            var saveRow = HBox(); saveRow.style.marginTop = 6;
+            var nameField = new TextField(); nameField.style.flexGrow = 1; nameField.style.marginRight = 6;
+            nameField.SetValueWithoutNotify(Designer.CurrentRoadPlanName);
+            var savePlanBtn = MakeButton("Save plan", () => { Designer.SaveRoadPlanAs(nameField.value); sel = SanitizeShown(nameField.value); });
+            savePlanBtn.style.width = 90;
+            saveRow.Add(nameField); saveRow.Add(savePlanBtn);
+            body.Add(saveRow);
+            var planNote = Cap("Save names a snapshot · Revert reloads it · Load swaps to another");
+            planNote.style.fontSize = 10; planNote.style.marginTop = 2;
+            body.Add(planNote);
         }
+
+        static string SanitizeShown(string n) => (n ?? "").Trim();
 
         // A scrollable grid of profile thumbnails (mini cross-sections); click to make it the active profile.
         VisualElement BuildThumbGrid()

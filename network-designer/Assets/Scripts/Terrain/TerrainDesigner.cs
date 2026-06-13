@@ -326,6 +326,7 @@ namespace NetworkDesigner.Terrain
         float _railSlopeGradePct;          // preview grade %
         bool _railSlopeGradeOk;            // within the rail's max grade?
         int _railConnectNodeA = -1;        // armed connect end A (-1 = none)
+        int _roadConnectNodeA = -1;        // road plan connect: armed end A (-1 = none)
         string _connectStatus;             // HUD line while connecting
         // Inverted so a 0/false deserialize = snapping ENABLED (preserves behavior
         // for an already-serialized scene); the tunable presents it as a positive
@@ -921,12 +922,18 @@ namespace NetworkDesigner.Terrain
                     if (rdp.TrySnapCurveSymmetry(flat, out Vector2 rsym)) return new Vector3(rsym.x, raw.y, rsym.y);
                     if (rdp.PlacingCurveEnd) return raw;
                     if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
-                    // Guided straights: hard-lock to colinear / 90° (the off-axis flag suppresses kinked clicks).
-                    bool rsnap = rdp.SnapStraightConstrained(flat, out Vector2 rsh, out bool roff);
-                    rdp.StraightOffAxis = roff;
-                    if (rsnap) return new Vector3(rsh.x, raw.y, rsh.y);
-                    if (rdp.TrySnapToTargetExtension(flat, out Vector2 rdt)) return new Vector3(rdt.x, raw.y, rdt.y);  // meet an existing road's extension head-on
-                    if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
+                    // Hold Alt/Option = FREE placement: skip the colinear hard-lock + extension snaps so you can
+                    // lay a slightly-unaligned road at any angle. (Node-join + curve locks above still apply.)
+                    bool roadFreeAngle = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+                    if (!roadFreeAngle)
+                    {
+                        // Guided straights: hard-lock to colinear / 90° (the off-axis flag suppresses kinked clicks).
+                        bool rsnap = rdp.SnapStraightConstrained(flat, out Vector2 rsh, out bool roff);
+                        rdp.StraightOffAxis = roff;
+                        if (rsnap) return new Vector3(rsh.x, raw.y, rsh.y);
+                        if (rdp.TrySnapToTargetExtension(flat, out Vector2 rdt)) return new Vector3(rdt.x, raw.y, rdt.y);  // meet an existing road's extension head-on
+                        if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
+                    }
                 }
                 // Grid snap makes no sense while shaping an arc that EXTENDS existing track —
                 // the bend/end are pinned to the MDT / extension line / PAC. But a brand-new
@@ -1895,6 +1902,83 @@ namespace NetworkDesigner.Terrain
         public void ClearPlan() { PlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
         public void RebuildRoadPlan() { RoadPlanLayer.Rebuild(Surf); }
         public void ClearRoadPlan() { RoadPlanLayer.ClearAll(Surf); _dirtySince = Time.realtimeSinceStartup; }
+
+        // ── Named road-plan library: per-world snapshots under <world>/RoadPlans/<name>.json, so you can
+        // save a work-in-progress, revert to it, load another, etc. (JsonUtility round-trips LineGraphSave). ──
+        [System.NonSerialized] string _currentRoadPlanName = "";
+        public string CurrentRoadPlanName => _currentRoadPlanName;
+
+        string RoadPlansDir() => System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(ResolveAutosavePath())), "RoadPlans");
+
+        static string SanitizePlanName(string n)
+        {
+            n = (n ?? "").Trim();
+            foreach (char c in System.IO.Path.GetInvalidFileNameChars()) n = n.Replace(c, '_');
+            return n;
+        }
+
+        public List<string> ListRoadPlans()
+        {
+            var list = new List<string>();
+            try
+            {
+                string d = RoadPlansDir();
+                if (System.IO.Directory.Exists(d))
+                    foreach (var f in System.IO.Directory.GetFiles(d, "*.json"))
+                        list.Add(System.IO.Path.GetFileNameWithoutExtension(f));
+            }
+            catch { }
+            list.Sort(System.StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
+        public void SaveRoadPlanAs(string name)
+        {
+            string nm = SanitizePlanName(name);
+            if (nm.Length == 0) { Debug.LogWarning("[RoadPlan] enter a name to save."); return; }
+            try
+            {
+                string d = RoadPlansDir(); System.IO.Directory.CreateDirectory(d);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(d, nm + ".json"),
+                    JsonUtility.ToJson(RoadPlanLayer.CollectData(), true));
+                _currentRoadPlanName = nm;
+                Debug.Log($"[RoadPlan] saved '{nm}'.");
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[RoadPlan] save failed: {ex.Message}"); }
+        }
+
+        public bool LoadRoadPlan(string name)
+        {
+            string nm = SanitizePlanName(name);
+            string path = System.IO.Path.Combine(RoadPlansDir(), nm + ".json");
+            if (!System.IO.File.Exists(path)) { Debug.LogWarning($"[RoadPlan] '{nm}' not found."); return false; }
+            try
+            {
+                var save = JsonUtility.FromJson<LineGraphSave>(System.IO.File.ReadAllText(path));
+                if (save == null) { Debug.LogWarning($"[RoadPlan] '{nm}' is unreadable."); return false; }
+                RoadPlanLayer.LoadState(save); RoadPlanLayer.Rebuild(Surf);
+                _currentRoadPlanName = nm; _dirtySince = Time.realtimeSinceStartup;
+                Debug.Log($"[RoadPlan] loaded '{nm}'.");
+                return true;
+            }
+            catch (System.Exception ex) { Debug.LogWarning($"[RoadPlan] load failed: {ex.Message}"); return false; }
+        }
+
+        // Reload the last saved/loaded named plan, discarding edits since.
+        public void RevertRoadPlan()
+        {
+            if (string.IsNullOrEmpty(_currentRoadPlanName)) { Debug.LogWarning("[RoadPlan] nothing to revert to — Save a named plan first."); return; }
+            LoadRoadPlan(_currentRoadPlanName);
+        }
+
+        public void DeleteRoadPlan(string name)
+        {
+            string nm = SanitizePlanName(name);
+            try { string path = System.IO.Path.Combine(RoadPlansDir(), nm + ".json"); if (System.IO.File.Exists(path)) System.IO.File.Delete(path); }
+            catch (System.Exception ex) { Debug.LogWarning($"[RoadPlan] delete failed: {ex.Message}"); }
+            if (_currentRoadPlanName == nm) _currentRoadPlanName = "";
+        }
         // Grade-aware A* auto-route between the last two plan points.
         public void AutoRoutePlan()
         {
@@ -2263,8 +2347,8 @@ namespace NetworkDesigner.Terrain
         }
 
         // Mode switching (mutually exclusive; same key again returns to sculpt).
-        void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; _railConnectNodeA = -1; HideLinePreviews(); }
-        void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; _railConnectNodeA = -1; HideLinePreviews(); }
+        void SetScatterMode(ScatterLayer s) { _active = _active == s ? null : s; _lineActive = null; _railConnectNodeA = -1; _roadConnectNodeA = -1; HideLinePreviews(); }
+        void SetLineMode(ITerrainLineLayer l) { _lineActive = _lineActive == l ? null : l; _active = null; _railConnectNodeA = -1; _roadConnectNodeA = -1; HideLinePreviews(); }
 
         // --- Rail palette hooks (the UI Toolkit RailPalette drives these) ---
         public bool IsRailBuildMode => ReferenceEquals(_lineActive, RailLayer);
@@ -2277,7 +2361,7 @@ namespace NetworkDesigner.Terrain
         // Exit any line/scatter mode back to the terrain brush (used when a palette that
         // implies sculpt — Terrain/System — is opened, so the cursor follows the palette).
         public void EnterSculptMode()
-        { _lineActive = null; _active = null; _railConnectNodeA = -1; HideLinePreviews(); }
+        { _lineActive = null; _active = null; _railConnectNodeA = -1; _roadConnectNodeA = -1; HideLinePreviews(); }
 
         // --- Scatter/Fence palette hooks ---
         public bool IsTreeMode  => ReferenceEquals(_active, TreeLayer);
@@ -2374,13 +2458,29 @@ namespace NetworkDesigner.Terrain
                 }
             }
         }
-        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RoadPlanLayer.HidePreview(); RailLayer.HideConnectPreview(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RoadPlanLayer.HidePreview(); RailLayer.HideConnectPreview(); RoadPlanLayer.HideConnectPreview(); }
 
         // Live preview while a connect end is armed (C held + rail mode): the join to the
         // endpoint under the cursor, green/red, with a HUD line.
         void UpdateConnectPreview(RaycastHit hit, bool overTerrain)
         {
             _connectStatus = null;
+            if (_lineActive is RoadPlanLayer rdc)
+            {
+                if (_roadConnectNodeA >= rdc.Graph.Nodes.Count) _roadConnectNodeA = -1;   // stale after an edit
+                Vector2 rcur = new Vector2(hit.point.x, hit.point.z);
+                if (_roadConnectNodeA >= 0 && overTerrain && Input.GetKey(KeyCode.C))
+                {
+                    int b = rdc.Graph.NearestNode(rcur, rdc.ConnectHoverRadius);
+                    if (b < 0 || b == _roadConnectNodeA || rdc.NodeDegree(b) < 1) { rdc.HideConnectPreview(); _connectStatus = "Connect: click end B."; return; }
+                    rdc.TryConnectGeometry(_roadConnectNodeA, b, out var rcr);
+                    rdc.RenderConnectPreview(Surf, rcr);
+                    _connectStatus = rcr.Valid ? $"Connect → R {rcr.Radius:0} m — OK. Click end B." : $"Connect — {rcr.Reason}.";
+                    return;
+                }
+                rdc.HideConnectPreview();
+                return;
+            }
             if (!(_lineActive is RailTrackLayer rc)) return;
             if (_railConnectNodeA >= rc.Graph.Nodes.Count) _railConnectNodeA = -1;   // stale after an edit
             Vector2 cursor = new Vector2(hit.point.x, hit.point.z);
@@ -2889,6 +2989,20 @@ namespace NetworkDesigner.Terrain
                             } // invalid B → keep A armed so a different B can be picked
                         }
                     }
+                    else if (_lineActive is RoadPlanLayer roadConn && connectMod)
+                    {
+                        // Road connect: C+click node A, then node B → tangent-matched fillet (with auto-extension).
+                        int n = roadConn.Graph.NearestNode(new Vector2(hit.point.x, hit.point.z), roadConn.ConnectHoverRadius);
+                        if (n >= 0 && roadConn.NodeDegree(n) >= 1)
+                        {
+                            if (_roadConnectNodeA < 0) _roadConnectNodeA = n;              // pick A
+                            else if (roadConn.TryConnectGeometry(_roadConnectNodeA, n, out var rcr) && rcr.Valid)
+                            {
+                                roadConn.CommitConnect(Surf, rcr); _dirtySince = Time.realtimeSinceStartup;
+                                _roadConnectNodeA = -1; roadConn.HideConnectPreview();
+                            } // invalid B → keep A armed
+                        }
+                    }
                     else if (_lineActive is RailTrackLayer railCC
                              && railCC.TryChainConnectTarget(new Vector2(hit.point.x, hit.point.z), out var ccr) && ccr.Valid)
                     {
@@ -2916,6 +3030,7 @@ namespace NetworkDesigner.Terrain
                 {
                     // An armed auto-slope / connect cancels first (right-click backs out).
                     if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }
+                    else if (_roadConnectNodeA >= 0) { _roadConnectNodeA = -1; if (_lineActive is RoadPlanLayer rdx) rdx.HideConnectPreview(); }
                     else if (_railSlopeNodeA >= 0) _railSlopeNodeA = -1;
                     // Shift+right-click on a rail edge CHOPS that edge, keeping its nodes (gap for a bridge).
                     else if ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) && overTerrain
