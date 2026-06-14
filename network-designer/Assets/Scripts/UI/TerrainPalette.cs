@@ -57,6 +57,15 @@ namespace NetworkDesigner.UI
             AddBrushButton(body, "Measure (7)", TerrainDesigner.BrushMode.Measure); // click A → click B, distance tooltip
             AddBrushButton(body, "Forest (8)",  TerrainDesigner.BrushMode.Forest);  // click-to-flood select by elevation, then grow trees
 
+            // Retaining wall (9): a LINE tool (not a brush). Click to place nodes; the wheel sets the top
+            // elevation; right-click ends the wall. Drawn as a 3m concrete slab with the back side regraded.
+            var wallBtn = MakeButton("Retaining Wall (9)", () => Designer.EnterRetainingWallMode());
+            wallBtn.tooltip = "3m concrete retaining wall. Click to place nodes; mouse-wheel sets the top elevation N; " +
+                              "the back (uphill) side is regraded to N and daylit into the slope. Right-click ends the wall.";
+            wallBtn.style.marginTop = 6; wallBtn.style.marginBottom = 4;
+            body.Add(wallBtn);
+            _sync.Add(() => StyleActive(wallBtn, Designer.IsRetainingWallMode));
+
             body.Add(SliderRow("Radius", () => Designer.BrushRadius, v => Designer.BrushRadius = v,
                 0.5f, Mathf.Max(1f, Designer.MaxBrushRadius), "0"));
             body.Add(SliderRow("Strength", () => Designer.BrushStrength, v => Designer.BrushStrength = v, 0f, 100f, "0"));
@@ -175,10 +184,10 @@ namespace NetworkDesigner.UI
         void AddBrushButton(VisualElement body, string label, TerrainDesigner.BrushMode mode)
         {
             // Picking a brush always lands you in sculpt mode (exits any rail/scatter).
-            var b = MakeButton(label, () => { Designer.EnterSculptMode(); Designer.Brush = mode; });
+            var b = MakeButton(label, () => Designer.SetBrush(mode));
             b.style.marginBottom = 6;
             body.Add(b);
-            _sync.Add(() => StyleActive(b, Designer.Brush == mode));
+            _sync.Add(() => StyleActive(b, Designer.Brush == mode && Designer.IsSculptMode));   // off while a line/scatter tool (e.g. wall) is active
         }
 
         // A ground-variant dropdown (full-width, shrinkable) preset to an index.

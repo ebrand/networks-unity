@@ -109,6 +109,7 @@ namespace NetworkDesigner.Terrain
         public LineGraphSave Rails;        // rail-track graph (procedural rails + ties)
         public LineGraphSave Plan;         // v7+: rail-planning survey alignment
         public LineGraphSave RoadPlan;     // v12+: road-plan corridor alignment
+        public LineGraphSave RetainingWalls; // v16+: retaining-wall polylines (NodeY = wall-top elevation)
         public bool HasCamera;             // v5+: a saved fly-camera pose follows
         public Vector3 CamPos;             // camera world position
         public float CamYaw;               // fly-camera yaw / pitch (its look state)

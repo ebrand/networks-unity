@@ -858,6 +858,17 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterAction("road.removeBuilt", "Road plan", "Remove built roads",
                 () => t.ClearBuiltRoads(),
                 description: "Delete the built 3D road meshes (keeps the plan) — for testing.");
+
+            // --- Retaining wall (tool 9) ---
+            TuningRegistry.RegisterFloat("wall.backFillCap", "Retaining wall", "Back fill cap (m)",
+                () => t.RetainingWallLayer.BackFillCap, v => t.RetainingWallLayer.BackFillCap = v, 5f, 400f,
+                description: "How far back the flat fill bench can reach before giving up. The bench normally stops where the hillside rises to the wall top; lower this to rein in walls with low/flat ground behind (which would otherwise fill a large plateau).");
+            TuningRegistry.RegisterFloat("wall.thickness", "Retaining wall", "Thickness (m)",
+                () => t.RetainingWallLayer.WallThickness, v => t.RetainingWallLayer.WallThickness = v, 0.5f, 10f,
+                description: "Wall thickness. Real retaining walls are ~3m.");
+            TuningRegistry.RegisterBool("wall.flipSide", "Retaining wall", "Flip front/back side",
+                () => t.RetainingWallLayer.FlipSide, v => t.RetainingWallLayer.FlipSide = v,
+                description: "Swap which side of the drawn line is the exposed FRONT face vs the filled BACK. Use if the wall builds facing the wrong way for your draw direction.");
         }
 
         // Persisted-settings changes made through the in-game Environment palette write the statics directly

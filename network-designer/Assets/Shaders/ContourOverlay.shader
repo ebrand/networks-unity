@@ -63,7 +63,9 @@ Shader "NetworkDesigner/ContourOverlay"
                 float aa = fwidth(f);                          // index change per pixel
                 float d  = abs(frac(f + 0.5) - 0.5);           // distance to nearest contour (index units)
                 float ln = 1.0 - smoothstep(0.0, max(aa * widthPx * 0.5, 1e-6), d);
-                float fade = 1.0 - smoothstep(0.35, 1.2, aa);  // fade when contours are denser than a few px
+                float fade = 1.0 - smoothstep(0.35, 1.2, aa);    // fade when contours are denser than a few px
+                fade *= smoothstep(0.0008, 0.004, aa);           // fade out near-FLAT surfaces (benches/platforms at a
+                                                                 // contour level shouldn't paint solid; real slopes are well above this)
                 return ln * fade;
             }
 

@@ -285,6 +285,10 @@ namespace NetworkDesigner.Terrain
         // (NetworkDesigner/TerrainGround). Optional textures load from Resources/TerrainGround/{grass,
         // grass_dirt,gravel}; missing ones just leave the layer as its tint. Falls back to a flat green
         // lit material if the shader isn't in the project.
+        // The shared chunk ground material (triplanar, colour-tunable) — so other meshes (e.g. the retaining-wall
+        // cap) can render with the exact terrain look. Triplanar uses world position, so no UVs are needed.
+        public static Material SharedGroundMaterial() { if (_mat == null) _mat = GroundMaterial(); return _mat; }
+
         static Material GroundMaterial()
         {
             Shader sh = Shader.Find("NetworkDesigner/TerrainGround");
@@ -1379,6 +1383,170 @@ namespace NetworkDesigner.Terrain
                 BuildMesh(ch);
                 CookCollider(ch, true);
             }
+        }
+
+        // ── Retaining-wall back-grade: a FLAT fill bench to the wall top elevation ───────────────
+        // ONLY the BACK side of a wall polyline is graded (front face stays exposed). The back side is
+        // FILLED flat to the wall top N and extends straight back until the natural hillside rises to N
+        // (graded = max(terrain, N)) — so the bench "daylights" where the ground reaches the wall top,
+        // not at an arbitrary batter. Ground already at/above N is left untouched (no cut). `centreline`
+        // carries the wall samples as (x, N, z) — N per-point so a stepped wall still works. `backSign`
+        // selects which side is "back": grade where sign(cross(seg, p-segA)) == backSign (+1 = left of
+        // travel, -1 = right). `halfThick` is the wall half-thickness. `maxRun` caps how far back the bench
+        // reaches (m). The fill is bounded LATERALLY to the wall span — it does NOT fan out past the ends.
+        // Reused by road auto-walls. O(verts × segments) — meant for short wall spans, not the whole network.
+        public static void GradeWallBack(List<Vector3> centreline, float backSign, float halfThick, float maxRun)
+        {
+            if (!Active || centreline == null || centreline.Count < 2) return;
+            float ht = Mathf.Max(0f, halfThick);
+            float run = Mathf.Clamp(maxRun, 5f, 1000f);   // how far back the flat bench can reach (m)
+            float reach = ht + run, reach2 = reach * reach;
+            float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
+            for (int i = 0; i < centreline.Count; i++)
+            {
+                var t = centreline[i];
+                if (t.x < minX) minX = t.x; if (t.x > maxX) maxX = t.x;
+                if (t.z < minZ) minZ = t.z; if (t.z > maxZ) maxZ = t.z;
+            }
+            minX -= reach; maxX += reach; minZ -= reach; maxZ += reach;
+
+            // Per-station FIRST-crossing distance: from each wall point, march back along the back normal and
+            // record the first distance where the natural ground rises to N. The fill is bounded to this per
+            // ray, so it stops at the FIRST hillside that reaches the wall top instead of filling every pocket
+            // below N out to the cap.
+            int M = centreline.Count;
+            var firstCross = new float[M];
+            for (int i = 0; i < M; i++)
+            {
+                int seg = Mathf.Min(i, M - 2);
+                Vector3 a3 = centreline[seg], b3 = centreline[seg + 1];
+                float ex = b3.x - a3.x, ez = b3.z - a3.z, el = Mathf.Sqrt(ex * ex + ez * ez);
+                float nbx = 0f, nbz = 0f;
+                if (el > 1e-6f) { nbx = -ez / el * Mathf.Sign(backSign); nbz = ex / el * Mathf.Sign(backSign); }   // unit back normal
+                float N = centreline[i].y, px = centreline[i].x, pz = centreline[i].z, fc = run;
+                for (float dd = 4f; dd <= run; dd += 4f)
+                    if (SampleHeight(px + nbx * dd, pz + nbz * dd) >= N) { fc = dd; break; }
+                firstCross[i] = fc;
+            }
+            // Let the bench wrap a small bounded distance PAST each end so the end caps are buried (tight end
+            // seams) without the runaway fan. Measured in metres along the first / last segment.
+            int lastSeg = M - 2;
+            float endWrap = ht + 2f;
+            float segLen0 = Vector2.Distance(new Vector2(centreline[0].x, centreline[0].z), new Vector2(centreline[1].x, centreline[1].z));
+            float segLenL = Vector2.Distance(new Vector2(centreline[lastSeg].x, centreline[lastSeg].z), new Vector2(centreline[lastSeg + 1].x, centreline[lastSeg + 1].z));
+            var touched = new List<Vector2Int>();
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value; var c = kv.Key;
+                float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+                if (ox + ChunkSize < minX || ox > maxX || oz + ChunkSize < minZ || oz > maxZ) continue;
+                int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+                int vx0 = Mathf.Clamp(Mathf.FloorToInt((minX - ox) / sp), 0, res - 1);
+                int vx1 = Mathf.Clamp(Mathf.CeilToInt((maxX - ox) / sp), 0, res - 1);
+                int vz0 = Mathf.Clamp(Mathf.FloorToInt((minZ - oz) / sp), 0, res - 1);
+                int vz1 = Mathf.Clamp(Mathf.CeilToInt((maxZ - oz) / sp), 0, res - 1);
+                bool changed = false;
+                for (int zz = vz0; zz <= vz1; zz++)
+                    for (int xx = vx0; xx <= vx1; xx++)
+                    {
+                        float wx = ox + xx * sp, wz = oz + zz * sp;
+                        // Nearest wall segment: closest point, perpendicular distance, interpolated top N, side.
+                        float bestD2 = reach2, topN = 0f, sideAtBest = 0f, bestRawU = 0f; int bestSeg = -1;
+                        for (int si = 0; si + 1 < centreline.Count; si++)
+                        {
+                            Vector3 a3 = centreline[si], b3 = centreline[si + 1];
+                            float ax = a3.x, az = a3.z, ex = b3.x - ax, ez = b3.z - az;
+                            float el2 = ex * ex + ez * ez;
+                            float rawU = el2 > 1e-9f ? ((wx - ax) * ex + (wz - az) * ez) / el2 : 0f;
+                            float u = Mathf.Clamp01(rawU);
+                            float cx = ax + ex * u, cz = az + ez * u;
+                            float dx = wx - cx, dz = wz - cz, d2 = dx * dx + dz * dz;
+                            if (d2 < bestD2)
+                            {
+                                bestD2 = d2; bestSeg = si; bestRawU = rawU;
+                                topN = Mathf.Lerp(a3.y, b3.y, u);
+                                sideAtBest = ex * (wz - az) - ez * (wx - ax);   // cross(seg, p-a): >0 left, <0 right
+                            }
+                        }
+                        if (bestSeg < 0) continue;
+                        // Bound the fill to the wall SPAN — don't fan past the outer ends (only an interior shared
+                        // node is allowed to clamp). This keeps a short wall from filling a huge fan beyond its tips.
+                        if (bestSeg == 0 && bestRawU < 0f && (-bestRawU * segLen0) > endWrap) continue;
+                        if (bestSeg == lastSeg && bestRawU > 1f && ((bestRawU - 1f) * segLenL) > endWrap) continue;
+                        if (Mathf.Sign(sideAtBest) != Mathf.Sign(backSign)) continue;   // front side stays exposed
+                        // Bound to the FIRST N-crossing for this ray — don't fill pockets beyond the first hill.
+                        float fcCell = Mathf.Lerp(firstCross[bestSeg], firstCross[bestSeg + 1], Mathf.Clamp01(bestRawU));
+                        if (Mathf.Sqrt(bestD2) > fcCell) continue;
+                        int i = zz * res + xx;
+                        float terrain = ch.H[i];
+                        float graded = Mathf.Max(terrain, topN);   // flat fill to the wall top; stops where the hill reaches N
+                        if (graded != ch.H[i])
+                        {
+                            EnsureEditRes(ch, res);
+                            ch.Abs[i] = graded; ch.Op[i] = 1f; ch.H[i] = graded;
+                            changed = true;
+                        }
+                    }
+                if (changed) { ch.EditDirty = true; touched.Add(c); }
+            }
+            for (int i = 0; i < touched.Count; i++)
+            {
+                var ch = _chunks[touched[i]];
+                BuildMesh(ch);
+                CookCollider(ch, true);
+            }
+        }
+
+        // Full-resolution mesh-grid step (m) — the ~1 m vertex spacing of a chunk at top LOD. Retaining-wall
+        // endpoints snap to this so their back-top vertices line up with terrain vertices (tight seam).
+        public static float MeshGridStep => ChunkSize / (ResLevels[ResLevels.Length - 1] - 1);
+        public static Vector2 SnapToMeshGrid(Vector2 xz)
+        {
+            float g = MeshGridStep;
+            return new Vector2(Mathf.Round(xz.x / g) * g, Mathf.Round(xz.y / g) * g);
+        }
+
+        // Flatten a terrace PLATFORM: the parallelogram with corners p0, p1, p1+perp*depth, p0+perp*depth, graded
+        // (cut AND fill) to a planar top — lerp(y0,y1) along the p0→p1 edge, constant across the depth — so the
+        // shelf is perfectly flat. `perp` is a UNIT vector pointing to the pull side. Retaining-wall terrace tool.
+        public static void FillPlatform(Vector2 p0, Vector2 p1, Vector2 perp, float depth, float y0, float y1)
+        {
+            if (!Active || depth <= 0.01f) return;
+            Vector2 e = p1 - p0; float len = e.magnitude; if (len < 1e-3f) return;
+            Vector2 edir = e / len;
+            Vector2 c2 = p1 + perp * depth, c3 = p0 + perp * depth;
+            float minX = Mathf.Min(Mathf.Min(p0.x, p1.x), Mathf.Min(c2.x, c3.x)) - 2f;
+            float maxX = Mathf.Max(Mathf.Max(p0.x, p1.x), Mathf.Max(c2.x, c3.x)) + 2f;
+            float minZ = Mathf.Min(Mathf.Min(p0.y, p1.y), Mathf.Min(c2.y, c3.y)) - 2f;
+            float maxZ = Mathf.Max(Mathf.Max(p0.y, p1.y), Mathf.Max(c2.y, c3.y)) + 2f;
+            var touched = new List<Vector2Int>();
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value; var c = kv.Key;
+                float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+                if (ox + ChunkSize < minX || ox > maxX || oz + ChunkSize < minZ || oz > maxZ) continue;
+                int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+                int vx0 = Mathf.Clamp(Mathf.FloorToInt((minX - ox) / sp), 0, res - 1);
+                int vx1 = Mathf.Clamp(Mathf.CeilToInt((maxX - ox) / sp), 0, res - 1);
+                int vz0 = Mathf.Clamp(Mathf.FloorToInt((minZ - oz) / sp), 0, res - 1);
+                int vz1 = Mathf.Clamp(Mathf.CeilToInt((maxZ - oz) / sp), 0, res - 1);
+                bool changed = false;
+                for (int zz = vz0; zz <= vz1; zz++)
+                    for (int xx = vx0; xx <= vx1; xx++)
+                    {
+                        float qx = ox + xx * sp - p0.x, qz = oz + zz * sp - p0.y;
+                        float t = qx * edir.x + qz * edir.y;       // along the back edge
+                        if (t < 0f || t > len) continue;
+                        float s = qx * perp.x + qz * perp.y;       // toward the pull side
+                        if (s < 0f || s > depth) continue;
+                        float E = Mathf.Lerp(y0, y1, t / len);
+                        int i = zz * res + xx;
+                        // Cut AND fill to the platform level → the shelf is PERFECTLY flat (bumps cut, hollows filled).
+                        if (E != ch.H[i]) { EnsureEditRes(ch, res); ch.Abs[i] = E; ch.Op[i] = 1f; ch.H[i] = E; changed = true; }
+                    }
+                if (changed) { ch.EditDirty = true; touched.Add(c); }
+            }
+            for (int i = 0; i < touched.Count; i++) { var ch = _chunks[touched[i]]; BuildMesh(ch); CookCollider(ch, true); }
         }
 
         // World-space box average of the CURRENT surface (k cells each way at `step` spacing), sampling

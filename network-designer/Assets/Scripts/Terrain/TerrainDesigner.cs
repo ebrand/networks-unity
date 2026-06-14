@@ -212,6 +212,8 @@ namespace NetworkDesigner.Terrain
         public RailTrackLayer RailLayer = new RailTrackLayer { Name = "Rail" };
         public RailPlanLayer PlanLayer = new RailPlanLayer { Name = "Plan" };
         public RoadPlanLayer RoadPlanLayer = new RoadPlanLayer { Name = "Road Plan" };
+        [Tooltip("Retaining-wall layer (9): 3m concrete wall to a level top; mouse-wheel sets the top elevation, back side regraded.")]
+        public RetainingWallLayer RetainingWallLayer = new RetainingWallLayer { Name = "RetainingWall" };
 
         [Header("Initial relief (stamped once)")]
         [Tooltip("Stamp a smooth gaussian hill when the field is first built, " +
@@ -720,6 +722,7 @@ namespace NetworkDesigner.Terrain
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
             RoadPlanLayer.Rebuild(Surf);
+            RetainingWallLayer.Rebuild(Surf);   // wall mesh from the save (terrain grade already in the edits)
             RebuildContours();
             if (!DemBackend) ApplyWater(); // low-poly water only; DEM water handled by LoadDemWorld
 
@@ -2305,6 +2308,7 @@ namespace NetworkDesigner.Terrain
             RoadPlanLayer.ClearAll(Surf);
             FenceLayer.ClearAll(Surf);
             PowerLineLayer.ClearAll(Surf);
+            RetainingWallLayer.ClearAll(Surf);
             ClearBuiltRoads();
         }
 
@@ -2561,6 +2565,9 @@ namespace NetworkDesigner.Terrain
         public void EnterSculptMode()
         { _lineActive = null; _active = null; _railConnectNodeA = -1; _roadConnectNodeA = -1; HideLinePreviews(); }
 
+        // Pick a sculpt brush: drop out of any line/scatter tool first, then set the brush.
+        public void SetBrush(BrushMode m) { EnterSculptMode(); Brush = m; }
+
         // --- Scatter/Fence palette hooks ---
         public bool IsTreeMode  => ReferenceEquals(_active, TreeLayer);
         public bool IsRockMode  => ReferenceEquals(_active, RockLayer);
@@ -2568,6 +2575,8 @@ namespace NetworkDesigner.Terrain
         public void EnterTreeMode()  { if (!IsTreeMode)  SetScatterMode(TreeLayer); }
         public void EnterRockMode()  { if (!IsRockMode)  SetScatterMode(RockLayer); }
         public void EnterFenceMode() { if (!IsFenceMode) SetLineMode(FenceLayer); }
+        public bool IsRetainingWallMode => ReferenceEquals(_lineActive, RetainingWallLayer);
+        public void EnterRetainingWallMode() { if (!IsRetainingWallMode) SetLineMode(RetainingWallLayer); }
         // T/R/F enter scatter/fence + open the Scatter/Fence palette exclusively; toggling
         // back out (key again) closes it to no palette.
         void SyncScatterPalette()
@@ -2659,7 +2668,7 @@ namespace NetworkDesigner.Terrain
                 }
             }
         }
-        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RoadPlanLayer.HidePreview(); RailLayer.HideConnectPreview(); RoadPlanLayer.HideConnectPreview(); }
+        void HideLinePreviews() { FenceLayer.HidePreview(); PowerLineLayer.HidePreview(); RailLayer.HidePreview(); PlanLayer.HidePreview(); RoadPlanLayer.HidePreview(); RetainingWallLayer.HidePreview(); RailLayer.HideConnectPreview(); RoadPlanLayer.HideConnectPreview(); }
 
         // Live preview while a connect end is armed (C held + rail mode): the join to the
         // endpoint under the cursor, green/red, with a HUD line.
@@ -2757,7 +2766,7 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = cam.GetComponent<FlyCameraController>();
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
-            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap();
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap() || WallTopScroll();
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.InputSuppressor = () => ChunkMapEditor.IsOpen;   // freeze the camera while the map trimmer is open
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
@@ -2771,6 +2780,11 @@ namespace NetworkDesigner.Terrain
         // these modes is active at a time, so the same gesture drives whichever is current.
         bool CmdSpeedScroll() =>
             (_lineActive is RailTrackLayer || _lineActive is RailPlanLayer || _lineActive is RoadPlanLayer)
+            && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand));
+
+        // Cmd + wheel in retaining-wall mode sets the wall-top elevation (camera ignores the wheel while Cmd is
+        // held; a plain wheel still zooms the camera).
+        bool WallTopScroll() => IsRetainingWallMode && !MouseOverActivePanel()
             && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand));
 
         // Option(Alt) + wheel adjusts the parallel-track count (rail Build mode, parallel on).
@@ -2859,15 +2873,17 @@ namespace NetworkDesigner.Terrain
             // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
             // typing a name doesn't fire hotkeys or sculpt.
             if (NetworkDesigner.UI.PaletteBase.ModalOpen || NetworkDesigner.UI.PaletteBase.TextEditing) return;
-            // Brush-mode hotkeys.
-            if (Input.GetKeyDown(KeyCode.Alpha1)) Brush = BrushMode.Raise;
-            else if (Input.GetKeyDown(KeyCode.Alpha2)) Brush = BrushMode.Lower;
-            else if (Input.GetKeyDown(KeyCode.Alpha3)) Brush = BrushMode.Smooth;
-            else if (Input.GetKeyDown(KeyCode.Alpha4)) Brush = BrushMode.Flatten;
-            else if (Input.GetKeyDown(KeyCode.Alpha5)) Brush = BrushMode.Slope;
-            else if (Input.GetKeyDown(KeyCode.Alpha6)) Brush = BrushMode.Sea;
-            else if (Input.GetKeyDown(KeyCode.Alpha7)) Brush = BrushMode.Measure;
-            else if (Input.GetKeyDown(KeyCode.Alpha8)) Brush = BrushMode.Forest;
+            // Brush-mode hotkeys. A brush key always lands you in sculpt mode (exits any line/scatter tool —
+            // e.g. the retaining wall — and hides its preview), matching the palette buttons.
+            if (Input.GetKeyDown(KeyCode.Alpha1)) SetBrush(BrushMode.Raise);
+            else if (Input.GetKeyDown(KeyCode.Alpha2)) SetBrush(BrushMode.Lower);
+            else if (Input.GetKeyDown(KeyCode.Alpha3)) SetBrush(BrushMode.Smooth);
+            else if (Input.GetKeyDown(KeyCode.Alpha4)) SetBrush(BrushMode.Flatten);
+            else if (Input.GetKeyDown(KeyCode.Alpha5)) SetBrush(BrushMode.Slope);
+            else if (Input.GetKeyDown(KeyCode.Alpha6)) SetBrush(BrushMode.Sea);
+            else if (Input.GetKeyDown(KeyCode.Alpha7)) SetBrush(BrushMode.Measure);
+            else if (Input.GetKeyDown(KeyCode.Alpha8)) SetBrush(BrushMode.Forest);
+            else if (Input.GetKeyDown(KeyCode.Alpha9)) SetLineMode(RetainingWallLayer);   // retaining-wall tool
             // T/R/F toggle the active mode (mutually exclusive; press the same
             // key again to return to sculpt).
             if (Input.GetKeyDown(KeyCode.T)) { SetScatterMode(TreeLayer); SyncScatterPalette(); }
@@ -3003,6 +3019,13 @@ namespace NetworkDesigner.Terrain
                 overTerrain = Physics.Raycast(ray, out hit, 100000f)
                               && (hit.collider is MeshCollider
                                   || ((DemTerrainWorld.HasWorld || ChunkWorld.Active) && hit.collider is TerrainCollider));
+            }
+            // Retaining-wall mode: Cmd + wheel sets the wall RISE above the natural grade (±0.5 m/notch). The
+            // camera ignores the wheel only while Cmd is held (WallTopScroll → ScrollSuppressor); plain wheel zooms.
+            if (WallTopScroll())
+            {
+                int wn = Mathf.RoundToInt(Input.mouseScrollDelta.y);
+                if (wn != 0) RetainingWallLayer.NudgeRise(wn * 0.5f);
             }
             // The raycast passes THROUGH the UI Toolkit palette to the terrain behind it,
             // so treat "cursor over a panel" as not-over-terrain — suppresses the brush
@@ -3487,6 +3510,7 @@ namespace NetworkDesigner.Terrain
             RailLayer.Rebuild(Surf);  // re-drape the rail too (load-restore onto the chunk surface; follows sculpts)
             PlanLayer.Rebuild(Surf); // re-drape the survey lines onto the new surface
             RoadPlanLayer.Rebuild(Surf); // re-drape the road corridor too — else it stays buried after load
+            RetainingWallLayer.Rebuild(Surf); // re-seat the wall base on the new surface
         }
 
         // World hit -> fractional grid coords, relative to the terrain corner
@@ -4902,6 +4926,7 @@ namespace NetworkDesigner.Terrain
                 Rails = RailLayer.CollectData(),
                 Plan = PlanLayer.CollectData(),
                 RoadPlan = RoadPlanLayer.CollectData(),
+                RetainingWalls = RetainingWallLayer.CollectData(),
                 HasCamera = haveCam,
                 CamPos = camPos,
                 CamYaw = camYaw,
@@ -5006,7 +5031,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(15); // version (15 added per-edge Excavated flag)
+                    w.Write(16); // version (16 added retaining-wall polylines)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -5048,6 +5073,7 @@ namespace NetworkDesigner.Terrain
                     // v11+: GPU-instanced forest
                     WriteForest(w, save.Forest);
                     WriteGraph(w, save.RoadPlan);   // v12+: road-plan corridor
+                    WriteGraph(w, save.RetainingWalls);   // v16+: retaining walls
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -5203,6 +5229,7 @@ namespace NetworkDesigner.Terrain
                 RailLayer.LoadState(save.Rails);
                 PlanLayer.LoadState(save.Plan);
                 RoadPlanLayer.LoadState(save.RoadPlan);
+                RetainingWallLayer.LoadState(save.RetainingWalls);   // mesh rebuilt after chunks; terrain grade already in the saved edits
                 // Stage the camera pose; applied in Start once the fly camera exists.
                 _havePendingCam = save.HasCamera;
                 _pendingCamPos = save.CamPos;
@@ -5295,6 +5322,8 @@ namespace NetworkDesigner.Terrain
                     s.Forest = ReadForest(r);
                 if (version >= 12) // road-plan corridor
                     s.RoadPlan = ReadGraph(r, version);
+                if (version >= 16) // retaining-wall polylines
+                    s.RetainingWalls = ReadGraph(r, version);
                 return s;
             }
             catch { return null; }
