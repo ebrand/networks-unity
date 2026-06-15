@@ -74,17 +74,41 @@ namespace NetworkDesigner.UI
             // visual profile picker (thumbnails), filtered to the selected category
             body.Add(BuildThumbGrid(_profileCategory));
 
-            // ---- Excavate Mode / Build Mode (interactive sub-modes) ----
-            var subModes = HBox(); subModes.style.marginTop = 4; subModes.style.marginBottom = 10;
-            var excBtn = MakeButton("Excavate Mode", () => Designer.SetRoadExcavateMode(!Designer.RoadExcavateMode));
+            // ---- ACTION QUEUE: Cmd/Ctrl-click inside segments to select, then act on the selection ----
+            var selHint = Cap("Cmd/Ctrl-click inside a segment to select it (red=planned · yellow=excavated · blue=bridge)");
+            selHint.style.fontSize = 10; selHint.style.marginTop = 4;
+            body.Add(selHint);
+            var selCount = Cap("0 selected");
+            selCount.style.fontSize = 10; selCount.style.marginBottom = 4;
+            body.Add(selCount);
+
+            var actRow = HBox(); actRow.style.marginBottom = 4;
+            var excBtn = MakeButton("Excavate!", () => Designer.ExcavateSelectedRoads());
             excBtn.style.flexGrow = 1; excBtn.style.marginRight = 6;
-            excBtn.tooltip = "Click a START node (green ring), then an END node — cuts + fills every segment between them";
-            var bldBtn = MakeButton("Build Mode", () => Designer.SetRoadBuildSegmentMode(!Designer.RoadBuildSegmentMode));
+            excBtn.tooltip = "Cut + fill the bed of every SELECTED planned (red) segment → they turn yellow, ready to build. Bridges are skipped.";
+            var bldBtn = MakeButton("Build!", () => Designer.BuildSelectedRoads());
             bldBtn.style.flexGrow = 1;
-            bldBtn.tooltip = "Click an EXCAVATED segment to sweep the 3D road onto it (excavate it first)";
-            subModes.Add(excBtn); subModes.Add(bldBtn);
-            body.Add(subModes);
-            _sync.Add(() => { StyleActive(excBtn, Designer.RoadExcavateMode); StyleActive(bldBtn, Designer.RoadBuildSegmentMode); });
+            bldBtn.tooltip = "Sweep the 3D road on every SELECTED segment that's excavated (yellow) or a bridge, each with its own profile.";
+            actRow.Add(excBtn); actRow.Add(bldBtn);
+            body.Add(actRow);
+
+            var actRow2 = HBox(); actRow2.style.marginBottom = 10;
+            var brBtn = MakeButton("Force Bridge", () => Designer.ForceBridgeSelectedRoads());
+            brBtn.style.flexGrow = 1; brBtn.style.marginRight = 6;
+            brBtn.tooltip = "Flag the SELECTED segments as a BRIDGE (blue): ends leveled, NOT excavated, built on a deck + piers. " +
+                            "If they're all already bridges, this un-bridges them.";
+            var clrBtn = MakeButton("Clear sel.", () => Designer.ClearRoadSelection());
+            clrBtn.style.flexGrow = 1;
+            clrBtn.tooltip = "Deselect all segments.";
+            actRow2.Add(brBtn); actRow2.Add(clrBtn);
+            body.Add(actRow2);
+
+            _sync.Add(() =>
+            {
+                int c = Designer.RoadSelectionCount;
+                selCount.text = c + " selected";
+                excBtn.SetEnabled(c > 0); bldBtn.SetEnabled(c > 0); brBtn.SetEnabled(c > 0); clrBtn.SetEnabled(c > 0);
+            });
 
             // ---- PLANS (named per-world library) ----
             body.Add(Divider());
@@ -139,6 +163,26 @@ namespace NetworkDesigner.UI
             adv.Add(NumberRow("Cut/fill slope 1:", "",
                 () => Designer.RoadPlanLayer.CutBatter,
                 v => Designer.RoadPlanLayer.CutBatter = v, 0.5f, 6f, "0.0"));
+            var autoBr = MakeButton("Auto-bridge on draw", () => Designer.RoadPlanLayer.AutoBridge = !Designer.RoadPlanLayer.AutoBridge);
+            autoBr.style.marginTop = 6;
+            autoBr.tooltip = "While drawing, detect a terrain dip under a straight segment and auto-split it into approach / bridge (blue) / approach.";
+            adv.Add(autoBr);
+            _sync.Add(() => StyleActive(autoBr, Designer.RoadPlanLayer.AutoBridge));
+            adv.Add(NumberRow("Bridge trigger depth", "m",
+                () => Designer.RoadPlanLayer.BridgeTriggerDepth,
+                v => Designer.RoadPlanLayer.BridgeTriggerDepth = v, 1f, 40f, "0.0"));
+            adv.Add(NumberRow("Bridge approach pad", "m",
+                () => Designer.RoadPlanLayer.BridgeApproachPad,
+                v => Designer.RoadPlanLayer.BridgeApproachPad = v, 0f, 40f, "0"));
+            adv.Add(NumberRow("Bridge deck depth", "m",
+                () => Designer.RoadPlanLayer.BridgeDeckDepth,
+                v => { Designer.RoadPlanLayer.BridgeDeckDepth = v; Designer.RefreshBuiltRoads(); }, 0.2f, 4f, "0.0"));
+            adv.Add(NumberRow("Bridge pier spacing", "m",
+                () => Designer.RoadPlanLayer.BridgePierSpacing,
+                v => { Designer.RoadPlanLayer.BridgePierSpacing = v; Designer.RefreshBuiltRoads(); }, 4f, 60f, "0"));
+            adv.Add(NumberRow("Bridge pier width", "m",
+                () => Designer.RoadPlanLayer.BridgePierWidth,
+                v => { Designer.RoadPlanLayer.BridgePierWidth = v; Designer.RefreshBuiltRoads(); }, 0.3f, 4f, "0.0"));
 
             var elevBtn = MakeButton("Edit elevations", () => Designer.SetRoadElevationEdit(!Designer.RoadElevationEdit));
             elevBtn.style.marginTop = 6;

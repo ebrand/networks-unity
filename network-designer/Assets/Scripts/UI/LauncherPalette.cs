@@ -58,6 +58,7 @@ namespace NetworkDesigner.UI
             ChunkToggle("▦", () => Designer.ChunkShowGrid, v => Designer.ChunkShowGrid = v);
             ChunkToggle("〰", () => Designer.ChunkContours, v => Designer.ChunkContours = v);
             ChunkToggle("⛰", () => Designer.ChunkRidges, _ => Designer.ToggleRidges());   // ridge/valley curvature overlay (persisted)
+            ChunkToggle("💧", () => Designer.HydrologyShow, v => Designer.HydrologyShow = v);   // drainage/catchment analysis
 
             void ChunkToggle(string icon, System.Func<bool> get, System.Action<bool> set)
             {

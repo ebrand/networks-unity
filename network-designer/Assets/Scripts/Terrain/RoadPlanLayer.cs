@@ -153,6 +153,7 @@ namespace NetworkDesigner.Terrain
 
         public void AddNode(ITerrainSurface field, Vector3 hit)
         {
+            _selEdges.Clear();   // drawing changes edge indices (append/split) → drop the stale action-queue selection
             Vector2 p = new Vector2(hit.x, hit.z);
             if (_chainTail < 0)   // start a chain: grab an existing node/edge so corridors branch + join
             {
@@ -183,8 +184,59 @@ namespace NetworkDesigner.Terrain
             Graph.AddEdge(_chainTail, end);
             if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
             SplitSegmentCrossings(start, end, ActiveProfileId);   // drawn OVER existing roads → make intersection nodes
+            if (AutoBridge) TryAutoBridge(field, start, end, ActiveProfileId);   // dip under the new straight span → bridge it
             _chainTail = end;
             Rebuild(field);
+        }
+
+        // If the straight segment just drawn from `start`→`end` crosses a terrain DIP (a gorge/valley), split it into
+        // approach / BRIDGE / approach: insert two nodes BridgeApproachPad metres outside each rim and flag the middle
+        // span as a bridge (rendered un-draped at deck grade, built on piers, never excavated). Skips curves and
+        // segments split by crossings (the direct start→end edge no longer exists), and segments too short to span.
+        void TryAutoBridge(ITerrainSurface field, int start, int end, string profile)
+        {
+            if (field == null || start < 0 || end < 0) return;
+            int ei = -1;
+            for (int i = 0; i < Graph.Edges.Count; i++)
+            { LineEdge ed = Graph.Edges[i]; if (!ed.HasCurve && ed.A == start && ed.B == end) { ei = i; break; } }
+            if (ei < 0) return;
+
+            Vector2 A = Graph.Nodes[start], B = Graph.Nodes[end];
+            float len = Vector2.Distance(A, B);
+            float pad = Mathf.Max(0f, BridgeApproachPad);
+            if (len < 2f * pad + 12f) return;   // no room for two approaches + a real span
+            Vector2 dir = (B - A) / len;
+            float yA = field.SampleHeight(A.x, A.y), yB = field.SampleHeight(B.x, B.y);
+
+            int n = Mathf.Clamp(Mathf.CeilToInt(len / 2f), 8, 600);   // ~2 m terrain sampling
+            float DepthAt(int i) { float t = i / (float)n; Vector2 q = A + dir * (len * t); return Mathf.Lerp(yA, yB, t) - field.SampleHeight(q.x, q.y); }
+
+            float maxDepth = 0f; int maxI = -1;
+            for (int i = 0; i <= n; i++) { float d = DepthAt(i); if (d > maxDepth) { maxDepth = d; maxI = i; } }
+            if (maxI < 0 || maxDepth < BridgeTriggerDepth) return;   // no real gorge under the span
+
+            // Walk out from the deepest point to the rim crossings (terrain returns to within `rim` of the chord).
+            float rim = Mathf.Max(0.5f, BridgeTriggerDepth * 0.2f);
+            int lo = maxI, hi = maxI;
+            while (lo > 0 && DepthAt(lo - 1) > rim) lo--;
+            while (hi < n && DepthAt(hi + 1) > rim) hi++;
+
+            float minGap = 4f;
+            float dropDist = Mathf.Clamp(len * lo / n - pad, minGap, len - minGap);
+            float riseDist = Mathf.Clamp(len * hi / n + pad, minGap, len - minGap);
+            if (riseDist - dropDist < minGap) return;
+
+            Vector2 P1 = A + dir * dropDist, P2 = A + dir * riseDist;
+            int n1 = Graph.AddNode(P1); Graph.SetNodeY(n1, field.SampleHeight(P1.x, P1.y));
+            int n2 = Graph.AddNode(P2); Graph.SetNodeY(n2, field.SampleHeight(P2.x, P2.y));
+            if (float.IsNaN(Graph.GetNodeY(start))) Graph.SetNodeY(start, yA);   // pin approach grades to terrain
+            if (float.IsNaN(Graph.GetNodeY(end))) Graph.SetNodeY(end, yB);
+
+            // Rewire A→B into A→n1 (reuse the original edge), n1→n2 (BRIDGE), n2→B.
+            LineEdge e = Graph.Edges[ei];
+            e.B = n1;
+            Graph.Edges.Add(new LineEdge(n1, n2) { Profile = profile, Bridge = true });
+            Graph.Edges.Add(new LineEdge(n2, end) { Profile = profile });
         }
 
         // Snap to an existing road's CENTRELINE when the click lands anywhere within its corridor footprint
@@ -462,6 +514,7 @@ namespace NetworkDesigner.Terrain
         {
             Graph.Clear();
             _chainTail = -1;
+            _selEdges.Clear();
             Rebuild(field);
         }
 
@@ -469,6 +522,7 @@ namespace NetworkDesigner.Terrain
         {
             int last = Graph.Nodes.Count - 1;
             if (last < 0) return;
+            _selEdges.Clear();   // indices shift → drop selection
             Graph.Edges.RemoveAll(e => e.A == last || e.B == last);
             Graph.Nodes.RemoveAt(last);
             if (_chainTail >= Graph.Nodes.Count) _chainTail = -1;
@@ -479,6 +533,7 @@ namespace NetworkDesigner.Terrain
         {
             int n = Graph.NearestNode(new Vector2(hit.x, hit.z), radius);
             if (n < 0) return false;
+            _selEdges.Clear();   // indices shift → drop selection
             Graph.RemoveNode(n);
             if (_chainTail == n) _chainTail = -1;
             else if (_chainTail > n) _chainTail--;
@@ -826,7 +881,10 @@ namespace NetworkDesigner.Terrain
         {
             if (Graph == null || outBeds == null) return;
             foreach (LineEdge e in Graph.Edges)
-            { BuildEdgeBed(field, e, out var pts, out float flatHalf); if (pts != null) outBeds.Add((pts, flatHalf)); }
+            {
+                if (e.Bridge) continue;   // bridge segments span the terrain — never cut a bed for them
+                BuildEdgeBed(field, e, out var pts, out float flatHalf); if (pts != null) outBeds.Add((pts, flatHalf));
+            }
         }
 
         // The smoothed sunken roadbed for ONE edge: centreline sampled at the node-to-node grade line minus depth.
@@ -852,6 +910,44 @@ namespace NetworkDesigner.Terrain
         public int EdgeCount => Graph?.Edges?.Count ?? 0;
         public bool IsEdgeExcavated(int i) => Graph != null && i >= 0 && i < Graph.Edges.Count && Graph.Edges[i].Excavated;
         public void SetEdgeExcavated(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Excavated = on; }
+        public bool IsEdgeBridge(int i) => Graph != null && i >= 0 && i < Graph.Edges.Count && Graph.Edges[i].Bridge;
+        public void SetEdgeBridge(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Bridge = on; }
+
+        // Bridge (trestle) build params: deck slab thickness, pier spacing along the span, pier cross-section size.
+        public float BridgeDeckDepth = 1.0f;
+        public float BridgePierSpacing = 14f;
+        public float BridgePierWidth = 1.2f;
+
+        // Auto-bridge: when a freshly-drawn STRAIGHT segment crosses a terrain dip, auto-split it and flag the
+        // middle span as a bridge. Trigger = terrain falls > BridgeTriggerDepth below the segment's chord; the
+        // approach nodes land BridgeApproachPad metres outside each rim (the "10 m before/after" in the mockup).
+        public bool AutoBridge = true;
+        public float BridgeTriggerDepth = 4f;
+        public float BridgeApproachPad = 10f;
+
+        // Geometry accessors for the 3D trestle builder (reconstructs the swept centreline + width per edge).
+        public void EdgeBezierWorld(int i, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3)
+        { p0 = p1 = p2 = p3 = default; if (Graph == null || i < 0 || i >= Graph.Edges.Count) return; EdgeBezier(Graph.Edges[i], out p0, out p1, out p2, out p3); }
+        public float EdgeCorridorWidth(int i) => (Graph != null && i >= 0 && i < Graph.Edges.Count) ? EdgeWidth(Graph.Edges[i]) : RoadWidth;
+
+        // ── segment selection (the action queue): Cmd/Ctrl-click inside a corridor toggles it; Excavate!/Build!/
+        // Force-Bridge act on the set. Indices are valid only between topology changes, so any draw/delete clears it.
+        [System.NonSerialized] readonly HashSet<int> _selEdges = new HashSet<int>();
+        public int SelectedEdgeCount => _selEdges.Count;
+        public bool IsEdgeSelected(int e) => _selEdges.Contains(e);
+        public void ClearEdgeSelection() { _selEdges.Clear(); }
+        public void ToggleEdgeSelected(int e) { if (e < 0) return; if (!_selEdges.Remove(e)) _selEdges.Add(e); }
+        public List<int> SelectedEdgesList() { var l = new List<int>(_selEdges); l.Sort(); return l; }
+
+        // Nearest edge whose corridor (its own footprint half-width + a small grab margin) contains the click; -1 if
+        // the click is outside every corridor. Lets the user select by clicking ANYWHERE inside a segment, not a node.
+        public int PickEdgeInCorridor(Vector2 xz)
+        {
+            if (Graph == null || Graph.Edges.Count == 0) return -1;
+            if (!Graph.NearestPointOnEdge(xz, 80f, out int ei, out _, out Vector2 cp)) return -1;
+            float half = Mathf.Max(2f, EdgeWidth(Graph.Edges[ei]) * 0.5f + 2f);
+            return (cp - xz).sqrMagnitude <= half * half ? ei : -1;
+        }
 
         public bool EdgeExcavationBed(ITerrainSurface field, int i, out List<Vector3> pts, out float flatHalf)
         {
@@ -910,6 +1006,11 @@ namespace NetworkDesigner.Terrain
         [System.NonSerialized] public bool BuildSegmentMode;
         [System.NonSerialized] public int BuildStartNode = -1;
         public void SetBuildSegmentMode(bool on) { BuildSegmentMode = on; if (!on) BuildStartNode = -1; }
+
+        // ── bridge mode: click a start node, then an end node → flag the path's segments as a bridge span ──
+        [System.NonSerialized] public bool BridgeSelectMode;
+        [System.NonSerialized] public int BridgeStartNode = -1;
+        public void SetBridgeSelectMode(bool on) { BridgeSelectMode = on; if (!on) BridgeStartNode = -1; }
 
         // Nearest edge whose bezier passes within maxDist of a world XZ; -1 if none.
         public int PickEdge(Vector2 xz, float maxDist)
@@ -1017,12 +1118,14 @@ namespace NetworkDesigner.Terrain
             var boxAx = new Vector2[nc];
             for (int v = 0; v < nc; v++) if (treated[v]) ComputeBox(v, out boxHalf[v], out boxAx[v]);
 
-            foreach (LineEdge e in Graph.Edges)
+            for (int ei = 0; ei < Graph.Edges.Count; ei++)
             {
+                LineEdge e = Graph.Edges[ei];
+                if (e.Bridge) { BuildBridgeEdge(field, ei, e); continue; }   // straight, un-draped deck at grade
                 EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
                 float ta = e.A < nc && treated[e.A] ? ApproachTrim(e.A, e, boxHalf[e.A], boxAx[e.A]) : 0f;
                 float tb = e.B < nc && treated[e.B] ? ApproachTrim(e.B, e, boxHalf[e.B], boxAx[e.B]) : 0f;
-                BuildCorridorEdge(field, p0, p1, p2, p3, e, ta, tb);   // lane schematic, trimmed back to the box
+                BuildCorridorEdge(field, p0, p1, p2, p3, e, ei, ta, tb);   // lane schematic, trimmed back to the box
             }
             for (int v = 0; v < nc; v++) if (treated[v]) BuildJunction(field, v, boxHalf[v], boxAx[v], isX[v]);
             for (int i = 0; i < Graph.Nodes.Count; i++) DrawPuck(field, i);   // into the node mesh (own colour + toggle)
@@ -1155,23 +1258,69 @@ namespace NetworkDesigner.Terrain
         static readonly Color32 ColMedian = new Color32(200, 165, 110, 220);   // median hatch (warm tan — reads as raised, not drivable)
         Color32 ColFoot => new Color32((byte)(PlanColor.r * 255f), (byte)(PlanColor.g * 255f), (byte)(PlanColor.b * 255f), 170); // shoulder/footprint (plan amber, dashed)
         static readonly Color32 ColSkirt = new Color32(70, 190, 235, 150);  // excavation skirt at ±(footprint + margin) — cyan, dashed, distinct from the amber footprint
-        static readonly Color32 ColExcavated = new Color32(70, 220, 110, 240); // excavated segment marker — solid green centreline
+        // Whole-segment STATE tint: every marking on a segment is recoloured by its state so you can read the plan
+        // at a glance — red = planned (not yet cut), yellow = excavated (ready to build), blue = bridge span. The
+        // per-marking ALPHA is preserved (so dashed footprint stays fainter than solid edges); only the hue swaps.
+        static readonly Color32 ColPlanned   = new Color32(225, 55, 45, 255);   // red  — drawn, not excavated
+        static readonly Color32 ColExcavated = new Color32(255, 232, 0, 255);   // bright yellow — bed cut, ready to build
+        static readonly Color32 ColBridge    = new Color32(55, 120, 240, 255);  // blue — bridge span (not cut, on piers)
+        [System.NonSerialized] Color32 _tint; [System.NonSerialized] bool _tintSel;
+
+        // Pick the state tint for an edge (+ whether it's selected → brighten + force a strong alpha).
+        void SetEdgeTint(LineEdge e, int edgeIndex)
+        {
+            Color32 baseCol = e != null && e.Bridge ? ColBridge : (e != null && e.Excavated ? ColExcavated : ColPlanned);
+            _tintSel = IsEdgeSelected(edgeIndex);
+            _tint = _tintSel ? (Color32)Color.Lerp(baseCol, Color.white, 0.45f) : baseCol;   // selected reads brighter
+        }
+        // Recolour a marking to the segment's state tint, keeping the marking's own alpha (or a strong floor when selected).
+        Color32 Tn(Color32 c) => new Color32(_tint.r, _tint.g, _tint.b, _tintSel ? (byte)Mathf.Max(c.a, 210) : c.a);
 
         // The two skirt lines marking the full excavated corridor (road footprint + ExcavationMargin per side).
         void EmitSkirt(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, int n, float footHalf)
         {
             if (ExcavationMargin <= 0.01f) return;
             float s = footHalf + ExcavationMargin;
-            EmitOffsetLine(field, p0, p1, p2, p3, n,  s, ColSkirt, 3f, 2.2f);
-            EmitOffsetLine(field, p0, p1, p2, p3, n, -s, ColSkirt, 3f, 2.2f);
+            EmitOffsetLine(field, p0, p1, p2, p3, n,  s, Tn(ColSkirt), 3f, 2.2f);
+            EmitOffsetLine(field, p0, p1, p2, p3, n, -s, Tn(ColSkirt), 3f, 2.2f);
         }
 
         // strip kinds across the cross-section (BA side → centre → AB side)
         const int KOut = -1;   // strip kinds come from the shared NetworkDesigner.Roads.RoadLayout
 
         // Lay the segment's lanes/median/turn-lane/shoulders out as draped markings, draped along the bezier.
-        void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, LineEdge e, float trimA, float trimB)
+        // A BRIDGE segment, drawn UN-DRAPED: straight lines held at the deck grade (the chord between the two nodes'
+        // design elevations) rather than draped on the gorge floor, so it reads as spanning the gap. Blue via the tint.
+        void BuildBridgeEdge(ITerrainSurface field, int edgeIndex, LineEdge e)
         {
+            SetEdgeTint(e, edgeIndex);
+            Vector2 a = Graph.Nodes[e.A], b = Graph.Nodes[e.B];
+            float yA = DesignElevation(e.A, field), yB = DesignElevation(e.B, field);
+            Vector2 d = b - a; float len = d.magnitude;
+            if (len < 1e-3f) return;
+            Vector2 dir = d / len, perp = new Vector2(-dir.y, dir.x);
+            float half = Mathf.Max(0.3f, EdgeWidth(e) * 0.5f);
+            int n = Mathf.Clamp(Mathf.CeilToInt(len / 2f), 2, 600);
+            EmitChordLine(a, b, yA, yB, perp,  half, n, Tn(ColEdge));    // deck edges (solid)
+            EmitChordLine(a, b, yA, yB, perp, -half, n, Tn(ColEdge));
+            EmitChordLine(a, b, yA, yB, perp,   0f, n, Tn(ColCenter));   // deck centreline
+        }
+        void EmitChordLine(Vector2 a, Vector2 b, float yA, float yB, Vector2 perp, float off, int n, Color32 col)
+        {
+            Vector3 prev = default; bool have = false;
+            for (int i = 0; i <= n; i++)
+            {
+                float t = i / (float)n;
+                Vector2 xz = Vector2.Lerp(a, b, t) + perp * off;
+                Vector3 w = new Vector3(xz.x, Mathf.Lerp(yA, yB, t) + 0.15f, xz.y);   // held at deck grade (not draped)
+                if (have) AddSeg(prev, w, col);
+                prev = w; have = true;
+            }
+        }
+
+        void BuildCorridorEdge(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, LineEdge e, int edgeIndex, float trimA, float trimB)
+        {
+            SetEdgeTint(e, edgeIndex);   // every marking below is recoloured to the segment's state (red/yellow/blue)
             float len = 0f;
             _pts[0] = p0;
             for (int i = 1; i <= SubSteps; i++) { _pts[i] = LineGraph.Bezier(p0, p1, p2, p3, i / (float)SubSteps); len += Vector2.Distance(_pts[i - 1], _pts[i]); }
@@ -1181,15 +1330,14 @@ namespace NetworkDesigner.Terrain
             _tEnd = 1f - Mathf.Clamp01(trimB / len);
             if (_tEnd - _tStart < 0.02f) { _tStart = 0f; _tEnd = 1f; return; }   // wholly inside junction boxes
             int n = Mathf.Clamp(Mathf.CeilToInt(len * (_tEnd - _tStart) / 1.5f), 2, 2048);   // fine enough for dashed markings
-            if (e != null && e.Excavated) EmitOffsetLine(field, p0, p1, p2, p3, n, 0f, ColExcavated, 0f, 0f);  // solid green centreline = this segment is cut
 
             NetworkDesigner.Model.RoadProfile prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(e?.Profile);
             if (prof == null || prof.TotalWidth < 0.5f)
             {
                 float half = Mathf.Max(0.1f, EdgeWidth(e) * 0.5f);
-                EmitOffsetLine(field, p0, p1, p2, p3, n, half, ColEdge, 0f, 0f);   // generic: two solid edges + dashed centre
-                EmitOffsetLine(field, p0, p1, p2, p3, n, -half, ColEdge, 0f, 0f);
-                EmitOffsetLine(field, p0, p1, p2, p3, n, 0f, ColCenter, 2f, 2f);
+                EmitOffsetLine(field, p0, p1, p2, p3, n, half, Tn(ColEdge), 0f, 0f);   // generic: two solid edges + dashed centre
+                EmitOffsetLine(field, p0, p1, p2, p3, n, -half, Tn(ColEdge), 0f, 0f);
+                EmitOffsetLine(field, p0, p1, p2, p3, n, 0f, Tn(ColCenter), 2f, 2f);
                 EmitSkirt(field, p0, p1, p2, p3, n, half);
                 return;
             }
@@ -1215,19 +1363,19 @@ namespace NetworkDesigner.Terrain
             int Med = NetworkDesigner.Roads.RoadLayout.Median, Trn = NetworkDesigner.Roads.RoadLayout.TurnLane;
             bool isLn(int kk) => NetworkDesigner.Roads.RoadLayout.IsLane(kk);
             if (left == KOut || right == KOut)
-            { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColFoot, 3f, 2.2f); return; }           // corridor footprint edge (dashed amber)
+            { EmitOffsetLine(field, p0, p1, p2, p3, n, u, Tn(ColFoot), 3f, 2.2f); return; }           // corridor footprint edge (dashed)
             if (isLn(left) && isLn(right))
             {
-                if (left == right) EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColLane, 1.5f, 2.2f);   // same dir → dashed lane divider
-                else { EmitOffsetLine(field, p0, p1, p2, p3, n, u - 0.25f, ColCenter, 0f, 0f);          // opposing → double-yellow centreline
-                       EmitOffsetLine(field, p0, p1, p2, p3, n, u + 0.25f, ColCenter, 0f, 0f); }
+                if (left == right) EmitOffsetLine(field, p0, p1, p2, p3, n, u, Tn(ColLane), 1.5f, 2.2f);   // same dir → dashed lane divider
+                else { EmitOffsetLine(field, p0, p1, p2, p3, n, u - 0.25f, Tn(ColCenter), 0f, 0f);          // opposing → double centreline
+                       EmitOffsetLine(field, p0, p1, p2, p3, n, u + 0.25f, Tn(ColCenter), 0f, 0f); }
                 return;
             }
-            if (left == Trn || right == Trn) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColTurn, 0f, 0f); return; }   // turn-lane edge (yellow)
-            if (left == Med || right == Med) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f); return; }   // median edge (white)
+            if (left == Trn || right == Trn) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, Tn(ColTurn), 0f, 0f); return; }   // turn-lane edge
+            if (left == Med || right == Med) { EmitOffsetLine(field, p0, p1, p2, p3, n, u, Tn(ColEdge), 0f, 0f); return; }   // median edge
             // lane meets shoulder/sidewalk/curb → pavement edge; structure boundaries (edge|curb, edge|guard,
             // edge|parapet) drawn as a thin solid line so curbs/sidewalks/guards read in the plan.
-            EmitOffsetLine(field, p0, p1, p2, p3, n, u, ColEdge, 0f, 0f);
+            EmitOffsetLine(field, p0, p1, p2, p3, n, u, Tn(ColEdge), 0f, 0f);
         }
 
         // A line at constant lateral offset `u`, draped, dashed when gap>0 (solid when gap<=0).
@@ -1262,7 +1410,7 @@ namespace NetworkDesigner.Terrain
             {
                 float t0 = Mathf.Lerp(_tStart, _tEnd, (float)j / m);   // trimmed range
                 float t1 = Mathf.Min(_tEnd, t0 + dt);
-                AddSeg(OffsetPt(field, p0, p1, p2, p3, t0, uA), OffsetPt(field, p0, p1, p2, p3, t1, uB), ColMedian);
+                AddSeg(OffsetPt(field, p0, p1, p2, p3, t0, uA), OffsetPt(field, p0, p1, p2, p3, t1, uB), Tn(ColMedian));
             }
         }
 

@@ -541,6 +541,30 @@ namespace NetworkDesigner.Terrain
         public float ChunkRidgeScale { get => ChunkWorld.RidgeScaleMeters; set => ChunkWorld.SetRidgeScale(value); }
         public float ChunkRidgeThreshold { get => ChunkWorld.RidgeThreshold; set => ChunkWorld.SetRidgeThreshold(value); }
         public float ChunkRidgeStrength { get => ChunkWorld.RidgeStrength; set => ChunkWorld.SetRidgeStrength(value); }
+        // Hydrology analysis overlay (drainage / catchment): blue = where rain pools, cyan = where runoff concentrates.
+        // Recomputes on toggle (and via Refresh) over a window around the camera's look-point — re-run after grading.
+        public bool HydrologyShow { get => HydrologyOverlay.Show; set => HydrologyOverlay.SetShow(value, CameraGroundXZ()); }
+        public void RefreshHydrology() => HydrologyOverlay.Refresh(CameraGroundXZ());
+        float _hydroDirtyAt;
+        // Debounce terrain-edit dirtiness into ONE drainage recompute once the edit stops (a sculpt drag would
+        // otherwise trigger an O(n log n) flood-fill every frame). Recenters on the SAME window (RefreshLast), not
+        // the camera, so the overlay stays put while you grade. ~0.35 s of no active drag → recompute.
+        void TickHydrology()
+        {
+            if (!HydrologyOverlay.Dirty) return;
+            if (Input.GetMouseButton(0)) { _hydroDirtyAt = Time.realtimeSinceStartup; return; }   // still dragging
+            if (Time.realtimeSinceStartup - _hydroDirtyAt < 0.35f) return;
+            HydrologyOverlay.RefreshLast();   // recompute once; clears Dirty
+            _hydroDirtyAt = Time.realtimeSinceStartup;
+        }
+        Vector2 CameraGroundXZ()
+        {
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return Vector2.zero;
+            if (Physics.Raycast(new Ray(cam.transform.position, cam.transform.forward), out var hit, 100000f))
+                return new Vector2(hit.point.x, hit.point.z);
+            return new Vector2(cam.transform.position.x, cam.transform.position.z);   // looking at sky → use position
+        }
         // Force the bubble to the FULL Radius regardless of zoom (streams in over frames). Heavy:
         // (2·Radius+1)² chunks — e.g. Radius 40 = 6,561. Following the camera; overrides Lock while on.
         public bool ChunkFillRadius
@@ -2216,6 +2240,7 @@ namespace NetworkDesigner.Terrain
         // Excavate just ONE segment (driven by its in-world Excavate button) and mark that edge Excavated.
         public void ExcavateRoadSegment(int edgeIndex)
         {
+            if (RoadPlanLayer.IsEdgeBridge(edgeIndex)) { Debug.Log($"[Road] Segment {edgeIndex} is a bridge — skipping excavation (it spans the gap)."); return; }
             if (!RoadPlanLayer.EdgeExcavationBed(Surf, edgeIndex, out var pts, out float flatHalf)) return;
             float feather = Mathf.Max(0.1f, RoadPlanLayer.CutFeather);
             float r = flatHalf + feather; float innerFrac = flatHalf / r;   // (DEM backend still uses the feathered stamp)
@@ -2286,7 +2311,20 @@ namespace NetworkDesigner.Terrain
             foreach (int e in _builtRoadEdges) if (e >= 0 && e < graph.Edges.Count) only.Add("r" + e);
             _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(
                 net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null, only);
+
+            // Raise a deck + piers under any BUILT segment flagged as a bridge (parented to the build root, so it's
+            // torn down with the rest of the built roads). Elevation by node index (vertex "v{i}" ↔ node i).
+            var bridgeEdges = new System.Collections.Generic.HashSet<int>();
+            foreach (int e in _builtRoadEdges) if (RoadPlanLayer.IsEdgeBridge(e)) bridgeEdges.Add(e);
+            if (bridgeEdges.Count > 0 && _roadBuildRoot != null)
+                RoadBridgeBuilder.Build(RoadPlanLayer, bridgeEdges,
+                    i => nodeElev.TryGetValue("v" + i, out float y) ? y : 0f, Surf,
+                    RoadPlanLayer.BridgeDeckDepth, RoadPlanLayer.BridgePierSpacing, RoadPlanLayer.BridgePierWidth,
+                    _roadBuildRoot.transform);
         }
+
+        // Re-sweep the currently-built roads (and their bridges) — e.g. after changing a bridge tunable.
+        public void RefreshBuiltRoads() => RebuildBuiltRoads();
 
         public void ClearRoadBuild()
         {
@@ -2327,7 +2365,7 @@ namespace NetworkDesigner.Terrain
         public bool RoadElevationEdit => RoadPlanLayer.ElevationEditMode;
         public void SetRoadElevationEdit(bool on)
         {
-            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); }
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); RoadPlanLayer.SetBridgeSelectMode(false); }
             RoadPlanLayer.SetElevationEditMode(on);
             RoadPlanLayer.Rebuild(Surf);
         }
@@ -2337,7 +2375,7 @@ namespace NetworkDesigner.Terrain
         public bool RoadExcavateMode => RoadPlanLayer.ExcavateSelectMode;
         public void SetRoadExcavateMode(bool on)
         {
-            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetBuildSegmentMode(false); }
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetBuildSegmentMode(false); RoadPlanLayer.SetBridgeSelectMode(false); }
             RoadPlanLayer.SetExcavateSelectMode(on);
             RoadPlanLayer.Rebuild(Surf);
         }
@@ -2347,8 +2385,18 @@ namespace NetworkDesigner.Terrain
         public bool RoadBuildSegmentMode => RoadPlanLayer.BuildSegmentMode;
         public void SetRoadBuildSegmentMode(bool on)
         {
-            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetExcavateSelectMode(false); }
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBridgeSelectMode(false); }
             RoadPlanLayer.SetBuildSegmentMode(on);
+            RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // ---- road plan bridge sub-mode (palette "Bridge Mode") ----
+
+        public bool RoadBridgeMode => RoadPlanLayer.BridgeSelectMode;
+        public void SetRoadBridgeMode(bool on)
+        {
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); }
+            RoadPlanLayer.SetBridgeSelectMode(on);
             RoadPlanLayer.Rebuild(Surf);
         }
 
@@ -2392,12 +2440,113 @@ namespace NetworkDesigner.Terrain
             int added = 0, skipped = 0;
             foreach (int e in edgeIndices)
             {
-                if (RoadPlanLayer.IsEdgeExcavated(e)) { _builtRoadEdges.Add(e); added++; }
+                if (RoadPlanLayer.IsEdgeExcavated(e) || RoadPlanLayer.IsEdgeBridge(e)) { _builtRoadEdges.Add(e); added++; }
                 else skipped++;
             }
-            if (added == 0) { Debug.LogWarning("[Road] None of those segments are excavated — Excavate the path first."); return; }
+            if (added == 0) { Debug.LogWarning("[Road] None of those segments are excavated or bridges — Excavate the path first (or mark it a Bridge)."); return; }
             RebuildBuiltRoads();
-            Debug.Log($"[Road] Built {added} segment(s)" + (skipped > 0 ? $", skipped {skipped} un-excavated." : "."));
+            Debug.Log($"[Road] Built {added} segment(s)" + (skipped > 0 ? $", skipped {skipped} un-built." : "."));
+        }
+
+        // Right-click while in an Excavate/Build/Bridge sub-mode: first back out of an armed start node; otherwise
+        // delete the node under the cursor. Lets you prune/redraw the plan (even after excavating) without first
+        // toggling the sub-mode off — the friction the sub-mode's early-return used to impose on right-click.
+        void HandleRoadSubModeRightClick(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            if (MouseOverActivePanel()) return;
+            if (rd.ExcavateStartNode >= 0 || rd.BuildStartNode >= 0 || rd.BridgeStartNode >= 0)
+            { rd.ExcavateStartNode = -1; rd.BuildStartNode = -1; rd.BridgeStartNode = -1; rd.Rebuild(Surf); return; }
+            if (overTerrain && rd.DeleteNearNode(Surf, hit.point, 3f)) _dirtySince = Time.realtimeSinceStartup;
+        }
+
+        // Bridge Mode (mirrors Excavate Mode): click a START node, then an END node → toggle every segment on the
+        // path between them as a BRIDGE span. Marking forces both ends of each span LEVEL (flat deck) and clears any
+        // excavated flag; the span is then build-eligible without cutting, and Build raises a deck+piers over the gap.
+        void HandleRoadBridgeInput(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            if (MouseOverActivePanel() || !overTerrain) return;
+            if (!Input.GetMouseButtonDown(0)) return;
+            int n = PickRoadNode(rd);
+            if (n < 0) return;
+            if (rd.BridgeStartNode < 0)
+            {
+                rd.BridgeStartNode = n;                             // arm the start node
+                rd.Rebuild(Surf);
+                Debug.Log($"[Road] Bridge start = node {n}. Click an end node.");
+                return;
+            }
+            if (n == rd.BridgeStartNode)                            // click the start again → cancel
+            { rd.BridgeStartNode = -1; rd.Rebuild(Surf); return; }
+            var edges = rd.EdgePathBetween(rd.BridgeStartNode, n);
+            rd.BridgeStartNode = -1;
+            if (edges == null || edges.Count == 0)
+            { Debug.LogWarning("[Road] No connected path between those two nodes."); rd.Rebuild(Surf); return; }
+            MarkRoadBridgePath(edges);
+        }
+
+        // Toggle a set of plan edges as bridge spans. Toggle-ON levels each span's two end nodes to the HIGHER of
+        // their design elevations (a flat deck that clears both abutments) and clears Excavated; toggle-OFF just
+        // un-flags (leaves the leveled elevation — re-edit via Edit elevations if you want the original grade back).
+        public void MarkRoadBridgePath(System.Collections.Generic.List<int> edgeIndices)
+        {
+            if (edgeIndices == null || edgeIndices.Count == 0) return;
+            LineGraph g = RoadPlanLayer.Graph;
+            if (g == null) return;
+            bool allBridge = true;
+            foreach (int ei in edgeIndices) if (!RoadPlanLayer.IsEdgeBridge(ei)) { allBridge = false; break; }
+            bool makeBridge = !allBridge;   // if the whole path is already bridge, this click un-bridges it
+            int n = 0;
+            foreach (int ei in edgeIndices)
+            {
+                if (ei < 0 || ei >= g.Edges.Count) continue;
+                if (makeBridge)
+                {
+                    LineEdge e = g.Edges[ei];
+                    float yA = RoadPlanLayer.DesignElevation(e.A, Surf);
+                    float yB = RoadPlanLayer.DesignElevation(e.B, Surf);
+                    float lvl = Mathf.Max(yA, yB);                 // flat deck at the higher abutment
+                    g.SetNodeY(e.A, lvl); g.SetNodeY(e.B, lvl);    // shared nodes propagate to adjoining segments
+                    RoadPlanLayer.SetEdgeBridge(ei, true);
+                    RoadPlanLayer.SetEdgeExcavated(ei, false);     // a bridge spans — it is not cut into the terrain
+                }
+                else RoadPlanLayer.SetEdgeBridge(ei, false);
+                n++;
+            }
+            RoadPlanLayer.Rebuild(Surf);
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log(makeBridge ? $"[Road] Marked {n} segment(s) as bridge (ends leveled)." : $"[Road] Cleared bridge on {n} segment(s).");
+        }
+
+        // ---- selection-driven actions (the palette's Excavate! / Build! / Force Bridge buttons) ----
+
+        public int RoadSelectionCount => RoadPlanLayer.SelectedEdgeCount;
+        public void ClearRoadSelection() { RoadPlanLayer.ClearEdgeSelection(); RoadPlanLayer.Rebuild(Surf); }
+
+        // Excavate! → cut every SELECTED segment that isn't already excavated and isn't a bridge (bridges span the gap).
+        public void ExcavateSelectedRoads()
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();
+            if (sel.Count == 0) { Debug.LogWarning("[Road] No segments selected — Cmd/Ctrl-click inside segments first."); return; }
+            var todo = new System.Collections.Generic.List<int>();
+            foreach (int ei in sel) if (!RoadPlanLayer.IsEdgeExcavated(ei) && !RoadPlanLayer.IsEdgeBridge(ei)) todo.Add(ei);
+            if (todo.Count == 0) { Debug.Log("[Road] Selected segments are already excavated (or bridges)."); return; }
+            ExcavateRoadPath(todo);   // cuts beds, marks them Excavated (→ yellow), rebuilds + conforms
+        }
+
+        // Build! → sweep the 3D road on every SELECTED segment that's excavated (yellow) or a bridge; skip the rest.
+        public void BuildSelectedRoads()
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();
+            if (sel.Count == 0) { Debug.LogWarning("[Road] No segments selected — Cmd/Ctrl-click inside segments first."); return; }
+            BuildRoadPath(sel);   // filters to excavated || bridge, warns on the rest
+        }
+
+        // Force Bridge → flag the SELECTED segments as a bridge span (or un-bridge them if all already are).
+        public void ForceBridgeSelectedRoads()
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();
+            if (sel.Count == 0) { Debug.LogWarning("[Road] No segments selected — Cmd/Ctrl-click inside segments first."); return; }
+            MarkRoadBridgePath(sel);
         }
 
         // Click a START node (armed → green ring), then an END node → excavate every plan segment on the
@@ -2436,6 +2585,7 @@ namespace NetworkDesigner.Terrain
                 float batter = Mathf.Max(0.25f, RoadPlanLayer.CutBatter);
                 foreach (int ei in edgeIndices)
                 {
+                    if (RoadPlanLayer.IsEdgeBridge(ei)) continue;   // bridge spans the gap — never cut a bed
                     if (!RoadPlanLayer.EdgeExcavationBed(Surf, ei, out var pts, out float flatHalf)) continue;
                     ChunkWorld.GradeBatter(pts, flatHalf, batter);   // daylighting cut/fill bench
                     RoadPlanLayer.SetEdgeExcavated(ei, true); done++;
@@ -2447,6 +2597,7 @@ namespace NetworkDesigner.Terrain
             {
                 foreach (int ei in edgeIndices)
                 {
+                    if (RoadPlanLayer.IsEdgeBridge(ei)) continue;   // bridge spans the gap — never cut a bed
                     if (!RoadPlanLayer.EdgeExcavationBed(Surf, ei, out var pts, out float flatHalf)) continue;
                     float r = flatHalf + feather; float innerFrac = flatHalf / r;
                     foreach (Vector3 p in pts) DemTerrainWorld.FlattenStamp(p, r, innerFrac, p.y);
@@ -2874,6 +3025,7 @@ namespace NetworkDesigner.Terrain
             // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
             // typing a name doesn't fire hotkeys or sculpt.
             if (NetworkDesigner.UI.PaletteBase.ModalOpen || NetworkDesigner.UI.PaletteBase.TextEditing) return;
+            TickHydrology();   // debounced drainage-analysis recompute after terrain edits settle
             // Brush-mode hotkeys. A brush key always lands you in sculpt mode (exits any line/scatter tool —
             // e.g. the retaining wall — and hides its preview), matching the palette buttons.
             if (Input.GetKeyDown(KeyCode.Alpha1)) SetBrush(BrushMode.Raise);
@@ -3139,7 +3291,12 @@ namespace NetworkDesigner.Terrain
             // matches the grid/rail snap in both sculpt and line modes.
             // Line/rail modes show a small fixed 5 m cursor (matching the node/grid); sculpt
             // and scatter use the brush-radius ring.
-            UpdateBrushCursor(ShowBrushCursor && overTerrain, cursorVis,
+            // Cmd/Ctrl held over a road plan = SELECT intent, not draw — drop the in-world placement ring and the
+            // new-node preview so the cursor reverts to the plain OS arrow for picking segments.
+            bool roadSelecting = _lineActive is RoadPlanLayer
+                && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand)
+                 || Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl));
+            UpdateBrushCursor(ShowBrushCursor && overTerrain && !roadSelecting, cursorVis,
                               _lineActive != null ? 5f : BrushRadius);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
@@ -3183,19 +3340,34 @@ namespace NetworkDesigner.Terrain
                 // (de)select, right-click a node to level all selected to it. Skips the normal draw/delete.
                 if (_lineActive is RoadPlanLayer rdElev && rdElev.ElevationEditMode)
                 { rdElev.HidePreview(); HandleRoadElevationInput(rdElev, hit, overTerrain); return; }
-                // Path-excavation sub-mode owns the mouse too: click a start node, then an end node → excavate between.
-                if (_lineActive is RoadPlanLayer rdExc && rdExc.ExcavateSelectMode)
-                { rdExc.HidePreview(); HandleRoadExcavateInput(rdExc, hit, overTerrain); return; }
-                // Per-segment build sub-mode: click an excavated segment → sweep the 3D road on it.
-                if (_lineActive is RoadPlanLayer rdBld && rdBld.BuildSegmentMode)
-                { rdBld.HidePreview(); HandleRoadBuildInput(rdBld, hit, overTerrain); return; }
-                _lineActive.UpdatePreview(Surf, place, overTerrain);
+                // Excavate / Build / Bridge sub-modes own the LEFT mouse (start node → end node). Right-click still
+                // cancels an armed start or deletes a node, so you can edit the plan without leaving the sub-mode.
+                if (_lineActive is RoadPlanLayer rdSub && (rdSub.ExcavateSelectMode || rdSub.BuildSegmentMode || rdSub.BridgeSelectMode))
+                {
+                    rdSub.HidePreview();
+                    if (Input.GetMouseButtonDown(1)) HandleRoadSubModeRightClick(rdSub, hit, overTerrain);
+                    else if (rdSub.ExcavateSelectMode) HandleRoadExcavateInput(rdSub, hit, overTerrain);
+                    else if (rdSub.BuildSegmentMode) HandleRoadBuildInput(rdSub, hit, overTerrain);
+                    else HandleRoadBridgeInput(rdSub, hit, overTerrain);
+                    return;
+                }
+                if (roadSelecting) _lineActive.HidePreview();   // no rubber-band / new-node outline while picking
+                else _lineActive.UpdatePreview(Surf, place, overTerrain);
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);
                 bool overPanel = MouseOverActivePanel();   // cursor over the rail palette
                 if (!overPanel && overTerrain && Input.GetMouseButtonDown(0))
                 {
-                    if (_lineActive is RailTrackLayer railSlope && altMod)
+                    // Cmd/Ctrl-click inside a road segment's corridor → toggle it in the action queue (no node clicking).
+                    // (Shift is the curve modifier, so selection uses Cmd/Ctrl.) Plain click still draws.
+                    bool selMod = Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand)
+                               || Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+                    if (_lineActive is RoadPlanLayer rdSel && selMod)
+                    {
+                        int picked = rdSel.PickEdgeInCorridor(new Vector2(hit.point.x, hit.point.z));
+                        if (picked >= 0) { rdSel.ToggleEdgeSelected(picked); rdSel.Rebuild(Surf); }
+                    }
+                    else if (_lineActive is RailTrackLayer railSlope && altMod)
                     {
                         // Rail auto-slope: Alt+click node A, then node B → grade between.
                         int n = railSlope.NearestNodeForPick(new Vector2(hit.point.x, hit.point.z));
@@ -3466,6 +3638,7 @@ namespace NetworkDesigner.Terrain
                     ChunkWorld.Sculpt(hit.point, BrushRadius, BrushStrength, Time.deltaTime,
                                       (DemTerrainWorld.SculptMode)(int)Brush, _demFlattenY);
                     _dirtySince = Time.realtimeSinceStartup;
+                    HydrologyOverlay.MarkDirty();   // chunk sculpt bypasses ConformScatterAndLines → mark here (debounced)
                 }
                 return;
             }
@@ -3512,6 +3685,7 @@ namespace NetworkDesigner.Terrain
             PlanLayer.Rebuild(Surf); // re-drape the survey lines onto the new surface
             RoadPlanLayer.Rebuild(Surf); // re-drape the road corridor too — else it stays buried after load
             RetainingWallLayer.Rebuild(Surf); // re-seat the wall base on the new surface
+            HydrologyOverlay.MarkDirty();      // terrain changed → re-run drainage analysis (debounced in Update)
         }
 
         // World hit -> fractional grid coords, relative to the terrain corner
@@ -5032,7 +5206,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(16); // version (16 added retaining-wall polylines)
+                    w.Write(17); // version (17 added road-plan per-segment Bridge flag)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -5183,6 +5357,7 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.SpeedLimit);                     // v4+
                 w.Write(e.Profile ?? "");                  // v13+ (road-plan per-segment profile)
                 w.Write(e.Excavated);                      // v15+ (road-plan per-segment excavated flag)
+                w.Write(e.Bridge);                         // v17+ (road-plan per-segment bridge flag)
             }
             int ny = g?.NodeY?.Count ?? 0;                 // v14+: per-node design elevation
             w.Write(ny);
@@ -5386,6 +5561,7 @@ namespace NetworkDesigner.Terrain
                 if (version >= 4) e.SpeedLimit = r.ReadSingle(); // section speed
                 if (version >= 13) e.Profile = r.ReadString();   // road-plan per-segment profile
                 if (version >= 15) e.Excavated = r.ReadBoolean(); // road-plan per-segment excavated flag
+                if (version >= 17) e.Bridge = r.ReadBoolean();    // road-plan per-segment bridge flag
                 g.Edges.Add(e);
             }
             if (version >= 14)   // per-node design elevation

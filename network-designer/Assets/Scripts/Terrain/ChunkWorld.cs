@@ -1042,6 +1042,10 @@ namespace NetworkDesigner.Terrain
             return (_chunks.TryGetValue(c, out var ch) && ch.H != null) ? SampleHeight(wx, wz) : SourceAt(c, wx, wz);
         }
 
+        // Best available height at a world point: the EDITED surface where the chunk is loaded (reflects roads /
+        // terraces / sculpts), else the continuous SOURCE DEM. Lets analysis windows extend past the loaded bubble.
+        public static float SampleHeightOrSource(float wx, float wz) => EdgeHeight(wx, wz);
+
         // ── Procedural heights ───────────────────────────────────────────────────────────────
         // Dramatic multi-octave terrain (0..AmpMeters) sampled at each vertex's WORLD position, so
         // it's seamless across chunks AND LOD resolutions (any res sampling the same point agrees).

@@ -233,6 +233,29 @@ namespace NetworkDesigner.Terrain
             TuningRegistry.RegisterFloat("terrain.chunkRidgeStrength", "Chunk", "Ridge strength",
                 () => t.ChunkRidgeStrength, v => t.ChunkRidgeStrength = v, 0.05f, 1f, 0.05f,
                 description: "Opacity of the ridge/valley overlay.");
+
+            // --- Hydrology (drainage / catchment) analysis overlay (💧 footer toggle) ---
+            TuningRegistry.RegisterFloat("hydro.window", "Hydrology", "Window size (m)",
+                () => HydrologyOverlay.WorldSize, v => { HydrologyOverlay.WorldSize = v; HydrologyOverlay.RefreshLast(); }, 300f, 8000f, 100f,
+                description: "Side of the square analysis window (centred on the camera's look-point). MUST enclose the whole catchment — its edges are treated as outlets, so too small a window reads false ponding at the borders.");
+            TuningRegistry.RegisterFloat("hydro.res", "Hydrology", "Resolution (cells/side)",
+                () => HydrologyOverlay.Res, v => { HydrologyOverlay.Res = Mathf.RoundToInt(v); HydrologyOverlay.RefreshLast(); }, 64f, 1024f, 32f,
+                description: "Analysis grid resolution. Higher = finer drainage detail but a longer recompute.");
+            TuningRegistry.RegisterFloat("hydro.pondMin", "Hydrology", "Min ponding (m)",
+                () => HydrologyOverlay.PondMin, v => { HydrologyOverlay.PondMin = v; HydrologyOverlay.RefreshLast(); }, 0.05f, 5f, 0.05f,
+                description: "Minimum depression depth (m) to paint blue. Lower = shows shallow ponding too.");
+            TuningRegistry.RegisterFloat("hydro.rain", "Hydrology", "Rain intensity",
+                () => HydrologyOverlay.RainIntensity, v => { HydrologyOverlay.RainIntensity = v; HydrologyOverlay.RefreshLast(); }, 0f, 1f, 0.02f,
+                description: "How wet: UP = heavier rain, so lower/finer river beds fill with flow (cyan); DOWN = only major channels. Internally lowers the upstream-area threshold on a log scale (driest ~0.02 → wettest ~5e-5 of the window).");
+            TuningRegistry.RegisterFloat("hydro.strength", "Hydrology", "Overlay strength",
+                () => HydrologyOverlay.Strength, v => { HydrologyOverlay.Strength = v; HydrologyOverlay.RefreshLast(); }, 0.1f, 1f, 0.05f,
+                description: "Opacity of the hydrology overlay.");
+            TuningRegistry.RegisterBool("hydro.live", "Hydrology", "Live update on edit",
+                () => HydrologyOverlay.LiveUpdate, v => HydrologyOverlay.LiveUpdate = v,
+                description: "Re-run the drainage analysis automatically after each terrain edit (sculpt/road/terrace) settles, over the SAME window. Off = only via 'Recompute here'. Each recompute is a brief hitch (the flood-fill is O(n log n)).");
+            TuningRegistry.RegisterAction("hydro.refresh", "Hydrology", "Recompute here",
+                () => t.RefreshHydrology(),
+                description: "Re-run the analysis around the current look-point — use this to MOVE the window to where you're now looking.");
             TuningRegistry.RegisterFloat("terrain.seaTolerance", "Chunk", "Sea tool: tolerance (m)",
                 () => t.SeaTolerance, v => t.SeaTolerance = v, 0.5f, 30f, 0.5f,
                 description: "Sea brush (6): how close in altitude counts as the same flooded area. One click floods " +

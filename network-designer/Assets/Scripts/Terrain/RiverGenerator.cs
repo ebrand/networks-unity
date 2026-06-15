@@ -65,6 +65,23 @@ namespace NetworkDesigner.Terrain
             return width;
         }
 
+        // Hydrology ANALYSIS for drainage / catchment planning (no terrain change). Reuses the same pipeline:
+        //   ponding[i] = filled - terrain  → metres of standing water that would pool in a depression (> 0 = a basin
+        //                that holds water given rain). flood / catchment basins.
+        //   accum[i]   = upstream drainage area (cells) → where runoff concentrates (streams / swale / culvert lines).
+        // Grid EDGES are treated as outlets, so the window must enclose the catchment (up to surrounding ridges).
+        public static void Analyze(float[] heights, int cx, int rz, float cellSize, out float[] ponding, out float[] accum)
+        {
+            int n = cx * rz;
+            ponding = new float[n]; accum = new float[n];
+            if (heights == null || heights.Length < n || cx < 3 || rz < 3) return;
+            cellSize = Mathf.Max(0.01f, cellSize);
+            float[] filled = PriorityFlood(heights, cx, rz);
+            int[] down = FlowDirections(filled, cx, rz, cellSize);
+            accum = Accumulate(filled, down, n);
+            for (int i = 0; i < n; i++) ponding[i] = Mathf.Max(0f, filled[i] - heights[i]);
+        }
+
         // Fill depressions so every cell has a downhill path to the boundary. Boundary
         // cells are the outlets; interior cells get raised to the lowest spill level.
         static float[] PriorityFlood(float[] h, int cx, int rz)

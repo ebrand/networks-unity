@@ -231,6 +231,7 @@ namespace NetworkDesigner.Terrain
             poly.Add(o1 + perp * Half);                     // wall line, under the back half of the wall
             poly.Add(o0 + perp * Half);
             ChunkWorld.FillPolygon(poly, _tLevel);
+            HydrologyOverlay.MarkDirty();   // platform reshaped the ground → re-run drainage analysis (debounced)
             // Wall centreline = outer edge + perp*Half so the BACK rail sits on the grid-snapped outer line.
             Vector2 c0 = o0 + perp * Half, c1 = o1 + perp * Half;
             int na = Graph.AddNode(c0); Graph.SetNodeY(na, _tLevel);
