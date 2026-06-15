@@ -1549,6 +1549,57 @@ namespace NetworkDesigner.Terrain
             for (int i = 0; i < touched.Count; i++) { var ch = _chunks[touched[i]]; BuildMesh(ch); CookCollider(ch, true); }
         }
 
+        // Flatten the terrace platform to `level` inside an ARBITRARY closed polygon (XZ). Used so the platform's
+        // back edge follows the traced CONTOUR exactly (the polygon = contour curve + straight wall line), not a
+        // straight chord. Cut+fill to `level` → perfectly flat. O(verts × polygon edges).
+        public static void FillPolygon(List<Vector2> poly, float level)
+        {
+            if (!Active || poly == null || poly.Count < 3) return;
+            float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
+            for (int i = 0; i < poly.Count; i++)
+            {
+                var pp = poly[i];
+                if (pp.x < minX) minX = pp.x; if (pp.x > maxX) maxX = pp.x;
+                if (pp.y < minZ) minZ = pp.y; if (pp.y > maxZ) maxZ = pp.y;
+            }
+            minX -= 2f; maxX += 2f; minZ -= 2f; maxZ += 2f;
+            var touched = new List<Vector2Int>();
+            foreach (var kv in _chunks)
+            {
+                var ch = kv.Value; var c = kv.Key;
+                float ox = c.x * ChunkSize, oz = c.y * ChunkSize;
+                if (ox + ChunkSize < minX || ox > maxX || oz + ChunkSize < minZ || oz > maxZ) continue;
+                int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+                int vx0 = Mathf.Clamp(Mathf.FloorToInt((minX - ox) / sp), 0, res - 1);
+                int vx1 = Mathf.Clamp(Mathf.CeilToInt((maxX - ox) / sp), 0, res - 1);
+                int vz0 = Mathf.Clamp(Mathf.FloorToInt((minZ - oz) / sp), 0, res - 1);
+                int vz1 = Mathf.Clamp(Mathf.CeilToInt((maxZ - oz) / sp), 0, res - 1);
+                bool changed = false;
+                for (int zz = vz0; zz <= vz1; zz++)
+                    for (int xx = vx0; xx <= vx1; xx++)
+                    {
+                        if (!PointInPoly(poly, ox + xx * sp, oz + zz * sp)) continue;
+                        int i = zz * res + xx;
+                        if (level != ch.H[i]) { EnsureEditRes(ch, res); ch.Abs[i] = level; ch.Op[i] = 1f; ch.H[i] = level; changed = true; }
+                    }
+                if (changed) { ch.EditDirty = true; touched.Add(c); }
+            }
+            for (int i = 0; i < touched.Count; i++) { var ch = _chunks[touched[i]]; BuildMesh(ch); CookCollider(ch, true); }
+        }
+
+        static bool PointInPoly(List<Vector2> poly, float px, float pz)
+        {
+            bool inside = false; int n = poly.Count;
+            for (int i = 0, j = n - 1; i < n; j = i++)
+            {
+                float zi = poly[i].y, zj = poly[j].y;
+                if ((zi > pz) != (zj > pz) &&
+                    px < (poly[j].x - poly[i].x) * (pz - zi) / (zj - zi) + poly[i].x)
+                    inside = !inside;
+            }
+            return inside;
+        }
+
         // World-space box average of the CURRENT surface (k cells each way at `step` spacing), sampling
         // across chunk boundaries via SampleHeight so smoothing stays continuous at seams. Samples that
         // land on an unloaded chunk are skipped (else they'd drag the average toward 0 at the bubble edge).

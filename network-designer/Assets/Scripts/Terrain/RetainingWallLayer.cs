@@ -29,8 +29,8 @@ namespace NetworkDesigner.Terrain
         public float FootingDepth = 0.6f;
         [Tooltip("How far the wall top sits ABOVE the back-fill (m) — just enough to clear z-fighting with the terrain graded to the same level, without leaving a visible exposed strip.")]
         public float TopLip = 0.12f;
-        [Tooltip("How far back (m) the sharp terrain CAP extends from the wall — a flat terrain-coloured strip that lays a crisp straight edge along the wall, hiding the 1 m grid staircase of the filled platform.")]
-        public float CapDepth = 4f;
+        [Tooltip("MAX distance back (m) the terrain CAP extends from the wall (a flat terrain-coloured strip over the platform that lays a crisp straight edge along the wall). Automatically clamped so it never runs past the platform onto the rising hillside.")]
+        public float CapDepth = 12f;
         [Tooltip("Snap radius (m) to the end of an existing wall — click within this to continue it (adopting its elevation).")]
         public float SnapRadius = 6f;
         [Tooltip("Default wall height above the ground (m) used when no elevation has been dialled in yet.")]
@@ -218,18 +218,19 @@ namespace NetworkDesigner.Terrain
             return outp;
         }
 
-        // Build the terrace: a single FLAT platform (the contour is its natural inner edge, since FillPlatform is
-        // fill-only to the contour level) and a STRAIGHT 3 m wall on the grid-snapped outer edge.
+        // Build the terrace: flatten the region bounded by the traced CONTOUR (inner edge) and the STRAIGHT wall
+        // (outer edge) to the contour level, then a STRAIGHT 3 m wall on the grid-snapped outer edge.
         void CommitTerrace(ITerrainSurface field, Vector2 cursor)
         {
-            if (!PullFrom(cursor, out Vector2 perp, out float depth)) return;
+            if (_backEdge == null || _backEdge.Count < 2 || !PullFrom(cursor, out Vector2 perp, out float depth)) return;
             Vector2 o0 = SnapXZ(_tP0 + perp * depth);   // grid-snapped wall REAR line
             Vector2 o1 = SnapXZ(_tP1 + perp * depth);
-            float fillDepth = Mathf.Max(Vector2.Dot(o0 - _tP0, perp), Vector2.Dot(o1 - _tP1, perp)) + Half;
-            // Extend the fill a little PAST each end (and under the wall) so it covers the full wall footprint —
-            // matching the cap overshoot, so the cap never floats over un-filled ground.
-            Vector2 cd = (_tP1 - _tP0).sqrMagnitude > 1e-6f ? (_tP1 - _tP0).normalized : Vector2.right;
-            ChunkWorld.FillPlatform(_tP0 - cd * Half, _tP1 + cd * Half, perp, fillDepth, _tLevel, _tLevel);
+            // Fill the polygon: the contour (inner) + the straight wall line pushed a little under the wall (outer).
+            var poly = new List<Vector2>(_backEdge.Count + 2);
+            poly.AddRange(_backEdge);                       // contour, _tP0 → _tP1 (the conforming inner edge)
+            poly.Add(o1 + perp * Half);                     // wall line, under the back half of the wall
+            poly.Add(o0 + perp * Half);
+            ChunkWorld.FillPolygon(poly, _tLevel);
             // Wall centreline = outer edge + perp*Half so the BACK rail sits on the grid-snapped outer line.
             Vector2 c0 = o0 + perp * Half, c1 = o1 + perp * Half;
             int na = Graph.AddNode(c0); Graph.SetNodeY(na, _tLevel);
@@ -330,12 +331,25 @@ namespace NetworkDesigner.Terrain
             Vector2 dir = d / len;
             Vector2 right = new Vector2(dir.y, -dir.x) * FrontSign;   // FRONT; the platform/back is -right
             Vector2 back = -right;
-            float yA = NodeTop(field, e.A) + 0.05f, yB = NodeTop(field, e.B) + 0.05f;   // just above the platform
+            float eA = NodeTop(field, e.A), eB = NodeTop(field, e.B);
+            float yA = eA + 0.05f, yB = eB + 0.05f;                   // just above the platform
             Vector2 r0 = A - right * Half, r1 = B - right * Half;     // back rail (= grid-snapped outer line); no end overshoot
-            float capD = Mathf.Max(0.5f, CapDepth);
+            float capMax = Mathf.Max(0.5f, CapDepth);
+            float d0 = CapReach(field, r0, back, eA, capMax);         // clamp each end to the platform's back edge
+            float d1 = CapReach(field, r1, back, eB, capMax);
             CapQuad(new Vector3(r0.x, yA, r0.y), new Vector3(r1.x, yB, r1.y),
-                    new Vector3((r1 + back * capD).x, yB, (r1 + back * capD).y),
-                    new Vector3((r0 + back * capD).x, yA, (r0 + back * capD).y));
+                    new Vector3((r1 + back * d1).x, yB, (r1 + back * d1).y),
+                    new Vector3((r0 + back * d0).x, yA, (r0 + back * d0).y));
+        }
+
+        // How far back the cap can reach before the natural hillside rises above the platform level (so it never
+        // spills onto the rising ground beyond the platform). Capped at maxD.
+        float CapReach(ITerrainSurface field, Vector2 from, Vector2 back, float level, float maxD)
+        {
+            const float step = 1f;
+            for (float dd = step; dd <= maxD; dd += step)
+                if (Sample(field, from + back * dd) > level + 0.3f) return Mathf.Max(step, dd - step);
+            return maxD;
         }
 
         // A flat (up-facing) quad into the cap mesh, emitted double-sided so winding never hides it.

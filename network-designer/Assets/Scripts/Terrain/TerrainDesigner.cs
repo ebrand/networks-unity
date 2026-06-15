@@ -2766,6 +2766,7 @@ namespace NetworkDesigner.Terrain
             FlyCameraController fly = cam.GetComponent<FlyCameraController>();
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
+            fly.enabled = true;   // a saved scene / force-quit can leave the component disabled → middle-mouse look + zoom dead
             fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap() || WallTopScroll();
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.InputSuppressor = () => ChunkMapEditor.IsOpen;   // freeze the camera while the map trimmer is open

@@ -1,7 +1,7 @@
 // Free-fly camera for roaming a large terrain. No pivot (so it never "swings"
 // around a stranded point the way an orbit camera does):
 //   - Middle-mouse drag        : look around (yaw/pitch) — the camera "pointing"
-//   - Shift + middle-mouse drag : pan
+//   - Hold SPACE + move mouse   : same look (fallback when the middle-click is eaten by the mouse driver)
 //   - W/A/S/D                   : move along the view, flattened to the ground
 //   - E / Q                     : up / down (world)
 //   - Left Shift (with WASD)    : move faster
@@ -123,9 +123,10 @@ namespace NetworkDesigner.Designer
 
         void HandleLook()
         {
-            // Middle-mouse = look. Left/right stay free for tools; Shift only
-            // affects move speed.
-            if (!Input.GetMouseButton(2)) return;
+            // Look = middle-mouse drag, OR hold SPACE + move the mouse (fallback for mice whose middle-click is
+            // swallowed by the driver, e.g. Logitech Options remapping the wheel button). Left/right stay free
+            // for tools; Shift only affects move speed.
+            if (!Input.GetMouseButton(2) && !Input.GetKey(KeyCode.Space)) return;
             if (LookSuppressor != null && LookSuppressor()) return;  // cursor over a UI panel
             Yaw += Input.GetAxis("Mouse X") * LookSensitivity;
             Pitch -= Input.GetAxis("Mouse Y") * LookSensitivity;
