@@ -82,6 +82,9 @@ namespace NetworkDesigner.Roads
                 foreach (VertexGeometry vg in resolved)
                 {
                     if (vg == null || vg.Outline == null || vg.Outline.Count < 2) continue;
+                    // Only fill a junction whose roads are actually built — so a partial/incremental build doesn't
+                    // drop pads at intersections where nothing is swept yet (matches the whole-plan look).
+                    if (onlyRoads != null && !VertexHasBuiltApproach(vg, onlyRoads)) continue;
                     if (!vById.TryGetValue(vg.VertexId, out Vertex v)) continue;
                     List<Vector2> ring = SampleOutlineRing(vg.Outline);
                     if (ring.Count < 3) continue;
@@ -93,6 +96,14 @@ namespace NetworkDesigner.Roads
             Debug.Log($"[Road] Build Plan: swept {built}/{net.Roads.Count} road bodies + {pads} intersection pads"
                       + (skipped > 0 ? $", {skipped} skipped (no profile / too short / fully set back)." : "."));
             return root;
+        }
+
+        // True if any road approaching this vertex is in the built set (so its junction pad should be filled).
+        static bool VertexHasBuiltApproach(VertexGeometry vg, HashSet<string> onlyRoads)
+        {
+            if (vg.Approaches == null) return false;
+            foreach (VertexApproach ap in vg.Approaches) if (ap != null && onlyRoads.Contains(ap.RoadId)) return true;
+            return false;
         }
 
         // Setback (m along centerline) the resolver computed for `roadId` at `vertexId`, 0 if not found.

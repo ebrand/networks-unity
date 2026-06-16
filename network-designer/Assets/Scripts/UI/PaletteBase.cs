@@ -586,7 +586,7 @@ namespace NetworkDesigner.UI
         // COLLAPSED. Add rows to the returned element, not to `parent`.
         protected VisualElement Section(VisualElement parent, string title, bool startCollapsed = true)
         {
-            var fold = new Foldout { text = title, value = !startCollapsed };
+            var fold = new Foldout { text = title };
             fold.style.marginBottom = 6;
             var header = fold.Q<Label>();
             if (header != null)
@@ -596,6 +596,7 @@ namespace NetworkDesigner.UI
             }
             fold.contentContainer.style.marginTop = 6;
             parent.Add(fold);
+            fold.value = !startCollapsed;   // set AFTER parenting — Foldout's initializer value is unreliable for collapse
             return fold.contentContainer;
         }
 

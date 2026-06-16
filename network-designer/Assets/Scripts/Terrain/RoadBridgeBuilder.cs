@@ -17,12 +17,14 @@ namespace NetworkDesigner.Terrain
         // Returns a GameObject holding the deck+pier mesh (parented under `parent`), or null if nothing was built.
         public static GameObject Build(RoadPlanLayer rd, HashSet<int> bridgeEdges, System.Func<int, float> nodeElev,
                                        ITerrainSurface field, float deckDepth, float pierSpacing, float pierWidth,
-                                       Transform parent)
+                                       bool parapets, float parapetHeight, Transform parent)
         {
             if (rd == null || rd.Graph == null || bridgeEdges == null || bridgeEdges.Count == 0) return null;
             deckDepth = Mathf.Max(0.1f, deckDepth);
             pierSpacing = Mathf.Max(2f, pierSpacing);
             pierWidth = Mathf.Max(0.1f, pierWidth);
+            parapetHeight = Mathf.Max(0.1f, parapetHeight);
+            const float parapetThick = 0.35f;
 
             var verts = new List<Vector3>();
             var tris = new List<int>();
@@ -53,6 +55,14 @@ namespace NetworkDesigner.Terrain
                     {
                         AddBeam(verts, tris, prev, ctr, width, deckDepth);                // deck slab sub-span
                         arc += Vector2.Distance(new Vector2(prev.x, prev.z), xz);
+                        if (parapets)
+                        {
+                            Vector2 d2 = new Vector2(ctr.x - prev.x, ctr.z - prev.z);
+                            Vector2 perp = d2.sqrMagnitude > 1e-8f ? new Vector2(-d2.y, d2.x).normalized : Vector2.right;
+                            float lat = width * 0.5f - parapetThick * 0.5f;              // wall along each deck edge
+                            AddParapetSeg(verts, tris, prev, ctr, perp,  lat, parapetThick, parapetHeight);
+                            AddParapetSeg(verts, tris, prev, ctr, perp, -lat, parapetThick, parapetHeight);
+                        }
                     }
 
                     // Pier: from the deck soffit down to the terrain, at start, end, and every pierSpacing along.
@@ -99,6 +109,21 @@ namespace NetworkDesigner.Terrain
             right = right.sqrMagnitude < 1e-6f ? Vector3.right : right.normalized;
             Vector3 up = Vector3.Cross(fwd, right).normalized;
             AddBox(v, t, (a + b) * 0.5f - up * (height * 0.5f), fwd, right, up, l, width, height);
+        }
+
+        // A parapet (barrier wall) sub-span: a box sitting ON the deck top, offset laterally by `lat` from the
+        // centreline, rising `height` above the deck. a/b are consecutive deck-top centreline points.
+        static void AddParapetSeg(List<Vector3> v, List<int> t, Vector3 a, Vector3 b, Vector2 perp, float lat, float thick, float height)
+        {
+            Vector3 off = new Vector3(perp.x, 0f, perp.y) * lat;
+            Vector3 a2 = a + off, b2 = b + off;
+            Vector3 along = b2 - a2; float l = along.magnitude;
+            if (l < 1e-4f) return;
+            Vector3 fwd = along / l;
+            Vector3 right = Vector3.Cross(Vector3.up, fwd);
+            right = right.sqrMagnitude < 1e-6f ? Vector3.right : right.normalized;
+            Vector3 ctr = (a2 + b2) * 0.5f + Vector3.up * (height * 0.5f);   // bottom on the deck, extends up
+            AddBox(v, t, ctr, fwd, right, Vector3.up, l, thick, height);
         }
 
         // Oriented box with un-shared per-face verts (flat low-poly normals). lenF/lenR/lenU are full sizes.

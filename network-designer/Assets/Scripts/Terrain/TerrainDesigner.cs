@@ -953,6 +953,10 @@ namespace NetworkDesigner.Terrain
                     if (rdp.TrySnapBendToTarget(flat, out Vector2 rbt)) return new Vector3(rbt.x, raw.y, rbt.y);
                     if (rdp.TrySnapCurveSymmetry(flat, out Vector2 rsym)) return new Vector3(rsym.x, raw.y, rsym.y);
                     if (rdp.PlacingCurveEnd) return raw;
+                    // Snap to the highlighted (hovered) node first, so snapping matches what the cursor is over.
+                    if (rdp.TrySnapToHoverNode(out Vector2 rhv)) return new Vector3(rhv.x, raw.y, rhv.y);
+                    // Starting a fresh chain near a road END → snap onto it so the new plan resumes off that road.
+                    if (rdp.TrySnapToRoadEnd(flat, out Vector2 rend)) return new Vector3(rend.x, raw.y, rend.y);
                     if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
                     // Hold Alt/Option = FREE placement: skip the colinear hard-lock + extension snaps so you can
                     // lay a slightly-unaligned road at any angle. (Node-join + curve locks above still apply.)
@@ -1937,7 +1941,14 @@ namespace NetworkDesigner.Terrain
         // Clear the editable plan linework only. The BUILT 3D roads are committed geometry → they stay standing
         // (use "Remove roads" to delete those). We DO drop the built-edge tracking set, since its indices point
         // at the now-deleted graph; a fresh plan + build starts clean, and the old meshes survive until then.
-        public void ClearRoadPlan() { RoadPlanLayer.ClearAll(Surf); _builtRoadEdges.Clear(); _dirtySince = Time.realtimeSinceStartup; }
+        // Clear the PLAN (nodes/edges) but KEEP the already-built 3D roads: detach the build root so neither this
+        // nor a future build destroys it (the meshes become standalone geometry). Use "Remove roads" to delete them.
+        public void ClearRoadPlan()
+        {
+            if (_roadBuildRoot != null) { _roadBuildRoot.name = "RoadBuild (kept)"; _roadBuildRoot = null; }
+            RoadPlanLayer.ClearAll(Surf);
+            _dirtySince = Time.realtimeSinceStartup;
+        }
 
         // ── Named road-plan library: per-world snapshots under <world>/RoadPlans/<name>.json, so you can
         // save a work-in-progress, revert to it, load another, etc. (JsonUtility round-trips LineGraphSave). ──
@@ -2266,60 +2277,59 @@ namespace NetworkDesigner.Terrain
         }
 
         GameObject _roadBuildRoot;   // runtime 3D road meshes from the last build (regenerated, not saved)
-        // Which plan edges currently have 3D road built. Build Plan = all edges; Build Mode = one edge per click.
-        // Runtime-only (the meshes aren't saved); cleared with the plan / on world switch / by "Remove roads".
-        readonly System.Collections.Generic.HashSet<int> _builtRoadEdges = new System.Collections.Generic.HashSet<int>();
+        // "Built" is now a per-segment flag on the edge (RoadPlanLayer.IsEdgeBuilt), NOT an index set — so it travels
+        // with the edge through the index renumbering that drawing/splitting causes (a built road stays fully built
+        // when you add a crossing). Runtime-only (not serialized); cleared with the plan / world switch / "Remove roads".
 
         // Build Plan (phase 1): convert the road plan to a Network, resolve it with the GeometryResolver brain
         // (setbacks / intersections / lane flow), then sweep each road BODY — setback-trimmed, draped at the
-        // node-to-node grade line — into the excavated bed. Junction fill + markings come in later phases.
-        // Marks EVERY edge built, then re-sweeps.
+        // node-to-node grade line — into the excavated bed. Marks EVERY edge built, then re-sweeps.
         public void BuildRoadPlan()
         {
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph == null || graph.Edges.Count == 0) { Debug.LogWarning("[Road] No road plan to build — draw a corridor first (;)."); return; }
-            _builtRoadEdges.Clear();
-            for (int e = 0; e < graph.Edges.Count; e++) _builtRoadEdges.Add(e);
+            for (int e = 0; e < graph.Edges.Count; e++) RoadPlanLayer.SetEdgeBuilt(e, true);
             RebuildBuiltRoads();
         }
 
-        // Build a SINGLE plan segment (Build Mode: click an excavated segment). Adds it to the built set and
-        // re-sweeps; the whole network still resolves, so this segment's junctions set back correctly.
+        // Build a SINGLE plan segment. Flags it built and re-sweeps; the whole network still resolves, so this
+        // segment's junctions set back correctly.
         public void BuildRoadSegment(int edgeIndex)
         {
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph == null || edgeIndex < 0 || edgeIndex >= graph.Edges.Count) return;
-            _builtRoadEdges.Add(edgeIndex);
+            RoadPlanLayer.SetEdgeBuilt(edgeIndex, true);
             RebuildBuiltRoads();
-            Debug.Log($"[Road] Built segment {edgeIndex} ({_builtRoadEdges.Count} built).");
+            Debug.Log($"[Road] Built segment {edgeIndex}.");
         }
 
-        // (Re)sweep exactly the edges in _builtRoadEdges into a fresh build root. The whole network resolves for
+        // (Re)sweep every edge flagged Built into a fresh build root. The whole network resolves for
         // correct setbacks; only the built edges emit geometry (RoadPlanBuilder's onlyRoads filter).
         void RebuildBuiltRoads()
         {
             LineGraph graph = RoadPlanLayer.Graph;
             ClearRoadBuild();
-            if (graph == null || _builtRoadEdges.Count == 0) return;
+            if (graph == null) return;
+            // Built edges come from the per-segment flag (survives index renumbering on draw/split).
+            var only = new System.Collections.Generic.HashSet<string>();
+            var bridgeEdges = new System.Collections.Generic.HashSet<int>();
+            for (int e = 0; e < graph.Edges.Count; e++)
+                if (graph.Edges[e].Built) { only.Add("r" + e); if (graph.Edges[e].Bridge) bridgeEdges.Add(e); }
+            if (only.Count == 0) return;
             // Per-node DESIGN elevation (vertex "v{i}" ↔ node i) — the same heights Excavate cut to, captured
             // from the shaped surface — so the swept road sits in its cut and respects carved/flattened terrain.
             var nodeElev = new System.Collections.Generic.Dictionary<string, float>(graph.Nodes.Count);
             for (int i = 0; i < graph.Nodes.Count; i++) nodeElev["v" + i] = RoadPlanLayer.DesignElevation(i, Surf);
             NetworkDesigner.Model.Network net = NetworkDesigner.Roads.RoadNetworkBridge.Build(
                 graph, NetworkDesigner.Model.DriveSide.Right, RoadPlanLayer.RoadWidth);
-            var only = new System.Collections.Generic.HashSet<string>();
-            foreach (int e in _builtRoadEdges) if (e >= 0 && e < graph.Edges.Count) only.Add("r" + e);
             _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(
                 net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null, only);
 
-            // Raise a deck + piers under any BUILT segment flagged as a bridge (parented to the build root, so it's
-            // torn down with the rest of the built roads). Elevation by node index (vertex "v{i}" ↔ node i).
-            var bridgeEdges = new System.Collections.Generic.HashSet<int>();
-            foreach (int e in _builtRoadEdges) if (RoadPlanLayer.IsEdgeBridge(e)) bridgeEdges.Add(e);
             if (bridgeEdges.Count > 0 && _roadBuildRoot != null)
                 RoadBridgeBuilder.Build(RoadPlanLayer, bridgeEdges,
                     i => nodeElev.TryGetValue("v" + i, out float y) ? y : 0f, Surf,
                     RoadPlanLayer.BridgeDeckDepth, RoadPlanLayer.BridgePierSpacing, RoadPlanLayer.BridgePierWidth,
+                    RoadPlanLayer.BridgeParapets, RoadPlanLayer.BridgeParapetHeight,
                     _roadBuildRoot.transform);
         }
 
@@ -2333,7 +2343,7 @@ namespace NetworkDesigner.Terrain
         }
 
         // "Remove roads" / world switch: drop the built meshes AND forget which segments were built.
-        public void ClearBuiltRoads() { _builtRoadEdges.Clear(); ClearRoadBuild(); }
+        public void ClearBuiltRoads() { RoadPlanLayer.ClearAllBuilt(); ClearRoadBuild(); }
 
         // Tear down ALL live network geometry (rail / rail-plan / road-plan / fence / power / built roads)
         // WITHOUT marking the save dirty. Used on world switch + return-to-menu so one world's networks don't
@@ -2440,7 +2450,7 @@ namespace NetworkDesigner.Terrain
             int added = 0, skipped = 0;
             foreach (int e in edgeIndices)
             {
-                if (RoadPlanLayer.IsEdgeExcavated(e) || RoadPlanLayer.IsEdgeBridge(e)) { _builtRoadEdges.Add(e); added++; }
+                if (RoadPlanLayer.IsEdgeExcavated(e) || RoadPlanLayer.IsEdgeBridge(e)) { RoadPlanLayer.SetEdgeBuilt(e, true); added++; }
                 else skipped++;
             }
             if (added == 0) { Debug.LogWarning("[Road] None of those segments are excavated or bridges — Excavate the path first (or mark it a Bridge)."); return; }
@@ -2521,6 +2531,49 @@ namespace NetworkDesigner.Terrain
 
         public int RoadSelectionCount => RoadPlanLayer.SelectedEdgeCount;
         public void ClearRoadSelection() { RoadPlanLayer.ClearEdgeSelection(); RoadPlanLayer.Rebuild(Surf); }
+
+        // Delete the SELECTED plan segments (and any 3D road built on them).
+        public void DeleteSelectedRoadSegments()
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();   // ascending
+            if (sel.Count == 0) { Debug.LogWarning("[Road] No segments selected to delete — Cmd/Ctrl-click some first."); return; }
+            int n = DeleteRoadEdges(sel);
+            Debug.Log($"[Road] Deleted {n} segment(s).");
+        }
+
+        // Remove a set of plan edges (and the built road on them). Removes high-index-first so the lower indices stay
+        // valid, remapping the built-edge set as it goes, then drops now-edgeless nodes and re-sweeps. Returns count.
+        int DeleteRoadEdges(System.Collections.Generic.List<int> indices)
+        {
+            if (indices == null || indices.Count == 0) return 0;
+            indices.Sort();
+            int removed = 0;
+            for (int j = indices.Count - 1; j >= 0; j--)   // high-index-first so lower indices stay valid
+                if (RoadPlanLayer.Graph.RemoveEdgeAt(indices[j])) removed++;
+            // No built-set remap needed: "built" is a per-edge flag that's removed with the edge; survivors keep theirs.
+            RoadPlanLayer.ClearEdgeSelection();
+            RoadPlanLayer.DropOrphanNodes();
+            RoadPlanLayer.Rebuild(Surf);
+            RebuildBuiltRoads();
+            _dirtySince = Time.realtimeSinceStartup;
+            return removed;
+        }
+
+        // Delete a node and its segments (+ built road). The node becomes edgeless and is pruned by DropOrphanNodes;
+        // a lone node with no edges is removed directly.
+        public void DeleteRoadNode(int node)
+        {
+            if (node < 0 || RoadPlanLayer.Graph == null || node >= RoadPlanLayer.Graph.Nodes.Count) return;
+            var edges = RoadPlanLayer.EdgesTouchingNode(node);
+            if (edges.Count > 0) { DeleteRoadEdges(edges); }
+            else
+            {
+                RoadPlanLayer.Graph.RemoveNode(node);
+                RoadPlanLayer.Rebuild(Surf);
+                _dirtySince = Time.realtimeSinceStartup;
+            }
+            Debug.Log($"[Road] Deleted node {node} and its segments.");
+        }
 
         // Excavate! → cut every SELECTED segment that isn't already excavated and isn't a bridge (bridges span the gap).
         public void ExcavateSelectedRoads()
@@ -2708,7 +2761,12 @@ namespace NetworkDesigner.Terrain
         public bool IsRailPlanMode => ReferenceEquals(_lineActive, PlanLayer);
         public bool IsRailMode => IsRailBuildMode || IsRailPlanMode;
         public bool IsRoadPlanMode => ReferenceEquals(_lineActive, RoadPlanLayer);
-        public void EnterRoadPlanMode() { if (!IsRoadPlanMode) SetLineMode(RoadPlanLayer); }
+        // Road plan has two sub-modes (both keep the road layer active): PLAN draws/edits + right-click deletes plan
+        // nodes; BUILD manages built roads + right-click un-builds (or deletes an un-built node). ' toggles BUILD.
+        [System.NonSerialized] bool _roadBuildMode;
+        public bool IsRoadBuildMode => IsRoadPlanMode && _roadBuildMode;
+        public void EnterRoadPlanMode() { if (!IsRoadPlanMode) SetLineMode(RoadPlanLayer); _roadBuildMode = false; }
+        public void EnterRoadBuildMode() { if (!IsRoadPlanMode) SetLineMode(RoadPlanLayer); _roadBuildMode = true; }
         // Default terrain (sculpt) mode: no line layer and no scatter layer active.
         public bool IsSculptMode => _lineActive == null && _active == null;
         // Exit any line/scatter mode back to the terrain brush (used when a palette that
@@ -3050,7 +3108,28 @@ namespace NetworkDesigner.Terrain
             if (Input.GetKeyDown(KeyCode.Y)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("System");
             if (Input.GetKeyDown(KeyCode.O)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Placeables");
             if (Input.GetKeyDown(KeyCode.U)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Environment");
-            if (Input.GetKeyDown(KeyCode.Semicolon)) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road");
+            // ; → road PLAN mode (open the palette if closed / switch from Build). Pressing ; while already in Plan
+            // closes the Road palette. ' does the same for BUILD mode.
+            if (Input.GetKeyDown(KeyCode.Semicolon))
+            {
+                if (NetworkDesigner.UI.PaletteBase.IsOpenId("Road") && IsRoadPlanMode && !IsRoadBuildMode)
+                { NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road"); EnterSculptMode(); }   // already in Plan → close
+                else
+                {
+                    if (!NetworkDesigner.UI.PaletteBase.IsOpenId("Road")) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road");
+                    EnterRoadPlanMode();
+                }
+            }
+            if (Input.GetKeyDown(KeyCode.Quote))
+            {
+                if (NetworkDesigner.UI.PaletteBase.IsOpenId("Road") && IsRoadBuildMode)
+                { NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road"); EnterSculptMode(); }   // already in Build → close
+                else
+                {
+                    if (!NetworkDesigner.UI.PaletteBase.IsOpenId("Road")) NetworkDesigner.UI.PaletteBase.ToggleExclusive("Road");
+                    EnterRoadBuildMode();
+                }
+            }
             if (Input.GetKeyDown(KeyCode.BackQuote)) NetworkDesigner.UI.PaletteBase.ToggleQuick("Guides");   // ` = Design Controls quick palette (overlays, keeps your place)
             if (Input.GetKeyDown(KeyCode.Tab)) NetworkDesigner.UI.PositionPalette.Toggle();                  // Tab = position HUD (Alt/X/Z/Route)
             if (Input.GetKeyDown(KeyCode.I) && RailLayer != null) RailLayer.ShowCurveInspect = !RailLayer.ShowCurveInspect;
@@ -3322,6 +3401,15 @@ namespace NetworkDesigner.Terrain
                 }
                 UpdateConnectPreview(hit, overTerrain);
             }
+            // Road plan: highlight the node under the cursor (screen-space pick) as the snap / delete target — like
+            // the rail pucks. Hidden (−1) when road isn't the active layer, off-terrain, or in elevation-edit mode.
+            if (RoadPlanLayer != null)
+            {
+                Camera hc = PickCamera != null ? PickCamera : Camera.main;
+                int hn = (_lineActive is RoadPlanLayer rdH && overTerrain && !rdH.ElevationEditMode && hc != null)
+                    ? RoadPlanLayer.PickNodeScreen(hc, Surf, new Vector2(Input.mousePosition.x, Input.mousePosition.y), 30f) : -1;
+                RoadPlanLayer.SetHoverNode(Surf, hn);
+            }
             // Remember the placement cursor + whether it's over terrain, for the on-screen
             // design-speed readout drawn in OnGUI.
             _lineCursorWorld = cursorVis; _lineCursorValid = overTerrain
@@ -3443,7 +3531,13 @@ namespace NetworkDesigner.Terrain
                     else if (_lineActive is RoadPlanLayer roadCancel && roadCancel.CornerPending) roadCancel.CancelCorner();
                     else DeleteOrEndChain(hit, overTerrain);
                 }
-                if (Input.GetKeyDown(KeyCode.Backspace))
+                // Delete key with road segments selected → delete them; otherwise Backspace undoes the last node.
+                if (_lineActive is RoadPlanLayer rdDel && rdDel.SelectedEdgeCount > 0
+                    && (Input.GetKeyDown(KeyCode.Delete) || Input.GetKeyDown(KeyCode.Backspace)))
+                {
+                    DeleteSelectedRoadSegments();
+                }
+                else if (Input.GetKeyDown(KeyCode.Backspace))
                 {
                     _lineActive.RemoveLastNode(Surf);
                     _dirtySince = Time.realtimeSinceStartup;
@@ -3970,6 +4064,14 @@ namespace NetworkDesigner.Terrain
         // chain. (Extracted so the rail auto-slope can intercept right-click to cancel.)
         void DeleteOrEndChain(RaycastHit hit, bool overTerrain)
         {
+            // Road plan: right-click deletes the HOVERED node (+ its segments + any built road) in BOTH modes;
+            // nothing highlighted just ends the chain.
+            if (_lineActive is RoadPlanLayer rdRoad)
+            {
+                if (overTerrain && rdRoad.HoverNode >= 0) DeleteRoadNode(rdRoad.HoverNode);
+                else { rdRoad.EndChain(); _dirtySince = Time.realtimeSinceStartup; }
+                return;
+            }
             bool deleted = false;
             if (overTerrain)
             {
@@ -3978,8 +4080,6 @@ namespace NetworkDesigner.Terrain
                     deleted = rlDel.DeleteNearNode(Surf, new Vector3(dsnap.x, hit.point.y, dsnap.y), 2f);
                 else if (_lineActive is RailPlanLayer plDel && plDel.TrySnapToOwnNode(dflat, out Vector2 psnap))
                     deleted = plDel.DeleteNearNode(Surf, new Vector3(psnap.x, hit.point.y, psnap.y), 2f);
-                else if (_lineActive is RoadPlanLayer rdDel && rdDel.TrySnapToOwnNode(dflat, out Vector2 rdsnap))
-                    deleted = rdDel.DeleteNearNode(Surf, new Vector3(rdsnap.x, hit.point.y, rdsnap.y), 2f);
                 if (!deleted) deleted = _lineActive.DeleteNearNode(Surf, hit.point, 3f);
             }
             if (deleted) _dirtySince = Time.realtimeSinceStartup;

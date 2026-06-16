@@ -123,6 +123,17 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _nv = new List<Vector3>();
         readonly List<Vector3> _nn = new List<Vector3>();
         readonly List<int> _nidx = new List<int>();
+        // Hovered-node highlight: a SEPARATE per-frame overlay (golden, scaled) rebuilt only when the hover changes.
+        GameObject _hoverGo; MeshFilter _hoverMf; MeshRenderer _hoverMr; Mesh _hoverMesh; Material _hoverMat;
+        readonly List<Vector3> _hv = new List<Vector3>();
+        readonly List<Vector3> _hn = new List<Vector3>();
+        readonly List<int> _hidx = new List<int>();
+        [System.NonSerialized] int _hoverNode = -1;
+        public int HoverNode => _hoverNode;
+        [System.NonSerialized] bool _linesHidden;   // plan-line markings hidden (Plan-mode right-click toggles this)
+        public bool PlanLinesHidden => _linesHidden;
+        public void TogglePlanLines() { _linesHidden = !_linesHidden; if (_mr != null) _mr.enabled = !_linesHidden; }
+        static readonly Color _RoadNodeHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);   // golden, matches rail pucks
 
         GameObject _pvGo; MeshFilter _pvMf; MeshRenderer _pvMr; Mesh _pvMesh; Material _pvBadMat;
         readonly List<Vector3> _pv = new List<Vector3>();
@@ -157,7 +168,9 @@ namespace NetworkDesigner.Terrain
             Vector2 p = new Vector2(hit.x, hit.z);
             if (_chainTail < 0)   // start a chain: grab an existing node/edge so corridors branch + join
             {
-                int near = Graph.NearestNode(p, NodePickRadius);
+                // The screen-picked hovered node is parallax-proof (the elevated puck vs the terrain hit below it),
+                // so prefer it over the world-radius pick — otherwise clicking a node drops a duplicate beside it.
+                int near = (_hoverNode >= 0 && _hoverNode < Graph.Nodes.Count) ? _hoverNode : Graph.NearestNode(p, NodePickRadius);
                 if (near >= 0) _chainTail = near;
                 else if (NearestRoadEdge(p, out int ei, out float tt)) { _chainTail = Graph.SplitEdge(ei, tt); Rebuild(field); }  // click anywhere on a road's footprint → split + continue
                 else _chainTail = Graph.AddNode(p);
@@ -332,6 +345,8 @@ namespace NetworkDesigner.Terrain
 
         int NearestOrNew(Vector2 p)
         {
+            // Prefer the screen-picked hovered node (parallax-proof) so a segment END snaps onto an existing node.
+            if (_hoverNode >= 0 && _hoverNode < Graph.Nodes.Count && _hoverNode != _chainTail) return _hoverNode;
             int near = Graph.NearestNode(p, NodePickRadius);
             if (near >= 0 && near != _chainTail) return near;
             // Crossing an existing road mid-span → split it into a shared intersection node (so an
@@ -542,6 +557,8 @@ namespace NetworkDesigner.Terrain
             Rebuild(field);
             return true;
         }
+
+        public void DropOrphanNodes() => PruneOrphanNodes();   // public: drop nodes left edgeless after a segment delete
 
         // Remove any node left with no edges (e.g. the far end of a just-deleted segment),
         // keeping the active chain tail (a fresh, not-yet-connected start node).
@@ -814,6 +831,37 @@ namespace NetworkDesigner.Terrain
             _connCol.Add(col); _connCol.Add(col); _connIdx.Add(s); _connIdx.Add(s + 1);
         }
 
+        // Snap onto the currently HOVERED node (the golden-highlighted puck) so snapping always matches what the
+        // cursor is over — any node, toggle-independent. Excludes the active chain tail (else a continuing segment
+        // would collapse back onto its own start).
+        public bool TrySnapToHoverNode(out Vector2 snapped)
+        {
+            snapped = default;
+            if (Graph == null || _hoverNode < 0 || _hoverNode >= Graph.Nodes.Count || _hoverNode == _chainTail) return false;
+            snapped = Graph.Nodes[_hoverNode];
+            return true;
+        }
+
+        // When STARTING a chain (no anchor yet), snap onto the nearest existing road END (a degree-1 node) within
+        // EndSnapRadius so a new plan resumes cleanly off a built/laid road — independent of the proximity toggle.
+        // Once grabbed, the next click continues from it exactly like any subsequent node (extension guide + locks).
+        public bool TrySnapToRoadEnd(Vector2 p, out Vector2 snapped)
+        {
+            snapped = p;
+            if (_chainTail >= 0 || Graph == null) return false;      // only at chain start
+            float r = Mathf.Max(0f, EndSnapRadius);
+            if (r <= 0f) return false;
+            int best = -1; float bestSq = r * r;
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                if (NodeDegree(i) != 1) continue;                    // road ends only
+                float d = (Graph.Nodes[i] - p).sqrMagnitude;
+                if (d <= bestSq) { bestSq = d; best = i; }
+            }
+            if (best >= 0) { snapped = Graph.Nodes[best]; return true; }
+            return false;
+        }
+
         // Snap onto the plan's own nearest node/edge within EndSnapRadius (excluding the active anchor) —
         // so segments join existing nodes into intersections, and you can resume from any end.
         public bool TrySnapToOwnNode(Vector2 p, out Vector2 snapped)
@@ -912,11 +960,19 @@ namespace NetworkDesigner.Terrain
         public void SetEdgeExcavated(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Excavated = on; }
         public bool IsEdgeBridge(int i) => Graph != null && i >= 0 && i < Graph.Edges.Count && Graph.Edges[i].Bridge;
         public void SetEdgeBridge(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Bridge = on; }
+        // "Built" = this segment has a 3D road swept on it. A per-segment flag (not an index set) so it survives the
+        // edge-index renumbering that drawing/splitting causes — built roads stay built when you add a crossing.
+        public bool IsEdgeBuilt(int i) => Graph != null && i >= 0 && i < Graph.Edges.Count && Graph.Edges[i].Built;
+        public void SetEdgeBuilt(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Built = on; }
+        public void ClearAllBuilt() { if (Graph == null) return; foreach (LineEdge e in Graph.Edges) e.Built = false; }
+        public bool AnyEdgeBuilt() { if (Graph == null) return false; foreach (LineEdge e in Graph.Edges) if (e.Built) return true; return false; }
 
         // Bridge (trestle) build params: deck slab thickness, pier spacing along the span, pier cross-section size.
         public float BridgeDeckDepth = 1.0f;
         public float BridgePierSpacing = 14f;
         public float BridgePierWidth = 1.2f;
+        public bool BridgeParapets = true;       // side barrier walls along the deck edges
+        public float BridgeParapetHeight = 1.0f;
 
         // Auto-bridge: when a freshly-drawn STRAIGHT segment crosses a terrain dip, auto-split it and flag the
         // middle span as a bridge. Trigger = terrain falls > BridgeTriggerDepth below the segment's chord; the
@@ -1132,8 +1188,13 @@ namespace NetworkDesigner.Terrain
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
-            _nodeMr.enabled = PlanGuides.ShowNodes || ElevationEditMode || ExcavateSelectMode || BuildSegmentMode;   // always show nodes while editing
+            _nodeMr.enabled = PlanGuides.ShowNodes && Graph.Nodes.Count > 0;   // Design Controls "Show nodes" gates the pucks
+            if (_mr != null) _mr.enabled = !_linesHidden;   // plan-line markings can be hidden (nodes stay for interaction)
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
+            // Topology may have shifted node indices — clear the hover so the per-frame driver re-resolves it cleanly
+            // next frame (avoids a stale index highlighting the wrong node).
+            _hoverNode = -1;
+            if (_hoverMr != null) { _hoverMr.enabled = false; _hoverMesh.Clear(); }
         }
 
         // ---- intersections / junctions ----
@@ -1439,7 +1500,6 @@ namespace NetworkDesigner.Terrain
         void DrawPuck(ITerrainSurface field, int idx)
         {
             Vector2 c = Graph.Nodes[idx];
-            const int N = 16;
             float radius = Mathf.Max(0.2f, NodePuckRadius);
             float terrainY = field != null ? field.SampleHeight(c.x, c.y) : 0f;
             float designY = Graph.GetNodeY(idx);
@@ -1479,34 +1539,74 @@ namespace NetworkDesigner.Terrain
                 }
             }
 
-            int capC = _nv.Count;
-            _nv.Add(new Vector3(c.x, topY, c.y)); _nn.Add(Vector3.up);
-            int capRim = _nv.Count;
+            EmitPuck(_nv, _nn, _nidx, c, radius, baseY, topY);
+        }
+
+        // A short low-poly cylinder puck (16-sided cap + side wall) into the given vertex/normal/triangle lists.
+        // Shared by the base node mesh (DrawPuck) and the per-frame hover overlay.
+        static void EmitPuck(List<Vector3> v, List<Vector3> nrm, List<int> idx, Vector2 c, float radius, float baseY, float topY)
+        {
+            const int N = 16;
+            int capC = v.Count;
+            v.Add(new Vector3(c.x, topY, c.y)); nrm.Add(Vector3.up);
+            int capRim = v.Count;
             for (int i = 0; i <= N; i++)
             {
                 float a = i / (float)N * Mathf.PI * 2f;
-                _nv.Add(new Vector3(c.x + Mathf.Cos(a) * radius, topY, c.y + Mathf.Sin(a) * radius)); _nn.Add(Vector3.up);
+                v.Add(new Vector3(c.x + Mathf.Cos(a) * radius, topY, c.y + Mathf.Sin(a) * radius)); nrm.Add(Vector3.up);
             }
-            for (int i = 0; i < N; i++) { _nidx.Add(capC); _nidx.Add(capRim + i + 1); _nidx.Add(capRim + i); }   // cap up
+            for (int i = 0; i < N; i++) { idx.Add(capC); idx.Add(capRim + i + 1); idx.Add(capRim + i); }   // cap up
 
-            int wTop = _nv.Count;
+            int wTop = v.Count;
             for (int i = 0; i <= N; i++)
             {
                 float a = i / (float)N * Mathf.PI * 2f; float nx = Mathf.Cos(a), nz = Mathf.Sin(a);
-                _nv.Add(new Vector3(c.x + nx * radius, topY, c.y + nz * radius)); _nn.Add(new Vector3(nx, 0f, nz));
+                v.Add(new Vector3(c.x + nx * radius, topY, c.y + nz * radius)); nrm.Add(new Vector3(nx, 0f, nz));
             }
-            int wBot = _nv.Count;
+            int wBot = v.Count;
             for (int i = 0; i <= N; i++)
             {
                 float a = i / (float)N * Mathf.PI * 2f; float nx = Mathf.Cos(a), nz = Mathf.Sin(a);
-                _nv.Add(new Vector3(c.x + nx * radius, baseY, c.y + nz * radius)); _nn.Add(new Vector3(nx, 0f, nz));
+                v.Add(new Vector3(c.x + nx * radius, baseY, c.y + nz * radius)); nrm.Add(new Vector3(nx, 0f, nz));
             }
             for (int i = 0; i < N; i++)
             {
                 int ti = wTop + i, tj = wTop + i + 1, bi = wBot + i, bj = wBot + i + 1;
-                _nidx.Add(bi); _nidx.Add(ti); _nidx.Add(tj);   // outward
-                _nidx.Add(bi); _nidx.Add(tj); _nidx.Add(bj);
+                idx.Add(bi); idx.Add(ti); idx.Add(tj);   // outward
+                idx.Add(bi); idx.Add(tj); idx.Add(bj);
             }
+        }
+
+        // Highlight the node under the cursor (golden, ~1.3× scale) in the per-frame overlay. Rebuilds the overlay
+        // mesh ONLY when the hovered index changes, so it's cheap to call every frame. node < 0 hides it.
+        public void SetHoverNode(ITerrainSurface field, int node)
+        {
+            if (_hoverMr == null || Graph == null) return;          // overlay not built yet (no Rebuild has run)
+            if (node >= Graph.Nodes.Count) node = -1;
+            if (node == _hoverNode) return;
+            _hoverNode = node;
+            _hoverMr.enabled = node >= 0 && PlanGuides.ShowNodes;   // hover puck follows the "Show nodes" toggle too
+            _hoverMesh.Clear();
+            if (node < 0) return;
+            Vector2 c = Graph.Nodes[node];
+            float radius = Mathf.Max(0.2f, NodePuckRadius) * 1.3f;
+            float terrainY = field != null ? field.SampleHeight(c.x, c.y) : 0f;
+            float designY = Graph.GetNodeY(node);
+            float dispY = float.IsNaN(designY) ? terrainY : designY;
+            float baseY = dispY + Lift;
+            float topY = baseY + Mathf.Max(0.02f, PlanGuides.NodePuckHeight) * 1.3f;
+            _hv.Clear(); _hn.Clear(); _hidx.Clear();
+            EmitPuck(_hv, _hn, _hidx, c, radius, baseY, topY);
+            _hoverMesh.SetVertices(_hv); _hoverMesh.SetNormals(_hn); _hoverMesh.SetTriangles(_hidx, 0); _hoverMesh.RecalculateBounds();
+        }
+
+        // Edge indices touching node `n` (for deleting a node + its segments and remapping the built-road set).
+        public List<int> EdgesTouchingNode(int n)
+        {
+            var list = new List<int>();
+            if (Graph == null) return list;
+            for (int i = 0; i < Graph.Edges.Count; i++) { LineEdge e = Graph.Edges[i]; if (e.A == n || e.B == n) list.Add(i); }
+            return list;
         }
 
         void EnsureRoot()
@@ -1533,6 +1633,18 @@ namespace NetworkDesigner.Terrain
             _nodeMf.sharedMesh = _nodeMesh;
             _nodeMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(PlanGuides.RoadNodeColor, 0.2f, "RoadPlanNodeMat");
             _nodeMr.sharedMaterial = _nodeMat;
+
+            _hoverGo = new GameObject(RootName + "_NodeHover") { hideFlags = HideFlags.DontSave };
+            _hoverGo.transform.SetParent(_root.transform, false);
+            _hoverMf = _hoverGo.AddComponent<MeshFilter>();
+            _hoverMr = _hoverGo.AddComponent<MeshRenderer>();
+            _hoverMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _hoverMr.receiveShadows = false;
+            _hoverMesh = new Mesh { name = "RoadPlanNodeHoverMesh" };
+            _hoverMf.sharedMesh = _hoverMesh;
+            _hoverMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(_RoadNodeHoverColor, 0.2f, "RoadPlanNodeHoverMat");
+            _hoverMr.sharedMaterial = _hoverMat;
+            _hoverMr.enabled = false;
+            _hoverNode = -1;   // overlay mesh is fresh → force a rebuild on the next SetHoverNode
         }
 
         Material MakeMat(Color c, string name)

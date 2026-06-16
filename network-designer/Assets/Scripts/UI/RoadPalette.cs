@@ -42,15 +42,19 @@ namespace NetworkDesigner.UI
             var modes = HBox(); modes.style.marginBottom = 12;
             var planBtn = MakeButton("Plan (;)", () =>
             {
-                if (Designer.IsRoadPlanMode) Designer.EnterSculptMode(); else Designer.EnterRoadPlanMode();
+                if (Designer.IsRoadPlanMode && !Designer.IsRoadBuildMode) Designer.EnterSculptMode(); else Designer.EnterRoadPlanMode();
             });
             planBtn.style.flexGrow = 1; planBtn.style.marginRight = 6;
-            var buildBtn = MakeButton("Build", () => { });   // top-level build view — pipeline not built yet
-            buildBtn.style.flexGrow = 1; buildBtn.SetEnabled(false);
-            buildBtn.tooltip = "Excavate + 3D road sweep — coming next";
+            planBtn.tooltip = "Plan mode: draw/edit the road plan. Right-click a node deletes it + its segments (+ built road).";
+            var buildBtn = MakeButton("Build (')", () =>
+            {
+                if (Designer.IsRoadBuildMode) Designer.EnterSculptMode(); else Designer.EnterRoadBuildMode();
+            });
+            buildBtn.style.flexGrow = 1;
+            buildBtn.tooltip = "Build mode. Right-click a node deletes it + its segments (+ built road), same as Plan mode.";
             modes.Add(planBtn); modes.Add(buildBtn);
             body.Add(modes);
-            _sync.Add(() => StyleActive(planBtn, Designer.IsRoadPlanMode));
+            _sync.Add(() => { StyleActive(planBtn, Designer.IsRoadPlanMode && !Designer.IsRoadBuildMode); StyleActive(buildBtn, Designer.IsRoadBuildMode); });
 
             // ---- DESIGN PROFILE ----
             body.Add(Divider());
@@ -83,10 +87,10 @@ namespace NetworkDesigner.UI
             body.Add(selCount);
 
             var actRow = HBox(); actRow.style.marginBottom = 4;
-            var excBtn = MakeButton("Excavate!", () => Designer.ExcavateSelectedRoads());
+            var excBtn = MakeButton("Excavate", () => Designer.ExcavateSelectedRoads());
             excBtn.style.flexGrow = 1; excBtn.style.marginRight = 6;
             excBtn.tooltip = "Cut + fill the bed of every SELECTED planned (red) segment → they turn yellow, ready to build. Bridges are skipped.";
-            var bldBtn = MakeButton("Build!", () => Designer.BuildSelectedRoads());
+            var bldBtn = MakeButton("Build", () => Designer.BuildSelectedRoads());
             bldBtn.style.flexGrow = 1;
             bldBtn.tooltip = "Sweep the 3D road on every SELECTED segment that's excavated (yellow) or a bridge, each with its own profile.";
             actRow.Add(excBtn); actRow.Add(bldBtn);
@@ -97,9 +101,9 @@ namespace NetworkDesigner.UI
             brBtn.style.flexGrow = 1; brBtn.style.marginRight = 6;
             brBtn.tooltip = "Flag the SELECTED segments as a BRIDGE (blue): ends leveled, NOT excavated, built on a deck + piers. " +
                             "If they're all already bridges, this un-bridges them.";
-            var clrBtn = MakeButton("Clear sel.", () => Designer.ClearRoadSelection());
+            var clrBtn = MakeButton("Clear Plan", () => Designer.ClearRoadPlan());
             clrBtn.style.flexGrow = 1;
-            clrBtn.tooltip = "Deselect all segments.";
+            clrBtn.tooltip = "Delete the ENTIRE road plan (all nodes + segments) and any 3D road built from it.";
             actRow2.Add(brBtn); actRow2.Add(clrBtn);
             body.Add(actRow2);
 
@@ -107,8 +111,22 @@ namespace NetworkDesigner.UI
             {
                 int c = Designer.RoadSelectionCount;
                 selCount.text = c + " selected";
-                excBtn.SetEnabled(c > 0); bldBtn.SetEnabled(c > 0); brBtn.SetEnabled(c > 0); clrBtn.SetEnabled(c > 0);
+                excBtn.SetEnabled(c > 0); bldBtn.SetEnabled(c > 0); brBtn.SetEnabled(c > 0);   // Clear Plan always enabled
             });
+
+            // Show/hide the plan-line markings (nodes stay visible). Highlighted = lines shown.
+            var planLinesBtn = MakeButton("Plan lines", () => Designer.RoadPlanLayer.TogglePlanLines());
+            planLinesBtn.style.marginBottom = 6;
+            planLinesBtn.tooltip = "Show or hide the plan-line markings (lane/centre/footprint). Nodes stay visible.";
+            body.Add(planLinesBtn);
+            _sync.Add(() => StyleActive(planLinesBtn, !Designer.RoadPlanLayer.PlanLinesHidden));
+
+            // Bridge parapets toggle (top-level so it's reachable without opening ADVANCED; height lives in ADVANCED).
+            var parapetTop = MakeButton("Bridge parapets", () => { Designer.RoadPlanLayer.BridgeParapets = !Designer.RoadPlanLayer.BridgeParapets; Designer.RefreshBuiltRoads(); });
+            parapetTop.style.marginBottom = 10;
+            parapetTop.tooltip = "Build side barrier walls along the deck edges of built bridge segments (height in ADVANCED).";
+            body.Add(parapetTop);
+            _sync.Add(() => StyleActive(parapetTop, Designer.RoadPlanLayer.BridgeParapets));
 
             // ---- PLANS (named per-world library) ----
             body.Add(Divider());
@@ -183,6 +201,9 @@ namespace NetworkDesigner.UI
             adv.Add(NumberRow("Bridge pier width", "m",
                 () => Designer.RoadPlanLayer.BridgePierWidth,
                 v => { Designer.RoadPlanLayer.BridgePierWidth = v; Designer.RefreshBuiltRoads(); }, 0.3f, 4f, "0.0"));
+            adv.Add(NumberRow("Parapet height", "m",
+                () => Designer.RoadPlanLayer.BridgeParapetHeight,
+                v => { Designer.RoadPlanLayer.BridgeParapetHeight = v; Designer.RefreshBuiltRoads(); }, 0.2f, 2.5f, "0.0"));
 
             var elevBtn = MakeButton("Edit elevations", () => Designer.SetRoadElevationEdit(!Designer.RoadElevationEdit));
             elevBtn.style.marginTop = 6;
@@ -204,12 +225,10 @@ namespace NetworkDesigner.UI
             adv.Add(advActs);
 
             var advActs2 = HBox(); advActs2.style.marginBottom = 8;
-            var clr = MakeButton("Clear Plan", () => Designer.ClearRoadPlan());
-            clr.style.flexGrow = 1; clr.style.marginRight = 6;
-            var rm = MakeButton("Remove roads", () => Designer.ClearBuiltRoads());
+            var rm = MakeButton("Remove roads", () => Designer.ClearBuiltRoads());   // Clear Plan now lives in the action area
             rm.style.flexGrow = 1;
             rm.tooltip = "Delete the built 3D road meshes (keeps the plan) — for testing";
-            advActs2.Add(clr); advActs2.Add(rm);
+            advActs2.Add(rm);
             adv.Add(advActs2);
 
             adv.Add(ToggleRow("Show crosswalks", () => Designer.RoadPlanLayer.ShowCrosswalks,
