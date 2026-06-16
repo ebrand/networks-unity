@@ -28,6 +28,8 @@ namespace NetworkDesigner.Terrain
         public bool Excavated;     // road plan: this segment's bed has been cut → renders distinctly + becomes Build-able
         public bool Bridge;        // road plan: this segment SPANS (bridge/trestle) — ends forced level, not excavated, built on piers
         public bool Built;         // road plan: this segment has a 3D road swept on it (runtime; travels with the edge through splits)
+        public float SetbackA = -1f;  // road plan: manual setback override (m) at END A's junction; <0 = auto (resolver-computed)
+        public float SetbackB = -1f;  // road plan: manual setback override (m) at END B's junction; <0 = auto
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }
@@ -143,6 +145,7 @@ namespace NetworkDesigner.Terrain
             string prof = e.Profile;
             bool curved = e.HasCurve;
             bool exc = e.Excavated, brg = e.Bridge, blt = e.Built;   // per-segment state travels onto both halves
+            float sbA = e.SetbackA, sbB = e.SetbackB;                 // setback overrides stay on their original-endpoint half
             Vector2 p0 = Nodes[origA], p3 = Nodes[origB], q1, q2;
             if (curved) { q1 = e.ControlA; q2 = e.ControlB; }
             else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
@@ -154,9 +157,14 @@ namespace NetworkDesigner.Terrain
             Vector2 bc = Vector2.Lerp(b, c, t);
             Vector2 m = Vector2.Lerp(ab, bc, t);
             int mi = AddNode(m);
+            // Sit the new junction node on the split edge's DESIGN grade line (lerp of its endpoints' elevations)
+            // instead of leaving it NaN → captured from raw terrain. Keeps a road perpendicular off an existing
+            // road, and the junction pad, on the same grade as the road being split (no step/gap at the junction).
+            float syA = GetNodeY(origA), syB = GetNodeY(origB);
+            if (!float.IsNaN(syA) && !float.IsNaN(syB)) SetNodeY(mi, Mathf.Lerp(syA, syB, t));
             Edges.RemoveAt(edgeIndex);
-            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt };
-            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt };
+            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt, SetbackA = sbA, SetbackB = -1f };
+            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt, SetbackA = -1f, SetbackB = sbB };
             if (curved)
             {
                 e1.HasCurve = true; e1.ControlA = a; e1.ControlB = ab;

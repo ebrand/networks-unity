@@ -746,6 +746,7 @@ namespace NetworkDesigner.Terrain
             RailLayer.Rebuild(Surf);
             PlanLayer.Rebuild(Surf);
             RoadPlanLayer.Rebuild(Surf);
+            RebuildBuiltRoads();   // re-sweep the 3D roads from the loaded per-segment Built flags (persist across restart)
             RetainingWallLayer.Rebuild(Surf);   // wall mesh from the save (terrain grade already in the edits)
             RebuildContours();
             if (!DemBackend) ApplyWater(); // low-poly water only; DEM water handled by LoadDemWorld
@@ -2005,6 +2006,7 @@ namespace NetworkDesigner.Terrain
                 var save = JsonUtility.FromJson<LineGraphSave>(System.IO.File.ReadAllText(path));
                 if (save == null) { Debug.LogWarning($"[RoadPlan] '{nm}' is unreadable."); return false; }
                 RoadPlanLayer.LoadState(save); RoadPlanLayer.Rebuild(Surf);
+                RebuildBuiltRoads();   // re-sweep the 3D roads for any segments saved as Built (JSON keeps the flag)
                 _currentRoadPlanName = nm; _dirtySince = Time.realtimeSinceStartup;
                 Debug.Log($"[RoadPlan] loaded '{nm}'.");
                 return true;
@@ -2531,6 +2533,29 @@ namespace NetworkDesigner.Terrain
 
         public int RoadSelectionCount => RoadPlanLayer.SelectedEdgeCount;
         public void ClearRoadSelection() { RoadPlanLayer.ClearEdgeSelection(); RoadPlanLayer.Rebuild(Surf); }
+
+        // Per-road junction SETBACK override for the SELECTED segments (applied to BOTH ends): how far the road pulls
+        // back from its junction. <0 = auto (resolver-computed). Re-sweeps so built intersections update live.
+        public float SelectedRoadSetback()
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();
+            if (sel.Count == 0 || RoadPlanLayer.Graph == null) return 0f;
+            return Mathf.Max(0f, RoadPlanLayer.Graph.Edges[sel[0]].SetbackA);   // auto (<0) reads as 0
+        }
+        public void SetSelectedRoadSetback(float meters)
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();
+            if (sel.Count == 0) return;
+            foreach (int e in sel) { RoadPlanLayer.Graph.Edges[e].SetbackA = meters; RoadPlanLayer.Graph.Edges[e].SetbackB = meters; }
+            RoadPlanLayer.Rebuild(Surf); RebuildBuiltRoads(); _dirtySince = Time.realtimeSinceStartup;
+        }
+        public void ClearSelectedRoadSetback()   // back to auto
+        {
+            var sel = RoadPlanLayer.SelectedEdgesList();
+            if (sel.Count == 0) return;
+            foreach (int e in sel) { RoadPlanLayer.Graph.Edges[e].SetbackA = -1f; RoadPlanLayer.Graph.Edges[e].SetbackB = -1f; }
+            RoadPlanLayer.Rebuild(Surf); RebuildBuiltRoads(); _dirtySince = Time.realtimeSinceStartup;
+        }
 
         // Delete the SELECTED plan segments (and any 3D road built on them).
         public void DeleteSelectedRoadSegments()
@@ -5306,7 +5331,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(17); // version (17 added road-plan per-segment Bridge flag)
+                    w.Write(19); // version (19 added road-plan per-segment setback overrides)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -5458,6 +5483,8 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.Profile ?? "");                  // v13+ (road-plan per-segment profile)
                 w.Write(e.Excavated);                      // v15+ (road-plan per-segment excavated flag)
                 w.Write(e.Bridge);                         // v17+ (road-plan per-segment bridge flag)
+                w.Write(e.Built);                          // v18+ (road-plan per-segment built flag → 3D road persists)
+                w.Write(e.SetbackA); w.Write(e.SetbackB);  // v19+ (road-plan per-segment setback overrides; <0 = auto)
             }
             int ny = g?.NodeY?.Count ?? 0;                 // v14+: per-node design elevation
             w.Write(ny);
@@ -5662,6 +5689,8 @@ namespace NetworkDesigner.Terrain
                 if (version >= 13) e.Profile = r.ReadString();   // road-plan per-segment profile
                 if (version >= 15) e.Excavated = r.ReadBoolean(); // road-plan per-segment excavated flag
                 if (version >= 17) e.Bridge = r.ReadBoolean();    // road-plan per-segment bridge flag
+                if (version >= 18) e.Built = r.ReadBoolean();     // road-plan per-segment built flag
+                if (version >= 19) { e.SetbackA = r.ReadSingle(); e.SetbackB = r.ReadSingle(); }   // setback overrides
                 g.Edges.Add(e);
             }
             if (version >= 14)   // per-node design elevation

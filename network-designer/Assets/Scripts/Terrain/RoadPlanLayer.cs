@@ -42,9 +42,9 @@ namespace NetworkDesigner.Terrain
         public bool AllowHardCorner => DesignSpeedKmh <= HardCornerMaxSpeedKmh;
         [System.NonSerialized] public bool StraightOffAxis;   // cursor isn't on an allowed heading → suppress the (kinked) click
         [Tooltip("Draw a stop bar across each approach at an intersection (3+ roads).")]
-        public bool ShowStopBars = true;
+        public bool ShowStopBars = false;
         [Tooltip("Draw crosswalk stripes across each approach at an intersection (3+ roads).")]
-        public bool ShowCrosswalks = true;
+        public bool ShowCrosswalks = false;
         [Tooltip("Metres between draped samples along the curve.")]
         public float SampleStep = 2f;
         [Tooltip("Metres above the terrain (avoids z-fighting with the ground).")]
@@ -130,9 +130,16 @@ namespace NetworkDesigner.Terrain
         readonly List<int> _hidx = new List<int>();
         [System.NonSerialized] int _hoverNode = -1;
         public int HoverNode => _hoverNode;
-        [System.NonSerialized] bool _linesHidden;   // plan-line markings hidden (Plan-mode right-click toggles this)
+        [System.NonSerialized] bool _linesHidden;   // whole plan overlay (line markings + node pucks) hidden — palette "Plan lines" toggle
         public bool PlanLinesHidden => _linesHidden;
-        public void TogglePlanLines() { _linesHidden = !_linesHidden; if (_mr != null) _mr.enabled = !_linesHidden; }
+        public void TogglePlanLines() => SetPlanLinesVisible(_linesHidden);
+        public void SetPlanLinesVisible(bool visible)
+        {
+            _linesHidden = !visible;
+            if (_mr != null) _mr.enabled = !_linesHidden;
+            if (_nodeMr != null) _nodeMr.enabled = PlanGuides.ShowNodes && !_linesHidden && Graph != null && Graph.Nodes.Count > 0;
+            if (_hoverMr != null && _linesHidden) _hoverMr.enabled = false;
+        }
         static readonly Color _RoadNodeHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);   // golden, matches rail pucks
 
         GameObject _pvGo; MeshFilter _pvMf; MeshRenderer _pvMr; Mesh _pvMesh; Material _pvBadMat;
@@ -1188,8 +1195,8 @@ namespace NetworkDesigner.Terrain
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
-            _nodeMr.enabled = PlanGuides.ShowNodes && Graph.Nodes.Count > 0;   // Design Controls "Show nodes" gates the pucks
-            if (_mr != null) _mr.enabled = !_linesHidden;   // plan-line markings can be hidden (nodes stay for interaction)
+            _nodeMr.enabled = PlanGuides.ShowNodes && !_linesHidden && Graph.Nodes.Count > 0;   // "Show nodes" + "Plan lines" gate the pucks
+            if (_mr != null) _mr.enabled = !_linesHidden;   // "Plan lines" toggle hides the whole overlay (lines + nodes)
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
             // Topology may have shifted node indices — clear the hover so the per-frame driver re-resolves it cleanly
             // next frame (avoids a stale index highlighting the wrong node).
@@ -1585,7 +1592,7 @@ namespace NetworkDesigner.Terrain
             if (node >= Graph.Nodes.Count) node = -1;
             if (node == _hoverNode) return;
             _hoverNode = node;
-            _hoverMr.enabled = node >= 0 && PlanGuides.ShowNodes;   // hover puck follows the "Show nodes" toggle too
+            _hoverMr.enabled = node >= 0 && PlanGuides.ShowNodes && !_linesHidden;   // hover puck follows "Show nodes" + "Plan lines"
             _hoverMesh.Clear();
             if (node < 0) return;
             Vector2 c = Graph.Nodes[node];

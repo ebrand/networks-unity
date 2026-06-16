@@ -115,11 +115,11 @@ namespace NetworkDesigner.UI
             });
 
             // Show/hide the plan-line markings (nodes stay visible). Highlighted = lines shown.
-            var planLinesBtn = MakeButton("Plan lines", () => Designer.RoadPlanLayer.TogglePlanLines());
-            planLinesBtn.style.marginBottom = 6;
-            planLinesBtn.tooltip = "Show or hide the plan-line markings (lane/centre/footprint). Nodes stay visible.";
-            body.Add(planLinesBtn);
-            _sync.Add(() => StyleActive(planLinesBtn, !Designer.RoadPlanLayer.PlanLinesHidden));
+            var planLinesRow = ToggleRow("Plan lines",
+                () => !Designer.RoadPlanLayer.PlanLinesHidden,
+                v => Designer.RoadPlanLayer.SetPlanLinesVisible(v));
+            planLinesRow.tooltip = "Show or hide the plan overlay — both the line markings and the node pucks.";
+            body.Add(planLinesRow);
 
             // Bridge parapets toggle (top-level so it's reachable without opening ADVANCED; height lives in ADVANCED).
             var parapetTop = MakeButton("Bridge parapets", () => { Designer.RoadPlanLayer.BridgeParapets = !Designer.RoadPlanLayer.BridgeParapets; Designer.RefreshBuiltRoads(); });
@@ -237,6 +237,23 @@ namespace NetworkDesigner.UI
                 v => { Designer.RoadPlanLayer.ShowStopBars = v; Designer.RebuildRoadPlan(); }));
             adv.Add(ToggleRow("Guided turns (lock)", () => Designer.RoadPlanLayer.GuidedTurns,
                 v => Designer.RoadPlanLayer.GuidedTurns = v));
+
+            // ---- INTERSECTIONS ----
+            adv.Add(SectionLabel("INTERSECTIONS"));
+            // Global tightness: base setback floor as a fraction of road width (geometric minimum always enforced).
+            adv.Add(NumberRow("Junction tightness", "× W",
+                () => NetworkDesigner.Geometry.GeometryResolver.JunctionSetbackFloor,
+                v => { NetworkDesigner.Geometry.GeometryResolver.JunctionSetbackFloor = v; Designer.RefreshBuiltRoads(); }, 0f, 1.5f, "0.0"));
+            // Per-road override for the SELECTED segments (both ends); "Auto" reverts to the resolver-computed value.
+            adv.Add(NumberRow("Sel. road setback", "m",
+                () => Designer.SelectedRoadSetback(),
+                v => Designer.SetSelectedRoadSetback(v), 0f, 40f, "0.0"));
+            var autoSb = MakeButton("Auto setback (selected)", () => Designer.ClearSelectedRoadSetback());
+            autoSb.tooltip = "Revert the SELECTED segments' junction setback to auto (resolver-computed).";
+            adv.Add(autoSb);
+            var sbNote = Cap("Select a road (Cmd/Ctrl-click), then set its setback; applies to both ends.");
+            sbNote.style.fontSize = 10;
+            adv.Add(sbNote);
         }
 
         static string SanitizeShown(string n) => (n ?? "").Trim();

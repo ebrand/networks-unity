@@ -88,6 +88,11 @@ namespace NetworkDesigner.Geometry
         /// </summary>
         public static float CurvedSetbackMultiplier = 1.5f;
 
+        /// Base setback floor at a 3+-way junction, as a fraction of the road's width. The geometric minimum
+        /// (RequiredSetback, so neighbours don't overlap) is always enforced on top; this is just how roomy the
+        /// junction feels beyond that. 1.0 = one full width (loose); lower = tighter intersections.
+        public static float JunctionSetbackFloor = 0.5f;
+
         /// <summary>
         /// Compute the resolved geometry at a single vertex. Returns an
         /// empty VertexGeometry if no roads reach the vertex.
@@ -876,7 +881,7 @@ namespace NetworkDesigner.Geometry
                     }
                     else
                     {
-                        setback = self.RoadWidth; // base floor: W
+                        setback = self.RoadWidth * Mathf.Max(0f, JunctionSetbackFloor); // base floor (tighter < 1·W)
 
                         setback = Mathf.Max(setback,
                             RequiredSetback(self.RoadWidth * 0.5f,
@@ -1116,6 +1121,10 @@ namespace NetworkDesigner.Geometry
             if (Mathf.Abs(det) < 1e-6f) return null;
             Vector2 diff = p2 - p1;
             float t = (diff.x * d2.y - diff.y * d2.x) / det;
+            // Near-parallel rays (det small but past the guard) give a huge |t| → an intersection far away, which is
+            // numerical noise. Reject it so the caller falls back to a straight fillet instead of a bezier control
+            // point shot off into space (which renders as a thin triangular spike off the road edge).
+            if (float.IsNaN(t) || float.IsInfinity(t) || Mathf.Abs(t) > 1000f) return null;
             return p1 + t * d1;
         }
 

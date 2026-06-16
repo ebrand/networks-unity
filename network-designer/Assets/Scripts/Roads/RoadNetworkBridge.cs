@@ -46,6 +46,8 @@ namespace NetworkDesigner.Roads
                     EndB = "v" + le.B,
                     Profile = prof,
                     SpeedLimit = le.SpeedLimit > 0f ? le.SpeedLimit : (float?)null,
+                    SetbackA = le.SetbackA >= 0f ? le.SetbackA : (float?)null,   // <0 = auto (resolver computes it)
+                    SetbackB = le.SetbackB >= 0f ? le.SetbackB : (float?)null,
                 };
                 if (le.HasCurve) road.Curve = new RoadCurve { ControlA = le.ControlA, ControlB = le.ControlB };
                 net.Roads.Add(road);

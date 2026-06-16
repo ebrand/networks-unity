@@ -167,7 +167,26 @@ namespace NetworkDesigner.Roads
         // and renders the pad black. The ring is first oriented CW in (x,z) so the fixed windings face right.
         static void BuildIntersectionPad(List<Vector2> ring, Vector2 center, float gradeY, float depth, Transform parent, string name)
         {
+            // Defense-in-depth against the triangular-spike artifact: first drop NaN/∞ points, then drop OUTLIERS —
+            // points far beyond the junction's TYPICAL ring radius. A single bad outline point (e.g. a near-parallel
+            // fillet intersection) would otherwise fan into a thin spike off the road edge. Median-based so it adapts
+            // to the junction size (catches a spike at any scale without clipping legit wide junctions).
+            for (int i = ring.Count - 1; i >= 0; i--)
+            {
+                Vector2 q = ring[i];
+                if (float.IsNaN(q.x) || float.IsNaN(q.y) || float.IsInfinity(q.x) || float.IsInfinity(q.y)) ring.RemoveAt(i);
+            }
+            if (ring.Count >= 4)
+            {
+                var rad = new List<float>(ring.Count);
+                for (int i = 0; i < ring.Count; i++) rad.Add((ring[i] - center).magnitude);
+                var sorted = new List<float>(rad); sorted.Sort();
+                float median = sorted[sorted.Count / 2];
+                float cap = Mathf.Max(median * 6f, 30f);   // outlier = >6× the typical ring radius (30 m floor for tiny junctions)
+                for (int i = ring.Count - 1; i >= 0; i--) if (rad[i] > cap) ring.RemoveAt(i);
+            }
             int n = ring.Count;
+            if (n < 3) return;
             double sa = 0.0;   // signed area in (x,z); >0 = CCW → reverse so the ring is CW
             for (int i = 0; i < n; i++) { int j = (i + 1) % n; sa += (double)ring[i].x * ring[j].y - (double)ring[j].x * ring[i].y; }
             if (sa > 0.0) ring.Reverse();
