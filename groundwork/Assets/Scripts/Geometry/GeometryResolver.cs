@@ -17,6 +17,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using NetworkDesigner.Model;
+using NetworkDesigner.Roads;   // RoadLayout (full-footprint width + edge constants)
 
 namespace NetworkDesigner.Geometry
 {
@@ -826,7 +827,7 @@ namespace NetworkDesigner.Geometry
                     End = end,
                     BearingDir = dir,
                     Bearing = Mathf.Atan2(dir.y, dir.x),
-                    RoadWidth = road.Profile.TotalWidth,
+                    RoadWidth = RoadLayout.Width(road.Profile),   // full footprint (incl. curb/parapet) so setbacks clear the true outer edge
                     HasSetbackOverride = hasOverride,
                     SetbackOverride = overrideVal,
                     OtherVertexPos = shiftedOtherPos,
@@ -1036,8 +1037,14 @@ namespace NetworkDesigner.Geometry
             // side, so dead-end caps and intersection fillets stay on the
             // pavement instead of the spline. OuterRight = CW side
             // (+rightFromV), OuterLeft = CCW side.
-            Vector2 abEdge = setbackPoint + (abOuter - midpoint) * abRight;
-            Vector2 baEdge = setbackPoint + (baOuter - midpoint) * abRight;
+            // Curb + parapet sit OUTBOARD of the shoulder in the swept body (RoadCrossSectionBuilder.FromProfile),
+            // but the lane/centering math above (abOuter/baOuter/midpoint) is intentionally lanes+shoulder only so
+            // lanes never move (see CenteringShift). Push ONLY the outer corners outward by that edge extra so
+            // OuterLeft/OuterRight land on the true pavement footprint — matching the segment body and the (already
+            // wider) excavation bed. midpoint is untouched, so lane endpoints below are unaffected.
+            float edgeExtra = EdgeExtraWidth(d.Road.Profile);
+            Vector2 abEdge = setbackPoint + (abOuter - midpoint + Mathf.Sign(abOuter) * edgeExtra) * abRight;
+            Vector2 baEdge = setbackPoint + (baOuter - midpoint + Mathf.Sign(baOuter) * edgeExtra) * abRight;
             Vector2 outerRight, outerLeft;
             if (Vector2.Dot(abEdge - setbackPoint, rightFromV) >= 0f)
             {
@@ -1117,6 +1124,8 @@ namespace NetworkDesigner.Geometry
                 Control = d.End == RoadEnd.A ? d.Road.ControlA : d.Road.ControlB,
                 ShoulderWidthCW = shoulderCW,
                 ShoulderWidthCCW = shoulderCCW,
+                EdgeStackWidthCW = shoulderCW + edgeExtra,
+                EdgeStackWidthCCW = shoulderCCW + edgeExtra,
             };
         }
 
@@ -1237,6 +1246,18 @@ namespace NetworkDesigner.Geometry
             float w = shoulderWidth;
             foreach (Lane l in lanes) w += l.Width;
             return w;
+        }
+
+        // Width (m) the swept body adds OUTBOARD of the shoulder on each side: curb + (elevated) parapet.
+        // Mirrors RoadCrossSectionBuilder.FromProfile exactly — curb 0.5 when Curbs; parapet 0.3 when Elevated
+        // and NOT guardrailed. Guardrails are excluded on purpose: FromProfile builds no guardrail geometry,
+        // so the swept body never widens for them. Kept in sync with Roads.RoadLayout constants.
+        static float EdgeExtraWidth(RoadProfile p)
+        {
+            float e = 0f;
+            if (p.Curbs) e += RoadLayout.CurbWidth;
+            if (p.Elevated && !p.Guardrails) e += RoadLayout.ParapetWidth;
+            return e;
         }
 
         /// <summary>

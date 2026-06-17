@@ -59,7 +59,7 @@ namespace NetworkDesigner.Roads
             {
                 case Guard:    return new Color(0.56f, 0.57f, 0.60f);   // steel
                 case Parapet:  return new Color(0.50f, 0.51f, 0.54f);   // concrete
-                case Edge:     return sidewalk ? new Color(0.85f, 0.85f, 0.86f) : new Color(0.20f, 0.21f, 0.22f);
+                case Edge:     return sidewalk ? new Color(0.66f, 0.66f, 0.67f) : new Color(0.20f, 0.21f, 0.22f);   // light-concrete gray (was 0.85 near-white → HDR bloom)
                 case Curb:     return new Color(0.72f, 0.72f, 0.72f);   // light gray
                 case Median:   return new Color(0.32f, 0.42f, 0.26f);   // planted
                 case TurnLane: return new Color(0.42f, 0.36f, 0.14f);   // amber

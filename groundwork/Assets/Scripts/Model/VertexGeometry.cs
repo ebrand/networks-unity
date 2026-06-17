@@ -106,6 +106,18 @@ namespace NetworkDesigner.Model
         public float ShoulderWidthCCW;
 
         /// <summary>
+        /// FULL outboard edge-stack width on each side (shoulder/sidewalk +
+        /// curb + parapet) — i.e. everything between the outermost lane and
+        /// OuterLeft/OuterRight. ShoulderWidthCW/CCW is just the shoulder
+        /// portion; this is the whole band the swept body lays outboard of
+        /// the lanes. Consumers that want to separate the lane area from the
+        /// edge band (junction edge band, designer corner-strip inset) use
+        /// THIS, not the shoulder-only value.
+        /// </summary>
+        public float EdgeStackWidthCW;
+        public float EdgeStackWidthCCW;
+
+        /// <summary>
         /// Per-end stop/yield/none control for this road at this vertex.
         /// Copied from NetworkRoad.ControlA / ControlB depending on End.
         /// Drives the IntersectionSignsRenderer.

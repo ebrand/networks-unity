@@ -37,6 +37,8 @@ namespace NetworkDesigner.Roads
             if (resolved != null) foreach (VertexGeometry vg in resolved) if (vg != null) vgById[vg.VertexId] = vg;
             var vById = new Dictionary<string, Vertex>();
             foreach (Vertex v in net.Vertices) vById[v.Id] = v;
+            var profById = new Dictionary<string, RoadProfile>();   // road id -> profile, for the junction edge band
+            foreach (NetworkRoad r in net.Roads) if (r != null && r.Profile != null) profById[r.Id] = r.Profile;
 
             float depth = Mathf.Max(0f, excavationDepth);
             int built = 0, skipped = 0;
@@ -70,7 +72,8 @@ namespace NetworkDesigner.Roads
                 RoadCrossSection xs = RoadCrossSectionBuilder.FromProfile(road.Profile);
                 if (xs.Thickness < depth) xs.Thickness = depth;
 
-                RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB, groundAt, follow);
+                var segGo = RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB, groundAt, follow);
+                WarnIfHugeMesh(segGo, road.Id);
                 BuildRoadMarkings(road.Profile, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks", groundAt, follow);
                 built++;
             }
@@ -91,6 +94,10 @@ namespace NetworkDesigner.Roads
                     if (ring.Count < 3) continue;
                     float gy = vertexElev != null ? vertexElev(vg.VertexId) : 0f;
                     BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId);
+                    // Overlay the raised edge stack (shoulder/sidewalk + curb + parapet) around corners whose
+                    // flanking approaches share a profile. Additive on top of the flat pad; no-op (no GO) when
+                    // nothing matches or there's no edge stack, so disparate/edgeless junctions are unchanged.
+                    BuildJunctionEdgeBands(vg, profById, gy, root.transform, "XE_" + vg.VertexId);
                     pads++;
                 }
 
@@ -264,6 +271,7 @@ namespace NetworkDesigner.Roads
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             go.AddComponent<MeshRenderer>().sharedMaterial = PipelineMaterials.CreateLitMatte(AsphaltColor, "RoadXFill");
             go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            WarnIfHugeMesh(go, name);
         }
 
         // Ear-clipping triangulation of a CW-wound simple polygon (XZ). Returns CW triangle index triples (into the
@@ -313,6 +321,221 @@ namespace NetworkDesigner.Roads
             bool neg = d1 < 0f || d2 < 0f || d3 < 0f;
             bool pos = d1 > 0f || d2 > 0f || d3 > 0f;
             return !(neg && pos);
+        }
+
+        // ---- edge stack carried through the junction (shoulder/sidewalk + curb + parapet) ----
+        //
+        // Segments already sweep their full edge stack up to the setback line. This overlays a RAISED edge
+        // band around each junction CORNER whose two flanking approaches share an edge profile, so the
+        // curb/sidewalk/shoulder wraps continuously through. Disparate approaches get no band — their edge
+        // stops at the setback (the flat asphalt pad fills past it). Mirrors the designer's 2D corner strips
+        // (Rendering/IntersectionRenderer.cs:62-258) but in 3D with real heights + per-surface materials
+        // matching the swept body (RoadSweep.SurfaceMat). Purely additive on top of BuildIntersectionPad's
+        // flat pad — no regression on disparate or edgeless junctions.
+        const int BandRungs = 8;      // samples along each corner fillet
+        const float EdgeBandLift = 0.02f;   // lift above the asphalt pad so a FLAT verge (sidewalk/shoulder, no curb) doesn't z-fight
+
+        static void BuildJunctionEdgeBands(VertexGeometry vg, Dictionary<string, RoadProfile> profById,
+                                           float gradeY, Transform parent, string name)
+        {
+            int n = vg.Approaches != null ? vg.Approaches.Count : 0;
+            if (n < 2 || vg.Outline == null) return;
+
+            // Lane-area corners per approach (outline inset inward by the full edge-stack width) — the inner
+            // boundary the band's curb face meets. Same construction as IntersectionRenderer (lines 84-86).
+            var shrunkStart = new Vector2[n];
+            var shrunkEnd = new Vector2[n];
+            for (int i = 0; i < n; i++)
+            {
+                VertexApproach a = vg.Approaches[i];
+                Vector2 dir = a.OuterRight - a.OuterLeft;
+                dir = dir.sqrMagnitude > 1e-8f ? dir.normalized : Vector2.right;
+                shrunkStart[i] = a.OuterLeft + dir * a.EdgeStackWidthCCW;
+                shrunkEnd[i] = a.OuterRight - dir * a.EdgeStackWidthCW;
+            }
+
+            var verts = new List<Vector3>();
+            var triBySurf = new Dictionary<RoadSurface, List<int>>();
+            var order = new List<RoadSurface>();
+            List<int> Tris(RoadSurface s)
+            {
+                if (!triBySurf.TryGetValue(s, out var t)) { t = new List<int>(); triBySurf[s] = t; order.Add(s); }
+                return t;
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                VertexApproach a = vg.Approaches[i];
+                VertexApproach b = vg.Approaches[(i + 1) % n];
+                if (!profById.TryGetValue(a.RoadId, out RoadProfile pa) || pa == null) continue;
+                if (!profById.TryGetValue(b.RoadId, out RoadProfile pb) || pb == null) continue;
+                if (EdgeSignature(pa) != EdgeSignature(pb)) continue;   // disparate corner → edge stops at setback
+
+                int transIdx = 2 * i + 1;
+                if (transIdx >= vg.Outline.Count) continue;
+                OutlineSegment trans = vg.Outline[transIdx];
+                if (trans == null) continue;
+
+                if (!EdgeSlice(pa, out List<Vector2> slice, out List<RoadSurface> sliceSegs, out float edgeW)) continue;
+
+                // Matched outer (footprint) + inner (lane) curves for this corner. The inner curve is the outer
+                // offset inward by the edge-stack width — mirror IntersectionRenderer's three cases (119-163):
+                // QuadraticBezier (normal fillet), CubicBezier (S-curve taper joint), Line (collinear joint).
+                Vector2 innerFrom = shrunkEnd[i], innerTo = shrunkStart[(i + 1) % n];
+                Vector2 outerCtrl = Vector2.zero, innerMiter = Vector2.zero;   // quadratic / line
+                Vector2 outerCtrl2 = Vector2.zero, innerCtrl2 = Vector2.zero;  // cubic only
+                if (trans.Kind == SegmentKind.QuadraticBezier)
+                {
+                    // Clamp BOTH controls (matches SampleOutlineRing's outer clamp): at near-parallel/acute
+                    // corners the OE intersection runs to infinity → a giant stretched sidewalk triangle that
+                    // HDR bloom washes the scene white. ClampFilletControl bounds the reach to a compact fillet.
+                    outerCtrl = ClampFilletControl(trans.From, trans.Control, trans.To);
+                    Vector2 e1 = SafeNorm(trans.Control - a.OuterRight);
+                    Vector2 e2 = SafeNorm(b.OuterLeft - trans.Control);
+                    Vector2 p1 = a.OuterRight + PerpRight2(e1) * a.EdgeStackWidthCW;
+                    Vector2 p2 = b.OuterLeft + PerpRight2(e2) * b.EdgeStackWidthCCW;
+                    Vector2 mit = LineIntersect2(p1, e1, p2, e2) ?? ((innerFrom + innerTo) * 0.5f);
+                    innerMiter = ClampFilletControl(innerFrom, mit, innerTo);
+                }
+                else if (trans.Kind == SegmentKind.CubicBezier)
+                {
+                    // Inner cubic = outer cubic shifted inward by the same vector that insets each end to its
+                    // shrunk lane corner, so the band parallels the outer S-curve (IntersectionRenderer 131-145).
+                    outerCtrl = trans.Control; outerCtrl2 = trans.Control2;
+                    innerMiter = trans.Control + (innerFrom - trans.From);
+                    innerCtrl2 = trans.Control2 + (innerTo - trans.To);
+                }
+                else // Line (collinear joint): straight edge continues through
+                {
+                    outerCtrl = (trans.From + trans.To) * 0.5f;
+                    Vector2 joinDir = SafeNorm(trans.To - trans.From);
+                    Vector2 il = a.OuterRight + PerpRight2(joinDir) * a.EdgeStackWidthCW;
+                    Vector2 ir = b.OuterLeft + PerpRight2(joinDir) * b.EdgeStackWidthCCW;
+                    innerMiter = (il + ir) * 0.5f;
+                }
+
+                // Sample the matched outer/inner curves, VALIDATING first: a runaway control (unbounded
+                // miter at an acute/near-parallel corner, or a wild cubic) flings a sample point to infinity →
+                // one giant white triangle that HDR-blooms the scene. Bound every sample to a sane radius of the
+                // corner chord; if anything escapes, skip this corner entirely (and log it) rather than emit a spike.
+                int sliceN = slice.Count;
+                var outPs = new Vector2[BandRungs + 1];
+                var inPs = new Vector2[BandRungs + 1];
+                Vector2 refC = (trans.From + trans.To) * 0.5f;
+                float cap = Mathf.Max((trans.To - trans.From).magnitude * 3f, 20f);
+                bool bad = false;
+                for (int r = 0; r <= BandRungs && !bad; r++)
+                {
+                    float t = (float)r / BandRungs;
+                    Vector2 outP, inP;
+                    if (trans.Kind == SegmentKind.CubicBezier)
+                    {
+                        outP = GeometryResolver.SampleCubic(trans.From, outerCtrl, outerCtrl2, trans.To, t);
+                        inP = GeometryResolver.SampleCubic(innerFrom, innerMiter, innerCtrl2, innerTo, t);
+                    }
+                    else
+                    {
+                        outP = GeometryResolver.SampleQuadratic(trans.From, outerCtrl, trans.To, t);
+                        inP = GeometryResolver.SampleQuadratic(innerFrom, innerMiter, innerTo, t);
+                    }
+                    if (!Finite(outP) || !Finite(inP) || (outP - refC).magnitude > cap || (inP - refC).magnitude > cap)
+                        bad = true;
+                    outPs[r] = outP; inPs[r] = inP;
+                }
+                if (bad)
+                {
+                    Debug.LogWarning($"[RoadXEdge] skipped runaway edge band at vertex {vg.VertexId}, corner {i} (kind={trans.Kind}, cap={cap:F1}m).");
+                    continue;
+                }
+
+                // Loft the edge slice radially between the matched outer (footprint) and inner (lane) curves.
+                int baseStart = verts.Count;
+                for (int r = 0; r <= BandRungs; r++)
+                    for (int k = 0; k < sliceN; k++)
+                    {
+                        float u = edgeW > 1e-5f ? slice[k].x / edgeW : 0f;   // 0 = outer foot, 1 = lane edge
+                        Vector2 xz = Vector2.Lerp(outPs[r], inPs[r], u);
+                        verts.Add(new Vector3(xz.x, gradeY + slice[k].y + EdgeBandLift, xz.y));
+                    }
+                int VID(int r, int k) => baseStart + r * sliceN + k;
+                for (int r = 0; r < BandRungs; r++)
+                    for (int k = 0; k < sliceSegs.Count; k++)
+                    {
+                        List<int> t = Tris(sliceSegs[k]);
+                        bool vertical = Mathf.Abs(slice[k].x - slice[k + 1].x) < 1e-4f;   // curb / outer face
+                        int v0 = VID(r, k), v1 = VID(r + 1, k), v2 = VID(r + 1, k + 1), v3 = VID(r, k + 1);
+                        t.Add(v0); t.Add(v1); t.Add(v2); t.Add(v0); t.Add(v2); t.Add(v3);
+                        if (vertical) { t.Add(v0); t.Add(v2); t.Add(v1); t.Add(v0); t.Add(v3); t.Add(v2); }
+                    }
+            }
+
+            if (verts.Count == 0) return;
+
+            var mesh = new Mesh { name = "RoadXEdge" };
+            if (verts.Count > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts);
+            mesh.subMeshCount = order.Count;
+            for (int s = 0; s < order.Count; s++) mesh.SetTriangles(triBySurf[order[s]], s);
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+
+            var go = new GameObject(name);
+            if (parent != null) go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mats = new Material[order.Count];
+            for (int s = 0; s < order.Count; s++) mats[s] = RoadSweep.SurfaceMat(order[s]);
+            go.AddComponent<MeshRenderer>().sharedMaterials = mats;
+            go.AddComponent<MeshCollider>().sharedMesh = mesh;
+        }
+
+        // Edge-stack slice from a profile: the transverse polyline from the OUTER footprint edge inward to
+        // the first lane — (lateralFromOuter, height) points + per-segment surfaces. Reuses the exact section
+        // the segment body sweeps (RoadCrossSectionBuilder.FromProfile) so the band matches it at the seam.
+        // False when there's no edge stack (first band is already a lane).
+        static bool EdgeSlice(RoadProfile p, out List<Vector2> pts, out List<RoadSurface> segs, out float width)
+        {
+            pts = null; segs = null; width = 0f;
+            RoadCrossSection xs = RoadCrossSectionBuilder.FromProfile(p);
+            int firstLane = -1;
+            for (int s = 0; s < xs.Segs.Count; s++) if (xs.Segs[s] == RoadSurface.Asphalt) { firstLane = s; break; }
+            if (firstLane <= 0) return false;
+            pts = new List<Vector2>(firstLane + 1);
+            for (int i = 0; i <= firstLane; i++) pts.Add(xs.Pts[i]);
+            segs = new List<RoadSurface>(firstLane);
+            for (int i = 0; i < firstLane; i++) segs.Add(xs.Segs[i]);
+            width = pts[pts.Count - 1].x;
+            return width > 0.01f;
+        }
+
+        // Two approaches' edges "match" (continue through their shared corner) when these edge-relevant fields agree.
+        static string EdgeSignature(RoadProfile p)
+            => $"{p.Curbs}|{p.Sidewalks}|{p.Elevated}|{p.Guardrails}|{(p.ShoulderAB != null ? p.ShoulderAB.Width : 0f):F2}|{(p.ShoulderBA != null ? p.ShoulderBA.Width : 0f):F2}";
+
+        // Diagnostic: a normal road sub-mesh spans at most a few hundred metres. A runaway/degenerate vertex
+        // (NaN, or a stray default like the world origin while the road sits at thousands-coords) blows the
+        // bounds up into a giant white-blooming wedge. Log the offending object name + bounds so we can pin it.
+        static void WarnIfHugeMesh(GameObject go, string what)
+        {
+            if (go == null) return;
+            var mf = go.GetComponent<MeshFilter>();
+            if (mf == null || mf.sharedMesh == null) return;
+            Bounds b = mf.sharedMesh.bounds;
+            Vector3 s = b.size;
+            bool nan = float.IsNaN(s.x) || float.IsNaN(s.y) || float.IsNaN(s.z) || float.IsInfinity(s.x) || float.IsInfinity(s.y) || float.IsInfinity(s.z);
+            if (nan || s.magnitude > 2000f)
+                Debug.LogWarning($"[Road] SUSPICIOUS mesh '{what}': bounds size={s}, center={b.center} (runaway vertex → white-bloom wedge).");
+        }
+
+        static bool Finite(Vector2 v) => !(float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsInfinity(v.x) || float.IsInfinity(v.y));
+        static Vector2 PerpRight2(Vector2 v) => new Vector2(v.y, -v.x);
+        static Vector2 SafeNorm(Vector2 v) => v.sqrMagnitude > 1e-8f ? v.normalized : Vector2.right;
+        static Vector2? LineIntersect2(Vector2 p1, Vector2 d1, Vector2 p2, Vector2 d2)
+        {
+            float det = d1.x * d2.y - d1.y * d2.x;
+            if (Mathf.Abs(det) < 1e-6f) return null;
+            Vector2 diff = p2 - p1;
+            float tt = (diff.x * d2.y - diff.y * d2.x) / det;
+            return p1 + tt * d1;
         }
 
         // ---- lane markings on the built asphalt ----
@@ -417,6 +640,7 @@ namespace NetworkDesigner.Roads
                 PipelineMaterials.CreateUnlitColor(MarkWhite, "RoadMarkWhite"),
                 PipelineMaterials.CreateUnlitColor(MarkYellow, "RoadMarkYellow"),
             };
+            WarnIfHugeMesh(go, name);
         }
     }
 }

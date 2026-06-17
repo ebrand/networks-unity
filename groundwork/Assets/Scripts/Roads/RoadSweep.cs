@@ -197,7 +197,9 @@ namespace NetworkDesigner.Roads
             return mats;
         }
 
-        static Material SurfaceMat(RoadSurface s)
+        // Public so the junction edge-band builder (RoadPlanBuilder) renders the same per-surface
+        // materials/colours as the swept road body — keeping the seam at the setback line consistent.
+        public static Material SurfaceMat(RoadSurface s)
         {
             Color c = s switch
             {
@@ -208,7 +210,7 @@ namespace NetworkDesigner.Roads
                 RoadSurface.Dirt     => new Color(0.40f, 0.30f, 0.20f),
                 RoadSurface.Deck     => new Color(0.45f, 0.45f, 0.48f),
                 RoadSurface.Curb     => new Color(0.72f, 0.72f, 0.72f),   // light gray
-                RoadSurface.Sidewalk => new Color(0.85f, 0.85f, 0.86f),   // white
+                RoadSurface.Sidewalk => new Color(0.66f, 0.66f, 0.67f),   // light concrete (was 0.85 near-white, which tripped HDR bloom)
                 RoadSurface.Guardrail => new Color(0.56f, 0.57f, 0.60f),  // steel
                 _ => Color.magenta
             };

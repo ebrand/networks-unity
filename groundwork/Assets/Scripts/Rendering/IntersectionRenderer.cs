@@ -82,8 +82,8 @@ namespace NetworkDesigner.Rendering
             {
                 VertexApproach a = Geometry.Approaches[i];
                 Vector2 dir = (a.OuterRight - a.OuterLeft).normalized;
-                shrunkStart[i] = a.OuterLeft + dir * a.ShoulderWidthCCW;
-                shrunkEnd[i] = a.OuterRight - dir * a.ShoulderWidthCW;
+                shrunkStart[i] = a.OuterLeft + dir * a.EdgeStackWidthCCW;
+                shrunkEnd[i] = a.OuterRight - dir * a.EdgeStackWidthCW;
             }
 
             // Effective outer control + inner miter at each corner.
@@ -122,8 +122,8 @@ namespace NetworkDesigner.Rendering
 
                     Vector2 e1 = (trans.Control - a.OuterRight).normalized;
                     Vector2 e2 = (b.OuterLeft - trans.Control).normalized;
-                    Vector2 p1 = a.OuterRight + PerpRight(e1) * a.ShoulderWidthCW;
-                    Vector2 p2 = b.OuterLeft + PerpRight(e2) * b.ShoulderWidthCCW;
+                    Vector2 p1 = a.OuterRight + PerpRight(e1) * a.EdgeStackWidthCW;
+                    Vector2 p2 = b.OuterLeft + PerpRight(e2) * b.EdgeStackWidthCCW;
                     Vector2? mi = LineIntersect(p1, e1, p2, e2);
                     innerMiter[i] = mi ?? trans.Control;
                     innerControl2[i] = innerMiter[i];
@@ -156,8 +156,8 @@ namespace NetworkDesigner.Rendering
                     // so LineIntersect would return null; use the midpoint
                     // of the inner endpoints instead.
                     Vector2 joinDir = (trans.To - trans.From).normalized;
-                    Vector2 innerLeft  = a.OuterRight + PerpRight(joinDir) * a.ShoulderWidthCW;
-                    Vector2 innerRight = b.OuterLeft  + PerpRight(joinDir) * b.ShoulderWidthCCW;
+                    Vector2 innerLeft  = a.OuterRight + PerpRight(joinDir) * a.EdgeStackWidthCW;
+                    Vector2 innerRight = b.OuterLeft  + PerpRight(joinDir) * b.EdgeStackWidthCCW;
                     innerMiter[i] = (innerLeft + innerRight) * 0.5f;
                     innerControl2[i] = innerMiter[i];
                 }

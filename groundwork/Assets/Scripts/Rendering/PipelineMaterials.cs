@@ -41,6 +41,17 @@ namespace NetworkDesigner
             m.SetFloat("_Metallic", 0f);
             if (Srp) m.SetFloat("_Smoothness", smoothness);
             else m.SetFloat("_Glossiness", smoothness);
+            // A truly matte material must NOT keep a specular term: URP Lit at smoothness 0 still renders a broad
+            // specular highlight, so a grazing-angle sun on a light surface (curb/sidewalk/concrete) spikes to the
+            // sun's HDR intensity → a white streak past the bloom threshold. Disable specular + env reflections so
+            // matte reads as pure diffuse (no glint, no bloom). Only for the matte case; glossy callers keep both.
+            if (Srp && smoothness <= 0.001f)
+            {
+                m.SetFloat("_SpecularHighlights", 0f);
+                m.SetFloat("_EnvironmentReflections", 0f);
+                m.EnableKeyword("_SPECULARHIGHLIGHTS_OFF");
+                m.EnableKeyword("_ENVIRONMENTREFLECTIONS_OFF");
+            }
             return m;
         }
 

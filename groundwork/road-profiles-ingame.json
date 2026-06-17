@@ -33,50 +33,6 @@
       "updatedAt": 0
     },
     {
-      "id": "new-road-profile",
-      "name": "new-road-profile",
-      "category": "One-Way",
-      "road": {
-        "id": "new-road-profile",
-        "ab": {
-          "lanes": [
-            {
-              "id": "a0",
-              "width": 4.0
-            },
-            {
-              "id": "a1",
-              "width": 4.0
-            }
-          ]
-        },
-        "ba": {
-          "lanes": [
-            {
-              "id": "b0",
-              "width": 4.0
-            },
-            {
-              "id": "b1",
-              "width": 4.0
-            }
-          ]
-        },
-        "shoulderAB": {
-          "width": 1.0
-        },
-        "shoulderBA": {
-          "width": 1.0
-        },
-        "curbs": false,
-        "sidewalks": false,
-        "elevated": false,
-        "guardrails": false
-      },
-      "driveSide": "right",
-      "updatedAt": 0
-    },
-    {
       "id": "2x-c-2",
       "name": "2x-c-2",
       "category": "One-Way",
@@ -483,6 +439,86 @@
         "sidewalks": false,
         "elevated": false,
         "guardrails": true
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "new-road-profile",
+      "name": "new-road-profile",
+      "category": "1x1-curb-sidewalk",
+      "road": {
+        "id": "new-road-profile",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1x1-curb-sidewalk",
+      "name": "1x1-curb-sidewalk",
+      "category": "Small",
+      "road": {
+        "id": "1x1-curb-sidewalk",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 2.0
+        },
+        "shoulderBA": {
+          "width": 2.0
+        },
+        "curbs": true,
+        "sidewalks": true,
+        "elevated": false,
+        "guardrails": false
       },
       "driveSide": "right",
       "updatedAt": 0
