@@ -26,11 +26,11 @@ namespace NetworkDesigner.Geometry
 
         // --- Centerline reference (prototype toggle) ---------------------
         // Where the spline sits relative to the cross-section.
-        //   GeometricCenter (legacy/default): spline at the geometric
+        //   GeometricCenter (legacy): spline at the geometric
         //     middle of total width (outer-shoulder to outer-shoulder), so
         //     even asymmetric AB/BA layouts render visually centered on the
         //     drawn line. The painted yellow line sits OFF the spline.
-        //   AxisSplit: spline on the AB/BA boundary, or the center of a
+        //   AxisSplit (default): spline on the AB/BA boundary, or the center of a
         //     median / turn lane when one exists. Matches how real road
         //     centerlines are referenced and lets profiles of different
         //     widths share a common axis and flow together. Asymmetric and
@@ -39,7 +39,12 @@ namespace NetworkDesigner.Geometry
         // RoadRenderer (mesh) so the two never desync. Flip it via the
         // "renderer.centerlineAtAxis" tunable; a rebuild redraws.
         public enum CenterlineReference { GeometricCenter, AxisSplit }
-        public static CenterlineReference CenterlineMode = CenterlineReference.GeometricCenter;
+        // Default: AxisSplit. Aligning the spline to the drawn centerline keeps
+        // a road's axis continuous through collinear lane consolidation / fan-out
+        // (2x3->2x2 transitions); GeometricCenter would slide the spline sideways
+        // at each width change and misalign the two roads' axes. Flip via the
+        // "renderer.centerlineAtAxis" tunable.
+        public static CenterlineReference CenterlineMode = CenterlineReference.AxisSplit;
 
         // Lateral shift subtracted from every cross-section offset so the
         // chosen reference lands on the spline. abOuter / baOuter are the
