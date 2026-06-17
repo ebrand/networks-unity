@@ -123,6 +123,10 @@ namespace NetworkDesigner.Terrain
         LineGraph _graph = new LineGraph();
         public LineGraph Graph => _graph ??= new LineGraph();
         int _chainTail = -1;
+        // True only between starting a FRESH chain (a brand-new start node with no edge yet) and drawing its first
+        // edge. PruneOrphanNodes exempts the chain tail ONLY while this holds — so a fresh start isn't pruned if you
+        // delete elsewhere mid-draw, but a tail left edgeless by deleting its segment IS pruned (no orphan).
+        bool _freshStartTail;
 
         GameObject _root; MeshFilter _mf; MeshRenderer _mr; Mesh _mesh; Material _mat;
         readonly List<Vector3> _v = new List<Vector3>();
@@ -188,9 +192,9 @@ namespace NetworkDesigner.Terrain
                 // The screen-picked hovered node is parallax-proof (the elevated puck vs the terrain hit below it),
                 // so prefer it over the world-radius pick — otherwise clicking a node drops a duplicate beside it.
                 int near = (_hoverNode >= 0 && _hoverNode < Graph.Nodes.Count) ? _hoverNode : Graph.NearestNode(p, NodePickRadius);
-                if (near >= 0) _chainTail = near;
-                else if (NearestRoadEdge(p, out int ei, out float tt)) { _chainTail = Graph.SplitEdge(ei, tt); Rebuild(field); }  // click anywhere on a road's footprint → split + continue
-                else _chainTail = Graph.AddNode(p);
+                if (near >= 0) { _chainTail = near; _freshStartTail = false; }                  // existing node → has edges
+                else if (NearestRoadEdge(p, out int ei, out float tt)) { _chainTail = Graph.SplitEdge(ei, tt); _freshStartTail = false; Rebuild(field); }  // split → has edges
+                else { _chainTail = Graph.AddNode(p); _freshStartTail = true; }                  // brand-new start node: keep until its first edge
                 _cornerPending = false;
                 return;
             }
@@ -203,7 +207,7 @@ namespace NetworkDesigner.Terrain
                 }
                 int endc = NearestOrNew(p);
                 AddCurvedEdge(_chainTail, endc, _corner);
-                _chainTail = endc; _cornerPending = false;
+                _chainTail = endc; _cornerPending = false; _freshStartTail = false;
                 Rebuild(field);
                 return;
             }
@@ -215,7 +219,7 @@ namespace NetworkDesigner.Terrain
             if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
             SplitSegmentCrossings(start, end, ActiveProfileId);   // drawn OVER existing roads → make intersection nodes
             if (AutoBridge) TryAutoBridge(field, start, end, ActiveProfileId);   // dip under the new straight span → bridge it
-            _chainTail = end;
+            _chainTail = end; _freshStartTail = false;   // the tail now has an edge → no longer a fresh start
             Rebuild(field);
         }
 
@@ -583,9 +587,10 @@ namespace NetworkDesigner.Terrain
         {
             for (int i = Graph.Nodes.Count - 1; i >= 0; i--)
             {
-                if (i == _chainTail || NodeHasEdge(i)) continue;
+                if ((i == _chainTail && _freshStartTail) || NodeHasEdge(i)) continue;   // keep a FRESH start; prune an edgeless orphaned tail
                 Graph.RemoveNode(i);
-                if (_chainTail > i) _chainTail--;
+                if (i == _chainTail) _chainTail = -1;          // we just pruned the (orphaned) tail
+                else if (_chainTail > i) _chainTail--;
             }
         }
 
@@ -674,6 +679,92 @@ namespace NetworkDesigner.Terrain
             Vector2 proj = o + dir * along;
             if ((cursor - proj).sqrMagnitude > r * r) return false;
             snapped = proj; return true;
+        }
+
+        // ── "Reactive" node guides (CAD-style smart guides) ─────────────────────────────────────────────
+        // Every existing node near the cursor projects guide rays: a COLLINEAR front ray (continue its road out
+        // the open end — endpoints only) plus two PERPENDICULAR side rays (±90° to its road). The placed node snaps
+        // to any of these lines, and PREFERS a point where two guides CROSS, so a new segment lines up with / tees
+        // square into the existing network. Excludes the chain tail. Replaces the single-target collinear/perp snaps.
+        struct GuideRay { public Vector2 O, D; public float Len; }
+        readonly List<GuideRay> _guideRays = new List<GuideRay>();
+
+        public void CollectTargetGuides(Vector2 p)
+        {
+            _guideRays.Clear();
+            if (Graph == null || _chainTail < 0) return;   // only react while a new segment is being drawn
+            // Ported from the original NetworkDesigner guide system. A node reacts only when the cursor is within the
+            // proximity-snap radius of it (Guides palette "Proximity snap"), so guides appear as you approach a node —
+            // not constantly. Per INCIDENT EDGE: emit a collinear extension (the road's outward continuation past the
+            // node) + the two perpendiculars; only the ray on the side the cursor is on is kept (cursor ahead of it).
+            float react = Mathf.Max(1f, EndSnapRadius);
+            float extLen = ExtensionGuideLength;
+            float perpLen = Mathf.Min(ExtensionGuideLength, 80f);
+            float r2 = react * react;
+            for (int i = 0; i < Graph.Nodes.Count; i++)
+            {
+                Vector2 np = Graph.Nodes[i];
+                // The chain tail (the node we're drawing OFF of) ALWAYS projects its guides — so a degree-3 junction
+                // gives colinear/perpendicular references off EACH of its existing edges for the new segment. Other
+                // nodes only react within the proximity-snap radius of the cursor.
+                if (i != _chainTail && (np - p).sqrMagnitude > r2) continue;
+                for (int e = 0; e < Graph.Edges.Count; e++)
+                {
+                    LineEdge le = Graph.Edges[e];
+                    if (le.A != i && le.B != i) continue;
+                    Vector2 outw = EdgeOutwardAtNode(le, i);
+                    if (outw.sqrMagnitude < 1e-6f) continue;
+                    outw.Normalize();
+                    Vector2 perp = new Vector2(-outw.y, outw.x);
+                    AddGuideCursorSide(p, np, outw, extLen);    // collinear extension out the road's front
+                    AddGuideCursorSide(p, np, perp, perpLen);   // perpendicular — only the cursor's side survives
+                    AddGuideCursorSide(p, np, -perp, perpLen);
+                }
+            }
+        }
+
+        // Continuation direction of edge `e` PAST node `i` (away from the road), curve-aware via the bezier tangent.
+        Vector2 EdgeOutwardAtNode(LineEdge e, int i)
+        {
+            EdgeBezier(e, out Vector2 p0, out Vector2 q1, out Vector2 q2, out Vector2 p3);
+            Vector2 tan = i == e.A ? -LineGraph.BezierTangent(p0, q1, q2, p3, 0f)
+                                   :  LineGraph.BezierTangent(p0, q1, q2, p3, 1f);
+            if (tan.sqrMagnitude < 1e-6f) tan = i == e.A ? p0 - p3 : p3 - p0;
+            return tan;
+        }
+
+        // Add a guide ray only if the cursor is on its side (ahead of the origin along the ray) — so a node shows the
+        // guide pointing toward the cursor, not the one pointing away. Mirrors the original's backward-ray rejection.
+        void AddGuideCursorSide(Vector2 cursor, Vector2 o, Vector2 d, float len)
+        {
+            if (Vector2.Dot(cursor - o, d) <= 0f) return;
+            _guideRays.Add(new GuideRay { O = o, D = d, Len = len });
+        }
+
+        public void DrawTargetGuides(ITerrainSurface field)
+        {
+            foreach (GuideRay g in _guideRays) DashGuide(field, g.O, g.D, g.Len);
+        }
+
+        // Snap the cursor to the NEAREST reactive-node guide line within ExtensionSnapRadius (nearest line wins — no
+        // intersection snapping, matching the original NetworkDesigner behaviour).
+        public bool TrySnapToGuides(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            float r = Mathf.Max(0f, ExtensionSnapRadius);
+            if (r <= 0f) return false;
+            CollectTargetGuides(cursor);
+            float best2 = r * r; bool found = false; Vector2 best = cursor;
+            foreach (GuideRay g in _guideRays)
+            {
+                float t = Vector2.Dot(cursor - g.O, g.D);
+                if (t < 0f || t > g.Len) continue;        // half-line from the node, within length
+                Vector2 proj = g.O + g.D * t;
+                float d2 = (cursor - proj).sqrMagnitude;
+                if (d2 < best2) { best2 = d2; best = proj; found = true; }
+            }
+            if (found) { snapped = best; return true; }
+            return false;
         }
 
         // ════ Auto-connect (mirrors the rail auto-connect): pick node A and node B, and a tangent-matched fillet
@@ -2081,17 +2172,11 @@ namespace NetworkDesigner.Terrain
 
             // Collinear extension guide of a nearby existing endpoint (the road you'd meet head-on) — shown in
             // every placement mode so you can align the new corridor to it; TrySnapToTargetExtension snaps to it.
-            if (TargetExtension(new Vector2(cursor.x, cursor.z), out Vector2 tgo, out Vector2 tgd))
-                DashGuide(field, tgo, tgd, ExtensionGuideLength);
-
-            // Perpendicular proximity guide: when extending near an existing road, the dashed dropline from the tail
-            // to where a 90° tee would land on it. TrySnapPerpendicularToRoad snaps the cursor onto that foot.
-            if (_chainTail >= 0 && PerpendicularFoot(new Vector2(cursor.x, cursor.z), out Vector2 pft, out Vector2 pfo))
-            {
-                float gate = 2f * Mathf.Max(1f, EndSnapRadius);
-                if ((new Vector2(cursor.x, cursor.z) - pfo).sqrMagnitude < gate * gate)
-                    DashLeg(field, pft, pfo);
-            }
+            // Reactive node guides (ported from NetworkDesigner): existing nodes within the proximity-snap radius
+            // project a collinear extension + a perpendicular guide on the cursor's side; the cursor snaps to the
+            // nearest such line via TrySnapToGuides. Only active while a new segment is being drawn.
+            CollectTargetGuides(new Vector2(cursor.x, cursor.z));
+            DrawTargetGuides(field);
 
             // Shift-curve in progress: the bend is armed, so draw the curve tail→corner→cursor (red when too
             // tight for the design speed), plus the two construction legs and a marker at the corner.

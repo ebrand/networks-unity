@@ -974,11 +974,14 @@ namespace NetworkDesigner.Terrain
                     if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
                     if (!roadFreeAngle)
                     {
+                        // Reactive node guides FIRST: snapping the new node onto a nearby node's colinear-front /
+                        // perpendicular-side line is a deliberate alignment, so it wins over the guided-turns heading
+                        // lock below. Clear the off-axis flag so the (possibly angled) click isn't suppressed.
+                        if (rdp.TrySnapToGuides(flat, out Vector2 rdg)) { rdp.StraightOffAxis = false; return new Vector3(rdg.x, raw.y, rdg.y); }
                         // Guided straights: hard-lock to colinear / 90° (the off-axis flag suppresses kinked clicks).
                         bool rsnap = rdp.SnapStraightConstrained(flat, out Vector2 rsh, out bool roff);
                         rdp.StraightOffAxis = roff;
                         if (rsnap) return new Vector3(rsh.x, raw.y, rsh.y);
-                        if (rdp.TrySnapToTargetExtension(flat, out Vector2 rdt)) return new Vector3(rdt.x, raw.y, rdt.y);  // meet an existing road's extension head-on
                         if (rdp.TrySnapToExtension(flat, out Vector2 rde)) return new Vector3(rde.x, raw.y, rde.y);
                     }
                 }
