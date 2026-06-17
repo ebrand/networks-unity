@@ -24,6 +24,11 @@ namespace NetworkDesigner.Terrain
         [Tooltip("Fallback width (m) for segments with no profile — corridor footprint either side of the centreline.")]
         public float RoadWidth = 14f;
 
+        // 0 = built roads ride a straight A→B grade between node elevations (cut/fill the terrain to suit). 1 = the
+        // road's mid-span hugs a smoothed terrain profile (endpoints stay pinned to the node grades). Blends between.
+        [Tooltip("0 = straight grade between nodes (cut/fill). 1 = follow the terrain. Endpoints stay pinned to node grades.")]
+        [Range(0f, 1f)] public float FollowTerrain = 0f;
+
         // Footprint width for a single segment: its profile's total cross-section, else the fallback width.
         public float EdgeWidth(LineEdge e) => ProfileCorridorWidth(e?.Profile);
         // The active profile's width (for the placement preview).
@@ -41,10 +46,10 @@ namespace NetworkDesigner.Terrain
         public float HardCornerMaxSpeedKmh = 50f;
         public bool AllowHardCorner => DesignSpeedKmh <= HardCornerMaxSpeedKmh;
         [System.NonSerialized] public bool StraightOffAxis;   // cursor isn't on an allowed heading → suppress the (kinked) click
-        [Tooltip("Draw a stop bar across each approach at an intersection (3+ roads).")]
-        public bool ShowStopBars = false;
-        [Tooltip("Draw crosswalk stripes across each approach at an intersection (3+ roads).")]
-        public bool ShowCrosswalks = false;
+        // Stop bars + crosswalks across each intersection approach. NonSerialized so the OFF default ALWAYS applies on
+        // load — a stale `true` saved in the scene can't force them back on — while the palette still toggles them live.
+        [System.NonSerialized] public bool ShowStopBars = false;
+        [System.NonSerialized] public bool ShowCrosswalks = false;
         [Tooltip("Metres between draped samples along the curve.")]
         public float SampleStep = 2f;
         [Tooltip("Metres above the terrain (avoids z-fighting with the ground).")]
@@ -105,6 +110,11 @@ namespace NetworkDesigner.Terrain
         [System.NonSerialized] public bool PreviewCurveActive;
         [System.NonSerialized] public Vector2 PreviewTail, PreviewCorner, PreviewEnd;
         [System.NonSerialized] public float PreviewLegA, PreviewLegB, PreviewDeflectionDeg;
+        // While dragging a STRAIGHT extension off the chain tail (also the first leg while arming a curve): the live
+        // tail→cursor span, for the on-screen distance label.
+        [System.NonSerialized] public bool PreviewStraightActive;
+        [System.NonSerialized] public Vector2 PreviewStraightFrom, PreviewStraightTo;
+        [System.NonSerialized] public float PreviewStraightDist;
         public bool CornerPending => _cornerPending;                           // a bend is armed, awaiting the end click
         public void CancelCorner() { _cornerPending = false; }                 // right-click backs out of the armed bend
         Vector2 _corner; bool _cornerPending;
@@ -679,6 +689,10 @@ namespace NetworkDesigner.Terrain
             public bool NeedStraightA, NeedStraightB, HasP, DirectTangent;
         }
 
+        // Shortest straight (m) the auto-connect will emit to fill a leg overhang; below this the curve just starts at
+        // the node, so we don't litter the plan with sub-metre sliver edges that break setbacks/intersection logic.
+        const float MinConnectStraight = 2f;
+
         public int NodeDegree(int n)
         {
             if (Graph == null || n < 0 || n >= Graph.Nodes.Count) return 0;
@@ -759,7 +773,13 @@ namespace NetworkDesigner.Terrain
             {
                 r.Leg = Mathf.Min(r.LegA, r.LegB);
                 r.CurveStartA = P - extA * r.Leg; r.CurveEndB = P - extB * r.Leg;
-                r.NeedStraightA = r.LegA > r.Leg + 0.01f; r.NeedStraightB = r.LegB > r.Leg + 0.01f;
+                // A straight only fills the LONGER leg's overhang. If that overhang is sub-MinConnectStraight, don't
+                // emit a tiny sliver edge — start the curve at the node itself and let the (slightly asymmetric) fillet
+                // absorb the small offset. Threshold (not 0.01 m) is what stopped the occasional micro-segment.
+                r.NeedStraightA = r.LegA > r.Leg + MinConnectStraight;
+                r.NeedStraightB = r.LegB > r.Leg + MinConnectStraight;
+                if (!r.NeedStraightA) r.CurveStartA = r.Apos;
+                if (!r.NeedStraightB) r.CurveEndB = r.Bpos;
                 CurveControls(r.CurveStartA, r.CurveEndB, P, out c1, out c2);
                 r.Radius = MinCurveRadius(r.CurveStartA, c1, c2, r.CurveEndB);
             }
@@ -889,6 +909,71 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        // When EXTENDING straight toward an existing road, keep the colinear heading instead of just grabbing the
+        // nearest road point: snap to where the tail's straight extension actually CROSSES the road. Fires only when
+        // the cursor is near that crossing AND the extension line genuinely meets the road — otherwise the caller
+        // falls back to the plain road-segment snap. Priority OVER TrySnapToOwnNode so the segment stays straight.
+        public bool TrySnapExtensionToRoad(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (Graph == null || !PlanGuides.ProximitySnapOn) return false;
+            if (_chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            float r = Mathf.Max(0f, EndSnapRadius);
+            if (r <= 0f) return false;
+            if (!IncomingDirection(cursor, out Vector2 dir)) return false;          // need a colinear heading to extend along
+            if (!Graph.NearestPointOnEdge(cursor, r, out int ei, out _, out _)) return false;  // the road the cursor is over
+            LineEdge e = Graph.Edges[ei];
+            if (e.A == _chainTail || e.B == _chainTail) return false;               // not our own incoming edge
+            Vector2 origin = Graph.Nodes[_chainTail];
+            EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            int K = 32; float bestPerp2 = float.MaxValue; Vector2 bestPt = cursor;
+            for (int i = 0; i <= K; i++)
+            {
+                Vector2 q = LineGraph.Bezier(p0, p1, p2, p3, i / (float)K);
+                float along = Vector2.Dot(q - origin, dir);
+                if (along <= 0.1f || along > ExtensionGuideLength) continue;        // ahead of the tail, within the guide
+                float perp2 = (q - (origin + dir * along)).sqrMagnitude;
+                if (perp2 < bestPerp2) { bestPerp2 = perp2; bestPt = q; }
+            }
+            if (bestPerp2 >= float.MaxValue) return false;
+            float tol = Mathf.Max(r, EdgeWidth(e) * 0.5f);
+            if (bestPerp2 > tol * tol) return false;                                // extension line must actually meet the road
+            if ((cursor - bestPt).sqrMagnitude > r * r) return false;              // and the cursor must be near the crossing
+            snapped = bestPt; return true;
+        }
+
+        // Foot of the perpendicular dropped from the chain tail onto the nearest road near `probe`. `foot` is where a
+        // 90° tee off the tail would land on that road (tail→foot ⟂ the road's tangent there). Drives the perpendicular
+        // proximity guide + snap so a new road can meet an existing one square-on.
+        public bool PerpendicularFoot(Vector2 probe, out Vector2 tail, out Vector2 foot)
+        {
+            tail = default; foot = default;
+            if (Graph == null || _chainTail < 0 || _chainTail >= Graph.Nodes.Count) return false;
+            float reach = Mathf.Max(1f, EndSnapRadius);
+            if (!Graph.NearestPointOnEdge(probe, reach, out int ei, out float tt, out Vector2 np)) return false;
+            LineEdge e = Graph.Edges[ei];
+            if (e.A == _chainTail || e.B == _chainTail) return false;               // not our own incoming edge
+            EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            Vector2 t = LineGraph.BezierTangent(p0, p1, p2, p3, tt);
+            if (t.sqrMagnitude < 1e-8f) t = p3 - p0;
+            if (t.sqrMagnitude < 1e-8f) return false;
+            t.Normalize();
+            tail = Graph.Nodes[_chainTail];
+            foot = np + t * Vector2.Dot(tail - np, t);                              // project tail onto the road's local line
+            return true;
+        }
+
+        // Snap the cursor onto the perpendicular foot when it's nearby, so the new segment tees into the road at 90°.
+        public bool TrySnapPerpendicularToRoad(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (!PlanGuides.ProximitySnapOn) return false;
+            float r = Mathf.Max(0f, EndSnapRadius);
+            if (r <= 0f || !PerpendicularFoot(cursor, out _, out Vector2 foot)) return false;
+            if ((cursor - foot).sqrMagnitude > r * r) return false;
+            snapped = foot; return true;
+        }
+
         // Hard-lock a continuing straight to an allowed heading off the chain tail: colinear (continue the
         // tangent) always, plus a 90° corner when the design speed permits one. Snaps the cursor to the
         // nearest allowed heading within tolerance; otherwise reports offAxis so the caller suppresses the
@@ -952,11 +1037,15 @@ namespace NetworkDesigner.Terrain
             float chord = Vector2.Distance(p0, p3);
             int n = Mathf.Max(2, Mathf.CeilToInt(chord / s));
             pts = new List<Vector3>(n + 1);
+            // The bed rides the SAME profile as the swept road (straight grade, or terrain-follow) so the cut matches
+            // where the road sits. EdgeBezier returns a cubic for straight edges too, so sample it as a curve.
+            var bedY = NetworkDesigner.Roads.RoadSweep.ElevationProfile(p0, p3, true, p1, p2, n + 1, yA, yB,
+                FollowTerrain > 0.001f && field != null ? (System.Func<Vector2, float>)(q => field.SampleHeight(q.x, q.y)) : null,
+                FollowTerrain);
             for (int i = 0; i <= n; i++)
             {
-                float u = i / (float)n;
-                Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
-                pts.Add(new Vector3(xz.x, Mathf.Lerp(yA, yB, u) - depth, xz.y));
+                Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, i / (float)n);
+                pts.Add(new Vector3(xz.x, bedY[i] - depth, xz.y));
             }
             flatHalf = Mathf.Max(1f, EdgeWidth(e) * 0.5f + Mathf.Max(0f, ExcavationMargin));
         }
@@ -973,6 +1062,34 @@ namespace NetworkDesigner.Terrain
         public void SetEdgeBuilt(int i, bool on) { if (Graph != null && i >= 0 && i < Graph.Edges.Count) Graph.Edges[i].Built = on; }
         public void ClearAllBuilt() { if (Graph == null) return; foreach (LineEdge e in Graph.Edges) e.Built = false; }
         public bool AnyEdgeBuilt() { if (Graph == null) return false; foreach (LineEdge e in Graph.Edges) if (e.Built) return true; return false; }
+
+        // Append straight sub-segments (a→b, with a half-width) of every BUILT edge whose footprint comes within
+        // `reach` of `center`, so the sculpt brush can skip cells under a built road (terrain edits don't disturb the
+        // road's bed). Only built edges count — un-built plan lines aren't protected.
+        public void CollectBuiltFootprints(Vector2 center, float reach, List<(Vector2 a, Vector2 b, float half)> outSegs)
+        {
+            if (Graph == null || outSegs == null) return;
+            for (int i = 0; i < Graph.Edges.Count; i++)
+            {
+                LineEdge e = Graph.Edges[i];
+                if (e == null || !e.Built) continue;
+                float half = EdgeWidth(e) * 0.5f;
+                float gate = reach + half; float gateSq = gate * gate;
+                EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+                float chord = Vector2.Distance(p0, p3);
+                // Cheap far-edge reject: if even the edge midpoint is farther than the whole edge could reach, skip
+                // sampling it entirely (keeps sculpting fast when most built roads are nowhere near the brush).
+                if (((p0 + p3) * 0.5f - center).sqrMagnitude > (gate + chord) * (gate + chord)) continue;
+                int n = Mathf.Clamp(Mathf.CeilToInt(chord / 4f), 1, 256);
+                Vector2 prev = p0;
+                for (int k = 1; k <= n; k++)
+                {
+                    Vector2 cur = LineGraph.Bezier(p0, p1, p2, p3, k / (float)n);
+                    if (((prev + cur) * 0.5f - center).sqrMagnitude <= gateSq) outSegs.Add((prev, cur, half));
+                    prev = cur;
+                }
+            }
+        }
 
         // Bridge (trestle) build params: deck slab thickness, pier spacing along the span, pier cross-section size.
         public float BridgeDeckDepth = 1.0f;
@@ -1166,6 +1283,148 @@ namespace NetworkDesigner.Terrain
             foreach (int s in _selected) if (s >= 0 && s < Graph.Nodes.Count) Graph.SetNodeY(s, targetY);
         }
 
+        // ── setback-edit sub-mode: a draggable handle per junction approach sets that road-end's setback override
+        // (LineEdge.SetbackA/SetbackB; <0 = auto). Mirrors the old NetworkDesigner's SetbackHandle UX. ──
+        [System.NonSerialized] public bool SetbackEditMode;
+        [System.NonSerialized] int _sbEdge = -1; [System.NonSerialized] bool _sbEndA;
+        public void SetSetbackEditMode(bool on) { SetbackEditMode = on; if (!on) _sbEdge = -1; }
+        public bool IsDraggingSetback => _sbEdge >= 0;
+
+        // ── road-class sub-mode: recolour the corridor by intersection precedence and click an edge to cycle its
+        // class (Auto → Primary → Secondary → Auto). Older corridors auto-resolve to Primary; crossers to Secondary. ──
+        [System.NonSerialized] public bool ClassEditMode;
+        public void SetClassEditMode(bool on) { ClassEditMode = on; }
+        static readonly Color32 ColPrimary   = new Color32(60, 200, 120, 255);  // green — primary (through) road
+        static readonly Color32 ColSecondary = new Color32(255, 140, 40, 255);  // orange — secondary (yielding) road
+
+        public RoadClass GetEdgeClass(int ei) => (Graph != null && ei >= 0 && ei < Graph.Edges.Count) ? Graph.Edges[ei].Class : RoadClass.Auto;
+        public void SetEdgeClass(int ei, RoadClass c) { if (Graph != null && ei >= 0 && ei < Graph.Edges.Count) Graph.Edges[ei].Class = c; }
+        public void CycleEdgeClass(int ei)
+        {
+            if (Graph == null || ei < 0 || ei >= Graph.Edges.Count) return;
+            LineEdge e = Graph.Edges[ei];
+            e.Class = e.Class == RoadClass.Auto ? RoadClass.Primary
+                    : (e.Class == RoadClass.Primary ? RoadClass.Secondary : RoadClass.Auto);
+        }
+
+        // Resolved precedence of an edge (manual class, or age-derived when Auto). Lives on LineGraph so the build
+        // bridge resolves it identically; this is just the overlay's accessor.
+        public RoadClass EffectiveClass(int ei) => Graph != null ? Graph.EffectiveClass(ei) : RoadClass.Primary;
+
+        // Extra arm (metres) the handle ring sticks out past the road's LEFT edge, so it's off the asphalt and easy to grab.
+        const float HandleArm = 4f;
+        // A handle exists for a (edge, end) only where the road meets a real intersection (node degree >= 3).
+        bool HandleApplies(int ei, bool endA) { LineEdge e = Graph.Edges[ei]; return NodeDegree(endA ? e.A : e.B) >= 3; }
+        // Setback used to POSITION a handle: the override if set, else the intersection default (matches the resolver's 10 m floor).
+        // Setback used to POSITION a handle: the live manual override (so it tracks a drag) → else the resolver's
+        // ACTUAL computed setback captured at the last build (acute/secondary boosts make this >> the flat default) →
+        // else the bare default before any build. Keyed by edge index, invalidated when the edge count changes.
+        [System.NonSerialized] readonly Dictionary<int, float> _resolvedSetback = new Dictionary<int, float>();
+        [System.NonSerialized] int _resolvedSetbackEdges = -1;
+        public void SetResolvedSetbacks(Dictionary<int, float> map)
+        {
+            _resolvedSetback.Clear();
+            if (map != null) foreach (var kv in map) _resolvedSetback[kv.Key] = kv.Value;
+            _resolvedSetbackEdges = Graph != null ? Graph.Edges.Count : -1;
+        }
+        public void ClearResolvedSetbacks() { _resolvedSetback.Clear(); _resolvedSetbackEdges = -1; }
+        float HandleSetback(int ei, bool endA)
+        {
+            LineEdge e = Graph.Edges[ei];
+            float ov = endA ? e.SetbackA : e.SetbackB;
+            if (ov >= 0f) return ov;                                                   // live override (tracks the drag)
+            if (Graph != null && _resolvedSetbackEdges == Graph.Edges.Count
+                && _resolvedSetback.TryGetValue(ei * 2 + (endA ? 0 : 1), out float rs) && rs > 0f)
+                return rs;                                                             // resolver's actual setback
+            return NetworkDesigner.Geometry.GeometryResolver.IntersectionSetback;      // default (pre-build)
+        }
+        // Left-perpendicular of the outward direction (XZ, top-down): facing away from the node, this points to the road's left.
+        Vector2 HandleLeft(LineEdge e, int node) { Vector2 o = EdgeDirAtNode(e, node); return new Vector2(-o.y, o.x); }
+        // Anchor = the LEFT edge of the road at the setback line (where the ring's arm attaches).
+        Vector2 HandleAnchorXZ(int ei, bool endA)
+        {
+            LineEdge e = Graph.Edges[ei]; int node = endA ? e.A : e.B;
+            return Graph.Nodes[node] + EdgeDirAtNode(e, node) * HandleSetback(ei, endA) + HandleLeft(e, node) * (EdgeWidth(e) * 0.5f);
+        }
+        // World XZ of the handle ring: the left-edge anchor pushed a short arm further out to the left, clear of the asphalt.
+        Vector2 HandleXZ(int ei, bool endA)
+        {
+            LineEdge e = Graph.Edges[ei]; int node = endA ? e.A : e.B;
+            return HandleAnchorXZ(ei, endA) + HandleLeft(e, node) * HandleArm;
+        }
+
+        // Nearest setback handle under the cursor (screen-space, parallax-proof). edge/endA identify the (road,end).
+        public bool PickSetbackHandle(Camera cam, ITerrainSurface field, Vector2 screenPos, float pixelRadius, out int edge, out bool endA)
+        {
+            edge = -1; endA = false;
+            if (cam == null || Graph == null) return false;
+            float bestSq = pixelRadius * pixelRadius;
+            for (int i = 0; i < Graph.Edges.Count; i++)
+                for (int s = 0; s < 2; s++)
+                {
+                    bool ea = s == 0;
+                    if (!HandleApplies(i, ea)) continue;
+                    int node = ea ? Graph.Edges[i].A : Graph.Edges[i].B;
+                    Vector2 h = HandleXZ(i, ea);
+                    Vector3 sp = cam.WorldToScreenPoint(new Vector3(h.x, DesignElevation(node, field) + 1f, h.y));
+                    if (sp.z <= 0f) continue;
+                    float dsq = (new Vector2(sp.x, sp.y) - screenPos).sqrMagnitude;
+                    if (dsq < bestSq) { bestSq = dsq; edge = i; endA = ea; }
+                }
+            return edge >= 0;
+        }
+
+        public void BeginSetbackDrag(int edge, bool endA) { _sbEdge = edge; _sbEndA = endA; }
+        // Project the cursor onto the approach's outward axis → the new setback (clamped within the edge length).
+        public bool UpdateSetbackDrag(Vector2 cursorXZ)
+        {
+            if (_sbEdge < 0 || _sbEdge >= Graph.Edges.Count) return false;
+            LineEdge e = Graph.Edges[_sbEdge];
+            int node = _sbEndA ? e.A : e.B;
+            Vector2 outward = EdgeDirAtNode(e, node);
+            float chord = Vector2.Distance(Graph.Nodes[e.A], Graph.Nodes[e.B]);
+            float sb = Mathf.Clamp(Vector2.Dot(cursorXZ - Graph.Nodes[node], outward), 0f, chord * 0.45f);
+            if (_sbEndA) e.SetbackA = sb; else e.SetbackB = sb;
+            return true;
+        }
+        public void EndSetbackDrag() { _sbEdge = -1; }
+        public void ResetSetback(int edge, bool endA)
+        {
+            if (edge < 0 || edge >= Graph.Edges.Count) return;
+            if (endA) Graph.Edges[edge].SetbackA = -1f; else Graph.Edges[edge].SetbackB = -1f;
+        }
+
+        static readonly Color32 ColSetbackHandle = new Color32(255, 140, 40, 255);    // orange ring + stem
+        static readonly Color32 ColSetbackActive = new Color32(255, 220, 60, 255);    // brighter while dragging
+        void DrawSetbackHandles(ITerrainSurface field)
+        {
+            for (int i = 0; i < Graph.Edges.Count; i++)
+                for (int s = 0; s < 2; s++)
+                {
+                    bool ea = s == 0;
+                    if (!HandleApplies(i, ea)) continue;
+                    LineEdge e = Graph.Edges[i];
+                    int node = ea ? e.A : e.B;
+                    Vector2 left = HandleLeft(e, node);
+                    Vector2 mid = Graph.Nodes[node] + EdgeDirAtNode(e, node) * HandleSetback(i, ea); // setback point on the centreline
+                    float half = EdgeWidth(e) * 0.5f;
+                    Vector2 anchor = HandleAnchorXZ(i, ea);      // left edge at the setback line
+                    Vector2 h = HandleXZ(i, ea);                 // ring, out past the left edge
+                    bool active = _sbEdge == i && _sbEndA == ea;
+                    Color32 col = active ? ColSetbackActive : ColSetbackHandle;
+                    AddSeg(Drape(field, mid - left * half), Drape(field, anchor), col);  // setback line across the road
+                    AddSeg(Drape(field, anchor), Drape(field, h), col);                  // arm out to the ring
+                    float rr = active ? 2.2f : 1.6f; Vector3 pr = default;
+                    for (int k = 0; k <= 20; k++)
+                    {
+                        float a = k / 20f * Mathf.PI * 2f;
+                        Vector3 p = Drape(field, new Vector2(h.x + Mathf.Cos(a) * rr, h.y + Mathf.Sin(a) * rr));
+                        if (k > 0) AddSeg(pr, p, col);
+                        pr = p;
+                    }
+                }
+        }
+
         // ---- rendering: a draped corridor ribbon (centreline + both edges + cross-ties) + node pucks ----
 
         public void Rebuild(ITerrainSurface field)
@@ -1192,11 +1451,16 @@ namespace NetworkDesigner.Terrain
             }
             for (int v = 0; v < nc; v++) if (treated[v]) BuildJunction(field, v, boxHalf[v], boxAx[v], isX[v]);
             for (int i = 0; i < Graph.Nodes.Count; i++) DrawPuck(field, i);   // into the node mesh (own colour + toggle)
+            // Setback rings show (and stay draggable) alongside the plan lines — no edit-mode button needed. Hidden
+            // only when the plan overlay itself is hidden, or while another sub-mode owns the corridor colours.
+            if (SetbackEditMode || (!_linesHidden && !ClassEditMode && !ElevationEditMode
+                && !ExcavateSelectMode && !BuildSegmentMode && !BridgeSelectMode))
+                DrawSetbackHandles(field);
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
             _nodeMr.enabled = PlanGuides.ShowNodes && !_linesHidden && Graph.Nodes.Count > 0;   // "Show nodes" + "Plan lines" gate the pucks
-            if (_mr != null) _mr.enabled = !_linesHidden;   // "Plan lines" toggle hides the whole overlay (lines + nodes)
+            if (_mr != null) _mr.enabled = !_linesHidden || SetbackEditMode || ClassEditMode;   // keep the overlay for setback handles / class colours
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
             // Topology may have shifted node indices — clear the hover so the per-frame driver re-resolves it cleanly
             // next frame (avoids a stale index highlighting the wrong node).
@@ -1337,7 +1601,18 @@ namespace NetworkDesigner.Terrain
         // Pick the state tint for an edge (+ whether it's selected → brighten + force a strong alpha).
         void SetEdgeTint(LineEdge e, int edgeIndex)
         {
-            Color32 baseCol = e != null && e.Bridge ? ColBridge : (e != null && e.Excavated ? ColExcavated : ColPlanned);
+            Color32 baseCol;
+            if (ClassEditMode)
+            {
+                // Class overlay: green = primary, orange = secondary. Auto-derived edges read dimmer (lerped to grey)
+                // than manually-set ones so you can tell which precedence you've pinned vs. what the age rule inferred.
+                Color32 cc = EffectiveClass(edgeIndex) == RoadClass.Primary ? ColPrimary : ColSecondary;
+                baseCol = (e != null && e.Class != RoadClass.Auto) ? cc : (Color32)Color.Lerp(cc, Color.gray, 0.5f);
+            }
+            else
+            {
+                baseCol = e != null && e.Bridge ? ColBridge : (e != null && e.Excavated ? ColExcavated : ColPlanned);
+            }
             _tintSel = IsEdgeSelected(edgeIndex);
             _tint = _tintSel ? (Color32)Color.Lerp(baseCol, Color.white, 0.45f) : baseCol;   // selected reads brighter
         }
@@ -1789,7 +2064,7 @@ namespace NetworkDesigner.Terrain
             EnsurePreview();
             _pvMr.enabled = show;
             LastPreviewRadius = float.PositiveInfinity; LastPreviewTooTight = false;
-            PreviewCurveActive = false;
+            PreviewCurveActive = false; PreviewStraightActive = false;
             HideSymRing();   // default off each frame; BuildSymRing/BuildMinLegGuide re-enable it
             if (!show) return;
             _pv.Clear(); _pvIdx.Clear(); _pvBadIdx.Clear();
@@ -1808,6 +2083,15 @@ namespace NetworkDesigner.Terrain
             // every placement mode so you can align the new corridor to it; TrySnapToTargetExtension snaps to it.
             if (TargetExtension(new Vector2(cursor.x, cursor.z), out Vector2 tgo, out Vector2 tgd))
                 DashGuide(field, tgo, tgd, ExtensionGuideLength);
+
+            // Perpendicular proximity guide: when extending near an existing road, the dashed dropline from the tail
+            // to where a 90° tee would land on it. TrySnapPerpendicularToRoad snaps the cursor onto that foot.
+            if (_chainTail >= 0 && PerpendicularFoot(new Vector2(cursor.x, cursor.z), out Vector2 pft, out Vector2 pfo))
+            {
+                float gate = 2f * Mathf.Max(1f, EndSnapRadius);
+                if ((new Vector2(cursor.x, cursor.z) - pfo).sqrMagnitude < gate * gate)
+                    DashLeg(field, pft, pfo);
+            }
 
             // Shift-curve in progress: the bend is armed, so draw the curve tail→corner→cursor (red when too
             // tight for the design speed), plus the two construction legs and a marker at the corner.
@@ -1853,7 +2137,11 @@ namespace NetworkDesigner.Terrain
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count)
             {
                 Vector2 tnode = Graph.Nodes[_chainTail];
-                DashLeg(field, tnode, new Vector2(cursor.x, cursor.z));
+                Vector2 curXZ = new Vector2(cursor.x, cursor.z);
+                DashLeg(field, tnode, curXZ);
+                // Live distance label feed (also the FIRST leg while arming a curve, which routes through here).
+                PreviewStraightActive = true; PreviewStraightFrom = tnode; PreviewStraightTo = curXZ;
+                PreviewStraightDist = Vector2.Distance(tnode, curXZ);
             }
             if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count
                 && IncomingDirection(new Vector2(cursor.x, cursor.z), out Vector2 gdir))

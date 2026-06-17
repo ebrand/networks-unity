@@ -93,6 +93,20 @@ namespace NetworkDesigner.Geometry
         /// junction feels beyond that. 1.0 = one full width (loose); lower = tighter intersections.
         public static float JunctionSetbackFloor = 0.5f;
 
+        /// Fixed minimum setback (metres) every approach at a real intersection (3+ roads) starts with, so the
+        /// junction reads as a proper intersection out of the box. The geometric minimum is still enforced on top;
+        /// drag the setback handles to override per-end.
+        public static float IntersectionSetback = 10f;
+
+        /// How much DEEPER than the just-touching geometric minimum an acute approach pulls back. 1 = edges merely
+        /// kiss (pinched pad); >1 opens a real gap so the intersection reads cleanly. Applies to the RequiredSetback
+        /// term only — square (~90°) crossings stay at IntersectionSetback since their requirement is below it.
+        public static float AcuteSetbackBoost = 1.6f;
+
+        /// Fraction of the acute setback a PRIMARY (through) road takes vs a secondary. <1 keeps the major road
+        /// shallower so it dominates, while still opening enough that the pad doesn't pinch. 0 = primary never deepens.
+        public static float PrimaryAcuteFraction = 0.4f;
+
         /// <summary>
         /// Compute the resolved geometry at a single vertex. Returns an
         /// empty VertexGeometry if no roads reach the vertex.
@@ -879,16 +893,34 @@ namespace NetworkDesigner.Geometry
                             setback = 0f;
                         }
                     }
+                    else if (n == 2)
+                    {
+                        // A degree-2 bend (two roads, not collinear): round the corner by the geometric MINIMUM so the
+                        // outer-corner pad is a proper simple polygon that fills cleanly. A zero setback collapses both
+                        // approaches' setback lines onto the vertex → self-intersecting outline → spike. No intersection
+                        // base floor here (a bend isn't a junction): thetaCW/thetaCCW are the inner/outer angles, and the
+                        // outer (>π) returns 0 from RequiredSetback, so this picks up the inner bend angle only.
+                        setback = Mathf.Max(
+                            RequiredSetback(self.RoadWidth * 0.5f, data[nextIdx].RoadWidth * 0.5f, thetaCW),
+                            RequiredSetback(self.RoadWidth * 0.5f, data[prevIdx].RoadWidth * 0.5f, thetaCCW));
+                    }
                     else
                     {
-                        setback = self.RoadWidth * Mathf.Max(0f, JunctionSetbackFloor); // base floor (tighter < 1·W)
+                        // Base floor: every intersection approach starts at a fixed IntersectionSetback (10 m) so the
+                        // junction reads as a proper intersection. JunctionSetbackFloor keeps wide roads proportional.
+                        setback = Mathf.Max(IntersectionSetback, self.RoadWidth * Mathf.Max(0f, JunctionSetbackFloor));
 
-                        setback = Mathf.Max(setback,
-                            RequiredSetback(self.RoadWidth * 0.5f,
-                                            data[nextIdx].RoadWidth * 0.5f, thetaCW));
-                        setback = Mathf.Max(setback,
-                            RequiredSetback(self.RoadWidth * 0.5f,
-                                            data[prevIdx].RoadWidth * 0.5f, thetaCCW));
+                        // Acute approaches must pull DEEPER back: RequiredSetback alone is only the just-touching
+                        // minimum, which leaves a pinched pad. AcuteSetbackBoost opens a real gap. The asymmetry: a
+                        // SECONDARY road yields fully (boosted requirement); a PRIMARY road runs through and only takes
+                        // a fraction of it, so it stays shallower (dominates) but still opens enough to not pinch.
+                        float req = Mathf.Max(
+                            RequiredSetback(self.RoadWidth * 0.5f, data[nextIdx].RoadWidth * 0.5f, thetaCW),
+                            RequiredSetback(self.RoadWidth * 0.5f, data[prevIdx].RoadWidth * 0.5f, thetaCCW));
+                        req *= Mathf.Max(1f, AcuteSetbackBoost);
+                        bool secondary = self.Road == null || self.Road.Classification != RoadClassification.Primary;
+                        if (!secondary) req *= Mathf.Clamp01(PrimaryAcuteFraction);
+                        setback = Mathf.Max(setback, req);
 
                         // Curved approaches need extra setback so the
                         // local tangent at the setback point bends enough

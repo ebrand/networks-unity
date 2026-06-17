@@ -13,6 +13,11 @@ using UnityEngine;
 
 namespace NetworkDesigner.Terrain
 {
+    // Intersection precedence for a road edge. Auto = derive from draw age (older corridor wins). Primary/Secondary
+    // are manual overrides: at a junction, primary roads run through with the base setback; secondary roads yield —
+    // their setback grows as the approach angle gets acute so they clear the primary's body.
+    public enum RoadClass { Auto = 0, Primary = 1, Secondary = 2 }
+
     [Serializable]
     public class LineEdge
     {
@@ -30,6 +35,8 @@ namespace NetworkDesigner.Terrain
         public bool Built;         // road plan: this segment has a 3D road swept on it (runtime; travels with the edge through splits)
         public float SetbackA = -1f;  // road plan: manual setback override (m) at END A's junction; <0 = auto (resolver-computed)
         public float SetbackB = -1f;  // road plan: manual setback override (m) at END B's junction; <0 = auto
+        public RoadClass Class = RoadClass.Auto;  // road plan: intersection precedence (manual primary/secondary override)
+        public int Serial;             // road plan: monotonic draw-order age (lower = drawn earlier = primary by default)
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }
@@ -54,10 +61,66 @@ namespace NetworkDesigner.Terrain
             if (a == b || a < 0 || b < 0 || a >= Nodes.Count || b >= Nodes.Count) return;
             foreach (LineEdge e in Edges)
                 if ((e.A == a && e.B == b) || (e.A == b && e.B == a)) return; // no dup
-            Edges.Add(new LineEdge(a, b));
+            Edges.Add(new LineEdge(a, b) { Serial = NextSerial() });
+        }
+
+        // Next draw-order serial: one past the oldest existing edge. O(n) but AddEdge is rare and n is small;
+        // computing from the live edges (rather than a stored counter) means it just works after load/clear.
+        public int NextSerial()
+        {
+            int max = 0;
+            for (int i = 0; i < Edges.Count; i++) if (Edges[i] != null && Edges[i].Serial > max) max = Edges[i].Serial;
+            return max + 1;
         }
 
         public void Clear() { Nodes.Clear(); Edges.Clear(); NodeY.Clear(); }
+
+        // If `node` is a degree-2 pass-through whose two edges run (near) straight through it (within tolDeg of
+        // collinear), replace them with ONE straight edge joining their far endpoints — preserving profile/speed/
+        // class/built/excavated and the OUTER setbacks — and remove the node. Returns true if it merged.
+        public bool TryJoinColinear(int node, float tolDeg)
+        {
+            if (node < 0 || node >= Nodes.Count) return false;
+            int e1 = -1, e2 = -1;
+            for (int i = 0; i < Edges.Count; i++)
+            {
+                var e = Edges[i];
+                if (e.A == node || e.B == node) { if (e1 < 0) e1 = i; else if (e2 < 0) e2 = i; else return false; } // >2 → not a pass-through
+            }
+            if (e1 < 0 || e2 < 0) return false;
+            LineEdge a = Edges[e1], b = Edges[e2];
+            int p = a.A == node ? a.B : a.A;
+            int q = b.A == node ? b.B : b.A;
+            if (p == q) return false;
+            Vector2 dp = Nodes[p] - Nodes[node], dq = Nodes[q] - Nodes[node];
+            if (dp.sqrMagnitude < 1e-6f || dq.sqrMagnitude < 1e-6f) return false;
+            if (Vector2.Angle(dp.normalized, -dq.normalized) > Mathf.Max(0f, tolDeg)) return false;  // not collinear
+            // already a direct p–q edge? bail rather than clobber it.
+            for (int i = 0; i < Edges.Count; i++) { var e = Edges[i]; if (i != e1 && i != e2 && ((e.A == p && e.B == q) || (e.A == q && e.B == p))) return false; }
+
+            LineEdge keep = a.Built ? a : b;
+            float sbP = a.A == node ? a.SetbackB : a.SetbackA;   // a's setback at the FAR end p
+            float sbQ = b.A == node ? b.SetbackB : b.SetbackA;   // b's setback at the FAR end q
+            string prof = keep.Profile; float spd = keep.SpeedLimit;
+            bool built = a.Built || b.Built, exc = a.Excavated || b.Excavated, brg = a.Bridge && b.Bridge;
+            RoadClass cls = keep.Class; int ser = Mathf.Min(a.Serial, b.Serial);
+
+            RemoveNode(node);                                    // drops node + its two edges, reindexes
+            int pp = p > node ? p - 1 : p, qq = q > node ? q - 1 : q;
+            AddEdge(pp, qq);
+            for (int i = 0; i < Edges.Count; i++)
+            {
+                var ne = Edges[i];
+                if ((ne.A == pp && ne.B == qq) || (ne.A == qq && ne.B == pp))
+                {
+                    ne.Profile = prof; ne.SpeedLimit = spd; ne.Built = built; ne.Excavated = exc; ne.Bridge = brg;
+                    ne.Class = cls; ne.Serial = ser; ne.HasCurve = false;
+                    if (ne.A == pp) { ne.SetbackA = sbP; ne.SetbackB = sbQ; } else { ne.SetbackA = sbQ; ne.SetbackB = sbP; }
+                    break;
+                }
+            }
+            return true;
+        }
 
         // Remove a single edge by index, KEEPING both endpoint nodes — for chopping a gap mid-line
         // (split twice, then delete the middle edge to leave the two nodes for a bridge, etc.).
@@ -146,6 +209,7 @@ namespace NetworkDesigner.Terrain
             bool curved = e.HasCurve;
             bool exc = e.Excavated, brg = e.Bridge, blt = e.Built;   // per-segment state travels onto both halves
             float sbA = e.SetbackA, sbB = e.SetbackB;                 // setback overrides stay on their original-endpoint half
+            RoadClass cls = e.Class; int ser = e.Serial;             // both halves keep the parent's class + draw age
             Vector2 p0 = Nodes[origA], p3 = Nodes[origB], q1, q2;
             if (curved) { q1 = e.ControlA; q2 = e.ControlB; }
             else { Vector2 d = p3 - p0; q1 = p0 + d / 3f; q2 = p0 + d * (2f / 3f); }
@@ -163,8 +227,8 @@ namespace NetworkDesigner.Terrain
             float syA = GetNodeY(origA), syB = GetNodeY(origB);
             if (!float.IsNaN(syA) && !float.IsNaN(syB)) SetNodeY(mi, Mathf.Lerp(syA, syB, t));
             Edges.RemoveAt(edgeIndex);
-            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt, SetbackA = sbA, SetbackB = -1f };
-            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt, SetbackA = -1f, SetbackB = sbB };
+            var e1 = new LineEdge(origA, mi) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt, SetbackA = sbA, SetbackB = -1f, Class = cls, Serial = ser };
+            var e2 = new LineEdge(mi, origB) { SpeedLimit = spd, Profile = prof, Excavated = exc, Bridge = brg, Built = blt, SetbackA = -1f, SetbackB = sbB, Class = cls, Serial = ser };
             if (curved)
             {
                 e1.HasCurve = true; e1.ControlA = a; e1.ControlB = ab;
@@ -200,6 +264,46 @@ namespace NetworkDesigner.Terrain
             Vector2 next = nextB >= 0 ? Nodes[nextB] : p3 + (p3 - p0);
             p1 = p0 + (p3 - prev) / 6f;
             p2 = p3 - (next - p0) / 6f;
+        }
+
+        // Unit direction pointing AWAY from node `v` along edge `e` (uses the edge's resolved bezier tangent).
+        public Vector2 DirAtNode(LineEdge e, int v)
+        {
+            EdgeControls(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            Vector2 d = e.A == v ? BezierTangent(p0, p1, p2, p3, 0f) : -BezierTangent(p0, p1, p2, p3, 1f);
+            if (d.sqrMagnitude < 1e-8f) d = e.A == v ? (Nodes[e.B] - Nodes[e.A]) : (Nodes[e.A] - Nodes[e.B]);
+            return d.sqrMagnitude > 1e-8f ? d.normalized : Vector2.right;
+        }
+
+        // Approaches within this of straight-through (180°) are treated as the SAME corridor, not a crossing.
+        public const float ClassCollinearTolDeg = 25f;
+
+        // Resolved intersection precedence of an edge: its manual class, or — when Auto — derived from draw age. An
+        // Auto edge is Secondary if a STRICTLY OLDER edge crosses it non-collinearly at either endpoint (it's the
+        // newcomer cutting across an existing road); otherwise Primary. Shared by the class overlay and the resolver.
+        public RoadClass EffectiveClass(int ei)
+        {
+            if (ei < 0 || ei >= Edges.Count) return RoadClass.Primary;
+            LineEdge e = Edges[ei];
+            if (e == null) return RoadClass.Primary;
+            if (e.Class != RoadClass.Auto) return e.Class;
+            if (CrossedByOlder(ei, e.A) || CrossedByOlder(ei, e.B)) return RoadClass.Secondary;
+            return RoadClass.Primary;
+        }
+        bool CrossedByOlder(int ei, int node)
+        {
+            LineEdge e = Edges[ei];
+            Vector2 myDir = DirAtNode(e, node);
+            for (int j = 0; j < Edges.Count; j++)
+            {
+                if (j == ei) continue;
+                LineEdge o = Edges[j];
+                if (o == null || (o.A != node && o.B != node)) continue;
+                if (o.Serial >= e.Serial) continue;                          // only strictly-older roads outrank us
+                float ang = Vector2.Angle(myDir, -DirAtNode(o, node));        // 0 = collinear (same corridor through node)
+                if (ang > ClassCollinearTolDeg) return true;                 // older road we CROSS (not continue) → we yield
+            }
+            return false;
         }
 
         public static Vector2 Bezier(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t)

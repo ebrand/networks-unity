@@ -172,6 +172,10 @@ namespace NetworkDesigner.UI
             adv.Add(NumberRow("Custom width", "m",
                 () => Designer.RoadPlanLayer.RoadWidth,
                 v => { Designer.RoadPlanLayer.RoadWidth = v; Designer.RebuildRoadPlan(); }, 3f, 60f, "0"));
+            // 0 = straight grade between nodes (cut/fill the terrain); 1 = the road's mid-span follows the terrain.
+            adv.Add(NumberRow("Follow terrain", "×",
+                () => Designer.RoadPlanLayer.FollowTerrain,
+                v => { Designer.RoadPlanLayer.FollowTerrain = Mathf.Clamp01(v); Designer.RefreshBuiltRoads(); }, 0f, 1f, "0.00"));
             adv.Add(NumberRow("Excavate depth", "m",
                 () => Designer.RoadPlanLayer.ExcavationDepth,
                 v => Designer.RoadPlanLayer.ExcavationDepth = v, 0f, 5f, "0.0"));
@@ -240,10 +244,30 @@ namespace NetworkDesigner.UI
 
             // ---- INTERSECTIONS ----
             adv.Add(SectionLabel("INTERSECTIONS"));
+            // Draggable per-approach setback handles (like the old NetworkDesigner): drag an orange ring to pull a
+            // road's end in/out of its junction; right-click a ring to reset that end to auto.
+            var sbEdit = MakeButton("Edit setbacks (drag handles)", () => Designer.SetRoadSetbackEdit(!Designer.RoadSetbackEdit));
+            sbEdit.tooltip = "Drag the orange ring at each junction approach to set that road-end's setback; right-click a ring to reset to auto.";
+            adv.Add(sbEdit);
+            _sync.Add(() => StyleActive(sbEdit, Designer.RoadSetbackEdit));
+            // Fixed default setback (metres) every intersection approach starts at (geometric minimum grows it on acute angles).
+            adv.Add(NumberRow("Intersection setback", "m",
+                () => NetworkDesigner.Geometry.GeometryResolver.IntersectionSetback,
+                v => { NetworkDesigner.Geometry.GeometryResolver.IntersectionSetback = v; Designer.RefreshBuiltRoads(); }, 0f, 40f, "0.0"));
+            // How much deeper than the just-touching minimum acute approaches pull back (1 = pinched, higher = roomier).
+            adv.Add(NumberRow("Acute setback boost", "×",
+                () => NetworkDesigner.Geometry.GeometryResolver.AcuteSetbackBoost,
+                v => { NetworkDesigner.Geometry.GeometryResolver.AcuteSetbackBoost = v; Designer.RefreshBuiltRoads(); }, 1f, 3f, "0.0"));
             // Global tightness: base setback floor as a fraction of road width (geometric minimum always enforced).
             adv.Add(NumberRow("Junction tightness", "× W",
                 () => NetworkDesigner.Geometry.GeometryResolver.JunctionSetbackFloor,
                 v => { NetworkDesigner.Geometry.GeometryResolver.JunctionSetbackFloor = v; Designer.RefreshBuiltRoads(); }, 0f, 1.5f, "0.0"));
+            // Primary/secondary precedence: recolour the plan by class (green = primary, orange = secondary) and
+            // click an edge to cycle Auto → Primary → Secondary; right-click resets to Auto. Drives setback in phase 2.
+            var clsEdit = MakeButton("Edit road class (primary/secondary)", () => Designer.SetRoadClassEdit(!Designer.RoadClassEdit));
+            clsEdit.tooltip = "Recolour by precedence (green = primary, orange = secondary). Click an edge to cycle Auto→Primary→Secondary; right-click resets to Auto.";
+            adv.Add(clsEdit);
+            _sync.Add(() => StyleActive(clsEdit, Designer.RoadClassEdit));
             // Per-road override for the SELECTED segments (both ends); "Auto" reverts to the resolver-computed value.
             adv.Add(NumberRow("Sel. road setback", "m",
                 () => Designer.SelectedRoadSetback(),

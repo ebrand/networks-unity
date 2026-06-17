@@ -19,13 +19,58 @@ namespace NetworkDesigner.Roads
         const float UvTile = 2f;          // metres per UV unit (PBR tiling)
         const float SampleEvery = 2f;     // ~one cross-section frame per this many metres along a curve
         const float Eps = 1e-4f;
+        const int FollowSmoothPasses = 3; // box-blur passes on the sampled terrain so a follow road doesn't ride every facet
+
+        // Per-frame road-centreline Y along the path: a straight A→B grade (follow=0) blended toward the terrain
+        // profile (follow=1). The sampled terrain is smoothed, then linearly shifted so its ENDS pin exactly to
+        // heightA/heightB (no step at junctions) while the mid-span hugs the ground. Shared by the sweep + the bed.
+        public static float[] ElevationProfile(Vector2 a, Vector2 b, bool curve, Vector2 cA, Vector2 cB,
+                                               int frames, float heightA, float heightB,
+                                               System.Func<Vector2, float> groundAt, float follow)
+        {
+            var y = new float[Mathf.Max(1, frames)];
+            bool following = follow > 0.001f && groundAt != null;
+            if (!following)
+            {
+                for (int f = 0; f < frames; f++) { float t = frames > 1 ? (float)f / (frames - 1) : 0f; y[f] = Mathf.Lerp(heightA, heightB, t); }
+                return y;
+            }
+            var g = new float[frames];
+            for (int f = 0; f < frames; f++)
+            {
+                float t = frames > 1 ? (float)f / (frames - 1) : 0f;
+                Vector2 p = curve ? GeometryResolver.SampleCubic(a, cA, cB, b, t) : Vector2.Lerp(a, b, t);
+                g[f] = groundAt(p);
+            }
+            for (int pass = 0; pass < FollowSmoothPasses; pass++)
+            {
+                var prev = (float[])g.Clone();
+                for (int f = 0; f < frames; f++)
+                {
+                    float s = prev[f]; int c = 1;
+                    if (f > 0) { s += prev[f - 1]; c++; }
+                    if (f < frames - 1) { s += prev[f + 1]; c++; }
+                    g[f] = s / c;
+                }
+            }
+            float e0 = g[0], e1 = g[frames - 1], k = Mathf.Clamp01(follow);
+            for (int f = 0; f < frames; f++)
+            {
+                float t = frames > 1 ? (float)f / (frames - 1) : 0f;
+                float lin = Mathf.Lerp(heightA, heightB, t);
+                float shifted = g[f] + Mathf.Lerp(heightA - e0, heightB - e1, t);   // pin endpoints to the design grade
+                y[f] = Mathf.Lerp(lin, shifted, k);
+            }
+            return y;
+        }
 
         public static GameObject Build(RoadCrossSection xs, Vector2 a, Vector2 b, bool curve, Vector2 cA, Vector2 cB,
-                                       Transform parent, string name = "Road", float heightA = 0f, float heightB = 0f)
+                                       Transform parent, string name = "Road", float heightA = 0f, float heightB = 0f,
+                                       System.Func<Vector2, float> groundAt = null, float follow = 0f)
         {
             var go = new GameObject(name);
             if (parent != null) go.transform.SetParent(parent, false);
-            var mesh = BuildMesh(xs, a, b, curve, cA, cB, out var surfaces, heightA, heightB);
+            var mesh = BuildMesh(xs, a, b, curve, cA, cB, out var surfaces, heightA, heightB, groundAt, follow);
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             go.AddComponent<MeshRenderer>().sharedMaterials = MaterialsFor(surfaces);
             go.AddComponent<MeshCollider>().sharedMesh = mesh;
@@ -33,20 +78,26 @@ namespace NetworkDesigner.Roads
         }
 
         public static Mesh BuildMesh(RoadCrossSection xs, Vector2 a, Vector2 b, bool curve, Vector2 cA, Vector2 cB,
-                                     out RoadSurface[] surfaces, float heightA = 0f, float heightB = 0f)
+                                     out RoadSurface[] surfaces, float heightA = 0f, float heightB = 0f,
+                                     System.Func<Vector2, float> groundAt = null, float follow = 0f)
         {
             int nPts = xs.Pts.Count;
             float centerU = xs.Center();
             bool deck = xs.Thickness > 0f;
             float bottomY = -xs.Thickness;
 
-            // Path frames: position (with per-end height) + right vector + arc distance.
-            int frames = curve
-                ? Mathf.Clamp(Mathf.CeilToInt(GeometryResolver.CubicArcLength(a, cA, cB, b) / SampleEvery), 2, 512)
+            bool following = follow > 0.001f && groundAt != null;
+
+            // Path frames: position (with per-end height) + right vector + arc distance. A straight road only needs 2
+            // frames for a flat grade, but to FOLLOW TERRAIN it must be subdivided so the profile can bend mid-span.
+            float pathLen = curve ? GeometryResolver.CubicArcLength(a, cA, cB, b) : Vector2.Distance(a, b);
+            int frames = (curve || following)
+                ? Mathf.Clamp(Mathf.CeilToInt(pathLen / SampleEvery), 2, 512)
                 : 2;
             var fp = new Vector3[frames];
             var fr = new Vector3[frames];
             var fs = new float[frames];
+            var profileY = ElevationProfile(a, b, curve, cA, cB, frames, heightA, heightB, groundAt, follow);
             for (int f = 0; f < frames; f++)
             {
                 float t = (float)f / (frames - 1);
@@ -55,7 +106,7 @@ namespace NetworkDesigner.Roads
                 else { p = Vector2.Lerp(a, b, t); tan = b - a; }
                 Vector3 fwd = new Vector3(tan.x, 0f, tan.y);
                 fwd = fwd.sqrMagnitude < 1e-8f ? Vector3.forward : fwd.normalized;
-                fp[f] = new Vector3(p.x, Mathf.Lerp(heightA, heightB, t), p.y);
+                fp[f] = new Vector3(p.x, profileY[f], p.y);
                 fr[f] = Vector3.Cross(Vector3.up, fwd).normalized;
                 fs[f] = f == 0 ? 0f : fs[f - 1] + (fp[f] - fp[f - 1]).magnitude;
             }

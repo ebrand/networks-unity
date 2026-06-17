@@ -1129,7 +1129,8 @@ namespace NetworkDesigner.Terrain
 
         // ── Sculpt (per-chunk res) ───────────────────────────────────────────────────────────
         public static void Sculpt(Vector3 world, float radius, float strength, float dt,
-                                  DemTerrainWorld.SculptMode mode, float targetY)
+                                  DemTerrainWorld.SculptMode mode, float targetY,
+                                  System.Func<float, float, bool> protect = null)
         {
             if (!Active || radius <= 0f) return;
             float r2 = radius * radius;
@@ -1157,6 +1158,7 @@ namespace NetworkDesigner.Terrain
                         float wx = ox + xx * sp, wz = oz + zz * sp;
                         float dx = wx - world.x, dz = wz - world.z, d2 = dx * dx + dz * dz;
                         if (d2 > r2) continue;
+                        if (protect != null && protect(wx, wz)) continue;   // leave built-road beds untouched
                         float fall = 1f - Mathf.Sqrt(d2) / radius;
                         fall = fall * fall * (3f - 2f * fall);
                         int i = zz * res + xx;

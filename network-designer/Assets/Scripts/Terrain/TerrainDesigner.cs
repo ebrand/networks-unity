@@ -123,6 +123,10 @@ namespace NetworkDesigner.Terrain
         public float BrushResizeRate = 50f;
         [Tooltip("Upper clamp for the brush radius (metres).")]
         public float MaxBrushRadius = 500f;
+        [Tooltip("When ON, sculpt brushes skip the ground under BUILT roads so terrain edits can't disturb a road's bed.")]
+        public bool ProtectRoadsFromSculpt = true;
+        [Tooltip("Extra metres beyond each road's half-width kept protected from the brush (a margin around the bed).")]
+        public float RoadProtectMargin = 1.5f;
         [Tooltip("Height change rate (metres/second) at the brush centre.")]
         public float BrushStrength = 20f;
         [Tooltip("Exponent on Strength for Raise/Lower: effective rate = Strength^exp. " +
@@ -248,6 +252,7 @@ namespace NetworkDesigner.Terrain
 
         TerrainField _field;
         float _dirtySince = -1f; // realtime when last edited; -1 = clean
+        float _roadRebuildAfterLoad = -1f; // countdown (s) after a load to re-sweep built roads once the world settles; <0 = none
         System.Threading.Tasks.Task _saveTask; // in-flight async autosave (serialize+write off-thread)
         // Camera pose staged from the autosave; applied in Start once the fly
         // camera exists (it's created after the load).
@@ -958,10 +963,15 @@ namespace NetworkDesigner.Terrain
                     if (rdp.TrySnapToHoverNode(out Vector2 rhv)) return new Vector3(rhv.x, raw.y, rhv.y);
                     // Starting a fresh chain near a road END → snap onto it so the new plan resumes off that road.
                     if (rdp.TrySnapToRoadEnd(flat, out Vector2 rend)) return new Vector3(rend.x, raw.y, rend.y);
-                    if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
                     // Hold Alt/Option = FREE placement: skip the colinear hard-lock + extension snaps so you can
                     // lay a slightly-unaligned road at any angle. (Node-join + curve locks above still apply.)
                     bool roadFreeAngle = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+                    // Extending straight toward a road: snap to where the colinear extension CROSSES it (keeps the
+                    // segment straight) rather than the nearest road point — must win over the plain road-segment snap.
+                    if (!roadFreeAngle && rdp.TrySnapExtensionToRoad(flat, out Vector2 rxr)) return new Vector3(rxr.x, raw.y, rxr.y);
+                    // Meet a nearby existing road at 90°: snap onto the perpendicular foot off the tail.
+                    if (!roadFreeAngle && rdp.TrySnapPerpendicularToRoad(flat, out Vector2 rpp)) return new Vector3(rpp.x, raw.y, rpp.y);
+                    if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
                     if (!roadFreeAngle)
                     {
                         // Guided straights: hard-lock to colinear / 90° (the off-axis flag suppresses kinked clicks).
@@ -1731,16 +1741,25 @@ namespace NetworkDesigner.Terrain
         // midpoints, and the deflection angle at the bend. Red when the curve is too tight to build.
         void DrawRoadCurveLabels()
         {
-            if (!(_lineActive is RoadPlanLayer rd) || !rd.PreviewCurveActive) return;
+            if (!(_lineActive is RoadPlanLayer rd)) return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
             float s = Mathf.Max(0.25f, UiScale);
-            Color col = rd.LastPreviewTooTight ? new Color(1f, 0.3f, 0.25f) : new Color(1f, 0.85f, 0.3f);
-            if (rd.PreviewLegA > 0.5f)
-                DrawWorldText(cam, s, ToWorldXZ((rd.PreviewTail + rd.PreviewCorner) * 0.5f, 2f), $"{rd.PreviewLegA:0} m", col);
-            if (rd.PreviewLegB > 0.5f)
-                DrawWorldText(cam, s, ToWorldXZ((rd.PreviewCorner + rd.PreviewEnd) * 0.5f, 2f), $"{rd.PreviewLegB:0} m", col);
-            DrawWorldText(cam, s, ToWorldXZ(rd.PreviewCorner, 2f), $"{rd.PreviewDeflectionDeg:0}°", col);
+            if (rd.PreviewCurveActive)
+            {
+                Color col = rd.LastPreviewTooTight ? new Color(1f, 0.3f, 0.25f) : new Color(1f, 0.85f, 0.3f);
+                if (rd.PreviewLegA > 0.5f)
+                    DrawWorldText(cam, s, ToWorldXZ((rd.PreviewTail + rd.PreviewCorner) * 0.5f, 2f), $"{rd.PreviewLegA:0} m", col);
+                if (rd.PreviewLegB > 0.5f)
+                    DrawWorldText(cam, s, ToWorldXZ((rd.PreviewCorner + rd.PreviewEnd) * 0.5f, 2f), $"{rd.PreviewLegB:0} m", col);
+                DrawWorldText(cam, s, ToWorldXZ(rd.PreviewCorner, 2f), $"{rd.PreviewDeflectionDeg:0}°", col);
+            }
+            else if (rd.PreviewStraightActive && rd.PreviewStraightDist > 0.5f)
+            {
+                // Live span while extending a straight off the tail (and the first leg while arming a curve).
+                DrawWorldText(cam, s, ToWorldXZ((rd.PreviewStraightFrom + rd.PreviewStraightTo) * 0.5f, 2f),
+                    $"{rd.PreviewStraightDist:0} m", new Color(1f, 0.85f, 0.3f));
+            }
         }
 
 
@@ -2279,9 +2298,10 @@ namespace NetworkDesigner.Terrain
         }
 
         GameObject _roadBuildRoot;   // runtime 3D road meshes from the last build (regenerated, not saved)
-        // "Built" is now a per-segment flag on the edge (RoadPlanLayer.IsEdgeBuilt), NOT an index set — so it travels
+        // "Built" is a per-segment flag on the edge (RoadPlanLayer.IsEdgeBuilt), NOT an index set — so it travels
         // with the edge through the index renumbering that drawing/splitting causes (a built road stays fully built
-        // when you add a crossing). Runtime-only (not serialized); cleared with the plan / world switch / "Remove roads".
+        // when you add a crossing). It IS serialized (save v18+); building marks the world dirty so the autosave
+        // captures it, and the world load re-sweeps from it — so 3D roads persist across quit/restart.
 
         // Build Plan (phase 1): convert the road plan to a Network, resolve it with the GeometryResolver brain
         // (setbacks / intersections / lane flow), then sweep each road BODY — setback-trimmed, draped at the
@@ -2292,6 +2312,7 @@ namespace NetworkDesigner.Terrain
             if (graph == null || graph.Edges.Count == 0) { Debug.LogWarning("[Road] No road plan to build — draw a corridor first (;)."); return; }
             for (int e = 0; e < graph.Edges.Count; e++) RoadPlanLayer.SetEdgeBuilt(e, true);
             RebuildBuiltRoads();
+            _dirtySince = Time.realtimeSinceStartup;   // persist the Built flags via autosave
         }
 
         // Build a SINGLE plan segment. Flags it built and re-sweeps; the whole network still resolves, so this
@@ -2302,6 +2323,7 @@ namespace NetworkDesigner.Terrain
             if (graph == null || edgeIndex < 0 || edgeIndex >= graph.Edges.Count) return;
             RoadPlanLayer.SetEdgeBuilt(edgeIndex, true);
             RebuildBuiltRoads();
+            _dirtySince = Time.realtimeSinceStartup;   // persist the Built flag via autosave
             Debug.Log($"[Road] Built segment {edgeIndex}.");
         }
 
@@ -2311,13 +2333,13 @@ namespace NetworkDesigner.Terrain
         {
             LineGraph graph = RoadPlanLayer.Graph;
             ClearRoadBuild();
-            if (graph == null) return;
+            if (graph == null) { RoadPlanLayer.ClearResolvedSetbacks(); return; }
             // Built edges come from the per-segment flag (survives index renumbering on draw/split).
             var only = new System.Collections.Generic.HashSet<string>();
             var bridgeEdges = new System.Collections.Generic.HashSet<int>();
             for (int e = 0; e < graph.Edges.Count; e++)
                 if (graph.Edges[e].Built) { only.Add("r" + e); if (graph.Edges[e].Bridge) bridgeEdges.Add(e); }
-            if (only.Count == 0) return;
+            if (only.Count == 0) { RoadPlanLayer.ClearResolvedSetbacks(); return; }
             // Per-node DESIGN elevation (vertex "v{i}" ↔ node i) — the same heights Excavate cut to, captured
             // from the shaped surface — so the swept road sits in its cut and respects carved/flattened terrain.
             var nodeElev = new System.Collections.Generic.Dictionary<string, float>(graph.Nodes.Count);
@@ -2325,7 +2347,25 @@ namespace NetworkDesigner.Terrain
             NetworkDesigner.Model.Network net = NetworkDesigner.Roads.RoadNetworkBridge.Build(
                 graph, NetworkDesigner.Model.DriveSide.Right, RoadPlanLayer.RoadWidth);
             _roadBuildRoot = NetworkDesigner.Roads.RoadPlanBuilder.Build(
-                net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null, only);
+                net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null, only,
+                xz => Surf != null ? Surf.SampleHeight(xz.x, xz.y) : 0f, RoadPlanLayer.FollowTerrain);   // terrain-follow blend
+
+            // Sync the setback HANDLES to the resolver's ACTUAL setbacks (acute/secondary boosts push them far past
+            // the flat default), so the orange rings sit where the road really sets back instead of at a fixed 10 m.
+            var resolvedVg = NetworkDesigner.Geometry.GeometryResolver.ResolveNetwork(net);
+            var sbMap = new System.Collections.Generic.Dictionary<int, float>();
+            foreach (var vg in resolvedVg)
+            {
+                if (vg?.Approaches == null) continue;
+                foreach (var ap in vg.Approaches)
+                {
+                    if (ap == null || string.IsNullOrEmpty(ap.RoadId) || ap.RoadId.Length < 2 || ap.RoadId[0] != 'r') continue;
+                    if (!int.TryParse(ap.RoadId.Substring(1), out int e)) continue;
+                    bool endA = ap.End == NetworkDesigner.Model.RoadEnd.A;
+                    sbMap[e * 2 + (endA ? 0 : 1)] = ap.Setback;
+                }
+            }
+            RoadPlanLayer.SetResolvedSetbacks(sbMap);
 
             if (bridgeEdges.Count > 0 && _roadBuildRoot != null)
                 RoadBridgeBuilder.Build(RoadPlanLayer, bridgeEdges,
@@ -2377,9 +2417,78 @@ namespace NetworkDesigner.Terrain
         public bool RoadElevationEdit => RoadPlanLayer.ElevationEditMode;
         public void SetRoadElevationEdit(bool on)
         {
-            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); RoadPlanLayer.SetBridgeSelectMode(false); }
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); RoadPlanLayer.SetBridgeSelectMode(false); RoadPlanLayer.SetSetbackEditMode(false); RoadPlanLayer.SetClassEditMode(false); }
             RoadPlanLayer.SetElevationEditMode(on);
             RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // ---- road plan setback-edit sub-mode (drag an orange ring per junction approach to set its setback) ----
+        public bool RoadSetbackEdit => RoadPlanLayer.SetbackEditMode;
+        public void SetRoadSetbackEdit(bool on)
+        {
+            if (on) { EnterRoadPlanMode(); RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetClassEditMode(false); }
+            RoadPlanLayer.SetSetbackEditMode(on);
+            RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // Drag an orange setback handle along its road's outward axis to set that end's setback; right-click resets to
+        // auto. The 3D roads re-sweep on release (cheap during the drag — only the handle/overlay updates live).
+        void HandleRoadSetbackInput(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            if (rd.IsDraggingSetback)
+            {
+                if (Input.GetMouseButton(0))
+                {
+                    if (overTerrain && rd.UpdateSetbackDrag(new Vector2(hit.point.x, hit.point.z)))
+                    { rd.Rebuild(Surf); _dirtySince = Time.realtimeSinceStartup; }
+                }
+                else { rd.EndSetbackDrag(); rd.Rebuild(Surf); RebuildBuiltRoads(); }   // re-sweep the 3D roads on release
+                return;
+            }
+            if (MouseOverActivePanel() || !overTerrain) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            Vector2 sp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+            if (Input.GetMouseButtonDown(0))
+            {
+                if (rd.PickSetbackHandle(cam, Surf, sp, 30f, out int e, out bool ea)) rd.BeginSetbackDrag(e, ea);
+            }
+            else if (Input.GetMouseButtonDown(1))
+            {
+                if (rd.PickSetbackHandle(cam, Surf, sp, 30f, out int e, out bool ea))
+                { rd.ResetSetback(e, ea); rd.Rebuild(Surf); RebuildBuiltRoads(); _dirtySince = Time.realtimeSinceStartup; }
+            }
+        }
+
+        // ---- road plan class-edit sub-mode (recolour by primary/secondary; click an edge to cycle its class) ----
+        public bool RoadClassEdit => RoadPlanLayer.ClassEditMode;
+        public void SetRoadClassEdit(bool on)
+        {
+            if (on)
+            {
+                EnterRoadPlanMode();
+                RoadPlanLayer.SetElevationEditMode(false); RoadPlanLayer.SetSetbackEditMode(false);
+                RoadPlanLayer.SetExcavateSelectMode(false); RoadPlanLayer.SetBuildSegmentMode(false); RoadPlanLayer.SetBridgeSelectMode(false);
+            }
+            RoadPlanLayer.SetClassEditMode(on);
+            RoadPlanLayer.Rebuild(Surf);
+        }
+
+        // Left-click an edge's corridor → cycle Auto → Primary → Secondary → Auto; the overlay recolours, then the 3D
+        // re-sweeps (class will drive intersection setback in phase 2). Right-click resets the clicked edge to Auto.
+        void HandleRoadClassInput(RoadPlanLayer rd, RaycastHit hit, bool overTerrain)
+        {
+            if (MouseOverActivePanel() || !overTerrain) return;
+            Vector2 xz = new Vector2(hit.point.x, hit.point.z);
+            if (Input.GetMouseButtonDown(0))
+            {
+                int e = rd.PickEdgeInCorridor(xz);
+                if (e >= 0) { rd.CycleEdgeClass(e); rd.Rebuild(Surf); RebuildBuiltRoads(); _dirtySince = Time.realtimeSinceStartup; }
+            }
+            else if (Input.GetMouseButtonDown(1))
+            {
+                int e = rd.PickEdgeInCorridor(xz);
+                if (e >= 0) { rd.SetEdgeClass(e, RoadClass.Auto); rd.Rebuild(Surf); RebuildBuiltRoads(); _dirtySince = Time.realtimeSinceStartup; }
+            }
         }
 
         // ---- road plan path-excavation sub-mode (palette "Excavate Mode") ----
@@ -2457,6 +2566,7 @@ namespace NetworkDesigner.Terrain
             }
             if (added == 0) { Debug.LogWarning("[Road] None of those segments are excavated or bridges — Excavate the path first (or mark it a Bridge)."); return; }
             RebuildBuiltRoads();
+            _dirtySince = Time.realtimeSinceStartup;   // persist the Built flags via autosave
             Debug.Log($"[Road] Built {added} segment(s)" + (skipped > 0 ? $", skipped {skipped} un-built." : "."));
         }
 
@@ -2589,6 +2699,16 @@ namespace NetworkDesigner.Terrain
         public void DeleteRoadNode(int node)
         {
             if (node < 0 || RoadPlanLayer.Graph == null || node >= RoadPlanLayer.Graph.Nodes.Count) return;
+            // A degree-2 pass-through whose two segments run straight through → drop the node but JOIN the segments
+            // into one (instead of deleting both), so a collinear point can be removed without breaking the road.
+            if (RoadPlanLayer.Graph.TryJoinColinear(node, 8f))
+            {
+                RoadPlanLayer.ClearEdgeSelection();
+                RoadPlanLayer.Rebuild(Surf);
+                RebuildBuiltRoads();
+                _dirtySince = Time.realtimeSinceStartup;
+                return;
+            }
             var edges = RoadPlanLayer.EdgesTouchingNode(node);
             if (edges.Count > 0) { DeleteRoadEdges(edges); }
             else
@@ -3105,6 +3225,13 @@ namespace NetworkDesigner.Terrain
         void Update()
         {
             UpdatePlanGradeLabels();   // world-space TMP grade labels (runs even under a modal, to hide)
+            // Deferred post-load road re-sweep: a load stages the plan + Built flags, but the world (chunks) may
+            // still be settling — wait a beat, then re-sweep so the 3D roads appear without a manual Build click.
+            if (_roadRebuildAfterLoad >= 0f)
+            {
+                _roadRebuildAfterLoad -= Time.unscaledDeltaTime;
+                if (_roadRebuildAfterLoad < 0f) RebuildBuiltRoads();
+            }
             // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
             // typing a name doesn't fire hotkeys or sculpt.
             if (NetworkDesigner.UI.PaletteBase.ModalOpen || NetworkDesigner.UI.PaletteBase.TextEditing) return;
@@ -3453,6 +3580,12 @@ namespace NetworkDesigner.Terrain
                 // (de)select, right-click a node to level all selected to it. Skips the normal draw/delete.
                 if (_lineActive is RoadPlanLayer rdElev && rdElev.ElevationEditMode)
                 { rdElev.HidePreview(); HandleRoadElevationInput(rdElev, hit, overTerrain); return; }
+                // Setback-edit sub-mode owns the mouse: drag an orange ring to set a road's junction setback.
+                if (_lineActive is RoadPlanLayer rdSbk && rdSbk.SetbackEditMode)
+                { rdSbk.HidePreview(); HandleRoadSetbackInput(rdSbk, hit, overTerrain); return; }
+                // Class-edit sub-mode owns the mouse: click an edge to cycle its primary/secondary precedence.
+                if (_lineActive is RoadPlanLayer rdCls && rdCls.ClassEditMode)
+                { rdCls.HidePreview(); HandleRoadClassInput(rdCls, hit, overTerrain); return; }
                 // Excavate / Build / Bridge sub-modes own the LEFT mouse (start node → end node). Right-click still
                 // cancels an armed start or deletes a node, so you can edit the plan without leaving the sub-mode.
                 if (_lineActive is RoadPlanLayer rdSub && (rdSub.ExcavateSelectMode || rdSub.BuildSegmentMode || rdSub.BridgeSelectMode))
@@ -3464,7 +3597,24 @@ namespace NetworkDesigner.Terrain
                     else HandleRoadBridgeInput(rdSub, hit, overTerrain);
                     return;
                 }
-                if (roadSelecting) _lineActive.HidePreview();   // no rubber-band / new-node outline while picking
+                // Setback rings are live in NORMAL plan mode too (no edit button): hovering a ring suppresses the
+                // add-node cursor (you'd grab the ring, not place a node); a press over a ring grabs it to drag
+                // (right-click resets to auto). Claims the mouse only over a ring, never while Cmd/Ctrl-selecting.
+                bool overSetbackHandle = false;
+                if (_lineActive is RoadPlanLayer rdSh && !roadSelecting)
+                {
+                    // An active drag owns the mouse regardless of where the cursor is (so it can't get stuck).
+                    if (rdSh.IsDraggingSetback) { rdSh.HidePreview(); HandleRoadSetbackInput(rdSh, hit, overTerrain); return; }
+                    if (!rdSh.PlanLinesHidden && !MouseOverActivePanel() && overTerrain)
+                    {
+                        Camera shc = PickCamera != null ? PickCamera : Camera.main;
+                        if (shc != null) overSetbackHandle = rdSh.PickSetbackHandle(shc, Surf,
+                            new Vector2(Input.mousePosition.x, Input.mousePosition.y), 30f, out _, out _);
+                        if (overSetbackHandle && (Input.GetMouseButtonDown(0) || Input.GetMouseButtonDown(1)))
+                        { rdSh.HidePreview(); HandleRoadSetbackInput(rdSh, hit, overTerrain); return; }
+                    }
+                }
+                if (roadSelecting || overSetbackHandle) _lineActive.HidePreview();   // hide the add-node cursor while picking / over a ring
                 else _lineActive.UpdatePreview(Surf, place, overTerrain);
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);
@@ -3755,7 +3905,8 @@ namespace NetworkDesigner.Terrain
                 if (Brush != BrushMode.Slope)
                 {
                     ChunkWorld.Sculpt(hit.point, BrushRadius, BrushStrength, Time.deltaTime,
-                                      (DemTerrainWorld.SculptMode)(int)Brush, _demFlattenY);
+                                      (DemTerrainWorld.SculptMode)(int)Brush, _demFlattenY,
+                                      BuildRoadProtectMask(hit.point));   // skip cells under built roads
                     _dirtySince = Time.realtimeSinceStartup;
                     HydrologyOverlay.MarkDirty();   // chunk sculpt bypasses ConformScatterAndLines → mark here (debounced)
                 }
@@ -4089,12 +4240,22 @@ namespace NetworkDesigner.Terrain
         // chain. (Extracted so the rail auto-slope can intercept right-click to cancel.)
         void DeleteOrEndChain(RaycastHit hit, bool overTerrain)
         {
-            // Road plan: right-click deletes the HOVERED node (+ its segments + any built road) in BOTH modes;
-            // nothing highlighted just ends the chain.
+            // Road plan: right-click deletes the HOVERED node (+ its segments + any built road) in BOTH modes; or,
+            // failing a node, the segment under the cursor — built OR un-built — removing its plan line and any 3D
+            // road swept on it. Nothing under the cursor just ends the chain.
             if (_lineActive is RoadPlanLayer rdRoad)
             {
-                if (overTerrain && rdRoad.HoverNode >= 0) DeleteRoadNode(rdRoad.HoverNode);
-                else { rdRoad.EndChain(); _dirtySince = Time.realtimeSinceStartup; }
+                if (overTerrain && rdRoad.HoverNode >= 0) { DeleteRoadNode(rdRoad.HoverNode); return; }
+                if (overTerrain)
+                {
+                    int e = rdRoad.PickEdgeInCorridor(new Vector2(hit.point.x, hit.point.z));
+                    if (e >= 0)
+                    {
+                        DeleteRoadEdges(new System.Collections.Generic.List<int> { e });   // plan edge + any built road; rebuilds + dirties
+                        return;
+                    }
+                }
+                rdRoad.EndChain(); _dirtySince = Time.realtimeSinceStartup;
                 return;
             }
             bool deleted = false;
@@ -4209,6 +4370,18 @@ namespace NetworkDesigner.Terrain
             int cz0 = Mathf.RoundToInt(fz);
             int rad = Mathf.Max(1, Mathf.CeilToInt(BrushRadius / cs));
 
+            // Protect built roads: snapshot nearby built-road footprints ONCE, then skip any cell that falls under
+            // one so the brush can't disturb a road's bed. Un-built plan lines aren't protected.
+            _roadMaskSegs.Clear();
+            bool maskRoads = ProtectRoadsFromSculpt && RoadPlanLayer != null;
+            if (maskRoads)
+            {
+                RoadPlanLayer.CollectBuiltFootprints(new Vector2(worldHit.x, worldHit.z),
+                    BrushRadius + Mathf.Max(0f, RoadProtectMargin), _roadMaskSegs);
+                maskRoads = _roadMaskSegs.Count > 0;
+            }
+            float ox = _field.Origin.x, oz = _field.Origin.z, protMargin = Mathf.Max(0f, RoadProtectMargin);
+
             // Effective Raise/Lower rate = Strength^exp. exp is floored at 1 so a
             // stale/zero serialized value can't collapse it to a constant 1 m/s.
             float exp = Mathf.Max(1f, BrushStrengthExponent);
@@ -4225,6 +4398,9 @@ namespace NetworkDesigner.Terrain
                     float mx = (x - fx) * cs, mz = (z - fz) * cs;
                     float dist = Mathf.Sqrt(mx * mx + mz * mz);
                     if (dist > BrushRadius) continue;
+
+                    // Skip cells sitting on a built road (its bed must not move under the brush).
+                    if (maskRoads && CellUnderRoad(ox + x * cs, oz + z * cs, protMargin)) continue;
 
                     float tEdge = BrushRadius > 0f ? dist / BrushRadius : 0f;
                     // BrushFalloff blends between a flat (hard) profile and a
@@ -4251,6 +4427,38 @@ namespace NetworkDesigner.Terrain
                     _field.SetHeight(x, z, h);
                 }
             }
+        }
+
+        // Per-stroke snapshot of nearby built-road footprint sub-segments (a→b + half-width), filled once per
+        // brush frame so the cell loop doesn't re-walk the road graph for every cell.
+        readonly List<(Vector2 a, Vector2 b, float half)> _roadMaskSegs = new List<(Vector2, Vector2, float)>();
+
+        // Snapshot built-road footprints near the brush and return a per-cell "is this under a road?" predicate (or
+        // null when protection is off / no built roads are near). Used by BOTH the chunk-world and low-poly sculpt.
+        System.Func<float, float, bool> BuildRoadProtectMask(Vector3 worldHit)
+        {
+            _roadMaskSegs.Clear();
+            if (!ProtectRoadsFromSculpt || RoadPlanLayer == null) return null;
+            RoadPlanLayer.CollectBuiltFootprints(new Vector2(worldHit.x, worldHit.z),
+                BrushRadius + Mathf.Max(0f, RoadProtectMargin), _roadMaskSegs);
+            if (_roadMaskSegs.Count == 0) return null;
+            float m = Mathf.Max(0f, RoadProtectMargin);
+            return (wx, wz) => CellUnderRoad(wx, wz, m);
+        }
+
+        // Is world (wx,wz) within (half-width + margin) of any snapshotted built-road segment?
+        bool CellUnderRoad(float wx, float wz, float margin)
+        {
+            Vector2 p = new Vector2(wx, wz);
+            for (int i = 0; i < _roadMaskSegs.Count; i++)
+            {
+                var s = _roadMaskSegs[i];
+                Vector2 ab = s.b - s.a; float len2 = ab.sqrMagnitude;
+                float t = len2 > 1e-9f ? Mathf.Clamp01(Vector2.Dot(p - s.a, ab) / len2) : 0f;
+                float r = s.half + margin;
+                if ((p - (s.a + ab * t)).sqrMagnitude <= r * r) return true;
+            }
+            return false;
         }
 
         // Slope tool: grade the corridor between A and B (width = brush diameter) to
@@ -5331,7 +5539,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(19); // version (19 added road-plan per-segment setback overrides)
+                    w.Write(20); // version (20 added road-plan primary/secondary class + draw-order serial)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -5485,6 +5693,7 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.Bridge);                         // v17+ (road-plan per-segment bridge flag)
                 w.Write(e.Built);                          // v18+ (road-plan per-segment built flag → 3D road persists)
                 w.Write(e.SetbackA); w.Write(e.SetbackB);  // v19+ (road-plan per-segment setback overrides; <0 = auto)
+                w.Write((int)e.Class); w.Write(e.Serial);  // v20+ (road-plan primary/secondary class + draw-order age)
             }
             int ny = g?.NodeY?.Count ?? 0;                 // v14+: per-node design elevation
             w.Write(ny);
@@ -5532,6 +5741,7 @@ namespace NetworkDesigner.Terrain
                 RailLayer.LoadState(save.Rails);
                 PlanLayer.LoadState(save.Plan);
                 RoadPlanLayer.LoadState(save.RoadPlan);
+                _roadRebuildAfterLoad = 0.6f;   // re-sweep the 3D roads once the world has settled (covers all load paths / async chunk streaming)
                 RetainingWallLayer.LoadState(save.RetainingWalls);   // mesh rebuilt after chunks; terrain grade already in the saved edits
                 // Stage the camera pose; applied in Start once the fly camera exists.
                 _havePendingCam = save.HasCamera;
@@ -5691,6 +5901,8 @@ namespace NetworkDesigner.Terrain
                 if (version >= 17) e.Bridge = r.ReadBoolean();    // road-plan per-segment bridge flag
                 if (version >= 18) e.Built = r.ReadBoolean();     // road-plan per-segment built flag
                 if (version >= 19) { e.SetbackA = r.ReadSingle(); e.SetbackB = r.ReadSingle(); }   // setback overrides
+                if (version >= 20) { e.Class = (RoadClass)r.ReadInt32(); e.Serial = r.ReadInt32(); }  // primary/secondary + age
+                else e.Serial = i + 1;   // pre-v20: no stored age → seed from edge order so derivation isn't all-tied
                 g.Edges.Add(e);
             }
             if (version >= 14)   // per-node design elevation

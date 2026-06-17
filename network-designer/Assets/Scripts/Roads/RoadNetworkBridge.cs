@@ -39,12 +39,18 @@ namespace NetworkDesigner.Roads
                 RoadProfile prof = RoadProfileLibrary.Resolve(le.Profile);
                 if (prof == null || prof.TotalWidth < 0.5f) prof = FallbackProfile(Mathf.Max(2f, fallbackWidth));
 
+                // Intersection precedence (primary runs through at the base setback; secondary yields — its setback
+                // grows on acute approaches). Resolved on the graph so the overlay and the resolver agree exactly.
+                RoadClassification cls = graph.EffectiveClass(e) == Terrain.RoadClass.Primary
+                    ? RoadClassification.Primary : RoadClassification.Secondary;
+
                 var road = new NetworkRoad
                 {
                     Id = "r" + e,
                     EndA = "v" + le.A,
                     EndB = "v" + le.B,
                     Profile = prof,
+                    Classification = cls,
                     SpeedLimit = le.SpeedLimit > 0f ? le.SpeedLimit : (float?)null,
                     SetbackA = le.SetbackA >= 0f ? le.SetbackA : (float?)null,   // <0 = auto (resolver computes it)
                     SetbackB = le.SetbackB >= 0f ? le.SetbackB : (float?)null,

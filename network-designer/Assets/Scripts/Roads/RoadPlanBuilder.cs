@@ -25,7 +25,8 @@ namespace NetworkDesigner.Roads
         // `onlyRoads` (road ids "r{e}") restricts which road bodies get swept — the WHOLE network still resolves
         // (so junction setbacks stay correct as segments are built one at a time), but only the listed roads emit
         // geometry. Pass null to sweep every road (the whole-plan build).
-        public static GameObject Build(Network net, Func<string, float> vertexElev, float excavationDepth, Transform parent, HashSet<string> onlyRoads = null)
+        public static GameObject Build(Network net, Func<string, float> vertexElev, float excavationDepth, Transform parent,
+                                       HashSet<string> onlyRoads = null, Func<Vector2, float> groundAt = null, float follow = 0f)
         {
             var root = new GameObject("RoadPlanBuild");
             if (parent != null) root.transform.SetParent(parent, false);
@@ -69,8 +70,8 @@ namespace NetworkDesigner.Roads
                 RoadCrossSection xs = RoadCrossSectionBuilder.FromProfile(road.Profile);
                 if (xs.Thickness < depth) xs.Thickness = depth;
 
-                RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB);
-                BuildRoadMarkings(road.Profile, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks");
+                RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB, groundAt, follow);
+                BuildRoadMarkings(road.Profile, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks", groundAt, follow);
                 built++;
             }
 
@@ -146,7 +147,10 @@ namespace NetworkDesigner.Roads
                 switch (s.Kind)
                 {
                     case SegmentKind.QuadraticBezier:
-                        for (int i = 0; i < 8; i++) pts.Add(GeometryResolver.SampleQuadratic(s.From, s.Control, s.To, i / 8f));
+                        // The fillet control is the OE-edge intersection; at near-parallel (acute) corners it flies far
+                        // off and the bezier bulges into a spike. Bound its reach so the corner stays a compact fillet.
+                        Vector2 qc = ClampFilletControl(s.From, s.Control, s.To);
+                        for (int i = 0; i < 8; i++) pts.Add(GeometryResolver.SampleQuadratic(s.From, qc, s.To, i / 8f));
                         break;
                     case SegmentKind.CubicBezier:
                         for (int i = 0; i < 10; i++) pts.Add(GeometryResolver.SampleCubic(s.From, s.Control, s.Control2, s.To, i / 10f));
@@ -157,6 +161,17 @@ namespace NetworkDesigner.Roads
                 }
             }
             return pts;
+        }
+
+        // Cap how far a quadratic fillet control may sit from its chord midpoint. A normal convex corner keeps its
+        // control within ~1×chord; a near-parallel acute corner's OE intersection runs to infinity → spike. Clamping
+        // toward the chord flattens that corner to a bounded fillet instead of letting it shoot off the junction.
+        static Vector2 ClampFilletControl(Vector2 from, Vector2 ctrl, Vector2 to)
+        {
+            Vector2 mid = (from + to) * 0.5f;
+            float maxReach = Mathf.Max((to - from).magnitude * 1.5f, 4f);
+            Vector2 d = ctrl - mid; float r = d.magnitude;
+            return (r > maxReach && r > 1e-4f) ? mid + d * (maxReach / r) : ctrl;
         }
 
         static readonly Color AsphaltColor = new Color(0.18f, 0.18f, 0.20f);
@@ -185,26 +200,55 @@ namespace NetworkDesigner.Roads
                 float cap = Mathf.Max(median * 6f, 30f);   // outlier = >6× the typical ring radius (30 m floor for tiny junctions)
                 for (int i = ring.Count - 1; i >= 0; i--) if (rad[i] > cap) ring.RemoveAt(i);
             }
+            // Drop consecutive coincident points (ear clipping chokes on zero-area edges).
+            for (int i = ring.Count - 1; i >= 0; i--)
+            {
+                int j = (i + 1) % ring.Count;
+                if (ring.Count > 3 && (ring[i] - ring[j]).sqrMagnitude < 1e-6f) ring.RemoveAt(i);
+            }
             int n = ring.Count;
             if (n < 3) return;
             double sa = 0.0;   // signed area in (x,z); >0 = CCW → reverse so the ring is CW
             for (int i = 0; i < n; i++) { int j = (i + 1) % n; sa += (double)ring[i].x * ring[j].y - (double)ring[j].x * ring[i].y; }
             if (sa > 0.0) ring.Reverse();
 
+            // Centroid (always interior for a convex/near-convex ring) — fan fallback centre and the rim's inner anchor.
+            Vector2 cen = Vector2.zero; for (int i = 0; i < n; i++) cen += ring[i]; cen *= 1f / n;
+
             float botY = gradeY - Mathf.Max(0f, depth);
             var verts = new List<Vector3>(2 * n + 2);
             for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, gradeY, ring[i].y));   // 0..n-1   top ring
             for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, botY, ring[i].y));      // n..2n-1  bottom ring
-            int ct = verts.Count; verts.Add(new Vector3(center.x, gradeY, center.y));            // 2n       top centre
-            int cb = verts.Count; verts.Add(new Vector3(center.x, botY, center.y));              // 2n+1     bottom centre
+            int ct = verts.Count; verts.Add(new Vector3(cen.x, gradeY, cen.y));                  // 2n       top centre
+            int cb = verts.Count; verts.Add(new Vector3(cen.x, botY, cen.y));                    // 2n+1     bottom centre
 
+            // Top face: ear-clip the ring so a non-star-shaped (asymmetric/acute) outline triangulates without the
+            // spikes a vertex/centroid FAN throws when the centre isn't visible to every edge. Fall back to a centroid
+            // fan only if ear-clipping can't complete (self-intersecting ring — shouldn't happen after the clamp).
+            List<int> topFace = EarClipCW(ring);
             var tris = new List<int>(n * 12);
+            if (topFace.Count >= (n - 2) * 3)
+            {
+                for (int t = 0; t < topFace.Count; t += 3)
+                {
+                    int a = topFace[t], b = topFace[t + 1], c = topFace[t + 2];
+                    tris.Add(a); tris.Add(b); tris.Add(c);                       // top (faces up)
+                    tris.Add(n + c); tris.Add(n + b); tris.Add(n + a);          // bottom (faces down)
+                }
+            }
+            else
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    int j = (i + 1) % n;
+                    tris.Add(ct); tris.Add(i); tris.Add(j);                      // top fan (faces up)
+                    tris.Add(cb); tris.Add(n + j); tris.Add(n + i);             // bottom fan (faces down)
+                }
+            }
             for (int i = 0; i < n; i++)
             {
                 int j = (i + 1) % n;
-                tris.Add(ct); tris.Add(i); tris.Add(j);              // top fan (faces up)
-                tris.Add(cb); tris.Add(n + j); tris.Add(n + i);      // bottom fan (faces down)
-                tris.Add(i); tris.Add(n + i); tris.Add(n + j);       // rim wall (faces out)
+                tris.Add(i); tris.Add(n + i); tris.Add(n + j);                   // rim wall (faces out)
                 tris.Add(i); tris.Add(n + j); tris.Add(j);
             }
 
@@ -222,6 +266,55 @@ namespace NetworkDesigner.Roads
             go.AddComponent<MeshCollider>().sharedMesh = mesh;
         }
 
+        // Ear-clipping triangulation of a CW-wound simple polygon (XZ). Returns CW triangle index triples (into the
+        // input list) — same winding as the old centre fan, so they face up after RecalculateNormals. Returns an
+        // incomplete list if the polygon self-intersects (caller falls back to a fan).
+        static List<int> EarClipCW(List<Vector2> poly)
+        {
+            var tris = new List<int>();
+            int n = poly.Count;
+            if (n < 3) return tris;
+            var idx = new List<int>(n);
+            for (int i = 0; i < n; i++) idx.Add(i);
+            int guard = 0;
+            while (idx.Count > 3 && guard++ < 20000)
+            {
+                bool clipped = false;
+                int m = idx.Count;
+                for (int i = 0; i < m; i++)
+                {
+                    int i0 = idx[(i - 1 + m) % m], i1 = idx[i], i2 = idx[(i + 1) % m];
+                    Vector2 a = poly[i0], b = poly[i1], c = poly[i2];
+                    // CW convex vertex: cross < 0. Reflex / collinear → not an ear.
+                    float cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+                    if (cross >= -1e-7f) continue;
+                    bool contains = false;
+                    for (int k = 0; k < m; k++)
+                    {
+                        int p = idx[k];
+                        if (p == i0 || p == i1 || p == i2) continue;
+                        if (PointInTri(poly[p], a, b, c)) { contains = true; break; }
+                    }
+                    if (contains) continue;
+                    tris.Add(i0); tris.Add(i1); tris.Add(i2);
+                    idx.RemoveAt(i); clipped = true; break;
+                }
+                if (!clipped) break;   // no ear found → degenerate/self-intersecting; bail to fan
+            }
+            if (idx.Count == 3) { tris.Add(idx[0]); tris.Add(idx[1]); tris.Add(idx[2]); }
+            return tris;
+        }
+
+        static bool PointInTri(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
+        {
+            float d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
+            float d2 = (p.x - c.x) * (b.y - c.y) - (b.x - c.x) * (p.y - c.y);
+            float d3 = (p.x - a.x) * (c.y - a.y) - (c.x - a.x) * (p.y - a.y);
+            bool neg = d1 < 0f || d2 < 0f || d3 < 0f;
+            bool pos = d1 > 0f || d2 > 0f || d3 > 0f;
+            return !(neg && pos);
+        }
+
         // ---- lane markings on the built asphalt ----
 
         static readonly Color MarkWhite = new Color(0.93f, 0.93f, 0.93f);
@@ -233,7 +326,8 @@ namespace NetworkDesigner.Roads
         // lines. Thin double-sided UNLIT quads lifted just above the asphalt, following the same trimmed curve
         // + design grade as the road body so they sit flush. (Lane-flow arrows come with phase 3 proper.)
         static void BuildRoadMarkings(RoadProfile prof, Vector2 a, Vector2 ca, Vector2 cb, Vector2 b, bool curve,
-                                      float hA, float hB, Transform parent, string name)
+                                      float hA, float hB, Transform parent, string name,
+                                      Func<Vector2, float> groundAt = null, float follow = 0f)
         {
             if (prof == null) return;
             List<(float w, int k)> lay = RoadLayout.Of(prof);
@@ -271,6 +365,8 @@ namespace NetworkDesigner.Roads
             float mlen = curve ? GeometryResolver.CubicArcLength(a, ca, cb, b) : Vector2.Distance(a, b);
             int frames = Mathf.Clamp(Mathf.CeilToInt(mlen / 0.5f) + 1, 2, 2048);
             var fp = new Vector3[frames]; var fr = new Vector3[frames];
+            // Markings ride the SAME profile as the road body (straight grade or terrain-follow) so they sit flush.
+            var markY = RoadSweep.ElevationProfile(a, b, curve, ca, cb, frames, hA, hB, groundAt, follow);
             for (int f = 0; f < frames; f++)
             {
                 float t = f / (float)(frames - 1);
@@ -278,7 +374,7 @@ namespace NetworkDesigner.Roads
                 if (curve) { p = GeometryResolver.SampleCubic(a, ca, cb, b, t); tan = GeometryResolver.CubicTangent(a, ca, cb, b, t); }
                 else { p = Vector2.Lerp(a, b, t); tan = b - a; }
                 Vector3 fwd = new Vector3(tan.x, 0f, tan.y); fwd = fwd.sqrMagnitude < 1e-8f ? Vector3.forward : fwd.normalized;
-                fp[f] = new Vector3(p.x, Mathf.Lerp(hA, hB, t) + MarkLift, p.y);
+                fp[f] = new Vector3(p.x, markY[f] + MarkLift, p.y);
                 fr[f] = Vector3.Cross(Vector3.up, fwd).normalized;
             }
 
