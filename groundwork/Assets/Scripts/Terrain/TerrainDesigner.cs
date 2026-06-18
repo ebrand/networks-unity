@@ -966,6 +966,10 @@ namespace NetworkDesigner.Terrain
                     // Hold Alt/Option = FREE placement: skip the colinear hard-lock + extension snaps so you can
                     // lay a slightly-unaligned road at any angle. (Node-join + curve locks above still apply.)
                     bool roadFreeAngle = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+                    // Reactive guides FIRST (node colinear/perpendicular, guide crossings, segment CENTERPOINTS): a
+                    // deliberate alignment, so it must win over the older road-proximity snaps below AND the guided-turns
+                    // lock. Clear the off-axis flag so the (possibly angled) click isn't suppressed.
+                    if (!roadFreeAngle && rdp.TrySnapToGuides(flat, out Vector2 rdg)) { rdp.StraightOffAxis = false; return new Vector3(rdg.x, raw.y, rdg.y); }
                     // Extending straight toward a road: snap to where the colinear extension CROSSES it (keeps the
                     // segment straight) rather than the nearest road point — must win over the plain road-segment snap.
                     if (!roadFreeAngle && rdp.TrySnapExtensionToRoad(flat, out Vector2 rxr)) return new Vector3(rxr.x, raw.y, rxr.y);
@@ -974,10 +978,6 @@ namespace NetworkDesigner.Terrain
                     if (rdp.TrySnapToOwnNode(flat, out Vector2 rdn)) return new Vector3(rdn.x, raw.y, rdn.y);
                     if (!roadFreeAngle)
                     {
-                        // Reactive node guides FIRST: snapping the new node onto a nearby node's colinear-front /
-                        // perpendicular-side line is a deliberate alignment, so it wins over the guided-turns heading
-                        // lock below. Clear the off-axis flag so the (possibly angled) click isn't suppressed.
-                        if (rdp.TrySnapToGuides(flat, out Vector2 rdg)) { rdp.StraightOffAxis = false; return new Vector3(rdg.x, raw.y, rdg.y); }
                         // Guided straights: hard-lock to colinear / 90° (the off-axis flag suppresses kinked clicks).
                         bool rsnap = rdp.SnapStraightConstrained(flat, out Vector2 rsh, out bool roff);
                         rdp.StraightOffAxis = roff;

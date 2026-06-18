@@ -706,6 +706,7 @@ namespace NetworkDesigner.Terrain
         public void CollectTargetGuides(Vector2 p)
         {
             _guideRays.Clear();
+            _guideMids.Clear();
             if (Graph == null) return;
             // Per the guide spec: every existing node within GuideRange of the cursor (Guides palette "Guide range",
             // separate from the EndSnapRadius node-snap) projects guides off EACH incident edge — a colinear (the road's
@@ -733,12 +734,17 @@ namespace NetworkDesigner.Terrain
                     _guideRays.Add(new GuideRay { O = np, D = outw, Len = len });    // colinear extension (outward)
                     _guideRays.Add(new GuideRay { O = np, D = perp, Len = len });    // perpendicular (both sides;
                     _guideRays.Add(new GuideRay { O = np, D = -perp, Len = len });   // snap/red picks the cursor's side)
+                    // Length-mirror snap: a point on the colinear EXTENSION at the SAME distance from the node as this
+                    // edge's far end — so a new segment can mirror the existing colinear segment's length. Shows a red
+                    // perpendicular when snapped (reuses the GuideMid mechanism, same as centerpoints).
+                    int other = (le.A == i) ? le.B : le.A;
+                    float segL = (np - Graph.Nodes[other]).magnitude;
+                    if (segL > 0.5f) _guideMids.Add(new GuideMid { Mid = np + outw * segL, Perp = perp });
                 }
             }
 
             // Segment CENTERPOINT snap targets: each edge whose midpoint is within GuideRange of the cursor (excluding
             // the chain's own incoming edge). Snapping onto a midpoint shows a red perpendicular guide (DrawTargetGuides).
-            _guideMids.Clear();
             for (int e = 0; e < Graph.Edges.Count; e++)
             {
                 LineEdge le = Graph.Edges[e];
@@ -771,8 +777,22 @@ namespace NetworkDesigner.Terrain
             EnsureGuideMesh();
             _gv.Clear(); _gTriA.Clear(); _gTriR.Clear();
             ResolveGuideSnap(cursor, out _, out int aIdx, out int bIdx, out int midIdx);
+            // Only DRAW a guide when the cursor is roughly IN LINE with it (within `show` of the line, alongside it),
+            // so distant in-range nodes don't clutter the map. The snapped guide(s) always draw. Snapping itself still
+            // considers every collected guide (ResolveGuideSnap above).
+            float show2 = Mathf.Max(0.01f, GuideSnapRadius * 2f); show2 *= show2;
             for (int i = 0; i < _guideRays.Count; i++)
-                GuideRibbon(field, _guideRays[i].O, _guideRays[i].D, _guideRays[i].Len, (i == aIdx || i == bIdx) ? _gTriR : _gTriA);
+            {
+                bool active = (i == aIdx || i == bIdx);
+                if (!active)
+                {
+                    GuideRay gr = _guideRays[i];
+                    float t = Vector2.Dot(cursor - gr.O, gr.D);
+                    if (t < 0f || t > gr.Len) continue;                                 // cursor not alongside this ray
+                    if ((cursor - (gr.O + gr.D * t)).sqrMagnitude > show2) continue;    // not in line with it
+                }
+                GuideRibbon(field, _guideRays[i].O, _guideRays[i].D, _guideRays[i].Len, active ? _gTriR : _gTriA);
+            }
             if (midIdx >= 0)   // snapped to a segment centerpoint → red perpendicular guide through it (both ways)
             {
                 GuideMid m = _guideMids[midIdx];

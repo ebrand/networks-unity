@@ -98,6 +98,34 @@ namespace NetworkDesigner.Terrain
         {
             TerrainDesigner t = Terrain;
 
+            // --- Design controls / plan guides (PlanGuides; shared by rail + road plan) ---
+            // Registered here so the Design Controls palette persists across games via TuningOverrides.json
+            // (snapshotted on save, applied on load) — same mechanism as the Environment palette.
+            TuningRegistry.RegisterBool("guides.showNodes", "Guides", "Show nodes",
+                () => PlanGuides.ShowNodes, v => PlanGuides.ShowNodes = v);
+            TuningRegistry.RegisterFloat("guides.nodeSize", "Guides", "Node size (m)",
+                () => PlanGuides.NodePuckRadius, v => PlanGuides.NodePuckRadius = v, 0.2f, 5f);
+            TuningRegistry.RegisterFloat("guides.nodeHeight", "Guides", "Node height (m)",
+                () => PlanGuides.NodePuckHeight, v => PlanGuides.NodePuckHeight = v, 0f, 3f);
+            TuningRegistry.RegisterFloat("guides.length", "Guides", "Guide length (m)",
+                () => PlanGuides.ExtensionGuideLength, v => PlanGuides.ExtensionGuideLength = v, 0f, 2000f);
+            TuningRegistry.RegisterFloat("guides.colinearSnap", "Guides", "Colinear snap (m)",
+                () => PlanGuides.ExtensionSnapRadius, v => PlanGuides.ExtensionSnapRadius = v, 0f, 30f);
+            TuningRegistry.RegisterBool("guides.proximityOn", "Guides", "Proximity snap",
+                () => PlanGuides.ProximitySnapOn, v => PlanGuides.ProximitySnapOn = v);
+            TuningRegistry.RegisterFloat("guides.nodeSnap", "Guides", "Node snap (m)",
+                () => PlanGuides.EndSnapRadius, v => PlanGuides.EndSnapRadius = v, 0f, 30f);
+            TuningRegistry.RegisterFloat("guides.nodePick", "Guides", "Node pick (m)",
+                () => PlanGuides.NodePickRadius, v => PlanGuides.NodePickRadius = v, 0f, 10f);
+            TuningRegistry.RegisterFloat("guides.range", "Guides", "Guide range (m)",
+                () => PlanGuides.GuideRange, v => PlanGuides.GuideRange = v, 0f, 2000f);
+            TuningRegistry.RegisterFloat("guides.snap", "Guides", "Guide snap (m)",
+                () => PlanGuides.GuideSnapRadius, v => PlanGuides.GuideSnapRadius = v, 0f, 30f);
+            TuningRegistry.RegisterFloat("guides.curveLever", "Guides", "Curve lever",
+                () => PlanGuides.CurveLever, v => PlanGuides.CurveLever = v, 0f, 1f);
+            TuningRegistry.RegisterFloat("guides.curveSymmetry", "Guides", "Curve symmetry snap",
+                () => PlanGuides.CurveSymmetrySnap, v => PlanGuides.CurveSymmetrySnap = v, 0f, 1f);
+
             // --- Terrain size (rebuild to apply) ---
             TuningRegistry.RegisterFloat("terrain.sizeMeters", "Terrain", "Map size (m, square)",
                 () => t.TerrainSizeMeters, v => t.TerrainSizeMeters = v, 200f, 20000f,

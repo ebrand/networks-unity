@@ -48,7 +48,7 @@ namespace NetworkDesigner.UI
             body.Add(Divider());
             body.Add(SectionLabel("GUIDES"));
             body.Add(SliderRow("Guide length", () => PlanGuides.ExtensionGuideLength,
-                v => PlanGuides.ExtensionGuideLength = v, 0f, 1000f, "0"));
+                v => PlanGuides.ExtensionGuideLength = v, 0f, 2000f, "0"));
             body.Add(SliderRow("Colinear snap", () => PlanGuides.ExtensionSnapRadius,
                 v => PlanGuides.ExtensionSnapRadius = v, 0f, 30f, "0.#"));
             body.Add(ToggleRow("Proximity", () => PlanGuides.ProximitySnapOn,
@@ -56,9 +56,18 @@ namespace NetworkDesigner.UI
             body.Add(SliderRow("Node snap", () => PlanGuides.EndSnapRadius,
                 v => PlanGuides.EndSnapRadius = v, 0f, 30f, "0.#"));
             body.Add(SliderRow("Guide range", () => PlanGuides.GuideRange,
-                v => PlanGuides.GuideRange = v, 0f, 120f, "0"));
+                v => PlanGuides.GuideRange = v, 0f, 2000f, "0"));
             body.Add(SliderRow("Guide snap", () => PlanGuides.GuideSnapRadius,
                 v => PlanGuides.GuideSnapRadius = v, 0f, 30f, "0.#"));
+            body.Add(SliderRow("Node pick", () => PlanGuides.NodePickRadius,
+                v => PlanGuides.NodePickRadius = v, 0f, 10f, "0.#"));
+
+            body.Add(Divider());
+            body.Add(SectionLabel("CURVES"));
+            body.Add(SliderRow("Curve lever", () => PlanGuides.CurveLever,
+                v => PlanGuides.CurveLever = v, 0f, 1f, "0.00"));
+            body.Add(SliderRow("Curve symmetry", () => PlanGuides.CurveSymmetrySnap,
+                v => PlanGuides.CurveSymmetrySnap = v, 0f, 1f, "0.00"));
 
             body.Add(Divider());
             body.Add(SectionLabel("SPEED CONSTRAINTS"));
