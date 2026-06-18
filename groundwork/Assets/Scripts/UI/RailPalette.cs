@@ -38,13 +38,6 @@ namespace NetworkDesigner.UI
                 StyleActive(planBtn,  Designer.IsRailPlanMode);
             });
 
-            body.Add(NumberRow("Dgn Speed (cmd)", "km/h",
-                () => Designer.RailLayer.SpeedLimitKmh, v => Designer.RailLayer.SpeedLimitKmh = v, 10f, 200f, "0"));
-            body.Add(NumberRow("Max Grade", "deg",
-                () => Designer.RailLayer.MaxGradeDeg, v => Designer.RailLayer.MaxGradeDeg = v, 0.5f, 15f, "0.#"));
-            body.Add(NumberRow("Grade Bed", "m",
-                () => Designer.RailLayer.GradeCorridorWidth, v => Designer.RailLayer.GradeCorridorWidth = v, 2f, 60f, "0"));
-
             body.Add(ToggleRow("Force Grade (B)",
                 () => Designer.RailLayer.OverrideGrade, v => Designer.RailLayer.OverrideGrade = v));
             body.Add(ToggleRow("Show Nodes",
@@ -65,24 +58,11 @@ namespace NetworkDesigner.UI
             // How hard the auto-route works to avoid climbing (hug the draw) vs. go straight.
             body.Add(SliderRow("Route climb avoid", () => RailAutoRoute.ClimbWeight,
                 v => RailAutoRoute.ClimbWeight = v, 5f, 80f, "0"));
-            // Keep escalating climb-avoidance until every segment ≤ the ruling grade (else best effort).
-            body.Add(ToggleRow("Route ≤ ruling grade", () => RailAutoRoute.EnforceGrade,
-                v => RailAutoRoute.EnforceGrade = v));
-            // Round route corners tighter than the design-speed min radius (approximate).
-            body.Add(ToggleRow("Speed-limit curves", () => RailAutoRoute.SpeedLimitCurves,
-                v => RailAutoRoute.SpeedLimitCurves = v));
-            // Higher = longer straights / fewer wiggles (more cut/fill); lower = hugs the terrain.
-            body.Add(SliderRow("Route straightness (m)", () => RailAutoRoute.SimplifyMeters,
-                v => RailAutoRoute.SimplifyMeters = v, 10f, 300f, "0"));
 
             // Plan/track actions.
-            var actRow = HBox();
-            var carve = MakeButton("Carve Appr.", () => Designer.CarveRailApproaches());
-            var bop   = MakeButton("Build on Plan", () => Designer.PromotePlanToRail());
-            carve.style.marginRight = 6;
-            actRow.Add(carve); actRow.Add(bop);
-            actRow.style.marginTop = 4;
-            body.Add(actRow);
+            var bop = MakeButton("Build on Plan", () => Designer.PromotePlanToRail());
+            bop.style.marginTop = 4;
+            body.Add(bop);
             // Cut/fill grading: carve+fill a roadbed under the rail to its routed grade (chunk world or DEM).
             var grade = MakeButton("Grade Corridor (cut/fill)", () => Designer.GradeRailCorridor());
             grade.style.marginTop = 4;
