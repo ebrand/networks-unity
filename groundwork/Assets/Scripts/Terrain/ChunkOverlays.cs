@@ -26,18 +26,23 @@ namespace NetworkDesigner.Terrain
         static Texture2D _gridTex;
         static Camera _cam;   // latest active camera (for choosing the drop spot); grid itself is static
 
+        const float NoSeaBand = -1e6f;   // _SeaLevel value that bands NOTHING (all ground reads as above water)
+
         public static void SetWater(bool on)
         {
             ShowWater = on;
             if (on) EnsureWater();
             if (_water != null) _water.SetActive(on);
+            // The ground shader's beach/submerge band must only show when water is ON — otherwise a raised level with
+            // water OFF leaves a white beach band and no water (the "white layer when Show Water is off" bug).
+            if (ChunkWorld.Active) ChunkWorld.GroundSeaLevel = on ? WaterLevel : NoSeaBand;
         }
 
         public static void SetWaterLevel(float y)
         {
             WaterLevel = Mathf.Round(y);   // snap to whole metres (0 = sea level), for both the slider + React
             if (_water != null) { var p = _water.transform.position; p.y = WaterLevel; _water.transform.position = p; }
-            if (ChunkWorld.Active) ChunkWorld.GroundSeaLevel = WaterLevel;   // keep the beach sand banded at the water
+            if (ChunkWorld.Active) ChunkWorld.GroundSeaLevel = ShowWater ? WaterLevel : NoSeaBand;   // band beach sand at the water only when shown
         }
 
         public static void SetWaterColor(Color c)

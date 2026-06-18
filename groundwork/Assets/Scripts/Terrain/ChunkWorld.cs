@@ -315,7 +315,9 @@ namespace NetworkDesigner.Terrain
             var sandN = Resources.Load<Texture2D>("TerrainGround/sand_normal");
             if (sand != null) m.SetTexture("_SandTex", sand);
             if (sandN != null) m.SetTexture("_SandNormal", sandN);
-            if (m.HasProperty("_SeaLevel")) m.SetFloat("_SeaLevel", ChunkOverlays.WaterLevel);
+            // Band the beach/submerge sand at the water level ONLY when water is shown (else far below everything, so
+            // no band) — matches ChunkOverlays' gating; the _groundProps re-apply below also enforces it.
+            if (m.HasProperty("_SeaLevel")) m.SetFloat("_SeaLevel", ChunkOverlays.ShowWater ? ChunkOverlays.WaterLevel : -1e6f);
             // Re-apply any ground-blend values set BEFORE this material existed (persisted settings loaded at
             // startup, or values held across a material rebuild) so they aren't lost — see _groundProps.
             foreach (var kv in _groundProps)

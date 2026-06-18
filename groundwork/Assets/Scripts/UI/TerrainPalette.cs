@@ -144,7 +144,8 @@ namespace NetworkDesigner.UI
                 v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { Designer.ShowWater = v; Designer.ApplyWater(); } }));
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : Designer.WaterLevel,
-                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, WaterLo(), WaterHi(), "0", 1f));
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, WaterLo, WaterHi, "0", 1f));
+            body.Add(WaterBodiesRow());
         }
 
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
@@ -158,7 +159,8 @@ namespace NetworkDesigner.UI
                 v => { if (Designer.ChunkTestActive) Designer.ChunkShowWater = v; else { DemWater.Show = v; DemWater.Apply(); } }));
             body.Add(SliderRow("Level",
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : DemWater.Level,
-                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, WaterLo(), WaterHi(), "0", 1f));
+                v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, WaterLo, WaterHi, "0", 1f));
+            body.Add(WaterBodiesRow());
             // LIGHTING controls removed from here — to be relocated.
         }
 
@@ -293,10 +295,27 @@ namespace NetworkDesigner.UI
             UpdatePreview();
         }
 
-        // Water slider range, relative to the world's floor so high inland terrain isn't out of reach:
-        // the level defaults (on load) to floor − 20 m; the slider spans floor − 50 … floor + 500.
-        float WaterFloor() => Designer.ChunkTestActive ? Mathf.Floor(Designer.DefaultNormMin) : 0f;
-        float WaterLo() => WaterFloor() - 50f;
-        float WaterHi() => WaterFloor() + 500f;
+        // Water slider range, keyed off the LOADED WORLD's minimum elevation (DemChunkSource.NormMin spans every
+        // downloaded tile and updates on each new download): [worldMin − 10 m  …  worldMin + 150 m]. Tight on purpose —
+        // a narrow span gives fine 1 m-step resolution for placing the level precisely (deep peaks are rarely the
+        // target). Falls back to a 0-based range when no region is downloaded. (Gate on DemChunkSource.Active, NOT
+        // ChunkWorld.Active — the floor must follow the data.)
+        // Multi-level water bodies (dam case): "+ Water body" arms placement — then CLICK a spot and a body is created
+        // whose level = that ground + 5 m, flooding from the click. Repeat at the reservoir and the tailwater; turn the
+        // global "Show Water" off so only the bodies render.
+        VisualElement WaterBodiesRow()
+        {
+            var row = HBox();
+            row.style.marginBottom = 8;
+            var add = MakeButton("+ Water body (click)", () => Designer.ArmWaterBodyPlacement());
+            var clr = MakeButton("Clear", () => Designer.ClearWaterBodies());
+            add.style.flexGrow = 1; clr.style.marginLeft = 6;
+            row.Add(add); row.Add(clr);
+            return row;
+        }
+
+        float WaterFloor() => DemChunkSource.Active ? Mathf.Floor(DemChunkSource.NormMin) : 0f;
+        float WaterLo() => WaterFloor() - 10f;    // tight range → finer slider resolution (1 m steps)
+        float WaterHi() => WaterFloor() + 150f;
     }
 }

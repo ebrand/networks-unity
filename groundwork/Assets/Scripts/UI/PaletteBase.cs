@@ -368,6 +368,39 @@ namespace NetworkDesigner.UI
             return row;
         }
 
+        // SliderRow variant whose min/max are LIVE (re-evaluated in the sync loop) — for ranges that change at runtime,
+        // e.g. the water level bounds following the downloaded world's elevation as new regions stream in.
+        protected VisualElement SliderRow(string label, Func<float> get, Action<float> set,
+                                          Func<float> minF, Func<float> maxF, string fmt = "0.#", float step = 0f)
+        {
+            var row = HBox();
+            row.style.marginBottom = 8;
+            var l = new Label(label);
+            l.style.color = Ink; l.style.fontSize = 13; l.style.minWidth = 76;
+            row.Add(l);
+            float mn0 = minF(), mx0 = maxF();
+            var s = new Slider(mn0, mx0) { value = Mathf.Clamp(get(), mn0, mx0) };
+            s.style.flexGrow = 1; s.style.marginLeft = 4; s.style.marginRight = 6;
+            var val = new Label(get().ToString(fmt));
+            val.style.color = Sub; val.style.minWidth = 36; val.style.unityTextAlign = TextAnchor.MiddleRight;
+            s.RegisterValueChangedCallback(e =>
+            {
+                float v = step > 0f ? Mathf.Round(e.newValue / step) * step : e.newValue;
+                if (step > 0f && !Mathf.Approximately(v, e.newValue)) s.SetValueWithoutNotify(v);
+                set(v); val.text = v.ToString(fmt);
+            });
+            _sync.Add(() =>
+            {
+                float mn = minF(), mx = maxF();
+                if (mx <= mn) mx = mn + 1f;                                   // guard a degenerate range
+                if (!Mathf.Approximately(mn, s.lowValue)) s.lowValue = mn;    // follow the live bounds (e.g. new download)
+                if (!Mathf.Approximately(mx, s.highValue)) s.highValue = mx;
+                float g = get(); s.SetValueWithoutNotify(Mathf.Clamp(g, mn, mx)); val.text = g.ToString(fmt);
+            });
+            row.Add(s); row.Add(val);
+            return row;
+        }
+
         protected DropdownField DropdownRow(Func<List<string>> choices, Func<string> get, Action<string> set)
         {
             var dd = new DropdownField();

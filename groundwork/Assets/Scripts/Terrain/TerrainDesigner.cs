@@ -465,6 +465,7 @@ namespace NetworkDesigner.Terrain
             if (DemBackend && DemTerrainWorld.HasWorld) DemTerrainWorld.WireCameraToDem();
             MinimapDiorama.Dispose();   // tear down the relief minimap (no-op for the flat test)
             ChunkOverlays.Teardown();   // tear down water + local-grid GOs (toggle state is kept)
+            WaterBodies.Teardown();     // tear down per-level water bodies (in-session only this phase)
             ForestGen.Teardown();       // tear down the forest-selection highlight
             DemChunkSource.Clear();     // drop the DEM tile mapping/cache (no-op for the flat test)
             Debug.Log("[ChunkTest] stopped.");
@@ -535,6 +536,20 @@ namespace NetworkDesigner.Terrain
         }
         public Color ChunkWaterColor { get => ChunkOverlays.WaterColor; set => ChunkOverlays.SetWaterColor(value); }
         public float ChunkWaterSmoothness { get => ChunkOverlays.WaterSmoothness; set => ChunkOverlays.SetWaterSmoothness(value); }
+
+        // ── multi-level water bodies (dam case) ──
+        public int WaterBodyCount => WaterBodies.Count;
+        [System.NonSerialized] bool _placingWaterBody;
+        public bool PlacingWaterBody => _placingWaterBody;
+        // Arm placement: the NEXT terrain click drops a water body whose LEVEL = clicked ground + 5 m and floods from
+        // there (so the seed is always below the surface → always fills). A palette button can't read the terrain
+        // cursor (mouse is over the panel), so this defers to the click handled in Update.
+        public void ArmWaterBodyPlacement()
+        {
+            _placingWaterBody = true;
+            Debug.Log("[WaterBodies] click a spot to place a water body (level = ground + 5 m); Esc cancels.");
+        }
+        public void ClearWaterBodies() { WaterBodies.Clear(); _dirtySince = Time.realtimeSinceStartup; }
         public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
         // Topographic contour lines over the loaded terrain (J hotkey too).
         // Topo contours render via the per-pixel overlay SHADER (ChunkWorld.SetContours).
@@ -3473,6 +3488,30 @@ namespace NetworkDesigner.Terrain
             // no active terrain tool. (Rail/scatter set _lineActive/_active, so unaffected.)
             if (overTerrain && _lineActive == null && _active == null
                 && !NetworkDesigner.UI.PaletteBase.IsOpenId("Terrain")) overTerrain = false;
+
+            // Armed water-body placement: the next terrain click seeds a body at clicked ground + 5 m and floods from
+            // there. Does its OWN ground pick (water placement may have no active tool, which zeroes overTerrain above)
+            // and swallows the frame's tool input so the click doesn't also draw/sculpt. Esc cancels.
+            if (_placingWaterBody)
+            {
+                if (Input.GetKeyDown(KeyCode.Escape)) { _placingWaterBody = false; }
+                else if (Input.GetMouseButtonDown(0) && !MouseOverActivePanel() && cam != null)
+                {
+                    Ray wr = cam.ScreenPointToRay(Input.mousePosition);
+                    bool got = Physics.Raycast(wr, out RaycastHit wh, 100000f)
+                               && (wh.collider is MeshCollider || wh.collider is TerrainCollider);
+                    Vector3 gp = got ? wh.point : default;
+                    if (!got) got = RaycastTerrainHeightfield(wr, out gp);
+                    if (got)
+                    {
+                        float lvl = ChunkWorld.SampleHeight(gp.x, gp.z) + 5f;
+                        var b = WaterBodies.Add(new Vector2(gp.x, gp.z), lvl);
+                        Debug.Log($"[WaterBodies] body at ({gp.x:0},{gp.z:0}) ground+5 = {lvl:0} m → {b.CellCount} cells.");
+                        _placingWaterBody = false; _dirtySince = Time.realtimeSinceStartup;
+                    }
+                }
+                return;   // armed → don't let this frame's click reach the draw/sculpt tools
+            }
 
             // Flatten mode: remember the world elevation under the cursor for the HUD.
             _flattenCursorValid = Brush == BrushMode.Flatten && overTerrain
