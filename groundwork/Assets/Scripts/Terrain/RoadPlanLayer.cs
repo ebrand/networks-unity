@@ -65,8 +65,12 @@ namespace NetworkDesigner.Terrain
         public float GradeSampleStep = 2f;
         [Tooltip("Width (m) of the feathered batter BEYOND the corridor edge. 0 = vertical walls at the corridor edge (the cut is exactly the corridor width).")]
         public float CutFeather = 0f;
-        [Tooltip("Cut/fill side-slope ratio 1:N (1 vertical : N horizontal). The excavation ramps the ground at this slope beyond the flat bed until it DAYLIGHTS into the existing terrain — no floating shelf / cliff. Bigger = gentler, wider earthwork.")]
+        [Tooltip("CUT side-slope ratio 1:N (1 vertical : N horizontal). The excavation ramps the ground at this slope beyond the flat bed until it DAYLIGHTS into the existing terrain — no floating shelf / cliff. Bigger = gentler, wider earthwork.")]
         public float CutBatter = 2f;
+        [Tooltip("FILL (embankment) side-slope ratio 1:N — separate from the cut side so downhill embankments can be held steeper. Bigger = gentler / wider fill.")]
+        public float FillBatter = 2f;
+        [Tooltip("How far (m) a FILL embankment may spread out from the corridor before it stops; past this the natural ground is left as a drop-off instead of building out endlessly down a slope / cliff.")]
+        public float FillReach = 120f;
         public Color PlanColor = new Color(1f, 0.55f, 0.12f, 0.95f);   // amber-orange (rail plan is yellow)
         // Guide/snap controls — shared by all plan tools via PlanGuides (tune in the Guides palette).
         public float NodePickRadius { get => PlanGuides.NodePickRadius; set => PlanGuides.NodePickRadius = value; }
@@ -157,16 +161,29 @@ namespace NetworkDesigner.Terrain
         [System.NonSerialized] Vector2 _tailPosShown;
         static readonly Color _RoadTailColor = new Color(0.20f, 1f, 0.45f, 0.9f);   // vivid green, distinct from the golden hover + red base pucks
         public bool HasOpenChain => _chainTail >= 0;
-        [System.NonSerialized] bool _linesHidden;   // whole plan overlay (line markings + node pucks) hidden — palette "Plan lines" toggle
+        [System.NonSerialized] bool _linesHidden;   // user's manual "Plan lines" toggle (hides the overlay while in the Road palette)
+        // The road plan overlay (line markings, node pucks, hover/tail/preview/guides) shows ONLY while the Road
+        // palette is the active palette; everywhere else it's force-hidden. Independent of the manual toggle above so
+        // returning to the Road palette restores whatever the user last chose. Starts hidden until the palette opens.
+        [System.NonSerialized] bool _paletteActive;
         public bool PlanLinesHidden => _linesHidden;
+        bool LinesVisible => !_linesHidden && _paletteActive;   // effective visibility = manual ON *and* palette active
         public void TogglePlanLines() => SetPlanLinesVisible(_linesHidden);
-        public void SetPlanLinesVisible(bool visible)
+        public void SetPlanLinesVisible(bool visible) { _linesHidden = !visible; ApplyVisibility(); }
+        // Driven by RoadPalette open/close: gate every road-plan visual on the Road palette being the active one.
+        public void SetPaletteActive(bool active)
         {
-            _linesHidden = !visible;
-            if (_mr != null) _mr.enabled = !_linesHidden;
-            if (_nodeMr != null) _nodeMr.enabled = PlanGuides.ShowNodes && !_linesHidden && Graph != null && Graph.Nodes.Count > 0;
-            if (_hoverMr != null && _linesHidden) _hoverMr.enabled = false;
-            if (_tailMr != null && _linesHidden) _tailMr.enabled = false;
+            _paletteActive = active;
+            ApplyVisibility();
+            if (!active) { HidePreview(); HideConnectPreview(); }   // also drop any transient add-node cursor / guides
+        }
+        void ApplyVisibility()
+        {
+            bool vis = LinesVisible;
+            if (_mr != null) _mr.enabled = vis || (_paletteActive && (SetbackEditMode || ClassEditMode));
+            if (_nodeMr != null) _nodeMr.enabled = PlanGuides.ShowNodes && vis && Graph != null && Graph.Nodes.Count > 0;
+            if (_hoverMr != null && !vis) _hoverMr.enabled = false;
+            if (_tailMr != null && !vis) _tailMr.enabled = false;
         }
         static readonly Color _RoadNodeHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);   // golden, matches rail pucks
 
@@ -1828,8 +1845,8 @@ namespace NetworkDesigner.Terrain
 
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
-            _nodeMr.enabled = PlanGuides.ShowNodes && !_linesHidden && Graph.Nodes.Count > 0;   // "Show nodes" + "Plan lines" gate the pucks
-            if (_mr != null) _mr.enabled = !_linesHidden || SetbackEditMode || ClassEditMode;   // keep the overlay for setback handles / class colours
+            _nodeMr.enabled = PlanGuides.ShowNodes && LinesVisible && Graph.Nodes.Count > 0;   // "Show nodes" + "Plan lines" + palette gate the pucks
+            if (_mr != null) _mr.enabled = LinesVisible || (_paletteActive && (SetbackEditMode || ClassEditMode));   // overlay for setback handles / class colours (palette-active only)
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
             // Topology may have shifted node indices — clear the hover so the per-frame driver re-resolves it cleanly
             // next frame (avoids a stale index highlighting the wrong node).
@@ -2238,7 +2255,7 @@ namespace NetworkDesigner.Terrain
             if (node >= Graph.Nodes.Count) node = -1;
             if (node == _hoverNode) return;
             _hoverNode = node;
-            _hoverMr.enabled = node >= 0 && PlanGuides.ShowNodes && !_linesHidden;   // hover puck follows "Show nodes" + "Plan lines"
+            _hoverMr.enabled = node >= 0 && PlanGuides.ShowNodes && LinesVisible;   // hover puck follows "Show nodes" + "Plan lines" + palette gate
             _hoverMesh.Clear();
             if (node < 0) return;
             Vector2 c = Graph.Nodes[node];
@@ -2263,7 +2280,7 @@ namespace NetworkDesigner.Terrain
             Vector2 pos = node >= 0 ? Graph.Nodes[node] : Vector2.zero;
             if (node == _tailShown && (node < 0 || pos == _tailPosShown)) return;
             _tailShown = node; _tailPosShown = pos;
-            _tailMr.enabled = node >= 0 && PlanGuides.ShowNodes && !_linesHidden;
+            _tailMr.enabled = node >= 0 && PlanGuides.ShowNodes && LinesVisible;
             _tailMesh.Clear();
             if (node < 0) return;
             float radius = Mathf.Max(0.2f, NodePuckRadius) * 1.5f;

@@ -120,6 +120,7 @@ namespace NetworkDesigner.Terrain
         public bool WaterOn;               // v10+: chunk water plane shown
         public float WaterLevel;           // v10+: chunk water level (m)
         public List<ForestGen.ForestSpeciesSave> Forest; // v11+: GPU-instanced forest (per-species transforms)
+        public List<WaterBodies.Save> WaterBodies; // v19+: per-level water bodies (seed + level; flood-filled on load)
     }
 
     // A named tree-brush preset: the subset of TerrainDesigner.TreePrefabs (by

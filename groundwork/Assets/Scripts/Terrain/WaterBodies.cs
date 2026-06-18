@@ -39,6 +39,21 @@ namespace NetworkDesigner.Terrain
         public static IReadOnlyList<Body> All => _bodies;
         public static int Count => _bodies.Count;
 
+        // Persisted form: seed + level only; the footprint is re-flooded from the terrain on load.
+        [System.Serializable] public class Save { public Vector2 Seed; public float Level; }
+        public static List<Save> CollectData()
+        {
+            var l = new List<Save>(_bodies.Count);
+            foreach (Body b in _bodies) l.Add(new Save { Seed = b.Seed, Level = b.Level });
+            return l;
+        }
+        public static void Restore(List<Save> saved)
+        {
+            Clear();
+            if (saved == null) return;
+            foreach (Save s in saved) Add(s.Seed, s.Level);   // re-floods from the (now-loaded) terrain
+        }
+
         // Add a body seeded at `seedWorldXZ`, filling up to `level`. Returns it (CellCount==0 if the seed is already
         // above the level — i.e. not in a basin). Re-fills + meshes immediately.
         public static Body Add(Vector2 seedWorldXZ, float level)

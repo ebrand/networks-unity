@@ -1325,13 +1325,38 @@ namespace NetworkDesigner.Terrain
         // existing terrain — cut where the land's high, fill (embankment) where it's low. The batter
         // extent is dynamic (deeper cut/fill → wider batter). Writes the LOD-independent edit overlay.
         // O(verts × targets) — meant for short slope-tool spans, not the whole-network grade.
-        public static void GradeBatter(List<Vector3> targets, float bedHalfWidth, float batterN)
+        // cutBatterN / fillBatterN: 1:N side-slopes for the CUT (uphill) and FILL (embankment) sides — steeper N is
+        // smaller. fillBatterN < 0 → use cutBatterN (symmetric, the old behaviour). fillMaxReach caps how far the
+        // FILL can spread out from the bed (m); past it the natural ground is left (a drop-off, not an endless
+        // embankment fanning down a cliff) — fillMaxReach < 0 → the default 120 m cap. The cut side always uses 120 m.
+        public static void GradeBatter(List<Vector3> targets, float bedHalfWidth, float cutBatterN, float fillBatterN = -1f, float fillMaxReach = -1f)
         {
             if (!Active || targets == null || targets.Count == 0) return;
             float bed = Mathf.Max(0f, bedHalfWidth);
-            float n = Mathf.Max(0.25f, batterN);
-            const float maxRun = 120f;                       // cap the daylight search beyond the bed (m)
+            float cutN = Mathf.Max(0.25f, cutBatterN);
+            float fillN = fillBatterN < 0f ? cutN : Mathf.Max(0.25f, fillBatterN);   // separate embankment slope
+            const float cutRun = 120f;                       // cut-side daylight search cap (m)
+            float fillRun = fillMaxReach < 0f ? 120f : Mathf.Clamp(fillMaxReach, 0f, 1000f);   // fill-side spread cap (m)
+            float maxRun = Mathf.Max(cutRun, fillRun);       // search box must cover the wider of the two sides
             float reach = bed + maxRun, reach2 = reach * reach;
+            // End-cap clip: the daylight must spread LATERALLY off the centreline, NOT fan out radially past the
+            // corridor's two open ends. Without this, the nearest-sample distance field rounds the terminal samples
+            // into a half-disc, so a deep cut (e.g. a bridge approach abutment on a high bank) becomes a huge
+            // circular crater. We reject any vertex more than `bed` PAST either end along the end's outward tangent
+            // — so the batter stops at the abutment (a near-vertical wall, correct for a bridge) instead of bowling
+            // out. (Mirrors GradeWallBack, which already bounds its bench laterally to the wall span.)
+            bool clipEnds = targets.Count >= 2;
+            float s0x = 0f, s0z = 0f, d0x = 0f, d0z = 0f, sNx = 0f, sNz = 0f, dNx = 0f, dNz = 0f;
+            if (clipEnds)
+            {
+                var a0 = targets[0]; var a1 = targets[1];
+                var b1 = targets[targets.Count - 2]; var b0 = targets[targets.Count - 1];
+                s0x = a0.x; s0z = a0.z; sNx = b0.x; sNz = b0.z;
+                float e0x = a0.x - a1.x, e0z = a0.z - a1.z, l0 = Mathf.Sqrt(e0x * e0x + e0z * e0z);   // outward at start
+                float eNx = b0.x - b1.x, eNz = b0.z - b1.z, lN = Mathf.Sqrt(eNx * eNx + eNz * eNz);   // outward at end
+                if (l0 > 1e-4f) { d0x = e0x / l0; d0z = e0z / l0; } else clipEnds = false;
+                if (lN > 1e-4f) { dNx = eNx / lN; dNz = eNz / lN; } else clipEnds = false;
+            }
             float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
             for (int i = 0; i < targets.Count; i++)
             {
@@ -1363,6 +1388,13 @@ namespace NetworkDesigner.Terrain
                             if (d2 < bestD2) { bestD2 = d2; bedElev = t.y; found = true; }
                         }
                         if (!found) continue;
+                        // Past either open end (beyond the flat bed) → leave terrain untouched: no radial fan-out.
+                        if (clipEnds)
+                        {
+                            float over0 = (wx - s0x) * d0x + (wz - s0z) * d0z;
+                            float overN = (wx - sNx) * dNx + (wz - sNz) * dNz;
+                            if (over0 > bed || overN > bed) continue;
+                        }
                         int i = zz * res + xx;
                         float terrain = ch.H[i];
                         float d = Mathf.Sqrt(bestD2);
@@ -1370,9 +1402,13 @@ namespace NetworkDesigner.Terrain
                         if (d <= bed) graded = bedElev;
                         else
                         {
-                            float rise = (d - bed) / n;   // 1:n batter
-                            graded = terrain >= bedElev ? Mathf.Min(terrain, bedElev + rise)   // cut, daylight up
-                                                        : Mathf.Max(terrain, bedElev - rise);  // fill, daylight down
+                            float over = d - bed;
+                            if (terrain >= bedElev)                       // CUT side: daylight UP at 1:cutN
+                                graded = Mathf.Min(terrain, bedElev + over / cutN);
+                            else if (over <= fillRun)                     // FILL side: build DOWN at 1:fillN, out to the cap
+                                graded = Mathf.Max(terrain, bedElev - over / fillN);
+                            else                                          // past the fill cap: leave natural ground (drop-off)
+                                graded = terrain;
                         }
                         if (graded != ch.H[i])
                         {

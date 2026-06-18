@@ -22,7 +22,18 @@ namespace NetworkDesigner.UI
         protected override string FooterMode => "Road";
         protected override string FooterSub => string.Empty;
 
-        protected override void OnOpened() => Designer.EnterRoadPlanMode();
+        protected override void OnOpened() { Designer.EnterRoadPlanMode(); Designer.RoadPlanLayer?.SetPaletteActive(true); }
+
+        // Road plan overlay (lines + node pucks) shows ONLY while this palette is the active one — gate it on our
+        // open state every time that state flips, so switching to any other palette hides the plan and returning shows it.
+        bool _wasOpen;
+        protected override void Update()
+        {
+            base.Update();
+            if (IsOpen == _wasOpen) return;
+            _wasOpen = IsOpen;
+            if (Designer != null && Designer.RoadPlanLayer != null) Designer.RoadPlanLayer.SetPaletteActive(IsOpen);
+        }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoSpawn()
@@ -182,9 +193,15 @@ namespace NetworkDesigner.UI
             adv.Add(NumberRow("Excavate margin", "m",
                 () => Designer.RoadPlanLayer.ExcavationMargin,
                 v => { Designer.RoadPlanLayer.ExcavationMargin = v; Designer.RebuildRoadPlan(); }, 0f, 20f, "0.0"));
-            adv.Add(NumberRow("Cut/fill slope 1:", "",
+            adv.Add(NumberRow("Cut slope 1:", "",
                 () => Designer.RoadPlanLayer.CutBatter,
                 v => Designer.RoadPlanLayer.CutBatter = v, 0.5f, 6f, "0.0"));
+            adv.Add(NumberRow("Fill slope 1:", "",
+                () => Designer.RoadPlanLayer.FillBatter,
+                v => Designer.RoadPlanLayer.FillBatter = v, 0.25f, 6f, "0.00"));
+            adv.Add(NumberRow("Fill reach", "m",
+                () => Designer.RoadPlanLayer.FillReach,
+                v => Designer.RoadPlanLayer.FillReach = v, 0f, 120f, "0"));
             var autoBr = MakeButton("Auto-bridge on draw", () => Designer.RoadPlanLayer.AutoBridge = !Designer.RoadPlanLayer.AutoBridge);
             autoBr.style.marginTop = 6;
             autoBr.tooltip = "While drawing, detect a terrain dip under a straight segment and auto-split it into approach / bridge (blue) / approach.";

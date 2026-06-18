@@ -264,6 +264,7 @@ namespace NetworkDesigner.Terrain
         string _pendingDemCity;
         DemTerrainWorld.Edits _pendingDemEdits;   // sparse sculpt/carve diff, applied after the DEM builds
         bool _pendingWaterOn; float _pendingWaterLevel;   // chunk water staged from the save; applied in LoadGame
+        System.Collections.Generic.List<WaterBodies.Save> _pendingWaterBodies;   // per-level water bodies staged from the save
         List<ForestGen.ForestSpeciesSave> _pendingForest; // forest staged from the save; imported after surface ready
         // The DEM city to fall back to when switching to DEM with no world built — the one
         // loaded this session if any, else the one remembered from the save. Lets the palette
@@ -2307,7 +2308,7 @@ namespace NetworkDesigner.Terrain
                 {
                     // Flat bed (road footprint + margin shoulder) then cut/fill batters daylighting into the
                     // terrain — proper bench, no floating shelf or scalloped disc edges.
-                    ChunkWorld.GradeBatter(b.pts, b.flatHalf, batter);
+                    ChunkWorld.GradeBatter(b.pts, b.flatHalf, batter, Mathf.Max(0.25f, RoadPlanLayer.FillBatter), RoadPlanLayer.FillReach);
                     n += b.pts.Count;
                 }
                 RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
@@ -2341,7 +2342,7 @@ namespace NetworkDesigner.Terrain
             float r = flatHalf + feather; float innerFrac = flatHalf / r;   // (DEM backend still uses the feathered stamp)
             if (ChunkWorld.Active)
             {
-                ChunkWorld.GradeBatter(pts, flatHalf, Mathf.Max(0.25f, RoadPlanLayer.CutBatter));   // daylighting bench
+                ChunkWorld.GradeBatter(pts, flatHalf, Mathf.Max(0.25f, RoadPlanLayer.CutBatter), Mathf.Max(0.25f, RoadPlanLayer.FillBatter), RoadPlanLayer.FillReach);   // daylighting bench
                 RoadPlanLayer.SetEdgeExcavated(edgeIndex, true);
                 RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
                 ConformScatterAndLines();
@@ -2849,7 +2850,7 @@ namespace NetworkDesigner.Terrain
                 {
                     if (RoadPlanLayer.IsEdgeBridge(ei)) continue;   // bridge spans the gap — never cut a bed
                     if (!RoadPlanLayer.EdgeExcavationBed(Surf, ei, out var pts, out float flatHalf)) continue;
-                    ChunkWorld.GradeBatter(pts, flatHalf, batter);   // daylighting cut/fill bench
+                    ChunkWorld.GradeBatter(pts, flatHalf, batter, Mathf.Max(0.25f, RoadPlanLayer.FillBatter), RoadPlanLayer.FillReach);   // daylighting cut/fill bench
                     RoadPlanLayer.SetEdgeExcavated(ei, true); done++;
                 }
                 RoadPlanLayer.Rebuild(Surf); RailLayer.Rebuild(Surf); PlanLayer.Rebuild(Surf);
@@ -3289,6 +3290,7 @@ namespace NetworkDesigner.Terrain
         void Update()
         {
             UpdatePlanGradeLabels();   // world-space TMP grade labels (runs even under a modal, to hide)
+            AutoOverviewByAltitude();  // fast-travel auto-engages above ~2 km altitude
             // Deferred post-load road re-sweep: a load stages the plan + Built flags, but the world (chunks) may
             // still be settling — wait a beat, then re-sweep so the 3D roads appear without a manual Build click.
             if (_roadRebuildAfterLoad >= 0f)
@@ -5505,6 +5507,8 @@ namespace NetworkDesigner.Terrain
             if (loaded != null) ConformScatterAndLines();
             // Restore the saved water plane (toggle + level) for this game.
             if (loaded != null) { ChunkOverlays.SetWaterLevel(_pendingWaterLevel); ChunkOverlays.SetWater(_pendingWaterOn); }
+            // Per-level water bodies: re-flood each from the now-loaded terrain (after the chunks around the camera streamed).
+            if (loaded != null) WaterBodies.Restore(_pendingWaterBodies);
             // Rebuild the GPU-instanced forest from the save (prior forest cleared by StopChunkTest above).
             if (loaded != null && _pendingForest != null)
             {
@@ -5567,6 +5571,7 @@ namespace NetworkDesigner.Terrain
                 // Chunk water plane state.
                 WaterOn = ChunkOverlays.ShowWater,
                 WaterLevel = ChunkOverlays.WaterLevel,
+                WaterBodies = NetworkDesigner.Terrain.WaterBodies.CollectData(),   // v19+: per-level water bodies
                 // v11+: GPU-instanced forest (decomposed per-species transforms).
                 Forest = ForestGen.ExportForest(),
             };
@@ -5638,6 +5643,22 @@ namespace NetworkDesigner.Terrain
             set { CameraSpeed = value ? 5000f : 500f; CameraZoomStep = value ? 100f : 10f; }
         }
 
+        // Auto fast-travel: engage Overview when the camera climbs past ~2 km altitude (matches the Position HUD's
+        // "Alt" = absolute world Y), disengage when it drops back below. Acts only on threshold CROSSINGS, with a
+        // 1.8–2.0 km hysteresis band so it can't flap at the boundary — and so a manual Overview toggle still sticks
+        // between crossings.
+        [System.NonSerialized] bool _camAboveOverviewAlt;
+        void AutoOverviewByAltitude()
+        {
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float y = cam.transform.position.y;
+            bool above = _camAboveOverviewAlt ? y > 1800f : y > 2000f;
+            if (above == _camAboveOverviewAlt) return;
+            _camAboveOverviewAlt = above;
+            CameraOverview = above;
+        }
+
         const int SaveMagic = 0x54524E33; // "TRN3"
 
         // BINARY serialize + write — primitives straight to a byte buffer, so a
@@ -5658,7 +5679,7 @@ namespace NetworkDesigner.Terrain
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(20); // version (20 added road-plan primary/secondary class + draw-order serial)
+                    w.Write(21); // version (21 added per-edge bridge arches + per-level water bodies)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -5701,6 +5722,11 @@ namespace NetworkDesigner.Terrain
                     WriteForest(w, save.Forest);
                     WriteGraph(w, save.RoadPlan);   // v12+: road-plan corridor
                     WriteGraph(w, save.RetainingWalls);   // v16+: retaining walls
+                    // v21+: per-level water bodies (seed + level; footprint re-flooded on load)
+                    var wb = save.WaterBodies;
+                    int nb = wb?.Count ?? 0;
+                    w.Write(nb);
+                    for (int i = 0; i < nb; i++) { w.Write(wb[i].Seed.x); w.Write(wb[i].Seed.y); w.Write(wb[i].Level); }
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -5813,6 +5839,9 @@ namespace NetworkDesigner.Terrain
                 w.Write(e.Built);                          // v18+ (road-plan per-segment built flag → 3D road persists)
                 w.Write(e.SetbackA); w.Write(e.SetbackB);  // v19+ (road-plan per-segment setback overrides; <0 = auto)
                 w.Write((int)e.Class); w.Write(e.Serial);  // v20+ (road-plan primary/secondary class + draw-order age)
+                int na = e.Arches?.Count ?? 0;             // v21+ (under-deck bridge arches)
+                w.Write(na);
+                for (int k = 0; k < na; k++) { BridgeArch ar = e.Arches[k]; w.Write(ar.StartArc); w.Write(ar.EndArc); w.Write(ar.Rise); }
             }
             int ny = g?.NodeY?.Count ?? 0;                 // v14+: per-node design elevation
             w.Write(ny);
@@ -5872,6 +5901,7 @@ namespace NetworkDesigner.Terrain
                 _pendingDemEdits = save.DemEdits;
                 _pendingWaterOn = save.WaterOn;
                 _pendingWaterLevel = save.WaterLevel;
+                _pendingWaterBodies = save.WaterBodies;
                 _pendingForest = save.Forest;
                 return f;
             }
@@ -5956,6 +5986,13 @@ namespace NetworkDesigner.Terrain
                     s.RoadPlan = ReadGraph(r, version);
                 if (version >= 16) // retaining-wall polylines
                     s.RetainingWalls = ReadGraph(r, version);
+                if (version >= 21) // per-level water bodies
+                {
+                    int nb = r.ReadInt32();
+                    s.WaterBodies = new List<WaterBodies.Save>(nb);
+                    for (int i = 0; i < nb; i++)
+                        s.WaterBodies.Add(new WaterBodies.Save { Seed = new Vector2(r.ReadSingle(), r.ReadSingle()), Level = r.ReadSingle() });
+                }
                 return s;
             }
             catch { return null; }
@@ -6022,6 +6059,16 @@ namespace NetworkDesigner.Terrain
                 if (version >= 19) { e.SetbackA = r.ReadSingle(); e.SetbackB = r.ReadSingle(); }   // setback overrides
                 if (version >= 20) { e.Class = (RoadClass)r.ReadInt32(); e.Serial = r.ReadInt32(); }  // primary/secondary + age
                 else e.Serial = i + 1;   // pre-v20: no stored age → seed from edge order so derivation isn't all-tied
+                if (version >= 21)       // under-deck bridge arches
+                {
+                    int na = r.ReadInt32();
+                    if (na > 0)
+                    {
+                        e.Arches = new List<BridgeArch>(na);
+                        for (int k = 0; k < na; k++)
+                            e.Arches.Add(new BridgeArch { StartArc = r.ReadSingle(), EndArc = r.ReadSingle(), Rise = r.ReadSingle() });
+                    }
+                }
                 g.Edges.Add(e);
             }
             if (version >= 14)   // per-node design elevation
