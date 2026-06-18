@@ -708,7 +708,10 @@ namespace NetworkDesigner.Geometry
                 if (vA == null || vB == null) continue;
 
                 float centerline = Vector2.Distance(vA.Position, vB.Position);
-                if (centerline <= Eps) continue; // skip degenerate zero-length edges
+                // Skip degenerate near-zero-length edges (coincident/near-coincident endpoints). These are a graph
+                // artifact (a 0-length stub), not a real setback conflict — the advice below ("increase spacing") can't
+                // apply, and road-plan now guards against creating them. Real but short roads (>= 0.5 m) still warn.
+                if (centerline < 0.5f) continue;
 
                 float? sA = FindResolvedSetback(geometries, vA.Id, road.Id, RoadEnd.A);
                 float? sB = FindResolvedSetback(geometries, vB.Id, road.Id, RoadEnd.B);

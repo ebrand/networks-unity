@@ -2341,6 +2341,7 @@ namespace NetworkDesigner.Terrain
         void RebuildBuiltRoads()
         {
             LineGraph graph = RoadPlanLayer.Graph;
+            if (graph != null && RoadPlanLayer.RemoveDegenerateEdges() > 0) RoadPlanLayer.Rebuild(Surf);   // drop 0-length stubs before resolving
             ClearRoadBuild();
             if (graph == null) { RoadPlanLayer.ClearResolvedSetbacks(); return; }
             // Built edges come from the per-segment flag (survives index renumbering on draw/split).

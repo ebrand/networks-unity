@@ -607,6 +607,24 @@ namespace NetworkDesigner.Terrain
 
         public void DropOrphanNodes() => PruneOrphanNodes();   // public: drop nodes left edgeless after a segment delete
 
+        // Drop degenerate near-zero-length edges (coincident endpoints — a graph artifact that makes 0-length roads:
+        // invisible segments, negative-length bodies, corrupt junctions) plus any node they orphan. No-op during a
+        // setback drag (it would shift the dragged edge index). Returns the count removed; caller should Rebuild if > 0.
+        public int RemoveDegenerateEdges()
+        {
+            if (Graph == null || _sbEdge >= 0) return 0;
+            int removed = 0;
+            for (int i = Graph.Edges.Count - 1; i >= 0; i--)
+            {
+                LineEdge e = Graph.Edges[i];
+                bool bad = e == null || e.A < 0 || e.B < 0 || e.A >= Graph.Nodes.Count || e.B >= Graph.Nodes.Count
+                           || (Graph.Nodes[e.A] - Graph.Nodes[e.B]).sqrMagnitude < MinSegLenSq;
+                if (bad) { Graph.RemoveEdgeAt(i); removed++; }
+            }
+            if (removed > 0) PruneOrphanNodes();
+            return removed;
+        }
+
         // Remove any node left with no edges (e.g. the far end of a just-deleted segment),
         // keeping the active chain tail (a fresh, not-yet-connected start node).
         void PruneOrphanNodes()
