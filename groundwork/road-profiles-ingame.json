@@ -102,13 +102,7 @@
         "curbs": true,
         "sidewalks": true,
         "elevated": false,
-        "guardrails": false,
-        "railCorridor": {
-          "tracks": 1,
-          "side": "center",
-          "trackSpacing": 5,
-          "laneClearance": 3
-        }
+        "guardrails": false
       },
       "driveSide": "right",
       "updatedAt": 0
@@ -523,6 +517,56 @@
         },
         "curbs": true,
         "sidewalks": true,
+        "elevated": false,
+        "guardrails": false
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2x2-rail",
+      "name": "2x2-rail",
+      "category": "Large",
+      "road": {
+        "id": "2x2-rail",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "railCorridor": {
+          "tracks": 1,
+          "side": "center",
+          "trackSpacing": 5.0,
+          "laneClearance": 3.0
+        },
+        "shoulderAB": {
+          "width": 1.0
+        },
+        "shoulderBA": {
+          "width": 1.0
+        },
+        "curbs": false,
+        "sidewalks": false,
         "elevated": false,
         "guardrails": false
       },

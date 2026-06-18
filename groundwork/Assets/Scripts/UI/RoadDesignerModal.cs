@@ -37,6 +37,12 @@ namespace NetworkDesigner.UI
         bool _curbs, _sidewalks, _elevated, _guardrails;
         Center _center = Center.None;
         float _laneW = 4.0f, _medianW = 1.5f, _shoulderW = 1.0f;
+        // Rail corridor (see RailCorridor / RailTrackLayer.RegenerateRoadCorridors). TrackSpacing stays at the model
+        // default (standardized track-to-track distance, not exposed).
+        bool _rail;
+        int _railTracks = 1;
+        RailCorridorSide _railSide = RailCorridorSide.Right;
+        float _railClearance = 3f;
 
         VisualElement _preview, _listBox, _view3d;
         bool _heldModal, _dragging;
@@ -187,6 +193,17 @@ namespace NetworkDesigner.UI
             left.Add(NumberRow(_sidewalks && !_elevated ? "Sidewalk" : "Shoulder", "m",
                 () => _shoulderW, v => { _shoulderW = v; RefreshPreview(); }, 0f, 6f, "0.#"));
 
+            // ---- Rail corridor ----
+            left.Add(Divider());
+            left.Add(Cap("Rail:"));
+            left.Add(ToggleRow("Rail", () => _rail, v => { _rail = v; RefreshPreview(); }));
+            left.Add(NumberRow("Tracks", "", () => _railTracks,
+                v => { _railTracks = Mathf.Max(1, Mathf.RoundToInt(v)); RefreshPreview(); }, 1f, 6f, "0"));
+            left.Add(NumberRow("Track/lane dist", "m", () => _railClearance,
+                v => { _railClearance = v; RefreshPreview(); }, 0f, 20f, "0.#"));
+            left.Add(DropdownRow("Track Pos", RailPosChoices, () => RailPosLabel(_railSide),
+                v => { _railSide = ParseRailPos(v); RefreshPreview(); }));
+
             var save = MakeButton("Save", () => { SaveCurrent(); RefreshList(); });
             save.style.marginTop = 10; left.Add(save);
             var close = MakeButton("Close", () => SetOpen(false));
@@ -194,6 +211,22 @@ namespace NetworkDesigner.UI
         }
 
         static List<string> CountChoices() => new List<string> { "0", "1", "2", "3", "4", "5", "6" };
+
+        // Track Pos uses the mockup's vocabulary (A-B / B-A / Center) mapped to the geometric RailCorridorSide.
+        // The A-B/B-A ↔ Left/Right mapping is verify-in-editor and trivially swappable.
+        static List<string> RailPosChoices() => new List<string> { "A-B", "B-A", "Center" };
+        static string RailPosLabel(RailCorridorSide s) => s switch
+        {
+            RailCorridorSide.Left => "A-B",
+            RailCorridorSide.Right => "B-A",
+            _ => "Center",
+        };
+        static RailCorridorSide ParseRailPos(string v) => v switch
+        {
+            "A-B" => RailCorridorSide.Left,
+            "B-A" => RailCorridorSide.Right,
+            _ => RailCorridorSide.Center,
+        };
 
         // A "Label  [dropdown]" row.
         VisualElement DropdownRow(string label, Func<List<string>> choices, Func<string> get, Action<string> set)
@@ -243,6 +276,7 @@ namespace NetworkDesigner.UI
             p.Elevated = _elevated;
             p.Sidewalks = _sidewalks && !_elevated;                       // elevated forces shoulders
             p.Guardrails = _guardrails && !(p.Sidewalks);                 // guardrails only with shoulders
+            if (_rail) p.RailCorridor = new RailCorridor { Tracks = _railTracks, Side = _railSide, LaneClearance = _railClearance };
             string cat = string.IsNullOrWhiteSpace(_category) ? "Uncategorized" : _category.Trim();
             return new SavedConfig { Id = p.Id, Name = _name, Category = cat, Road = p };
         }
@@ -275,6 +309,9 @@ namespace NetworkDesigner.UI
             _elevated = p.Elevated;
             _sidewalks = p.Sidewalks && !p.Elevated;
             _guardrails = p.Guardrails;
+            RailCorridor rc = p.RailCorridor;
+            _rail = rc != null;
+            if (rc != null) { _railTracks = Mathf.Max(1, rc.Tracks); _railSide = rc.Side; _railClearance = rc.LaneClearance; }
             Rebuild();   // re-read all controls from the loaded state
         }
 
