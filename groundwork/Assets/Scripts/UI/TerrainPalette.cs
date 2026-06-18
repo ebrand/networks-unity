@@ -305,13 +305,17 @@ namespace NetworkDesigner.UI
         // global "Show Water" off so only the bodies render.
         VisualElement WaterBodiesRow()
         {
+            var col = new VisualElement();
+            // How far the body's surface sits above the clicked ground (= water depth at the click point).
+            col.Add(SliderRow("Body rise (m)", () => WaterBodies.SeedRise, v => WaterBodies.SeedRise = v, 1f, 200f, "0", 1f));
             var row = HBox();
             row.style.marginBottom = 8;
             var add = MakeButton("+ Water body (click)", () => Designer.ArmWaterBodyPlacement());
             var clr = MakeButton("Clear", () => Designer.ClearWaterBodies());
             add.style.flexGrow = 1; clr.style.marginLeft = 6;
             row.Add(add); row.Add(clr);
-            return row;
+            col.Add(row);
+            return col;
         }
 
         float WaterFloor() => DemChunkSource.Active ? Mathf.Floor(DemChunkSource.NormMin) : 0f;

@@ -18,18 +18,22 @@ namespace NetworkDesigner.Terrain
     {
         public const float CellSize = 8f;      // flood-fill / surface cell (m). Finer = smoother shoreline (shared-corner mesh keeps it cheap).
         public const int MaxCells = 300000;    // safety budget per body (~ 19 km² at 8 m) so a leak can't run away.
+        public static float SeedRise = 5f;     // m the surface sits ABOVE the clicked ground (= water depth at the click). Exposed in the Terrain palette.
 
         public class Body
         {
             public Vector2 Seed;       // world XZ the fill grew from
             public float Level;        // world Y of this body's surface
             public GameObject Go;
-            public Mesh Mesh;
+            public Mesh Mesh;          // a single flat quad over the basin bounding box
+            public Material Mat;       // transparent, mask-textured (per body)
+            public Texture2D Mask;     // basin footprint (alpha = inside); clips the quad to the basin
             public int CellCount;      // last fill size (for the UI / leak diagnostics)
         }
 
+        const int MaxMaskDim = 2048;   // cap the mask texture side; coarser past this (terrain occlusion hides it anyway)
+
         static readonly List<Body> _bodies = new List<Body>();
-        static Material _mat;
         static GameObject _root;
 
         public static IReadOnlyList<Body> All => _bodies;
@@ -55,13 +59,21 @@ namespace NetworkDesigner.Terrain
         public static void Remove(int index)
         {
             if (index < 0 || index >= _bodies.Count) return;
-            if (_bodies[index].Go != null) Object.Destroy(_bodies[index].Go);
+            Destroy(_bodies[index]);
             _bodies.RemoveAt(index);
+        }
+
+        static void Destroy(Body b)
+        {
+            if (b.Go != null) Object.Destroy(b.Go);
+            if (b.Mat != null) Object.Destroy(b.Mat);
+            if (b.Mask != null) Object.Destroy(b.Mask);
+            b.Go = null; b.Mat = null; b.Mask = null;
         }
 
         public static void Clear()
         {
-            foreach (Body b in _bodies) if (b.Go != null) Object.Destroy(b.Go);
+            foreach (Body b in _bodies) Destroy(b);
             _bodies.Clear();
         }
 
@@ -117,6 +129,9 @@ namespace NetworkDesigner.Terrain
                 && wz >= DemChunkSource.OriginZ && wz <= DemChunkSource.OriginZ + DemChunkSource.Rows * DemChunkSource.TileMetersZ;
         }
 
+        // MASK-QUAD surface: a single flat quad over the basin's bounding box, clipped to the basin by a footprint
+        // MASK texture (alpha = inside). The TERRAIN occludes the quad at the waterline, so the shoreline is at
+        // terrain-mesh resolution (identical to the global plane) for ~the cost of one quad — no fitted perimeter mesh.
         static void BuildSurface(Body b, List<Vector2Int> cells)
         {
             EnsureRoot();
@@ -125,46 +140,59 @@ namespace NetworkDesigner.Terrain
                 b.Go = new GameObject("WaterBody") { hideFlags = HideFlags.DontSave };
                 b.Go.transform.SetParent(_root.transform, false);
                 var mf = b.Go.AddComponent<MeshFilter>();
-                b.Mesh = new Mesh { name = "WaterBodyMesh" };
+                b.Mesh = new Mesh { name = "WaterBodyQuad" };
                 mf.sharedMesh = b.Mesh;
                 var mr = b.Go.AddComponent<MeshRenderer>();
-                mr.sharedMaterial = Mat();
                 mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 mr.receiveShadows = false;
             }
             b.Mesh.Clear();
-            if (cells.Count == 0) return;
+            var rend = b.Go.GetComponent<MeshRenderer>();
+            if (cells.Count == 0) { rend.enabled = false; return; }
+            rend.enabled = true;
+
+            // Cell-index bounding box → world bounding box (cell (cx,cz) spans [cx,cx+1]·CellSize).
+            int cxMin = int.MaxValue, cxMax = int.MinValue, czMin = int.MaxValue, czMax = int.MinValue;
+            foreach (Vector2Int c in cells)
+            { if (c.x < cxMin) cxMin = c.x; if (c.x > cxMax) cxMax = c.x; if (c.y < czMin) czMin = c.y; if (c.y > czMax) czMax = c.y; }
+            int wCells = cxMax - cxMin + 1, hCells = czMax - czMin + 1;
+            float minX = cxMin * CellSize, maxX = (cxMax + 1) * CellSize;
+            float minZ = czMin * CellSize, maxZ = (czMax + 1) * CellSize;
             float y = b.Level;
-            // SHARED corner vertices (one per grid point, not 4 per cell) so a fine cell size stays cheap.
-            var idx = new Dictionary<long, int>(cells.Count * 2);
-            var verts = new List<Vector3>(cells.Count);
-            var tris = new List<int>(cells.Count * 6);
-            int Corner(int gx, int gz)
+
+            // Footprint mask: 1 texel per cell, downsampled if the basin is huge (the terrain hides the mask's own
+            // resolution — the mask only has to separate THIS basin from neighbours, and basin divides are high ground).
+            int step = Mathf.Max(1, Mathf.CeilToInt(Mathf.Max(wCells, hCells) / (float)MaxMaskDim));
+            int tw = Mathf.Max(1, Mathf.CeilToInt(wCells / (float)step)), th = Mathf.Max(1, Mathf.CeilToInt(hCells / (float)step));
+            if (b.Mask == null || b.Mask.width != tw || b.Mask.height != th)
             {
-                long k = ((long)gx << 32) ^ (uint)gz;
-                if (!idx.TryGetValue(k, out int v)) { v = verts.Count; verts.Add(new Vector3(gx * CellSize, y, gz * CellSize)); idx[k] = v; }
-                return v;
+                if (b.Mask != null) Object.Destroy(b.Mask);
+                b.Mask = new Texture2D(tw, th, TextureFormat.RGBA32, false) { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
             }
+            var px = new Color32[tw * th];
+            for (int i = 0; i < px.Length; i++) px[i] = new Color32(255, 255, 255, 0);   // white, fully outside
             foreach (Vector2Int c in cells)
             {
-                int a = Corner(c.x, c.y), bb = Corner(c.x, c.y + 1), cc = Corner(c.x + 1, c.y + 1), d = Corner(c.x + 1, c.y);
-                tris.Add(a); tris.Add(bb); tris.Add(cc); tris.Add(a); tris.Add(cc); tris.Add(d);
+                int tx = (c.x - cxMin) / step, tz = (c.y - czMin) / step;
+                px[tz * tw + tx] = new Color32(255, 255, 255, 255);                       // inside the basin
             }
-            if (verts.Count > 65000) b.Mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-            b.Mesh.SetVertices(verts);
-            b.Mesh.SetTriangles(tris, 0);
-            var up = new Vector3[verts.Count];
-            for (int i = 0; i < up.Length; i++) up[i] = Vector3.up;
-            b.Mesh.SetNormals(up);
-            b.Mesh.RecalculateBounds();
-        }
+            b.Mask.SetPixels32(px); b.Mask.Apply(false);
 
-        static Material Mat()
-        {
-            // Share the chunk water's colour/smoothness so bodies match the global plane's look.
-            if (_mat == null)
-                _mat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(ChunkOverlays.WaterColor, ChunkOverlays.WaterSmoothness, "WaterBody");
-            return _mat;
+            // Per-body transparent material tinted by the chunk water colour; the mask's alpha confines it to the basin
+            // (final alpha = WaterColor.a · mask.a → 0 outside, translucent inside).
+            if (b.Mat == null)
+                b.Mat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(ChunkOverlays.WaterColor, ChunkOverlays.WaterSmoothness, "WaterBodyMask");
+            b.Mat.mainTexture = b.Mask;
+            if (b.Mat.HasProperty("_BaseMap")) b.Mat.SetTexture("_BaseMap", b.Mask);
+            rend.sharedMaterial = b.Mat;
+
+            // One quad over the world bounding box, UV 0..1 (so cell (cxMin,czMin)→UV(0,0)).
+            b.Mesh.SetVertices(new List<Vector3> {
+                new Vector3(minX, y, minZ), new Vector3(minX, y, maxZ), new Vector3(maxX, y, maxZ), new Vector3(maxX, y, minZ) });
+            b.Mesh.SetUVs(0, new List<Vector2> { new Vector2(0, 0), new Vector2(0, 1), new Vector2(1, 1), new Vector2(1, 0) });
+            b.Mesh.SetNormals(new List<Vector3> { Vector3.up, Vector3.up, Vector3.up, Vector3.up });
+            b.Mesh.SetTriangles(new List<int> { 0, 1, 2, 0, 2, 3 }, 0);
+            b.Mesh.RecalculateBounds();
         }
 
         static void EnsureRoot()
@@ -177,7 +205,7 @@ namespace NetworkDesigner.Terrain
         {
             Clear();
             if (_root != null) Object.Destroy(_root);
-            _root = null; _mat = null;
+            _root = null;
         }
     }
 }

@@ -547,7 +547,7 @@ namespace NetworkDesigner.Terrain
         public void ArmWaterBodyPlacement()
         {
             _placingWaterBody = true;
-            Debug.Log("[WaterBodies] click a spot to place a water body (level = ground + 5 m); Esc cancels.");
+            Debug.Log($"[WaterBodies] click a spot to place a water body (level = ground + {WaterBodies.SeedRise:0} m); Esc cancels.");
         }
         public void ClearWaterBodies() { WaterBodies.Clear(); _dirtySince = Time.realtimeSinceStartup; }
         public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
@@ -3504,9 +3504,9 @@ namespace NetworkDesigner.Terrain
                     if (!got) got = RaycastTerrainHeightfield(wr, out gp);
                     if (got)
                     {
-                        float lvl = ChunkWorld.SampleHeight(gp.x, gp.z) + 5f;
+                        float lvl = ChunkWorld.SampleHeight(gp.x, gp.z) + WaterBodies.SeedRise;
                         var b = WaterBodies.Add(new Vector2(gp.x, gp.z), lvl);
-                        Debug.Log($"[WaterBodies] body at ({gp.x:0},{gp.z:0}) ground+5 = {lvl:0} m → {b.CellCount} cells.");
+                        Debug.Log($"[WaterBodies] body at ({gp.x:0},{gp.z:0}) ground+{WaterBodies.SeedRise:0} = {lvl:0} m → {b.CellCount} cells.");
                         _placingWaterBody = false; _dirtySince = Time.realtimeSinceStartup;
                     }
                 }
