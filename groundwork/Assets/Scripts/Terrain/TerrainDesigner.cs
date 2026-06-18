@@ -3737,8 +3737,15 @@ namespace NetworkDesigner.Terrain
                     }
                     else if (_lineActive is RoadPlanLayer roadOA && roadOA.StraightOffAxis)
                     {
-                        // Guided road: off-axis would be a freehand kink — ignore. Continue colinear,
-                        // turn via a speed-based curve (Shift), or (slow enough) snap a 90° corner.
+                        // Guided road: off-axis in OPEN space would be a freehand kink — ignore. BUT a deliberate
+                        // connection that lands on an existing node/edge is allowed at any angle (so you can join two
+                        // networks). Continue colinear, curve (Shift), or snap a 90° corner for open-space turns.
+                        if (cam != null && roadOA.TryOffAxisJoin(cam, Surf, Input.mousePosition,
+                                new Vector2(hit.point.x, hit.point.z), out Vector2 joinXZ))
+                        {
+                            roadOA.AddNode(Surf, new Vector3(joinXZ.x, hit.point.y, joinXZ.y));
+                            _dirtySince = Time.realtimeSinceStartup;
+                        }
                     }
                     else
                     {

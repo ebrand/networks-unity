@@ -1263,6 +1263,21 @@ namespace NetworkDesigner.Terrain
             return false;
         }
 
+        // For the off-axis commit gate: a DELIBERATE connection that lands on an existing node (or road edge) should be
+        // allowed at ANY angle — the off-axis guard only exists to stop freehand kinks in OPEN space. Uses a generous
+        // SCREEN-space node pick (zoom-robust, unlike the world-meters EndSnapRadius) + a world edge fallback. Excludes
+        // the chain tail. Returns the join position.
+        public bool TryOffAxisJoin(Camera cam, ITerrainSurface field, Vector2 screenPos, Vector2 cursorXZ, out Vector2 pos)
+        {
+            pos = cursorXZ;
+            if (Graph == null) return false;
+            int n = PickNodeScreen(cam, field, screenPos, 36f);
+            if (n >= 0 && n != _chainTail) { pos = Graph.Nodes[n]; return true; }
+            if (Graph.NearestPointOnEdge(cursorXZ, Mathf.Max(2f, NodePickRadius), out _, out _, out Vector2 pt))
+            { pos = pt; return true; }
+            return false;
+        }
+
         // When EXTENDING straight toward an existing road, keep the colinear heading instead of just grabbing the
         // nearest road point: snap to where the tail's straight extension actually CROSSES the road. Fires only when
         // the cursor is near that crossing AND the extension line genuinely meets the road — otherwise the caller
