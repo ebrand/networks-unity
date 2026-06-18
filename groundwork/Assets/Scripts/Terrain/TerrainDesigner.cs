@@ -3528,7 +3528,8 @@ namespace NetworkDesigner.Terrain
                     !MouseOverActivePanel() && Input.GetMouseButtonDown(0),
                     Input.mouseScrollDelta.y, Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter),
                     Input.GetKeyDown(KeyCode.Escape) || (!MouseOverActivePanel() && Input.GetMouseButtonDown(1)));
-                if (BridgeArchTool.Active) return;   // still editing → don't let input fall through to other tools
+                if (BridgeArchTool.TakeConfirmed()) { RebuildBuiltRoads(); _dirtySince = Time.realtimeSinceStartup; }   // build the arch + truncate piers
+                return;   // we were in arch mode this frame → swallow tool input (whether still active or just exited)
             }
 
             // Flatten mode: remember the world elevation under the cursor for the HUD.

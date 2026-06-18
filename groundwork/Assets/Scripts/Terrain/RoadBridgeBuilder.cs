@@ -74,11 +74,25 @@ namespace NetworkDesigner.Terrain
                 rd.EdgeBezierWorld(ei, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
                 float yA = nodeElev != null ? nodeElev(e.A) : 0f;
                 float yB = nodeElev != null ? nodeElev(e.B) : 0f;   // leveled equal for a true bridge, but lerp anyway
-                float width = Mathf.Max(2f, rd.EdgeCorridorWidth(ei)) + 1.5f;   // deck lip past the carriageway edges
+                float baseW = Mathf.Max(2f, rd.EdgeCorridorWidth(ei));          // the carriageway (road base) width
+                float width = baseW + 1.5f;                                     // deck lip past the carriageway edges
+                float pierAcross = Mathf.Max(pierWidth, baseW * 0.75f);         // wall pier: 75% of the road base, ACROSS the road
                 const float sink = 0.1f;                                        // sit the deck just under the road surface (no z-fight)
 
                 float chord = Vector2.Distance(p0, p3);
                 int n = Mathf.Clamp(Mathf.CeilToInt(chord / 4f), 2, 1024);   // ~4 m deck sub-spans
+
+                // Under-deck arches recorded on this edge: precompute each arch's spring-foot heights (from the trestle
+                // stations at its ends) so the in-between piers can be truncated to the arch and the band swept along it.
+                List<ArchSpan> arches = null;
+                if (e.Arches != null && e.Arches.Count > 0)
+                {
+                    var st = Stations(rd, ei, nodeElev, field, deckDepth, pierSpacing);
+                    arches = new List<ArchSpan>();
+                    foreach (BridgeArch ar in e.Arches)
+                        arches.Add(new ArchSpan { StartArc = ar.StartArc, EndArc = ar.EndArc, Rise = ar.Rise,
+                                                  FootStart = GroundAtArc(st, ar.StartArc), FootEnd = GroundAtArc(st, ar.EndArc) });
+                }
 
                 Vector3 prev = default; bool hasPrev = false;
                 float arc = 0f, nextPier = 0f;
@@ -103,17 +117,35 @@ namespace NetworkDesigner.Terrain
                         }
                     }
 
-                    // Pier: from the deck soffit down to the terrain, at start, end, and every pierSpacing along.
+                    // Pier: from the deck soffit down to the terrain — OR, if strictly inside an arch span, down to the
+                    // ARCH (the in-between trestles sit on it). The springing trestles at the span ends stay full depth.
                     float soffit = deckTop - deckDepth;
                     float ground = field != null ? field.SampleHeight(xz.x, xz.y) : 0f;
+                    float bottom = ground;
+                    if (arches != null)
+                        foreach (ArchSpan a in arches)
+                            if (arc > a.StartArc + 0.01f && arc < a.EndArc - 0.01f) { bottom = ArchY(a, arc); break; }
                     bool endpoint = (i == 0 || i == n);
-                    if ((endpoint || arc >= nextPier) && soffit - ground > 0.3f)
+                    if ((endpoint || arc >= nextPier) && soffit - bottom > 0.3f)
                     {
-                        float h = soffit - ground;
-                        AddBox(verts, tris, new Vector3(xz.x, (soffit + ground) * 0.5f, xz.y),
-                               Vector3.forward, Vector3.right, Vector3.up, pierWidth, pierWidth, h);
+                        float h = soffit - bottom;
+                        // Wall pier oriented to the road: thin (pierWidth) along the road, wide (pierAcross) across it.
+                        Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, u);
+                        Vector3 fwd = tan.sqrMagnitude > 1e-8f ? new Vector3(tan.x, 0f, tan.y).normalized : Vector3.forward;
+                        Vector3 rgt = Vector3.Cross(Vector3.up, fwd); rgt = rgt.sqrMagnitude > 1e-6f ? rgt.normalized : Vector3.right;
+                        AddBox(verts, tris, new Vector3(xz.x, (soffit + bottom) * 0.5f, xz.y),
+                               fwd, rgt, Vector3.up, pierWidth, pierAcross, h);
                         if (!endpoint) nextPier = arc + pierSpacing;
                     }
+                    // Arch band: sweep a box section along the arch curve across each span.
+                    if (arches != null)
+                        foreach (ArchSpan a in arches)
+                            if (arc >= a.StartArc - 0.01f && arc <= a.EndArc + 0.01f)
+                            {
+                                Vector3 ap = new Vector3(xz.x, ArchY(a, arc), xz.y);
+                                if (a.HasPrev) AddArchSeg(verts, tris, a.Prev, ap, width * 0.85f, 1.6f);
+                                a.Prev = ap; a.HasPrev = true;
+                            }
                     prev = ctr; hasPrev = true;
                 }
             }
@@ -134,6 +166,36 @@ namespace NetworkDesigner.Terrain
             if (_mat == null) _mat = NetworkDesigner.PipelineMaterials.CreateLitMatte(new Color(0.62f, 0.62f, 0.64f), "RoadBridgeMat");
             go.AddComponent<MeshRenderer>().sharedMaterial = _mat;
             return go;
+        }
+
+        // Per-edge working copy of a recorded arch, with its resolved spring-foot heights + the previous swept point.
+        class ArchSpan { public float StartArc, EndArc, Rise, FootStart, FootEnd; public Vector3 Prev; public bool HasPrev; }
+
+        // Arch surface height at arc-distance `arc`: a parabola from FootStart to FootEnd, peaking Rise above that line.
+        static float ArchY(ArchSpan a, float arc)
+        {
+            float t = a.EndArc > a.StartArc ? Mathf.Clamp01((arc - a.StartArc) / (a.EndArc - a.StartArc)) : 0f;
+            return Mathf.Lerp(a.FootStart, a.FootEnd, t) + a.Rise * 4f * t * (1f - t);
+        }
+
+        // Terrain height at the trestle nearest arc-distance `arc` (the arch springs from a trestle's foot).
+        static float GroundAtArc(List<TrestleStation> st, float arc)
+        {
+            float best = float.MaxValue, g = 0f;
+            foreach (TrestleStation s in st) { float d = Mathf.Abs(s.Arc - arc); if (d < best) { best = d; g = s.Ground; } }
+            return g;
+        }
+
+        // A box section between two points on the arch curve (oriented along the segment): the arch band.
+        static void AddArchSeg(List<Vector3> v, List<int> t, Vector3 a, Vector3 b, float width, float thick)
+        {
+            Vector3 along = b - a; float l = along.magnitude;
+            if (l < 1e-4f) return;
+            Vector3 fwd = along / l;
+            Vector3 right = Vector3.Cross(Vector3.up, fwd);
+            right = right.sqrMagnitude < 1e-6f ? Vector3.right : right.normalized;
+            Vector3 up = Vector3.Cross(fwd, right).normalized;
+            AddBox(v, t, (a + b) * 0.5f, fwd, right, up, l, width, thick);
         }
 
         // A horizontal beam (box) between two centreline points, TOP at a/b's level, extending DOWN by `height`.

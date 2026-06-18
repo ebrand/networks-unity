@@ -26,6 +26,9 @@ namespace NetworkDesigner.Terrain
         static float _rise = 5f;
         static bool _logged;
         static int _dbgEdge = -2, _dbgCount = -1;
+        static bool _confirmed;
+        // TerrainDesigner consumes this the frame a span is confirmed → rebuild the bridge so the arch appears.
+        public static bool TakeConfirmed() { bool c = _confirmed; _confirmed = false; return c; }
 
         // overlay: submeshes 0=markers(grey) 1=hover(yellow) 2=start(green) 3=end(red) 4=preview arch(blue)
         static GameObject _go; static MeshRenderer _mr; static Mesh _mesh; static Material[] _mats;
@@ -74,7 +77,8 @@ namespace NetworkDesigner.Terrain
                 LineEdge e = rd.Graph.Edges[_edge];
                 if (e.Arches == null) e.Arches = new List<BridgeArch>();
                 e.Arches.Add(new BridgeArch { StartArc = _st[_start].Arc, EndArc = _st[_end].Arc, Rise = _rise });
-                Debug.Log($"[BridgeArch] recorded on edge {_edge}: {_st[_start].Arc:0}→{_st[_end].Arc:0} m, rise {_rise:0} m. (Build = Increment 2.)");
+                Debug.Log($"[BridgeArch] built on edge {_edge}: {_st[_start].Arc:0}→{_st[_end].Arc:0} m, rise {_rise:0} m.");
+                _confirmed = true;
                 Exit();
                 return;
             }
