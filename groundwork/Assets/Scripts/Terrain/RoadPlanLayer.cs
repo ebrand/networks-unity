@@ -125,6 +125,8 @@ namespace NetworkDesigner.Terrain
         LineGraph _graph = new LineGraph();
         public LineGraph Graph => _graph ??= new LineGraph();
         int _chainTail = -1;
+        const float MinSegLenSq = 0.25f;   // (0.5 m)² — reject degenerate near-zero-length segments (coincident endpoints
+                                           // make a 0-length road → negative-length body, corrupt junction, giant collider tris)
         // True only between starting a FRESH chain (a brand-new start node with no edge yet) and drawing its first
         // edge. PruneOrphanNodes exempts the chain tail ONLY while this holds — so a fresh start isn't pruned if you
         // delete elsewhere mid-draw, but a tail left edgeless by deleting its segment IS pruned (no orphan).
@@ -146,6 +148,15 @@ namespace NetworkDesigner.Terrain
         readonly List<int> _hidx = new List<int>();
         [System.NonSerialized] int _hoverNode = -1;
         public int HoverNode => _hoverNode;
+        // Open-chain TAIL highlight (bright green): so an in-progress chain is never invisible — right-click finishes it.
+        GameObject _tailGo; MeshFilter _tailMf; MeshRenderer _tailMr; Mesh _tailMesh; Material _tailMat;
+        readonly List<Vector3> _tv = new List<Vector3>();
+        readonly List<Vector3> _tn = new List<Vector3>();
+        readonly List<int> _tidx = new List<int>();
+        [System.NonSerialized] int _tailShown = -1;
+        [System.NonSerialized] Vector2 _tailPosShown;
+        static readonly Color _RoadTailColor = new Color(0.20f, 1f, 0.45f, 0.9f);   // vivid green, distinct from the golden hover + red base pucks
+        public bool HasOpenChain => _chainTail >= 0;
         [System.NonSerialized] bool _linesHidden;   // whole plan overlay (line markings + node pucks) hidden — palette "Plan lines" toggle
         public bool PlanLinesHidden => _linesHidden;
         public void TogglePlanLines() => SetPlanLinesVisible(_linesHidden);
@@ -155,6 +166,7 @@ namespace NetworkDesigner.Terrain
             if (_mr != null) _mr.enabled = !_linesHidden;
             if (_nodeMr != null) _nodeMr.enabled = PlanGuides.ShowNodes && !_linesHidden && Graph != null && Graph.Nodes.Count > 0;
             if (_hoverMr != null && _linesHidden) _hoverMr.enabled = false;
+            if (_tailMr != null && _linesHidden) _tailMr.enabled = false;
         }
         static readonly Color _RoadNodeHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);   // golden, matches rail pucks
 
@@ -215,7 +227,9 @@ namespace NetworkDesigner.Terrain
                     CurveControls(Graph.Nodes[_chainTail], p, _corner, out Vector2 cc1, out Vector2 cc2);
                     if (MinCurveRadius(Graph.Nodes[_chainTail], cc1, cc2, p) < MinRadiusForSpeed) return;   // too tight: keep the corner armed for a wider end
                 }
+                if ((p - Graph.Nodes[_chainTail]).sqrMagnitude < MinSegLenSq) return;   // end ≈ tail → degenerate curve, ignore
                 int endc = NearestOrNew(p);
+                if (endc == _chainTail || (Graph.Nodes[endc] - Graph.Nodes[_chainTail]).sqrMagnitude < MinSegLenSq) return;
                 AddCurvedEdge(_chainTail, endc, _corner);
                 _chainTail = endc; _cornerPending = false; _freshStartTail = false;
                 Rebuild(field);
@@ -223,7 +237,9 @@ namespace NetworkDesigner.Terrain
             }
             if (CurveModifier) { _corner = p; _cornerPending = true; return; }   // arm the bend; the next click is the end
             int start = _chainTail;
+            if ((p - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq) return;   // clicked on / snapped back to the tail → no 0-length edge
             int end = NearestOrNew(p);   // join an existing node → a real intersection
+            if (end == start || (Graph.Nodes[end] - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq) return;   // coincident → skip degenerate edge
             int before = Graph.Edges.Count;
             Graph.AddEdge(_chainTail, end);
             if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
@@ -696,11 +712,11 @@ namespace NetworkDesigner.Terrain
         // the open end — endpoints only) plus two PERPENDICULAR side rays (±90° to its road). The placed node snaps
         // to any of these lines, and PREFERS a point where two guides CROSS, so a new segment lines up with / tees
         // square into the existing network. Excludes the chain tail. Replaces the single-target collinear/perp snaps.
-        struct GuideRay { public Vector2 O, D; public float Len; }
+        struct GuideRay { public Vector2 O, D; public float Len; public bool Tail; public bool Colinear; }   // Tail=true → ray off the node being drawn FROM (priority over centerpoints); Colinear=true → the straight continuation (the tail's is exempt from the snap-range gate so long straight roads still lock)
         readonly List<GuideRay> _guideRays = new List<GuideRay>();
         // Segment centerpoint snap targets (within GuideRange of the cursor): snapping onto Mid shows a red guide
         // along Perp (perpendicular to the segment) so a new road tees into the MIDDLE of a segment square-on.
-        struct GuideMid { public Vector2 Mid, Perp; }
+        struct GuideMid { public Vector2 Mid, Perp; public bool Center; }   // Center=true → its perpendicular is also a snappable LINE (snap "beside" the segment, aligned to the midpoint)
         readonly List<GuideMid> _guideMids = new List<GuideMid>();
 
         public void CollectTargetGuides(Vector2 p)
@@ -731,9 +747,10 @@ namespace NetworkDesigner.Terrain
                     if (outw.sqrMagnitude < 1e-6f) continue;
                     outw.Normalize();
                     Vector2 perp = new Vector2(-outw.y, outw.x);
-                    _guideRays.Add(new GuideRay { O = np, D = outw, Len = len });    // colinear extension (outward)
-                    _guideRays.Add(new GuideRay { O = np, D = perp, Len = len });    // perpendicular (both sides;
-                    _guideRays.Add(new GuideRay { O = np, D = -perp, Len = len });   // snap/red picks the cursor's side)
+                    bool tail = (i == _chainTail);   // guides off the node we're drawing FROM stay sticky over centerpoints
+                    _guideRays.Add(new GuideRay { O = np, D = outw, Len = len, Tail = tail, Colinear = true });   // colinear extension (outward)
+                    _guideRays.Add(new GuideRay { O = np, D = perp, Len = len, Tail = tail });    // perpendicular (both sides;
+                    _guideRays.Add(new GuideRay { O = np, D = -perp, Len = len, Tail = tail });   // snap/red picks the cursor's side)
                     // Length-mirror snap: a point on the colinear EXTENSION at the SAME distance from the node as this
                     // edge's far end — so a new segment can mirror the existing colinear segment's length. Shows a red
                     // perpendicular when snapped (reuses the GuideMid mechanism, same as centerpoints).
@@ -743,8 +760,9 @@ namespace NetworkDesigner.Terrain
                 }
             }
 
-            // Segment CENTERPOINT snap targets: each edge whose midpoint is within GuideRange of the cursor (excluding
-            // the chain's own incoming edge). Snapping onto a midpoint shows a red perpendicular guide (DrawTargetGuides).
+            // Segment CENTERPOINT snap targets (toggle: "Midpoint guides"): each edge whose midpoint is within GuideRange
+            // of the cursor (excluding the chain's own incoming edge). Snapping onto a midpoint shows a red perpendicular.
+            if (PlanGuides.MidpointGuides)
             for (int e = 0; e < Graph.Edges.Count; e++)
             {
                 LineEdge le = Graph.Edges[e];
@@ -756,7 +774,7 @@ namespace NetworkDesigner.Terrain
                 if (tan.sqrMagnitude < 1e-6f) tan = p3 - p0;
                 if (tan.sqrMagnitude < 1e-6f) continue;
                 tan.Normalize();
-                _guideMids.Add(new GuideMid { Mid = mid, Perp = new Vector2(-tan.y, tan.x) });
+                _guideMids.Add(new GuideMid { Mid = mid, Perp = new Vector2(-tan.y, tan.x), Center = true });
             }
         }
 
@@ -792,6 +810,19 @@ namespace NetworkDesigner.Terrain
                     if ((cursor - (gr.O + gr.D * t)).sqrMagnitude > show2) continue;    // not in line with it
                 }
                 GuideRibbon(field, _guideRays[i].O, _guideRays[i].D, _guideRays[i].Len, active ? _gTriR : _gTriA);
+            }
+            // Amber: a segment centerpoint's perpendicular line, when the cursor is in-line beside the segment but not
+            // (yet) the snapped guide — so the "snap beside the segment" line is discoverable, like the rays above.
+            float midLen = Mathf.Max(1f, ExtensionGuideLength);
+            for (int k = 0; k < _guideMids.Count; k++)
+            {
+                if (k == midIdx || !_guideMids[k].Center) continue;
+                GuideMid m = _guideMids[k];
+                float t = Vector2.Dot(cursor - m.Mid, m.Perp);
+                if (t < -midLen || t > midLen) continue;
+                if ((cursor - (m.Mid + m.Perp * t)).sqrMagnitude > show2) continue;   // not in line with it
+                GuideRibbon(field, m.Mid, m.Perp, midLen, _gTriA);
+                GuideRibbon(field, m.Mid, -m.Perp, midLen, _gTriA);
             }
             if (midIdx >= 0)   // snapped to a segment centerpoint → red perpendicular guide through it (both ways)
             {
@@ -852,29 +883,88 @@ namespace NetworkDesigner.Terrain
             point = cursor; aIdx = -1; bIdx = -1; midIdx = -1;
             float r = Mathf.Max(0f, GuideSnapRadius);   // "guide snap strength" — dedicated, separate from Colinear snap
             if (r <= 0f) return false;
-            float best2 = r * r; bool found = false;
-            for (int k = 0; k < _guideMids.Count; k++)              // 1a) segment centerpoints (point snap)
-            {
-                float d2 = (cursor - _guideMids[k].Mid).sqrMagnitude;
-                if (d2 < best2) { best2 = d2; point = _guideMids[k].Mid; midIdx = k; aIdx = bIdx = -1; found = true; }
-            }
-            for (int a = 0; a < _guideRays.Count; a++)               // 1b) guide-line crossings (point snap)
+            float r2 = r * r;
+            float mlen = Mathf.Max(1f, ExtensionGuideLength);   // length of a centerpoint's perpendicular (midline) guide
+            float range2 = Mathf.Max(1f, GuideRange); range2 *= range2;
+            float best2; bool found;
+            // A guide only SNAPS when its SOURCE is within Guide range of the cursor, so a far/stale source (e.g. an
+            // abandoned chain tail clear across the map) can't grab the endpoint. The active tail's COLINEAR continuation
+            // is exempt so a long straight road still locks along its whole length. (Non-tail nodes only emit within Guide
+            // range anyway, so this only constrains the tail.)
+            bool RaySnappable(GuideRay g) => (g.Tail && g.Colinear) || (cursor - g.O).sqrMagnitude <= range2;
+            bool MidSnappable(GuideMid m) => (cursor - m.Mid).sqrMagnitude <= range2;
+
+            // (1) Nearest guide-line CROSSING — most specific; snap to BOTH guides at their intersection. Covers ray ×
+            // ray AND ray × midline (a colinear/perpendicular guide off a node crossing a segment-centerpoint perpendicular).
+            best2 = r2; found = false;
+            for (int a = 0; a < _guideRays.Count; a++)
                 for (int b = a + 1; b < _guideRays.Count; b++)
+                {
+                    if (!RaySnappable(_guideRays[a]) || !RaySnappable(_guideRays[b])) continue;
                     if (RayCross(_guideRays[a], _guideRays[b], out Vector2 x))
                     {
                         float d2 = (cursor - x).sqrMagnitude;
                         if (d2 < best2) { best2 = d2; point = x; aIdx = a; bIdx = b; midIdx = -1; found = true; }
                     }
+                }
+            for (int i = 0; i < _guideRays.Count; i++)              // ray × centerpoint-perpendicular (midline) crossing
+                for (int k = 0; k < _guideMids.Count; k++)
+                {
+                    if (!_guideMids[k].Center || !RaySnappable(_guideRays[i]) || !MidSnappable(_guideMids[k])) continue;
+                    if (!RayMidCross(_guideRays[i], _guideMids[k].Mid, _guideMids[k].Perp, mlen, out Vector2 xm)) continue;
+                    float d2 = (cursor - xm).sqrMagnitude;
+                    if (d2 < best2) { best2 = d2; point = xm; aIdx = i; bIdx = -1; midIdx = k; found = true; }
+                }
             if (found) return true;
-            best2 = r * r;                                           // 2) else snap onto the nearest single guide line
+
+            // (2) The chain-tail extension you're actively pulling ALONG keeps priority over loose centerpoints: if the
+            // cursor is on a Tail ray, stay on it. (Fixes a passing centerpoint hijacking the cursor off the extension.)
+            best2 = r2; found = false;
             for (int i = 0; i < _guideRays.Count; i++)
             {
+                if (!_guideRays[i].Tail) continue;
                 GuideRay g = _guideRays[i];
+                if (!RaySnappable(g)) continue;                     // a stale tail's non-colinear guides stop reaching from afar
                 float t = Vector2.Dot(cursor - g.O, g.D);
                 if (t < 0f || t > g.Len) continue;                  // half-line from the node, within length
                 Vector2 proj = g.O + g.D * t;
                 float d2 = (cursor - proj).sqrMagnitude;
-                if (d2 < best2) { best2 = d2; point = proj; aIdx = i; bIdx = -1; found = true; }
+                if (d2 < best2) { best2 = d2; point = proj; aIdx = i; found = true; }
+            }
+            if (found) return true;
+
+            // (3) Segment CENTERPOINT point snap.
+            best2 = r2; found = false;
+            for (int k = 0; k < _guideMids.Count; k++)
+            {
+                if (!MidSnappable(_guideMids[k])) continue;
+                float d2 = (cursor - _guideMids[k].Mid).sqrMagnitude;
+                if (d2 < best2) { best2 = d2; point = _guideMids[k].Mid; midIdx = k; found = true; }
+            }
+            if (found) return true;
+
+            // (4) Else snap onto the nearest single guide LINE — any ray, plus the perpendicular line through a segment
+            // centerpoint (both ways: snap "beside" the segment, aligned to the midpoint, not only right on it).
+            best2 = r2; found = false;
+            for (int i = 0; i < _guideRays.Count; i++)
+            {
+                GuideRay g = _guideRays[i];
+                if (!RaySnappable(g)) continue;
+                float t = Vector2.Dot(cursor - g.O, g.D);
+                if (t < 0f || t > g.Len) continue;
+                Vector2 proj = g.O + g.D * t;
+                float d2 = (cursor - proj).sqrMagnitude;
+                if (d2 < best2) { best2 = d2; point = proj; aIdx = i; bIdx = -1; midIdx = -1; found = true; }
+            }
+            for (int k = 0; k < _guideMids.Count; k++)
+            {
+                GuideMid m = _guideMids[k];
+                if (!m.Center || !MidSnappable(m)) continue;
+                float t = Vector2.Dot(cursor - m.Mid, m.Perp);   // bidirectional line through Mid ⟂ to the segment
+                if (t < -mlen || t > mlen) continue;
+                Vector2 proj = m.Mid + m.Perp * t;
+                float d2 = (cursor - proj).sqrMagnitude;
+                if (d2 < best2) { best2 = d2; point = proj; midIdx = k; aIdx = -1; bIdx = -1; found = true; }
             }
             return found;
         }
@@ -890,6 +980,21 @@ namespace NetworkDesigner.Terrain
             float tb = (a.D.x * diff.y - a.D.y * diff.x) / det;
             if (ta < 0f || ta > a.Len || tb < 0f || tb > b.Len) return false;
             x = a.O + a.D * ta; return true;
+        }
+
+        // Crossing of a guide ray (half-line [0,Len]) with a centerpoint's perpendicular MIDLINE (the bidirectional
+        // line through `mid` along `perp`, bounded ±perpLen). False if parallel or the intersection is off either.
+        static bool RayMidCross(GuideRay g, Vector2 mid, Vector2 perp, float perpLen, out Vector2 x)
+        {
+            x = default;
+            float det = g.D.x * (-perp.y) - g.D.y * (-perp.x);
+            if (Mathf.Abs(det) < 1e-6f) return false;
+            Vector2 diff = mid - g.O;
+            float ts = (diff.x * (-perp.y) - diff.y * (-perp.x)) / det;   // along the ray (half-line)
+            float tu = (g.D.x * diff.y - g.D.y * diff.x) / det;           // along the perpendicular (bidirectional)
+            if (ts < 0f || ts > g.Len) return false;
+            if (tu < -perpLen || tu > perpLen) return false;
+            x = g.O + g.D * ts; return true;
         }
 
         // Hard-snap the cursor to the nearest guide line / crossing (see ResolveGuideSnap).
@@ -2105,6 +2210,29 @@ namespace NetworkDesigner.Terrain
             _hoverMesh.SetVertices(_hv); _hoverMesh.SetNormals(_hn); _hoverMesh.SetTriangles(_hidx, 0); _hoverMesh.RecalculateBounds();
         }
 
+        // Highlight the OPEN chain's tail (vivid green, ~1.5×) so an in-progress chain is never invisible — right-click
+        // ends it. Rebuilds only when the tail node (or its position, after an index shift) changes. `active`=false (road
+        // not the live layer) hides it. Call every frame alongside SetHoverNode.
+        public void RefreshTailHighlight(ITerrainSurface field, bool active)
+        {
+            if (_tailMr == null || Graph == null) return;
+            int node = (active && _chainTail >= 0 && _chainTail < Graph.Nodes.Count) ? _chainTail : -1;
+            Vector2 pos = node >= 0 ? Graph.Nodes[node] : Vector2.zero;
+            if (node == _tailShown && (node < 0 || pos == _tailPosShown)) return;
+            _tailShown = node; _tailPosShown = pos;
+            _tailMr.enabled = node >= 0 && PlanGuides.ShowNodes && !_linesHidden;
+            _tailMesh.Clear();
+            if (node < 0) return;
+            float radius = Mathf.Max(0.2f, NodePuckRadius) * 1.5f;
+            float terrainY = field != null ? field.SampleHeight(pos.x, pos.y) : 0f;
+            float designY = Graph.GetNodeY(node);
+            float baseY = (float.IsNaN(designY) ? terrainY : designY) + Lift;
+            float topY = baseY + Mathf.Max(0.02f, PlanGuides.NodePuckHeight) * 1.5f;
+            _tv.Clear(); _tn.Clear(); _tidx.Clear();
+            EmitPuck(_tv, _tn, _tidx, pos, radius, baseY, topY);
+            _tailMesh.SetVertices(_tv); _tailMesh.SetNormals(_tn); _tailMesh.SetTriangles(_tidx, 0); _tailMesh.RecalculateBounds();
+        }
+
         // Edge indices touching node `n` (for deleting a node + its segments and remapping the built-road set).
         public List<int> EdgesTouchingNode(int n)
         {
@@ -2150,6 +2278,18 @@ namespace NetworkDesigner.Terrain
             _hoverMr.sharedMaterial = _hoverMat;
             _hoverMr.enabled = false;
             _hoverNode = -1;   // overlay mesh is fresh → force a rebuild on the next SetHoverNode
+
+            _tailGo = new GameObject(RootName + "_NodeTail") { hideFlags = HideFlags.DontSave };
+            _tailGo.transform.SetParent(_root.transform, false);
+            _tailMf = _tailGo.AddComponent<MeshFilter>();
+            _tailMr = _tailGo.AddComponent<MeshRenderer>();
+            _tailMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _tailMr.receiveShadows = false;
+            _tailMesh = new Mesh { name = "RoadPlanNodeTailMesh" };
+            _tailMf.sharedMesh = _tailMesh;
+            _tailMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(_RoadTailColor, 0.2f, "RoadPlanNodeTailMat");
+            _tailMr.sharedMaterial = _tailMat;
+            _tailMr.enabled = false;
+            _tailShown = -1;   // force a rebuild on the next RefreshTailHighlight
         }
 
         Material MakeMat(Color c, string name)

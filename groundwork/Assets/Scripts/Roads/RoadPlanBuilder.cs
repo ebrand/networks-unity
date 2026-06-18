@@ -22,9 +22,9 @@ namespace NetworkDesigner.Roads
         // `vertexElev(vertexId)` gives the per-node DESIGN elevation (the same height Excavate graded/cut to,
         // captured from the shaped surface) so the road sits in its cut. `excavationDepth` sets the minimum
         // slab thickness so the body fills the cut. Returns the root even when nothing builds.
-        // `onlyRoads` (road ids "r{e}") restricts which road bodies get swept — the WHOLE network still resolves
-        // (so junction setbacks stay correct as segments are built one at a time), but only the listed roads emit
-        // geometry. Pass null to sweep every road (the whole-plan build).
+        // `onlyRoads` (road ids "r{e}") restricts which roads get built. The geometry is resolved over JUST those roads
+        // (and their vertices), so PLANNED/un-built segments never shape a built junction — drawing or deleting plan
+        // lines elsewhere can't make intersection geometry appear before you Build. Pass null to build the whole plan.
         public static GameObject Build(Network net, Func<string, float> vertexElev, float excavationDepth, Transform parent,
                                        HashSet<string> onlyRoads = null, Func<Vector2, float> groundAt = null, float follow = 0f)
         {
@@ -32,7 +32,29 @@ namespace NetworkDesigner.Roads
             if (parent != null) root.transform.SetParent(parent, false);
             if (net == null || net.Roads == null || net.Roads.Count == 0) return root;
 
-            List<VertexGeometry> resolved = GeometryResolver.ResolveNetwork(net);
+            // Resolve only the BUILT sub-network (the roads in onlyRoads + the vertices they touch). Resolving the full
+            // net would let un-built plan segments push setbacks / grow junction outlines on roads that ARE built —
+            // surfacing as "intersections before you build". Reuses the same Vertex/Road objects (read-only resolve).
+            Network rnet = net;
+            if (onlyRoads != null)
+            {
+                var vpos = new Dictionary<string, Vector2>();
+                foreach (Vertex v in net.Vertices) if (v != null) vpos[v.Id] = v.Position;
+                rnet = new Network { DriveSide = net.DriveSide };
+                var keepV = new HashSet<string>();
+                foreach (NetworkRoad r in net.Roads)
+                {
+                    if (r == null || !onlyRoads.Contains(r.Id)) continue;
+                    // Drop a degenerate (coincident-endpoint, ~0-length) road: resolving it warns and corrupts the shared
+                    // junction (negative-length body → far-flung vertices → giant collider triangles on the NEIGHBOURS).
+                    if (vpos.TryGetValue(r.EndA, out Vector2 pa) && vpos.TryGetValue(r.EndB, out Vector2 pb)
+                        && (pa - pb).sqrMagnitude < 0.25f) continue;
+                    rnet.Roads.Add(r); keepV.Add(r.EndA); keepV.Add(r.EndB);
+                }
+                foreach (Vertex v in net.Vertices) if (v != null && keepV.Contains(v.Id)) rnet.Vertices.Add(v);
+            }
+
+            List<VertexGeometry> resolved = GeometryResolver.ResolveNetwork(rnet);
             var vgById = new Dictionary<string, VertexGeometry>();
             if (resolved != null) foreach (VertexGeometry vg in resolved) if (vg != null) vgById[vg.VertexId] = vg;
             var vById = new Dictionary<string, Vertex>();
@@ -189,6 +211,10 @@ namespace NetworkDesigner.Roads
         // and renders the pad black. The ring is first oriented CW in (x,z) so the fixed windings face right.
         static void BuildIntersectionPad(List<Vector2> ring, Vector2 center, float gradeY, float depth, Transform parent, string name)
         {
+            // DIAGNOSTIC (throttled once per junction): dump the raw outline so a protruding/stray point can be located.
+            if (_xfillWarned.Add(name))
+                Debug.Log($"[Road] pad '{name}' center=({center.x:0.0},{center.y:0.0}) ring({ring.Count})={RingToStr(ring)}");
+
             // Defense-in-depth against the triangular-spike artifact: first drop NaN/∞ points, then drop OUTLIERS —
             // points far beyond the junction's TYPICAL ring radius. A single bad outline point (e.g. a near-parallel
             // fillet intersection) would otherwise fan into a thin spike off the road edge. Median-based so it adapts
@@ -218,6 +244,22 @@ namespace NetworkDesigner.Roads
             double sa = 0.0;   // signed area in (x,z); >0 = CCW → reverse so the ring is CW
             for (int i = 0; i < n; i++) { int j = (i + 1) % n; sa += (double)ring[i].x * ring[j].y - (double)ring[j].x * ring[i].y; }
             if (sa > 0.0) ring.Reverse();
+
+            // A self-intersecting outline (typically a tight degree-2 90° bend whose concave-corner OE-fillet control
+            // bulges back across the ring) makes EarClipCW bail to a centroid fan that renders TORN/jagged. Replace the
+            // ring with its convex hull: always simple, so it triangulates cleanly. The only cost is a slight over-fill
+            // at a concave corner, which is hidden under the abutting road bodies. Logged (throttled) so the underlying
+            // bend outline can still be root-fixed in the resolver.
+            if (RingSelfIntersects(ring))
+            {
+                Debug.LogWarning($"[Road] junction outline '{name}' self-intersects ({n} pts) — using convex-hull fill.");
+                ring = ConvexHull(ring);
+                n = ring.Count;
+                if (n < 3) return;
+                double sah = 0.0;   // hull comes out CCW from the monotone chain → re-orient CW like the rest of the code expects
+                for (int i = 0; i < n; i++) { int j = (i + 1) % n; sah += (double)ring[i].x * ring[j].y - (double)ring[j].x * ring[i].y; }
+                if (sah > 0.0) ring.Reverse();
+            }
 
             // Centroid (always interior for a convex/near-convex ring) — fan fallback centre and the rim's inner anchor.
             Vector2 cen = Vector2.zero; for (int i = 0; i < n; i++) cen += ring[i]; cen *= 1f / n;
@@ -272,6 +314,67 @@ namespace NetworkDesigner.Roads
             go.AddComponent<MeshRenderer>().sharedMaterial = PipelineMaterials.CreateLitMatte(AsphaltColor, "RoadXFill");
             go.AddComponent<MeshCollider>().sharedMesh = mesh;
             WarnIfHugeMesh(go, name);
+        }
+
+        // Junction outlines we've already warned about (per-vertex GameObject name), so the per-rebuild log doesn't spam.
+        static readonly HashSet<string> _xfillWarned = new HashSet<string>();
+
+        static float Cross2(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
+
+        // True if any two NON-adjacent edges of the closed ring properly cross (strict — touching endpoints don't count).
+        static bool RingSelfIntersects(List<Vector2> r)
+        {
+            int n = r.Count;
+            if (n < 4) return false;
+            for (int i = 0; i < n; i++)
+            {
+                Vector2 a = r[i], b = r[(i + 1) % n];
+                for (int j = i + 2; j < n; j++)
+                {
+                    if (i == 0 && j == n - 1) continue;   // edges 0 and n-1 share vertex 0 — adjacent, skip
+                    Vector2 c = r[j], d = r[(j + 1) % n];
+                    float d1 = Cross2(d - c, a - c), d2 = Cross2(d - c, b - c);
+                    float d3 = Cross2(b - a, c - a), d4 = Cross2(b - a, d - a);
+                    if (((d1 > 0f) != (d2 > 0f)) && ((d3 > 0f) != (d4 > 0f)) &&
+                        d1 != 0f && d2 != 0f && d3 != 0f && d4 != 0f)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // Andrew's monotone-chain convex hull (XZ). Returns the hull CCW; caller re-orients as needed.
+        static List<Vector2> ConvexHull(List<Vector2> pts)
+        {
+            var p = new List<Vector2>(pts);
+            p.Sort((a, b) => a.x != b.x ? a.x.CompareTo(b.x) : a.y.CompareTo(b.y));
+            int n = p.Count;
+            if (n < 3) return p;
+            var h = new Vector2[2 * n];
+            int k = 0;
+            for (int i = 0; i < n; i++)
+            {
+                while (k >= 2 && Cross2(h[k - 1] - h[k - 2], p[i] - h[k - 2]) <= 0f) k--;
+                h[k++] = p[i];
+            }
+            int lower = k + 1;
+            for (int i = n - 2; i >= 0; i--)
+            {
+                while (k >= lower && Cross2(h[k - 1] - h[k - 2], p[i] - h[k - 2]) <= 0f) k--;
+                h[k++] = p[i];
+            }
+            var res = new List<Vector2>(k - 1);
+            for (int i = 0; i < k - 1; i++) res.Add(h[i]);
+            return res;
+        }
+
+        static string RingToStr(List<Vector2> r)
+        {
+            var sb = new System.Text.StringBuilder();
+            int lim = Mathf.Min(r.Count, 64);
+            for (int i = 0; i < lim; i++) sb.Append($"({r[i].x:0.0},{r[i].y:0.0}) ");
+            if (r.Count > lim) sb.Append("...");
+            return sb.ToString();
         }
 
         // Ear-clipping triangulation of a CW-wound simple polygon (XZ). Returns CW triangle index triples (into the

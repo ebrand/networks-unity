@@ -27,6 +27,8 @@ namespace NetworkDesigner.Terrain
                                                            // node-snap).
         public static float GuideSnapRadius       = 4f;    // m: how close the cursor must be to a reactive node-guide
                                                            // LINE (or crossing) to hard-snap onto it ("guide snap strength").
+        public static bool  MidpointGuides        = true;  // emit + snap to segment-MIDPOINT guides (the centerpoint point,
+                                                           // its perpendicular midline, and ray×midline crossings)?
 
         // ── curves ──
         public static float CurveLever        = 0.55f;     // bezier control lever (0.55 ≈ circular arc)

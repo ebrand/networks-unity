@@ -121,6 +121,8 @@ namespace NetworkDesigner.Terrain
                 () => PlanGuides.GuideRange, v => PlanGuides.GuideRange = v, 0f, 2000f);
             TuningRegistry.RegisterFloat("guides.snap", "Guides", "Guide snap (m)",
                 () => PlanGuides.GuideSnapRadius, v => PlanGuides.GuideSnapRadius = v, 0f, 30f);
+            TuningRegistry.RegisterBool("guides.midpoint", "Guides", "Midpoint guides",
+                () => PlanGuides.MidpointGuides, v => PlanGuides.MidpointGuides = v);
             TuningRegistry.RegisterFloat("guides.curveLever", "Guides", "Curve lever",
                 () => PlanGuides.CurveLever, v => PlanGuides.CurveLever = v, 0f, 1f);
             TuningRegistry.RegisterFloat("guides.curveSymmetry", "Guides", "Curve symmetry snap",
@@ -982,6 +984,21 @@ namespace NetworkDesigner.Terrain
                 h = h * 31 + ForestGen.NearLodTint.GetHashCode();
                 h = h * 31 + ForestGen.FarLodDarken.GetHashCode();
                 h = h * 31 + ForestGen.NightFoliageTint.GetHashCode();
+                // Design Controls palette (GuidesPalette) also writes its statics directly, bypassing the registry —
+                // include them or guide-only edits (e.g. Guide range) never mark the file dirty and are never saved.
+                h = h * 31 + PlanGuides.ShowNodes.GetHashCode();
+                h = h * 31 + PlanGuides.NodePuckRadius.GetHashCode();
+                h = h * 31 + PlanGuides.NodePuckHeight.GetHashCode();
+                h = h * 31 + PlanGuides.ExtensionGuideLength.GetHashCode();
+                h = h * 31 + PlanGuides.ExtensionSnapRadius.GetHashCode();
+                h = h * 31 + PlanGuides.ProximitySnapOn.GetHashCode();
+                h = h * 31 + PlanGuides.EndSnapRadius.GetHashCode();
+                h = h * 31 + PlanGuides.NodePickRadius.GetHashCode();
+                h = h * 31 + PlanGuides.GuideRange.GetHashCode();
+                h = h * 31 + PlanGuides.GuideSnapRadius.GetHashCode();
+                h = h * 31 + PlanGuides.MidpointGuides.GetHashCode();
+                h = h * 31 + PlanGuides.CurveLever.GetHashCode();
+                h = h * 31 + PlanGuides.CurveSymmetrySnap.GetHashCode();
                 var urp = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
                           as UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset;
                 h = h * 31 + (urp != null ? urp.shadowDistance : -1f).GetHashCode();

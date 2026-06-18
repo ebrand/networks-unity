@@ -1332,11 +1332,17 @@ namespace NetworkDesigner.Terrain
                 bool plan = _lineActive is RailPlanLayer;
                 // Drop below the corner minimap when it's up (chunk world) so they don't overlap.
                 float hudY = (ChunkWorld.Active && _showMinimap) ? 264f : 8f;
-                GUILayout.BeginArea(new Rect(Vw - 308f, hudY, 300f, rail ? 332f : (plan ? 292f : 104f)), GUI.skin.box);
+                GUILayout.BeginArea(new Rect(Vw - 308f, hudY, 300f, rail ? 332f : (plan ? 292f : 128f)), GUI.skin.box);
                 GUILayout.Label(_lineActive.LayerName + " mode");
                 GUILayout.Label(rail || plan
                     ? "Click: straight segment. Hold Shift: click a corner, then the end = curve."
                     : "Left-click: add node (chains)\nRight-click: delete near node / end chain\nBackspace: undo last node");
+                if (_lineActive is RoadPlanLayer rdHud && rdHud.HasOpenChain)
+                {
+                    Color prevC = GUI.color; GUI.color = new Color(0.30f, 1f, 0.5f);
+                    GUILayout.Label("● Drawing a chain (green node) — right-click to finish");
+                    GUI.color = prevC;
+                }
                 if (_lineActive is LineworkLayer lw && lw.Asset == null)
                     GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
                 if (_lineActive is RailPlanLayer pl)
@@ -3564,6 +3570,7 @@ namespace NetworkDesigner.Terrain
                 int hn = (_lineActive is RoadPlanLayer rdH && overTerrain && !rdH.ElevationEditMode && hc != null)
                     ? RoadPlanLayer.PickNodeScreen(hc, Surf, new Vector2(Input.mousePosition.x, Input.mousePosition.y), 30f) : -1;
                 RoadPlanLayer.SetHoverNode(Surf, hn);
+                RoadPlanLayer.RefreshTailHighlight(Surf, _lineActive is RoadPlanLayer);   // show the open-chain tail (right-click to finish)
             }
             // Remember the placement cursor + whether it's over terrain, for the on-screen
             // design-speed readout drawn in OnGUI.
