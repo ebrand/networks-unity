@@ -20,8 +20,13 @@ namespace NetworkDesigner.Terrain
         public static float ExtensionGuideLength = 120f;   // m: how far the collinear ("colinear") extension guide runs
         public static float ExtensionSnapRadius  = 4f;     // m: snap onto that guide
         public static bool  ProximitySnapOn      = true;   // snap onto a plan's own nodes/edges?
-        public static float EndSnapRadius         = 8f;    // m: that proximity snap radius
+        public static float EndSnapRadius         = 8f;    // m: that proximity snap radius (snap the cursor ONTO a node)
         public static float NodePickRadius        = 2.5f;  // m: grab an existing node when starting/joining
+        public static float GuideRange            = 40f;   // m: how close the cursor must be to a node for it to EMIT
+                                                           // colinear/perpendicular guides (distinct from EndSnapRadius
+                                                           // node-snap).
+        public static float GuideSnapRadius       = 4f;    // m: how close the cursor must be to a reactive node-guide
+                                                           // LINE (or crossing) to hard-snap onto it ("guide snap strength").
 
         // ── curves ──
         public static float CurveLever        = 0.55f;     // bezier control lever (0.55 ≈ circular arc)

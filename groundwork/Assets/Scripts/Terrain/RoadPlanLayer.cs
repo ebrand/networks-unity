@@ -73,6 +73,8 @@ namespace NetworkDesigner.Terrain
         public float ExtensionSnapRadius { get => PlanGuides.ExtensionSnapRadius; set => PlanGuides.ExtensionSnapRadius = value; }
         public float EndSnapRadius { get => PlanGuides.EndSnapRadius; set => PlanGuides.EndSnapRadius = value; }
         public float ExtensionGuideLength { get => PlanGuides.ExtensionGuideLength; set => PlanGuides.ExtensionGuideLength = value; }
+        public float GuideRange { get => PlanGuides.GuideRange; set => PlanGuides.GuideRange = value; }
+        public float GuideSnapRadius { get => PlanGuides.GuideSnapRadius; set => PlanGuides.GuideSnapRadius = value; }
         public float NodePuckRadius { get => PlanGuides.NodePuckRadius; set => PlanGuides.NodePuckRadius = value; }
         public float CurveLever { get => PlanGuides.CurveLever; set => PlanGuides.CurveLever = value; }
 
@@ -160,6 +162,14 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _pv = new List<Vector3>();
         readonly List<int> _pvIdx = new List<int>();       // submesh 0: normal (plan colour)
         readonly List<int> _pvBadIdx = new List<int>();    // submesh 1: too-tight curve (red)
+
+        // Dedicated reactive-guide mesh: thick, BRIGHT flat dashed ribbons (vs the thin 1px preview lines), with
+        // their own materials — submesh 0 = available (bright amber), 1 = active/snapped (bright red).
+        GameObject _gGo; MeshFilter _gMf; MeshRenderer _gMr; Mesh _gMesh;
+        readonly List<Vector3> _gv = new List<Vector3>();
+        readonly List<int> _gTriA = new List<int>();       // available (amber)
+        readonly List<int> _gTriR = new List<int>();       // active / snapped (red)
+        const float GuideWidth = 0.6f;                     // ribbon width (m) — "a little thicker" than 1px lines
 
         // Equal-leg "PAC" ring (vertex-coloured yellow=buildable / red=too-tight) + its 15° tick labels.
         GameObject _symGo; MeshFilter _symMf; MeshRenderer _symMr; Mesh _symMesh; Material _symMat;
@@ -688,18 +698,22 @@ namespace NetworkDesigner.Terrain
         // square into the existing network. Excludes the chain tail. Replaces the single-target collinear/perp snaps.
         struct GuideRay { public Vector2 O, D; public float Len; }
         readonly List<GuideRay> _guideRays = new List<GuideRay>();
+        // Segment centerpoint snap targets (within GuideRange of the cursor): snapping onto Mid shows a red guide
+        // along Perp (perpendicular to the segment) so a new road tees into the MIDDLE of a segment square-on.
+        struct GuideMid { public Vector2 Mid, Perp; }
+        readonly List<GuideMid> _guideMids = new List<GuideMid>();
 
         public void CollectTargetGuides(Vector2 p)
         {
             _guideRays.Clear();
-            if (Graph == null || _chainTail < 0) return;   // only react while a new segment is being drawn
-            // Ported from the original NetworkDesigner guide system. A node reacts only when the cursor is within the
-            // proximity-snap radius of it (Guides palette "Proximity snap"), so guides appear as you approach a node —
-            // not constantly. Per INCIDENT EDGE: emit a collinear extension (the road's outward continuation past the
-            // node) + the two perpendiculars; only the ray on the side the cursor is on is kept (cursor ahead of it).
-            float react = Mathf.Max(1f, EndSnapRadius);
-            float extLen = ExtensionGuideLength;
-            float perpLen = Mathf.Min(ExtensionGuideLength, 80f);
+            if (Graph == null) return;
+            // Per the guide spec: every existing node within GuideRange of the cursor (Guides palette "Guide range",
+            // separate from the EndSnapRadius node-snap) projects guides off EACH incident edge — a colinear (the road's
+            // outward continuation past the node) + BOTH perpendiculars. Works whether STARTING a new segment (no
+            // chain yet) or extending; the chain tail (the drawn-off node) always projects. ResolveGuideSnap then
+            // picks which guide the cursor hard-snaps to (rendered red); the rest render amber.
+            float react = Mathf.Max(1f, GuideRange);   // node emits guides within this (separate from node-snap EndSnapRadius)
+            float len = Mathf.Max(1f, ExtensionGuideLength);   // configurable guide length (Guides palette "Guide length") — colinear AND perpendicular
             float r2 = react * react;
             for (int i = 0; i < Graph.Nodes.Count; i++)
             {
@@ -716,10 +730,27 @@ namespace NetworkDesigner.Terrain
                     if (outw.sqrMagnitude < 1e-6f) continue;
                     outw.Normalize();
                     Vector2 perp = new Vector2(-outw.y, outw.x);
-                    AddGuideCursorSide(p, np, outw, extLen);    // collinear extension out the road's front
-                    AddGuideCursorSide(p, np, perp, perpLen);   // perpendicular — only the cursor's side survives
-                    AddGuideCursorSide(p, np, -perp, perpLen);
+                    _guideRays.Add(new GuideRay { O = np, D = outw, Len = len });    // colinear extension (outward)
+                    _guideRays.Add(new GuideRay { O = np, D = perp, Len = len });    // perpendicular (both sides;
+                    _guideRays.Add(new GuideRay { O = np, D = -perp, Len = len });   // snap/red picks the cursor's side)
                 }
+            }
+
+            // Segment CENTERPOINT snap targets: each edge whose midpoint is within GuideRange of the cursor (excluding
+            // the chain's own incoming edge). Snapping onto a midpoint shows a red perpendicular guide (DrawTargetGuides).
+            _guideMids.Clear();
+            for (int e = 0; e < Graph.Edges.Count; e++)
+            {
+                LineEdge le = Graph.Edges[e];
+                if (le.A == _chainTail || le.B == _chainTail) continue;
+                EdgeBezier(le, out Vector2 p0, out Vector2 q1, out Vector2 q2, out Vector2 p3);
+                Vector2 mid = LineGraph.Bezier(p0, q1, q2, p3, 0.5f);
+                if ((mid - p).sqrMagnitude > r2) continue;
+                Vector2 tan = LineGraph.BezierTangent(p0, q1, q2, p3, 0.5f);
+                if (tan.sqrMagnitude < 1e-6f) tan = p3 - p0;
+                if (tan.sqrMagnitude < 1e-6f) continue;
+                tan.Normalize();
+                _guideMids.Add(new GuideMid { Mid = mid, Perp = new Vector2(-tan.y, tan.x) });
             }
         }
 
@@ -733,38 +764,119 @@ namespace NetworkDesigner.Terrain
             return tan;
         }
 
-        // Add a guide ray only if the cursor is on its side (ahead of the origin along the ray) — so a node shows the
-        // guide pointing toward the cursor, not the one pointing away. Mirrors the original's backward-ray rejection.
-        void AddGuideCursorSide(Vector2 cursor, Vector2 o, Vector2 d, float len)
+        // Draw every candidate guide as a thick, bright, flat dashed ribbon into the dedicated guide mesh: the one(s)
+        // the cursor is hard-snapped to render RED (submesh 1), the rest amber (submesh 0) — spec: snapped=red, available=yellow.
+        public void DrawTargetGuides(ITerrainSurface field, Vector2 cursor)
         {
-            if (Vector2.Dot(cursor - o, d) <= 0f) return;
-            _guideRays.Add(new GuideRay { O = o, D = d, Len = len });
-        }
-
-        public void DrawTargetGuides(ITerrainSurface field)
-        {
-            foreach (GuideRay g in _guideRays) DashGuide(field, g.O, g.D, g.Len);
-        }
-
-        // Snap the cursor to the NEAREST reactive-node guide line within ExtensionSnapRadius (nearest line wins — no
-        // intersection snapping, matching the original NetworkDesigner behaviour).
-        public bool TrySnapToGuides(Vector2 cursor, out Vector2 snapped)
-        {
-            snapped = cursor;
-            float r = Mathf.Max(0f, ExtensionSnapRadius);
-            if (r <= 0f) return false;
-            CollectTargetGuides(cursor);
-            float best2 = r * r; bool found = false; Vector2 best = cursor;
-            foreach (GuideRay g in _guideRays)
+            EnsureGuideMesh();
+            _gv.Clear(); _gTriA.Clear(); _gTriR.Clear();
+            ResolveGuideSnap(cursor, out _, out int aIdx, out int bIdx, out int midIdx);
+            for (int i = 0; i < _guideRays.Count; i++)
+                GuideRibbon(field, _guideRays[i].O, _guideRays[i].D, _guideRays[i].Len, (i == aIdx || i == bIdx) ? _gTriR : _gTriA);
+            if (midIdx >= 0)   // snapped to a segment centerpoint → red perpendicular guide through it (both ways)
             {
+                GuideMid m = _guideMids[midIdx];
+                float len = Mathf.Max(1f, ExtensionGuideLength);
+                GuideRibbon(field, m.Mid, m.Perp, len, _gTriR);
+                GuideRibbon(field, m.Mid, -m.Perp, len, _gTriR);
+            }
+            _gMesh.Clear();
+            _gMesh.SetVertices(_gv);
+            _gMesh.subMeshCount = 2;
+            _gMesh.SetTriangles(_gTriA, 0);
+            _gMesh.SetTriangles(_gTriR, 1);
+            _gMesh.RecalculateBounds();
+            _gMr.enabled = _gv.Count > 0;
+        }
+
+        // A dashed flat ribbon (quads) of width GuideWidth from `o` along `dir` for `len`, draped on the terrain.
+        void GuideRibbon(ITerrainSurface field, Vector2 o, Vector2 dir, float len, List<int> tris)
+        {
+            int gn = Mathf.Clamp(Mathf.CeilToInt(len / 1.2f), 4, 800);
+            Vector2 perp = new Vector2(-dir.y, dir.x) * (GuideWidth * 0.5f);
+            Vector3 up = Vector3.up * 0.05f;   // float clearly above the terrain so the bright ribbon reads
+            for (int i = 0; i < gn; i += 2)    // dashed: draw even cells, skip odd (gap)
+            {
+                Vector2 a = o + dir * ((float)i / gn * len);
+                Vector2 b = o + dir * ((float)(i + 1) / gn * len);
+                Vector3 a0 = Drape(field, a - perp) + up, a1 = Drape(field, a + perp) + up;
+                Vector3 b0 = Drape(field, b - perp) + up, b1 = Drape(field, b + perp) + up;
+                int s = _gv.Count;
+                _gv.Add(a0); _gv.Add(a1); _gv.Add(b1); _gv.Add(b0);
+                tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 3);          // up
+                tris.Add(s); tris.Add(s + 2); tris.Add(s + 1); tris.Add(s); tris.Add(s + 3); tris.Add(s + 2);          // down (2-sided)
+            }
+        }
+
+        void EnsureGuideMesh()
+        {
+            if (_gMf != null) return;
+            _gGo = new GameObject(RootName + "_Guides") { hideFlags = HideFlags.DontSave };
+            _gMf = _gGo.AddComponent<MeshFilter>();
+            _gMr = _gGo.AddComponent<MeshRenderer>();
+            _gMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _gMr.receiveShadows = false;
+            _gMesh = new Mesh { name = "RoadPlanGuideMesh" };
+            _gMf.sharedMesh = _gMesh;
+            _gMr.sharedMaterials = new[]
+            {
+                NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(1f, 0.92f, 0.12f, 1f), "RoadGuideAmber"),  // available = bright yellow
+                NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(1f, 0.18f, 0.10f, 1f), "RoadGuideRed"),    // snapped = bright red
+            };
+        }
+
+        // Resolve the cursor's snap against the current _guideRays: nearest guide-line INTERSECTION within
+        // ExtensionSnapRadius, else nearest guide LINE. Reports the winning ray index(es) so the renderer can colour
+        // them red (bIdx >= 0 only for an intersection snap). Does NOT recollect — caller collects first.
+        bool ResolveGuideSnap(Vector2 cursor, out Vector2 point, out int aIdx, out int bIdx, out int midIdx)
+        {
+            point = cursor; aIdx = -1; bIdx = -1; midIdx = -1;
+            float r = Mathf.Max(0f, GuideSnapRadius);   // "guide snap strength" — dedicated, separate from Colinear snap
+            if (r <= 0f) return false;
+            float best2 = r * r; bool found = false;
+            for (int k = 0; k < _guideMids.Count; k++)              // 1a) segment centerpoints (point snap)
+            {
+                float d2 = (cursor - _guideMids[k].Mid).sqrMagnitude;
+                if (d2 < best2) { best2 = d2; point = _guideMids[k].Mid; midIdx = k; aIdx = bIdx = -1; found = true; }
+            }
+            for (int a = 0; a < _guideRays.Count; a++)               // 1b) guide-line crossings (point snap)
+                for (int b = a + 1; b < _guideRays.Count; b++)
+                    if (RayCross(_guideRays[a], _guideRays[b], out Vector2 x))
+                    {
+                        float d2 = (cursor - x).sqrMagnitude;
+                        if (d2 < best2) { best2 = d2; point = x; aIdx = a; bIdx = b; midIdx = -1; found = true; }
+                    }
+            if (found) return true;
+            best2 = r * r;                                           // 2) else snap onto the nearest single guide line
+            for (int i = 0; i < _guideRays.Count; i++)
+            {
+                GuideRay g = _guideRays[i];
                 float t = Vector2.Dot(cursor - g.O, g.D);
-                if (t < 0f || t > g.Len) continue;        // half-line from the node, within length
+                if (t < 0f || t > g.Len) continue;                  // half-line from the node, within length
                 Vector2 proj = g.O + g.D * t;
                 float d2 = (cursor - proj).sqrMagnitude;
-                if (d2 < best2) { best2 = d2; best = proj; found = true; }
+                if (d2 < best2) { best2 = d2; point = proj; aIdx = i; bIdx = -1; found = true; }
             }
-            if (found) { snapped = best; return true; }
-            return false;
+            return found;
+        }
+
+        // Crossing of two guide rays (both as half-lines within their Len); false if parallel or off either ray.
+        static bool RayCross(GuideRay a, GuideRay b, out Vector2 x)
+        {
+            x = default;
+            float det = a.D.x * (-b.D.y) - a.D.y * (-b.D.x);
+            if (Mathf.Abs(det) < 1e-6f) return false;
+            Vector2 diff = b.O - a.O;
+            float ta = (diff.x * (-b.D.y) - diff.y * (-b.D.x)) / det;
+            float tb = (a.D.x * diff.y - a.D.y * diff.x) / det;
+            if (ta < 0f || ta > a.Len || tb < 0f || tb > b.Len) return false;
+            x = a.O + a.D * ta; return true;
+        }
+
+        // Hard-snap the cursor to the nearest guide line / crossing (see ResolveGuideSnap).
+        public bool TrySnapToGuides(Vector2 cursor, out Vector2 snapped)
+        {
+            CollectTargetGuides(cursor);
+            return ResolveGuideSnap(cursor, out snapped, out _, out _, out _);
         }
 
         // ════ Auto-connect (mirrors the rail auto-connect): pick node A and node B, and a tangent-matched fillet
@@ -2029,7 +2141,7 @@ namespace NetworkDesigner.Terrain
 
         // ---- placement preview (ghost puck + dashed pending edge) ----
 
-        public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; HideSymRing(); }
+        public void HidePreview() { if (_pvMr != null) _pvMr.enabled = false; if (_gMr != null) _gMr.enabled = false; HideSymRing(); }
 
         // ---- curve-constraint visuals (equal-leg ring + 15° ticks + min-leg target) ----
 
@@ -2154,6 +2266,7 @@ namespace NetworkDesigner.Terrain
         {
             EnsurePreview();
             _pvMr.enabled = show;
+            if (_gMr != null) _gMr.enabled = false;   // default off each frame; DrawTargetGuides re-enables when it draws
             LastPreviewRadius = float.PositiveInfinity; LastPreviewTooTight = false;
             PreviewCurveActive = false; PreviewStraightActive = false;
             HideSymRing();   // default off each frame; BuildSymRing/BuildMinLegGuide re-enable it
@@ -2176,7 +2289,7 @@ namespace NetworkDesigner.Terrain
             // project a collinear extension + a perpendicular guide on the cursor's side; the cursor snaps to the
             // nearest such line via TrySnapToGuides. Only active while a new segment is being drawn.
             CollectTargetGuides(new Vector2(cursor.x, cursor.z));
-            DrawTargetGuides(field);
+            DrawTargetGuides(field, new Vector2(cursor.x, cursor.z));
 
             // Shift-curve in progress: the bend is armed, so draw the curve tail→corner→cursor (red when too
             // tight for the design speed), plus the two construction legs and a marker at the corner.
@@ -2228,18 +2341,8 @@ namespace NetworkDesigner.Terrain
                 PreviewStraightActive = true; PreviewStraightFrom = tnode; PreviewStraightTo = curXZ;
                 PreviewStraightDist = Vector2.Distance(tnode, curXZ);
             }
-            if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count
-                && IncomingDirection(new Vector2(cursor.x, cursor.z), out Vector2 gdir))
-            {
-                Vector2 o = Graph.Nodes[_chainTail];
-                DashGuide(field, o, gdir, ExtensionGuideLength);                 // colinear continuation
-                if (GuidedTurns && AllowHardCorner)                              // 90° corner guides (slow enough)
-                {
-                    float gl = Mathf.Min(ExtensionGuideLength, 60f);
-                    DashGuide(field, o, new Vector2(-gdir.y, gdir.x), gl);
-                    DashGuide(field, o, new Vector2(gdir.y, -gdir.x), gl);
-                }
-            }
+            // (The chain tail's colinear/perpendicular guides now come from the reactive guide system above —
+            // CollectTargetGuides includes the chain tail and emits a guide per incident edge.)
             _pvMesh.Clear(); _pvMesh.subMeshCount = 2; _pvMesh.SetVertices(_pv);
             _pvMesh.SetIndices(_pvIdx, MeshTopology.Lines, 0); _pvMesh.SetIndices(_pvBadIdx, MeshTopology.Lines, 1);
             _pvMesh.RecalculateBounds();
