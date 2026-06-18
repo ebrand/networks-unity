@@ -244,12 +244,14 @@ namespace NetworkDesigner.Terrain
             int end = NearestOrNew(p);   // join an existing node → a real intersection
             if (end == start || (Graph.Nodes[end] - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq)
             { Debug.Log("[Road] segment ignored: endpoints coincide (degenerate edge)."); return; }
-            int before = Graph.Edges.Count;
-            Graph.AddEdge(_chainTail, end);
-            if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
-            SplitSegmentCrossings(start, end, ActiveProfileId);   // drawn OVER existing roads → make intersection nodes
-            if (AutoBridge) TryAutoBridge(field, start, end, ActiveProfileId);   // dip under the new straight span → bridge it
-            _chainTail = end; _freshStartTail = false;   // the tail now has an edge → no longer a fresh start
+            if (Graph.AddEdge(start, end))
+            {
+                Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
+                SplitSegmentCrossings(start, end, ActiveProfileId);             // drawn OVER existing roads → make intersection nodes
+                if (AutoBridge) TryAutoBridge(field, start, end, ActiveProfileId);   // dip under the new straight span → bridge it
+            }
+            else Debug.Log("[Road] segment already exists between those nodes — extending the chain from there.");
+            _chainTail = end; _freshStartTail = false;   // the tail now has an edge (new or pre-existing) → no longer a fresh start
             Rebuild(field);
         }
 
@@ -361,9 +363,7 @@ namespace NetworkDesigner.Terrain
         void ConnectStraight(int a, int b, string profile)
         {
             if (a == b) return;
-            int before = Graph.Edges.Count;
-            Graph.AddEdge(a, b);
-            if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = profile;
+            if (Graph.AddEdge(a, b)) Graph.Edges[Graph.Edges.Count - 1].Profile = profile;
         }
 
         int FindEdgeIndex(int a, int b)
@@ -417,9 +417,7 @@ namespace NetworkDesigner.Terrain
 
         void AddCurvedEdge(int a, int b, Vector2 corner)
         {
-            int before = Graph.Edges.Count;
-            Graph.AddEdge(a, b);
-            if (Graph.Edges.Count <= before) return;   // edge already existed (dedup) — leave it straight
+            if (!Graph.AddEdge(a, b)) return;   // rejected / edge already existed (dedup) — leave it straight
             LineEdge e = Graph.Edges[Graph.Edges.Count - 1];
             CurveControls(Graph.Nodes[a], Graph.Nodes[b], corner, out Vector2 c1, out Vector2 c2);
             e.HasCurve = true; e.ControlA = c1; e.ControlB = c2; e.Profile = ActiveProfileId;

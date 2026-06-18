@@ -56,12 +56,16 @@ namespace NetworkDesigner.Terrain
         public float GetNodeY(int i) => i >= 0 && i < NodeY.Count ? NodeY[i] : float.NaN;
         public void SetNodeY(int i, float y) { if (i < 0) return; while (NodeY.Count <= i) NodeY.Add(float.NaN); NodeY[i] = y; }
 
-        public void AddEdge(int a, int b)
+        // Returns true if a new edge was actually added; false if rejected (out-of-range / self-loop) or a duplicate
+        // already existed. Callers must check this rather than infer success from Edges.Count, and the new edge (when
+        // true) is the last in Edges.
+        public bool AddEdge(int a, int b)
         {
-            if (a == b || a < 0 || b < 0 || a >= Nodes.Count || b >= Nodes.Count) return;
+            if (a == b || a < 0 || b < 0 || a >= Nodes.Count || b >= Nodes.Count) return false;
             foreach (LineEdge e in Edges)
-                if ((e.A == a && e.B == b) || (e.A == b && e.B == a)) return; // no dup
+                if ((e.A == a && e.B == b) || (e.A == b && e.B == a)) return false; // no dup
             Edges.Add(new LineEdge(a, b) { Serial = NextSerial() });
+            return true;
         }
 
         // Next draw-order serial: one past the oldest existing edge. O(n) but AddEdge is rare and n is small;
