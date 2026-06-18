@@ -37,8 +37,20 @@ namespace NetworkDesigner.Terrain
         public float SetbackB = -1f;  // road plan: manual setback override (m) at END B's junction; <0 = auto
         public RoadClass Class = RoadClass.Auto;  // road plan: intersection precedence (manual primary/secondary override)
         public int Serial;             // road plan: monotonic draw-order age (lower = drawn earlier = primary by default)
+        public List<BridgeArch> Arches; // road plan: under-deck open-spandrel arches on a bridge span (null = none)
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
+    }
+
+    // An under-deck arch carrying a stretch of a bridge: springs from the trestle at StartArc to the one at EndArc
+    // (arc-distance along the edge), peaking Rise above the straight base line between their feet. The bridge builder
+    // truncates the intermediate trestles to sit on it. (Increment 1 just records it; Increment 2 builds it.)
+    [System.Serializable]
+    public class BridgeArch
+    {
+        public float StartArc;   // arc-distance (m) along the edge of the start trestle
+        public float EndArc;     // arc-distance (m) of the end trestle
+        public float Rise;       // peak height (m) above the straight line joining the two trestle feet
     }
 
     [Serializable]

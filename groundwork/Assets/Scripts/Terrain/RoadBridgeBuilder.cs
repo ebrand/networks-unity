@@ -14,6 +14,44 @@ namespace NetworkDesigner.Terrain
     {
         static Material _mat;
 
+        // One trestle/pier position along a bridge edge (so the arch tool can pick + highlight trestles, and Increment
+        // 2 can truncate them to an arch). MUST match Build's pier placement so picks line up with the real piers.
+        public struct TrestleStation { public Vector2 Xz; public float DeckTop; public float Ground; public float Arc; }
+
+        // Enumerate the pier stations of bridge edge `ei` — same logic as Build's pier loop (start, end, every
+        // pierSpacing along the arc; only where the soffit clears the ground by > 0.3 m).
+        public static List<TrestleStation> Stations(RoadPlanLayer rd, int ei, System.Func<int, float> nodeElev,
+                                                    ITerrainSurface field, float deckDepth, float pierSpacing)
+        {
+            var outS = new List<TrestleStation>();
+            if (rd == null || rd.Graph == null || ei < 0 || ei >= rd.Graph.Edges.Count) return outS;
+            LineEdge e = rd.Graph.Edges[ei];
+            rd.EdgeBezierWorld(ei, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+            float yA = nodeElev != null ? nodeElev(e.A) : 0f, yB = nodeElev != null ? nodeElev(e.B) : 0f;
+            deckDepth = Mathf.Max(0.1f, deckDepth); pierSpacing = Mathf.Max(2f, pierSpacing);
+            const float sink = 0.1f;
+            float chord = Vector2.Distance(p0, p3);
+            int n = Mathf.Clamp(Mathf.CeilToInt(chord / 4f), 2, 1024);
+            float arc = 0f, nextPier = 0f; Vector2 prevXz = p0; bool hasPrev = false;
+            for (int i = 0; i <= n; i++)
+            {
+                float u = i / (float)n;
+                Vector2 xz = LineGraph.Bezier(p0, p1, p2, p3, u);
+                float deckTop = Mathf.Lerp(yA, yB, u) - sink;
+                if (hasPrev) arc += Vector2.Distance(prevXz, xz);
+                float soffit = deckTop - deckDepth;
+                float ground = field != null ? field.SampleHeight(xz.x, xz.y) : 0f;
+                bool endpoint = (i == 0 || i == n);
+                if ((endpoint || arc >= nextPier) && soffit - ground > 0.3f)
+                {
+                    outS.Add(new TrestleStation { Xz = xz, DeckTop = deckTop, Ground = ground, Arc = arc });
+                    if (!endpoint) nextPier = arc + pierSpacing;
+                }
+                prevXz = xz; hasPrev = true;
+            }
+            return outS;
+        }
+
         // Returns a GameObject holding the deck+pier mesh (parented under `parent`), or null if nothing was built.
         public static GameObject Build(RoadPlanLayer rd, HashSet<int> bridgeEdges, System.Func<int, float> nodeElev,
                                        ITerrainSurface field, float deckDepth, float pierSpacing, float pierWidth,

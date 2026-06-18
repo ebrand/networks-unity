@@ -146,6 +146,7 @@ namespace NetworkDesigner.UI
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : Designer.WaterLevel,
                 v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { Designer.WaterLevel = v; Designer.ApplyWater(); } }, WaterLo, WaterHi, "0", 1f));
             body.Add(WaterBodiesRow());
+            body.Add(ArchBridgesRow());
         }
 
         // ───────────────────────── DEM real-world Unity Terrain ──────────────────────────
@@ -161,6 +162,7 @@ namespace NetworkDesigner.UI
                 () => Designer.ChunkTestActive ? Designer.ChunkWaterLevel : DemWater.Level,
                 v => { if (Designer.ChunkTestActive) Designer.ChunkWaterLevel = v; else { DemWater.Level = v; DemWater.Apply(); } }, WaterLo, WaterHi, "0", 1f));
             body.Add(WaterBodiesRow());
+            body.Add(ArchBridgesRow());
             // LIGHTING controls removed from here — to be relocated.
         }
 
@@ -315,6 +317,20 @@ namespace NetworkDesigner.UI
             add.style.flexGrow = 1; clr.style.marginLeft = 6;
             row.Add(add); row.Add(clr);
             col.Add(row);
+            return col;
+        }
+
+        // Bridge arch (under-deck, open-spandrel): enter a mode, hover a bridge to highlight its trestles, click the
+        // start trestle then the end trestle, scroll to set the rise, Enter to confirm. (Builds in Increment 2.)
+        VisualElement ArchBridgesRow()
+        {
+            var col = new VisualElement();
+            col.Add(SectionLabel("BRIDGE ARCH"));
+            var btn = MakeButton("Bridge arch", () => Designer.EnterBridgeArchMode());
+            btn.tooltip = "Hover an existing bridge → trestles highlight. Click the start trestle, then the end trestle. " +
+                          "Scroll adjusts the arch rise; Enter confirms; Esc cancels.";
+            btn.style.marginBottom = 8;
+            col.Add(btn);
             return col;
         }
 

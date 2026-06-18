@@ -466,6 +466,7 @@ namespace NetworkDesigner.Terrain
             MinimapDiorama.Dispose();   // tear down the relief minimap (no-op for the flat test)
             ChunkOverlays.Teardown();   // tear down water + local-grid GOs (toggle state is kept)
             WaterBodies.Teardown();     // tear down per-level water bodies (in-session only this phase)
+            BridgeArchTool.Teardown();  // tear down the bridge-arch editing overlay
             ForestGen.Teardown();       // tear down the forest-selection highlight
             DemChunkSource.Clear();     // drop the DEM tile mapping/cache (no-op for the flat test)
             Debug.Log("[ChunkTest] stopped.");
@@ -550,6 +551,9 @@ namespace NetworkDesigner.Terrain
             Debug.Log($"[WaterBodies] click a spot to place a water body (level = ground + {WaterBodies.SeedRise:0} m); Esc cancels.");
         }
         public void ClearWaterBodies() { WaterBodies.Clear(); _dirtySince = Time.realtimeSinceStartup; }
+
+        // ── bridge arch (under-deck, on an existing bridge's trestles) — see BridgeArchTool ──
+        public void EnterBridgeArchMode() { EnterSculptMode(); _active = null; _lineActive = null; BridgeArchTool.Enter(); }
         public bool ChunkLocalGrid { get => ChunkOverlays.ShowLocalGrid; set => ChunkOverlays.SetLocalGrid(value); }
         // Topographic contour lines over the loaded terrain (J hotkey too).
         // Topo contours render via the per-pixel overlay SHADER (ChunkWorld.SetContours).
@@ -3181,7 +3185,7 @@ namespace NetworkDesigner.Terrain
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
             fly.enabled = true;   // a saved scene / force-quit can leave the component disabled → middle-mouse look + zoom dead
-            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap() || WallTopScroll();
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap() || WallTopScroll() || BridgeArchTool.AdjustingRise;
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.InputSuppressor = () => ChunkMapEditor.IsOpen;   // freeze the camera while the map trimmer is open
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
@@ -3511,6 +3515,20 @@ namespace NetworkDesigner.Terrain
                     }
                 }
                 return;   // armed → don't let this frame's click reach the draw/sculpt tools
+            }
+
+            // Bridge-arch editing mode: hover an existing bridge → its trestles highlight; click a start trestle, then an
+            // end trestle; a preview arch is drawn base→base; scroll adjusts the rise; Enter confirms, Esc cancels.
+            // Drives the whole interaction through BridgeArchTool; swallows the frame's tool input while active.
+            if (BridgeArchTool.Active)
+            {
+                BridgeArchTool.Tick(RoadPlanLayer, idx => RoadPlanLayer.DesignElevation(idx, Surf), Surf,
+                    RoadPlanLayer.BridgeDeckDepth, RoadPlanLayer.BridgePierSpacing,
+                    cam, new Vector2(Input.mousePosition.x, Input.mousePosition.y),
+                    !MouseOverActivePanel() && Input.GetMouseButtonDown(0),
+                    Input.mouseScrollDelta.y, Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter),
+                    Input.GetKeyDown(KeyCode.Escape) || (!MouseOverActivePanel() && Input.GetMouseButtonDown(1)));
+                if (BridgeArchTool.Active) return;   // still editing → don't let input fall through to other tools
             }
 
             // Flatten mode: remember the world elevation under the cursor for the HUD.
