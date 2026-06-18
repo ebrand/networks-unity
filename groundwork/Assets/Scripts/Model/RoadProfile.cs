@@ -75,6 +75,29 @@ namespace NetworkDesigner.Model
         public float Width;
     }
 
+    /// <summary>Which side of the road a rail corridor runs on.</summary>
+    public enum RailCorridorSide { Left, Right, Center }
+
+    /// <summary>
+    /// An optional rail corridor carried by the road: one or more parallel
+    /// tracks generated alongside (Left/Right) or down the middle (Center)
+    /// of the road when it's built. Null = no rail. The tracks become real
+    /// edges in the rail network (rendered + navigable); see
+    /// RailTrackLayer.RegenerateRoadCorridors.
+    /// </summary>
+    [Serializable]
+    public class RailCorridor
+    {
+        /// <summary>Number of parallel tracks (>= 1).</summary>
+        public int Tracks = 1;
+        /// <summary>Which side of the road the corridor runs on.</summary>
+        public RailCorridorSide Side = RailCorridorSide.Right;
+        /// <summary>Standard track-to-track centre spacing, meters.</summary>
+        public float TrackSpacing = 5f;
+        /// <summary>Gap from the outer lane edge to the nearest track centre (Left/Right only), meters.</summary>
+        public float LaneClearance = 3f;
+    }
+
     /// <summary>
     /// A road's cross-section profile: lanes per direction, optional
     /// median, and shoulders. Reused by NetworkRoad.Profile in the
@@ -92,6 +115,8 @@ namespace NetworkDesigner.Model
         public Median Median;
         /// <summary>Null when the road has no turn lane. Mutually exclusive with Median.</summary>
         public TurnLane TurnLane;
+        /// <summary>Null when the road carries no rail. Generates real, navigable rail edges on build.</summary>
+        public RailCorridor RailCorridor;
         public Shoulder ShoulderAB = new Shoulder { Width = 1f };
         public Shoulder ShoulderBA = new Shoulder { Width = 1f };
         /// <summary>Raised curb (0.25 m high × 0.5 m wide) between the outer lanes and the edge.</summary>

@@ -2393,7 +2393,15 @@ namespace NetworkDesigner.Terrain
 
         // (Re)sweep every edge flagged Built into a fresh build root. The whole network resolves for
         // correct setbacks; only the built edges emit geometry (RoadPlanBuilder's onlyRoads filter).
+        // Re-sweep built roads, then regenerate any rail corridors their profiles declare. The corridor step runs on
+        // EVERY path (including the no-built-roads early-outs in the core) so stale corridor rail is always cleaned up.
         void RebuildBuiltRoads()
+        {
+            RebuildBuiltRoadsCore();
+            if (RailLayer != null) { RailLayer.RegenerateRoadCorridors(RoadPlanLayer, Surf); RailLayer.Rebuild(Surf); }
+        }
+
+        void RebuildBuiltRoadsCore()
         {
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph != null && RoadPlanLayer.RemoveDegenerateEdges() > 0) RoadPlanLayer.Rebuild(Surf);   // drop 0-length stubs before resolving

@@ -102,7 +102,13 @@
         "curbs": true,
         "sidewalks": true,
         "elevated": false,
-        "guardrails": false
+        "guardrails": false,
+        "railCorridor": {
+          "tracks": 1,
+          "side": "center",
+          "trackSpacing": 5,
+          "laneClearance": 3
+        }
       },
       "driveSide": "right",
       "updatedAt": 0

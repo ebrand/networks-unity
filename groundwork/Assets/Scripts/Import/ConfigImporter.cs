@@ -86,6 +86,7 @@ namespace NetworkDesigner.Import
                 Converters = new List<JsonConverter>
                 {
                     new DriveSideConverter(),
+                    new RailCorridorSideConverter(),
                 },
                 NullValueHandling = NullValueHandling.Ignore,
                 MissingMemberHandling = MissingMemberHandling.Ignore,
@@ -118,6 +119,38 @@ namespace NetworkDesigner.Import
                 "right" => DriveSide.Right,
                 "left" => DriveSide.Left,
                 _ => throw new JsonSerializationException($"Unknown DriveSide value: '{s}'."),
+            };
+        }
+    }
+
+    /// <summary>
+    /// Maps <see cref="RailCorridorSide"/> to/from lowercase strings
+    /// ("left", "right", "center") so the rail-corridor block in
+    /// road-profiles-ingame.json stays human-readable.
+    /// </summary>
+    internal class RailCorridorSideConverter : JsonConverter<RailCorridorSide>
+    {
+        public override void WriteJson(JsonWriter writer, RailCorridorSide value, JsonSerializer serializer)
+        {
+            writer.WriteValue(value switch
+            {
+                RailCorridorSide.Left => "left",
+                RailCorridorSide.Right => "right",
+                RailCorridorSide.Center => "center",
+                _ => throw new JsonSerializationException($"Unhandled RailCorridorSide value: {value}"),
+            });
+        }
+
+        public override RailCorridorSide ReadJson(JsonReader reader, Type objectType,
+            RailCorridorSide existingValue, bool hasExistingValue, JsonSerializer serializer)
+        {
+            string s = (reader.Value as string)?.ToLowerInvariant();
+            return s switch
+            {
+                "left" => RailCorridorSide.Left,
+                "right" => RailCorridorSide.Right,
+                "center" => RailCorridorSide.Center,
+                _ => throw new JsonSerializationException($"Unknown RailCorridorSide value: '{s}'."),
             };
         }
     }

@@ -38,6 +38,10 @@ namespace NetworkDesigner.Terrain
         public RoadClass Class = RoadClass.Auto;  // road plan: intersection precedence (manual primary/secondary override)
         public int Serial;             // road plan: monotonic draw-order age (lower = drawn earlier = primary by default)
         public List<BridgeArch> Arches; // road plan: under-deck open-spandrel arches on a bridge span (null = none)
+        // Rail layer: non-null ⇒ this edge was GENERATED from a road's rail corridor (key = owning road edge + track),
+        // so it's regenerated on every road (re)build and must NOT be persisted (filtered out of CollectData). Null ⇒
+        // a hand-drawn edge. Runtime-only — never written to a save. See RailTrackLayer.RegenerateRoadCorridors.
+        [System.NonSerialized] public string CorridorKey;
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
     }

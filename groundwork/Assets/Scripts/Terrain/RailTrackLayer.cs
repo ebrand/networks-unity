@@ -477,6 +477,105 @@ namespace NetworkDesigner.Terrain
             return new Vector2(-tan.y, tan.x) * dist;
         }
 
+        // ── road-declared rail corridors ───────────────────────────────────────────────────────────────────
+        // Regenerate the rail edges implied by built roads whose profile declares a RailCorridor. Called at the end
+        // of a road (re)build: strip any previously-generated corridor edges, then lay fresh ones offset from each
+        // such road segment's centreline. The new edges are real rail (rendered by BuildEdge, routable via
+        // RailNetwork) tagged with CorridorKey so they regenerate cleanly and are never persisted (see CollectData).
+        // Caller must Rebuild() afterwards. Bridge spans are skipped (their deck-grade rail isn't handled yet).
+        public void RegenerateRoadCorridors(RoadPlanLayer road, ITerrainSurface field)
+        {
+            LineGraph g = Graph;
+            StripCorridorEdges(g);
+            if (road == null) return;
+
+            // Share an offset node per (road node, track) so consecutive road segments' corridor tracks stay
+            // continuous (a single rail node, not two coincident ones). Key packs (roadNode, track) into a long.
+            var shared = new Dictionary<long, int>();
+            int roadEdges = road.EdgeCount;
+            for (int e = 0; e < roadEdges; e++)
+            {
+                if (!road.IsEdgeBuilt(e) || road.IsEdgeBridge(e)) continue;
+                LineEdge re = road.Graph.Edges[e];
+                NetworkDesigner.Model.RoadProfile prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(re.Profile);
+                NetworkDesigner.Model.RailCorridor rc = prof?.RailCorridor;
+                if (rc == null || rc.Tracks < 1) continue;
+
+                road.EdgeBezierWorld(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+                float halfRoad = road.EdgeCorridorWidth(e) * 0.5f;
+                float spacing = Mathf.Max(1f, rc.TrackSpacing);
+                bool center = rc.Side == NetworkDesigner.Model.RailCorridorSide.Center;
+                if (center && prof.CenterStripWidth > 0.01f && rc.Tracks * spacing > prof.CenterStripWidth + 0.01f)
+                    Debug.LogWarning($"[Rail corridor] {rc.Tracks} track(s) @ {spacing:0.#} m exceed the " +
+                                     $"{prof.CenterStripWidth:0.#} m centre strip on profile '{re.Profile}'.");
+                // +offset = LEFT of the road's A→B travel (OffsetNormal's left normal). Right = mirror.
+                float sideSign = rc.Side == NetworkDesigner.Model.RailCorridorSide.Left ? 1f : -1f;
+
+                for (int k = 0; k < rc.Tracks; k++)
+                {
+                    float signed = center
+                        ? (k - (rc.Tracks - 1) * 0.5f) * spacing
+                        : sideSign * (halfRoad + Mathf.Max(0f, rc.LaneClearance) + k * spacing);
+
+                    Vector2 a = p0 + OffsetNormal(p0, p1, p2, p3, 0f, signed);
+                    Vector2 b = p3 + OffsetNormal(p0, p1, p2, p3, 1f, signed);
+                    int na = SharedCorridorNode(g, shared, re.A, k, a);
+                    int nb = SharedCorridorNode(g, shared, re.B, k, b);
+                    if (na == nb) continue;
+                    if (!g.AddEdge(na, nb)) continue;
+                    LineEdge ce = FindEdge(na, nb);
+                    if (ce == null) continue;
+                    ce.CorridorKey = "r" + e + "#t" + k;
+                    ce.SpeedLimit = SpeedLimitKmh;
+                    ce.HasCurve = true;   // follow the road bezier (colinear controls ⇒ straight for straight roads)
+                    ce.ControlA = p1 + OffsetNormal(p0, p1, p2, p3, 1f / 3f, signed);
+                    ce.ControlB = p2 + OffsetNormal(p0, p1, p2, p3, 2f / 3f, signed);
+                }
+            }
+        }
+
+        static int SharedCorridorNode(LineGraph g, Dictionary<long, int> shared, int roadNode, int track, Vector2 pos)
+        {
+            long key = ((long)roadNode << 16) | (uint)(track & 0xffff);
+            if (shared.TryGetValue(key, out int idx)) return idx;
+            idx = g.AddNode(pos);
+            shared[key] = idx;
+            return idx;
+        }
+
+        // Remove every corridor-derived edge (CorridorKey != null) and the nodes only they reference, remapping the
+        // surviving (hand-drawn) edges' node indices. Corridor nodes are never shared with hand-drawn edges, so any
+        // node touched by a corridor edge is corridor-owned and safe to drop.
+        void StripCorridorEdges(LineGraph g)
+        {
+            bool any = false;
+            foreach (LineEdge e in g.Edges) if (e.CorridorKey != null) { any = true; break; }
+            if (!any) return;
+
+            var drop = new HashSet<int>();
+            foreach (LineEdge e in g.Edges) if (e.CorridorKey != null) { drop.Add(e.A); drop.Add(e.B); }
+
+            var newNodes = new List<Vector2>();
+            var newNodeY = new List<float>();
+            var remap = new Dictionary<int, int>();
+            for (int i = 0; i < g.Nodes.Count; i++)
+            {
+                if (drop.Contains(i)) continue;
+                remap[i] = newNodes.Count;
+                newNodes.Add(g.Nodes[i]);
+                newNodeY.Add(i < g.NodeY.Count ? g.NodeY[i] : float.NaN);
+            }
+            var newEdges = new List<LineEdge>();
+            foreach (LineEdge e in g.Edges)
+            {
+                if (e.CorridorKey != null) continue;
+                if (remap.TryGetValue(e.A, out int na) && remap.TryGetValue(e.B, out int nb)) { e.A = na; e.B = nb; newEdges.Add(e); }
+            }
+            g.Nodes = newNodes; g.NodeY = newNodeY; g.Edges = newEdges;
+            if (_chainTail >= 0) _chainTail = remap.TryGetValue(_chainTail, out int t) ? t : -1;   // keep in-progress chain valid
+            _parTails = null;   // parallel-draw tails reference old indices
+        }
+
         const float NodePickRadius = 5f; // click within this of a node to pick it up / join
 
         [Tooltip("Snap radius (m) for connecting to EXISTING track. A click within " +
@@ -3036,11 +3135,36 @@ namespace NetworkDesigner.Terrain
 
         public LineGraphSave CollectData()
         {
-            return new LineGraphSave
+            // Corridor-derived edges (CorridorKey != null) are regenerated from the road graph on every build/load,
+            // so they must NOT be persisted — otherwise load would regenerate them ON TOP of the saved copy and
+            // double the rail every save/load cycle. When none exist (the common case) behave exactly as before.
+            bool anyDerived = false;
+            for (int i = 0; i < Graph.Edges.Count; i++) if (Graph.Edges[i].CorridorKey != null) { anyDerived = true; break; }
+            if (!anyDerived)
+                return new LineGraphSave { Nodes = new List<Vector2>(Graph.Nodes), Edges = new List<LineEdge>(Graph.Edges) };
+
+            // Drop derived edges; keep only nodes referenced by surviving (hand-drawn) edges, remapping indices.
+            // Clone each kept edge so remapping A/B can't mutate the live graph.
+            var keepNodes = new List<Vector2>();
+            var map = new Dictionary<int, int>();
+            int Map(int i)
             {
-                Nodes = new List<Vector2>(Graph.Nodes),
-                Edges = new List<LineEdge>(Graph.Edges),
-            };
+                if (!map.TryGetValue(i, out int j)) { j = keepNodes.Count; map[i] = j; keepNodes.Add(Graph.Nodes[i]); }
+                return j;
+            }
+            var keepEdges = new List<LineEdge>();
+            foreach (LineEdge e in Graph.Edges)
+            {
+                if (e.CorridorKey != null) continue;
+                keepEdges.Add(new LineEdge(Map(e.A), Map(e.B))
+                {
+                    HasCurve = e.HasCurve, ControlA = e.ControlA, ControlB = e.ControlB,
+                    SpeedLimit = e.SpeedLimit, Profile = e.Profile, Excavated = e.Excavated,
+                    Bridge = e.Bridge, Built = e.Built, SetbackA = e.SetbackA, SetbackB = e.SetbackB,
+                    Class = e.Class, Serial = e.Serial, Arches = e.Arches,
+                });
+            }
+            return new LineGraphSave { Nodes = keepNodes, Edges = keepEdges };
         }
 
         public void LoadState(LineGraphSave save)
