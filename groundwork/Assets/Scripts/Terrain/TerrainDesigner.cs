@@ -904,6 +904,41 @@ namespace NetworkDesigner.Terrain
             return new Vector3(Mathf.Round(p.x / s) * s, p.y, Mathf.Round(p.z / s) * s);
         }
 
+        // March the camera ray against the terrain HEIGHTFIELD (Surf.SampleHeight) to find the ground point WITHOUT a
+        // physics collider — so line tools place/connect anywhere the terrain is defined, even where the streaming
+        // chunk bubble hasn't cooked a collider. Adaptive step (coarse high above ground, fine near it) + bisection
+        // refine. Returns false if the ray never descends through the surface (e.g. looking at the horizon).
+        bool RaycastTerrainHeightfield(Ray ray, out Vector3 point)
+        {
+            point = default;
+            if (Surf == null) return false;
+            Vector3 o = ray.origin, d = ray.direction;
+            float prevAbove = o.y - Surf.SampleHeight(o.x, o.z);
+            if (prevAbove < 0f) return false;                       // camera under the surface — nothing to hit downward
+            float t = 0f; const float maxT = 50000f; int guard = 0;
+            while (t < maxT && guard++ < 4000)
+            {
+                float step = Mathf.Clamp(prevAbove * 0.5f, 1f, 500f);   // overshoot-limited near the ground
+                t += step;
+                Vector3 cur = o + d * t;
+                float above = cur.y - Surf.SampleHeight(cur.x, cur.z);
+                if (above <= 0f)                                    // crossed the surface between (t-step) and t → bisect
+                {
+                    float lo = t - step, hi = t;
+                    for (int i = 0; i < 24; i++)
+                    {
+                        float mid = (lo + hi) * 0.5f; Vector3 m = o + d * mid;
+                        if (m.y - Surf.SampleHeight(m.x, m.z) > 0f) lo = mid; else hi = mid;
+                    }
+                    Vector3 h = o + d * hi;
+                    point = new Vector3(h.x, Surf.SampleHeight(h.x, h.z), h.z);
+                    return true;
+                }
+                prevAbove = above;
+            }
+            return false;
+        }
+
         // The cursor point the active tool will actually use, so the brush ring can
         // be drawn there too. Rail: existing track > alignment guide > grid. Other
         // line layers: grid. Slope tool (armed): the guide-snapped end. Scatter and
@@ -3413,6 +3448,14 @@ namespace NetworkDesigner.Terrain
                 overTerrain = Physics.Raycast(ray, out hit, 100000f)
                               && (hit.collider is MeshCollider
                                   || ((DemTerrainWorld.HasWorld || ChunkWorld.Active) && hit.collider is TerrainCollider));
+                // Collider-independent fallback for LINE tools (rail/road plan): if the physics ray missed because the
+                // chunk collider there isn't cooked (streaming bubble / zoomed out), march the camera ray against the
+                // terrain HEIGHTFIELD so you can still place/connect anywhere the terrain is defined — not only where a
+                // collider happens to be baked. Sculpt tools are excluded (they genuinely need the cooked mesh).
+                if (!overTerrain && _lineActive != null && Surf != null && RaycastTerrainHeightfield(ray, out Vector3 gp))
+                {
+                    hit.point = gp; hit.normal = Vector3.up; overTerrain = true;
+                }
             }
             // Retaining-wall mode: Cmd + wheel sets the wall RISE above the natural grade (±0.5 m/notch). The
             // camera ignores the wheel only while Cmd is held (WallTopScroll → ScrollSuppressor); plain wheel zooms.

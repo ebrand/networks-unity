@@ -114,6 +114,7 @@ namespace NetworkDesigner.Roads
                     if (!vById.TryGetValue(vg.VertexId, out Vertex v)) continue;
                     List<Vector2> ring = SampleOutlineRing(vg.Outline);
                     if (ring.Count < 3) continue;
+                    TwistDiag("X_" + vg.VertexId, v.Position, ring, vg.Outline);   // auto-flag + dump a protruding (twisted) outline
                     float gy = vertexElev != null ? vertexElev(vg.VertexId) : 0f;
                     BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId);
                     // Overlay the raised edge stack (shoulder/sidewalk + curb + parapet) around corners whose
@@ -366,6 +367,34 @@ namespace NetworkDesigner.Roads
             var res = new List<Vector2>(k - 1);
             for (int i = 0; i < k - 1; i++) res.Add(h[i]);
             return res;
+        }
+
+        // Auto-flag a TWISTED junction (an outline point sticking out far beyond the typical ring radius — the concave-
+        // corner fillet bulging outward / a protrusion) and dump its outline SEGMENTS so the resolver geometry can be
+        // fixed at the source. Throttled once per vertex; only fires on actually-protruding outlines, so it's not spammy.
+        static readonly HashSet<string> _twistWarned = new HashSet<string>();
+        static void TwistDiag(string id, Vector2 center, List<Vector2> ring, List<OutlineSegment> outline)
+        {
+            int n = ring.Count;
+            if (n < 4 || outline == null) return;
+            var sorted = new List<float>(n);
+            float max = 0f;
+            for (int i = 0; i < n; i++) { float d = (ring[i] - center).magnitude; sorted.Add(d); if (d > max) max = d; }
+            sorted.Sort();
+            float med = sorted[sorted.Count / 2];
+            if (med < 0.01f || max < med * 1.8f) return;             // no protrusion → not twisted
+            if (!_twistWarned.Add(id)) return;
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"[Road] TWIST '{id}' center=({center.x:0.0},{center.y:0.0}) max/med={max / med:0.0} ({outline.Count} segs):");
+            foreach (OutlineSegment s in outline)
+            {
+                if (s == null) continue;
+                sb.Append($" [{s.Kind} F=({s.From.x:0.0},{s.From.y:0.0})");
+                if (s.Kind == SegmentKind.QuadraticBezier) sb.Append($" C=({s.Control.x:0.0},{s.Control.y:0.0})");
+                else if (s.Kind == SegmentKind.CubicBezier) sb.Append($" C=({s.Control.x:0.0},{s.Control.y:0.0}) C2=({s.Control2.x:0.0},{s.Control2.y:0.0})");
+                sb.Append($" T=({s.To.x:0.0},{s.To.y:0.0})]");
+            }
+            Debug.LogWarning(sb.ToString());
         }
 
         static string RingToStr(List<Vector2> r)

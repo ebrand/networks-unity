@@ -718,7 +718,11 @@ namespace NetworkDesigner.Geometry
                 if (!sA.HasValue || !sB.HasValue) continue;
 
                 float sum = sA.Value + sB.Value;
-                if (sum > centerline + Eps)
+                // Warn only when the road can't fit even the LARGER single setback — i.e. it's genuinely too short.
+                // A modest overlap (two junction setbacks on a SHORT BLOCK, e.g. 10 m + 10 m on a 19 m block) is normal:
+                // the two junction pads each reach ~their setback inward, so they meet/overlap and cover the gap. The
+                // "increase spacing" advice doesn't apply there, so don't spam it.
+                if (sum > centerline + Eps && centerline < Mathf.Max(sA.Value, sB.Value))
                 {
                     Debug.LogWarning(
                         $"[GeometryResolver] Road '{road.Id}' setbacks overlap: " +
