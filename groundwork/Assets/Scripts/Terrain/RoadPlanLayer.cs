@@ -237,9 +237,13 @@ namespace NetworkDesigner.Terrain
             }
             if (CurveModifier) { _corner = p; _cornerPending = true; return; }   // arm the bend; the next click is the end
             int start = _chainTail;
-            if ((p - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq) return;   // clicked on / snapped back to the tail → no 0-length edge
+            // Reject (with feedback, not silently) a degenerate near-zero-length segment. With the tail-snap guard in
+            // TrySnapToGuides this should be rare; if it fires, the click landed essentially on the tail.
+            if ((p - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq)
+            { Debug.Log("[Road] segment ignored: endpoint is on the start node (too short / snapped back to it)."); return; }
             int end = NearestOrNew(p);   // join an existing node → a real intersection
-            if (end == start || (Graph.Nodes[end] - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq) return;   // coincident → skip degenerate edge
+            if (end == start || (Graph.Nodes[end] - Graph.Nodes[start]).sqrMagnitude < MinSegLenSq)
+            { Debug.Log("[Road] segment ignored: endpoints coincide (degenerate edge)."); return; }
             int before = Graph.Edges.Count;
             Graph.AddEdge(_chainTail, end);
             if (Graph.Edges.Count > before) Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
@@ -1019,7 +1023,13 @@ namespace NetworkDesigner.Terrain
         public bool TrySnapToGuides(Vector2 cursor, out Vector2 snapped)
         {
             CollectTargetGuides(cursor);
-            return ResolveGuideSnap(cursor, out snapped, out _, out _, out _);
+            if (!ResolveGuideSnap(cursor, out snapped, out _, out _, out _)) return false;
+            // While extending a chain, never snap the new endpoint back onto (or within a segment-length of) the tail:
+            // that collapses to a 0-length segment the draw code then silently rejects — the "can't start a segment off
+            // a node" bug. Reject the snap so the raw cursor (where the user actually clicked) is used instead.
+            if (_chainTail >= 0 && _chainTail < Graph.Nodes.Count
+                && (snapped - Graph.Nodes[_chainTail]).sqrMagnitude < MinSegLenSq) { snapped = cursor; return false; }
+            return true;
         }
 
         // ════ Auto-connect (mirrors the rail auto-connect): pick node A and node B, and a tangent-matched fillet
@@ -2014,10 +2024,12 @@ namespace NetworkDesigner.Terrain
             _pts[0] = p0;
             for (int i = 1; i <= SubSteps; i++) { _pts[i] = LineGraph.Bezier(p0, p1, p2, p3, i / (float)SubSteps); len += Vector2.Distance(_pts[i - 1], _pts[i]); }
             if (len < 1e-3f) return;
-            // Pull the markings back from junctions so approaches don't pile on top of each other.
-            _tStart = Mathf.Clamp01(trimA / len);
-            _tEnd = 1f - Mathf.Clamp01(trimB / len);
-            if (_tEnd - _tStart < 0.02f) { _tStart = 0f; _tEnd = 1f; return; }   // wholly inside junction boxes
+            // Pull the markings back from junctions so approaches don't pile on top of each other — but CAP each end's
+            // trim at 45% of the length so a short segment between two big junctions still shows its middle (≥10%)
+            // instead of rendering nothing. A real edge must never be invisible (the "segment doesn't show up" bug).
+            float cap = len * 0.45f;
+            _tStart = Mathf.Clamp01(Mathf.Min(trimA, cap) / len);
+            _tEnd = 1f - Mathf.Clamp01(Mathf.Min(trimB, cap) / len);
             int n = Mathf.Clamp(Mathf.CeilToInt(len * (_tEnd - _tStart) / 1.5f), 2, 2048);   // fine enough for dashed markings
 
             NetworkDesigner.Model.RoadProfile prof = NetworkDesigner.Roads.RoadProfileLibrary.Resolve(e?.Profile);
