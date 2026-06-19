@@ -1,7 +1,9 @@
-// In-game Road Designer: author cross-section road profiles (lane counts per direction, median / turn
-// lane, shoulders), preview them, and save to the in-game profiles file (RoadProfileLibrary) so the road
-// planner can pick them. Phase 1: full authoring + a 2D cross-section preview in the viewport area.
-// Phase 2 will swap that area for a rotatable / zoomable 3D view. Auto-spawns; opened from the Road palette.
+// In-game Transportation Corridor Designer: author cross-section profiles as an ORDERED STACK of typed
+// corridor segments (Traffic / Bike / Median / Rail / Shoulder / Sidewalk / Turn), each with a width and
+// per-type attributes (HOV / Fence / Parapet+height / Guardrail). Pick a direction (A→B or B→A), define a
+// segment, and "Add →" it to that stack. The stack is the source of truth; a derived RoadProfile is written
+// alongside it so the car-agent sim + geometry keep working (see Model/CorridorStack.ToRoadProfile).
+// Saved to RoadProfileLibrary (road-profiles-ingame.json). Auto-spawns; opened from the Road palette ("…").
 
 using System;
 using System.Collections.Generic;
@@ -18,44 +20,37 @@ namespace NetworkDesigner.UI
     public class RoadDesignerModal : PaletteBase
     {
         public override string PaletteId => "RoadDesigner";
-        public override bool Toggleable => false;           // opened on demand (Road palette button)
+        public override bool Toggleable => false;           // opened on demand (Road palette "…" button)
         protected override bool ShouldShow() => IsOpen;
         protected override bool Centered => true;
         protected override bool ShowFooter => false;
-        protected override string Title => "Road Designer";
-        // Centered window sized to leave the Road + Design Controls side palettes visible (per layout).
-        protected override float PanelWidth => Mathf.Clamp(Screen.width - 720f, 700f, 1200f);
+        protected override string Title => "Transportation Corridor Designer";
+        protected override float PanelWidth => Mathf.Clamp(Screen.width - 720f, 760f, 1280f);
         protected override Color Accent => new Color(0.95f, 0.55f, 0.15f);
-
-        enum Center { None, TurnLane, NormalMedian, WideMedian }
 
         // ---- editing state ----
         string _name = "new-road-profile";
-        int _aLanes = 2, _bLanes = 2;
-        bool _oneWay;
         string _category = "";
-        bool _curbs, _sidewalks, _elevated, _guardrails;
-        Center _center = Center.None;
-        float _laneW = 4.0f, _medianW = 1.5f, _shoulderW = 1.0f;
-        // Rail corridor (see RailCorridor / RailTrackLayer.RegenerateRoadCorridors). TrackSpacing stays at the model
-        // default (standardized track-to-track distance, not exposed).
-        bool _rail;
-        int _railTracks = 1;
-        RailCorridorSide _railSide = RailCorridorSide.Right;
-        float _railClearance = 3f;
+        readonly CorridorStack _stack = new CorridorStack();
 
-        VisualElement _preview, _listBox, _view3d;
+        // The segment currently being defined (the left-panel form) + which stack "Add →" targets.
+        int _target = 2;                                // 0 = B→A, 1 = Center (straddles axis), 2 = A→B
+        CorridorType _addType = CorridorType.Traffic;
+        float _addWidth = 4f;
+        bool _addHOV, _addFence, _addParapet, _addGuardrail;
+        float _addParapetH = 1f;
+
+        VisualElement _preview, _listBox, _stackBox, _view3d;
         bool _heldModal, _dragging;
         Vector2 _lastPtr;
         RoadPreview3D _rig;
 
-        // Hold ModalOpen while visible (suspends world hotkeys / camera under the full-screen window).
         protected override void Update()
         {
             base.Update();
             bool shown = ShouldShow();
             if (shown != _heldModal) { if (shown) PushModal(); else PopModal(); _heldModal = shown; }
-            if (_rig != null) _rig.SetActive(shown);   // only render the preview while the window is open
+            if (_rig != null) _rig.SetActive(shown);
         }
 
         protected override void OnDisable()
@@ -74,11 +69,10 @@ namespace NetworkDesigner.UI
         void EnsureRig()
         {
             if (_rig != null) return;
-            var go = new GameObject("RoadDesignerPreview3D") { hideFlags = HideFlags.DontSave };
+            var go = new GameObject("CorridorDesignerPreview3D") { hideFlags = HideFlags.DontSave };
             _rig = go.AddComponent<RoadPreview3D>();
         }
 
-        // Drag to orbit, wheel to zoom the 3D view.
         void RegisterViewportInput(VisualElement v)
         {
             v.RegisterCallback<PointerDownEvent>(e => { v.CapturePointer(e.pointerId); _dragging = true; _lastPtr = (Vector2)e.position; });
@@ -106,14 +100,14 @@ namespace NetworkDesigner.UI
             body.Add(row);
 
             var left = new VisualElement();
-            left.style.width = 280; left.style.marginRight = 16; left.style.flexShrink = 0;
+            left.style.width = 300; left.style.marginRight = 16; left.style.flexShrink = 0;
             row.Add(left);
 
             var right = new VisualElement();
             right.style.flexGrow = 1; right.style.minHeight = 440;
             row.Add(right);
 
-            _view3d = new VisualElement();   // rotatable / zoomable 3D road
+            _view3d = new VisualElement();
             _view3d.style.flexGrow = 1; _view3d.style.minHeight = 360;
             _view3d.style.backgroundColor = new Color(0.08f, 0.09f, 0.10f);
             _view3d.style.unityBackgroundScaleMode = ScaleMode.ScaleAndCrop;
@@ -121,20 +115,61 @@ namespace NetworkDesigner.UI
             right.Add(_view3d);
             RegisterViewportInput(_view3d);
 
-            _preview = new VisualElement();   // 2D cross-section strip below the 3D view
-            _preview.style.height = 96; _preview.style.marginTop = 8;
+            _preview = new VisualElement();
+            _preview.style.height = 110; _preview.style.marginTop = 8;
             right.Add(_preview);
 
             BuildControls(left);
             RefreshList();
+            RefreshStackList();
             RefreshPreview();
         }
 
         void BuildControls(VisualElement left)
         {
-            left.Add(Cap("New road profile:"));
+            // Direction selector — which stack "Add →" appends to.
+            var dirRow = HBox();
+            var baBtn = MakeButton("B → A", () => { _target = 0; RefreshStackList(); });
+            var ctBtn = MakeButton("Center", () => { _target = 1; RefreshStackList(); });
+            var abBtn = MakeButton("A → B", () => { _target = 2; RefreshStackList(); });
+            baBtn.style.marginRight = 6; ctBtn.style.marginRight = 6;
+            dirRow.Add(baBtn); dirRow.Add(ctBtn); dirRow.Add(abBtn);
+            dirRow.style.marginBottom = 10;
+            left.Add(dirRow);
+            _sync.Add(() => { StyleActive(baBtn, _target == 0); StyleActive(ctBtn, _target == 1); StyleActive(abBtn, _target == 2); });
+
+            // Segment definition form.
+            left.Add(DropdownRow("Type", TypeChoices, () => TypeLabel(_addType),
+                v => { _addType = ParseType(v); _addWidth = CorridorStack.DefaultWidth(_addType); }));
+            left.Add(NumberRow("Width", "m", () => _addWidth, v => _addWidth = v, 0.5f, 60f, "0.#"));
+            left.Add(ToggleRow("HOV", () => _addHOV, v => _addHOV = v));
+            left.Add(ToggleRow("Fence", () => _addFence, v => _addFence = v));
+            left.Add(ToggleRow("Parapet", () => _addParapet, v => _addParapet = v));
+            left.Add(NumberRow("Height", "m", () => _addParapetH, v => _addParapetH = v, 0.2f, 5f, "0.#"));
+            left.Add(ToggleRow("Guardrail", () => _addGuardrail, v => _addGuardrail = v));
+
+            var add = MakeButton("Add →", AddSegment);
+            add.style.marginTop = 8; add.style.marginBottom = 8;
+            left.Add(add);
+
+            _stackBox = ScrollBox(150);
+            SetBorder(_stackBox, 1, new Color(0.3f, 0.32f, 0.36f));
+            Radius(_stackBox, 8);
+            _stackBox.style.marginBottom = 12;
+            left.Add(_stackBox);
+
+            left.Add(Divider());
+
+            // Saved-profile library.
+            left.Add(Cap("Profiles:"));
+            _listBox = ScrollBox(120);
+            SetBorder(_listBox, 1, new Color(0.3f, 0.32f, 0.36f));
+            Radius(_listBox, 8);
+            _listBox.style.marginBottom = 8;
+            left.Add(_listBox);
+
+            left.Add(Cap("Profile name:"));
             var nameField = new TextField { value = _name };
-            nameField.style.marginBottom = 6;
             nameField.RegisterValueChangedCallback(e => _name = e.newValue);
             left.Add(nameField);
             left.Add(Cap("Category:"));
@@ -142,98 +177,117 @@ namespace NetworkDesigner.UI
             catField.style.marginBottom = 6;
             catField.RegisterValueChangedCallback(e => _category = e.newValue);
             left.Add(catField);
-            var createBtn = MakeButton("Create", () => { _name = nameField.value; _category = catField.value; SaveCurrent(); RefreshList(); });
-            createBtn.style.marginBottom = 10; left.Add(createBtn);
 
-            _listBox = ScrollBox(150);
-            _listBox.style.marginBottom = 12;
-            SetBorder(_listBox, 1, new Color(0.3f, 0.32f, 0.36f));
-            Radius(_listBox, 8);
-            left.Add(_listBox);
+            var saveRow = HBox();
+            var newBtn = MakeButton("New", NewProfile);
+            var saveBtn = MakeButton("Save", () => { SaveCurrent(); RefreshList(); });
+            var delBtn = MakeButton("Delete", () => { RoadProfileLibrary.DeleteUserConfig(Sanitize(_name)); RebuildId("Road"); RefreshList(); });
+            newBtn.style.marginRight = 6; saveBtn.style.marginRight = 6;
+            saveRow.Add(newBtn); saveRow.Add(saveBtn); saveRow.Add(delBtn);
+            saveRow.style.marginTop = 4;
+            left.Add(saveRow);
 
-            left.Add(DropdownRow("A lanes", CountChoices, () => _aLanes.ToString(),
-                v => { int.TryParse(v, out _aLanes); RefreshPreview(); }));
-            left.Add(DropdownRow("B lanes", CountChoices, () => _bLanes.ToString(),
-                v => { int.TryParse(v, out _bLanes); RefreshPreview(); }));
-
-            left.Add(ToggleRow("One-Way", () => _oneWay, v => { _oneWay = v; RefreshPreview(); }));
-            // Turn Lane / Wide Median / Normal Median are mutually exclusive (one centre treatment).
-            left.Add(ToggleRow("Turn Lane", () => _center == Center.TurnLane,
-                v => { _center = v ? Center.TurnLane : Center.None; RefreshPreview(); }));
-            left.Add(ToggleRow("Wide Median", () => _center == Center.WideMedian,
-                v => { _center = v ? Center.WideMedian : Center.None; RefreshPreview(); }));
-            left.Add(ToggleRow("Normal Median", () => _center == Center.NormalMedian,
-                v => { _center = v ? Center.NormalMedian : Center.None; RefreshPreview(); }));
-
-            // Edge / structure options.
-            left.Add(ToggleRow("Curbs", () => _curbs, v => { _curbs = v; RefreshPreview(); }));
-            left.Add(ToggleRow("Sidewalks", () => _sidewalks && !_elevated, v =>
-            {
-                _sidewalks = v && !_elevated;                       // elevated forces shoulders
-                if (_sidewalks) _guardrails = false;                // guardrails need shoulders
-                if (_sidewalks && _shoulderW <= 1.01f) _shoulderW = 2f;   // sidewalks default 2 m
-                RefreshPreview();
-            }));
-            left.Add(ToggleRow("Elevated", () => _elevated, v =>
-            {
-                _elevated = v;
-                if (_elevated) _sidewalks = false;                  // elevated → shoulders only
-                RefreshPreview();
-            }));
-            // Guardrails (wood posts + light-gray rail) — only with shoulders; on elevated they replace the parapet.
-            left.Add(ToggleRow("Guardrails", () => _guardrails, v =>
-            {
-                _guardrails = v;
-                if (_guardrails) _sidewalks = false;                // guardrails need shoulders
-                RefreshPreview();
-            }));
-
-            left.Add(NumberRow("Lane", "m", () => _laneW, v => { _laneW = v; RefreshPreview(); }, 2f, 6f, "0.#"));
-            left.Add(NumberRow("Median", "m", () => _medianW, v => { _medianW = v; RefreshPreview(); }, 0.5f, 20f, "0.#"));
-            left.Add(NumberRow(_sidewalks && !_elevated ? "Sidewalk" : "Shoulder", "m",
-                () => _shoulderW, v => { _shoulderW = v; RefreshPreview(); }, 0f, 6f, "0.#"));
-
-            // ---- Rail corridor ----
-            left.Add(Divider());
-            left.Add(Cap("Rail:"));
-            left.Add(ToggleRow("Rail", () => _rail, v => { _rail = v; RefreshPreview(); }));
-            left.Add(NumberRow("Tracks", "", () => _railTracks,
-                v => { _railTracks = Mathf.Max(1, Mathf.RoundToInt(v)); RefreshPreview(); }, 1f, 6f, "0"));
-            left.Add(NumberRow("Track/lane dist", "m", () => _railClearance,
-                v => { _railClearance = v; RefreshPreview(); }, 0f, 20f, "0.#"));
-            left.Add(DropdownRow("Track Pos", RailPosChoices, () => RailPosLabel(_railSide),
-                v => { _railSide = ParseRailPos(v); RefreshPreview(); }));
-
-            var save = MakeButton("Save", () => { SaveCurrent(); RefreshList(); });
-            save.style.marginTop = 10; left.Add(save);
             var close = MakeButton("Close", () => SetOpen(false));
-            close.style.marginTop = 6; left.Add(close);
+            close.style.marginTop = 8; left.Add(close);
         }
 
-        static List<string> CountChoices() => new List<string> { "0", "1", "2", "3", "4", "5", "6" };
+        // ---- segment add / stack list ----
 
-        // Track Pos uses the mockup's vocabulary (A-B / B-A / Center) mapped to the geometric RailCorridorSide.
-        // The A-B/B-A ↔ Left/Right mapping is verify-in-editor and trivially swappable.
-        static List<string> RailPosChoices() => new List<string> { "A-B", "B-A", "Center" };
-        static string RailPosLabel(RailCorridorSide s) => s switch
+        void AddSegment()
         {
-            RailCorridorSide.Left => "A-B",
-            RailCorridorSide.Right => "B-A",
-            _ => "Center",
-        };
-        static RailCorridorSide ParseRailPos(string v) => v switch
+            var seg = new CorridorSegment(_addType, Mathf.Max(0.1f, _addWidth))
+            {
+                HOV = _addHOV && _addType == CorridorType.Traffic,
+                Fence = _addFence,
+                Parapet = _addParapet,
+                ParapetHeight = _addParapetH,
+                Guardrail = _addGuardrail,
+            };
+            List<CorridorSegment> dst = _target == 0 ? _stack.BA : _target == 1 ? _stack.Center : _stack.AB;
+            dst.Add(seg);
+            RefreshStackList();
+            RefreshPreview();
+        }
+
+        void RefreshStackList()
         {
-            "A-B" => RailCorridorSide.Left,
-            "B-A" => RailCorridorSide.Right,
-            _ => RailCorridorSide.Center,
+            if (_stackBox == null) return;
+            _stackBox.Clear();
+            AddStackGroup("A → B", _stack.AB);
+            AddStackGroup("Center", _stack.Center);
+            AddStackGroup("B → A", _stack.BA);
+            if (_stack.AB.Count == 0 && _stack.BA.Count == 0 && _stack.Center.Count == 0)
+            {
+                var none = new Label("  (empty — define a segment and Add →)");
+                none.style.color = Sub; none.style.fontSize = 11; none.style.unityFontStyleAndWeight = FontStyle.Italic;
+                _stackBox.Add(none);
+            }
+        }
+
+        void AddStackGroup(string title, List<CorridorSegment> side)
+        {
+            if (side.Count == 0) return;
+            var head = new Label(title);
+            head.style.color = Sub; head.style.fontSize = 11; head.style.unityFontStyleAndWeight = FontStyle.Bold; head.style.marginTop = 2;
+            _stackBox.Add(head);
+            for (int i = 0; i < side.Count; i++)
+            {
+                CorridorSegment s = side[i]; List<CorridorSegment> list = side;
+                var r = HBox();
+                r.style.justifyContent = Justify.SpaceBetween; r.style.marginBottom = 1;
+                var lbl = new Label("  " + SegLabel(s));
+                lbl.style.color = Ink; lbl.style.fontSize = 12;
+                var x = MakeButton("✕", () => { list.Remove(s); RefreshStackList(); RefreshPreview(); });
+                x.style.width = 24; x.style.height = 20;
+                r.Add(lbl); r.Add(x);
+                _stackBox.Add(r);
+            }
+        }
+
+        static string SegLabel(CorridorSegment s)
+        {
+            string t = TypeLabel(s.Type) + " " + s.Width.ToString("0.#") + "m";
+            if (s.HOV) t += " HOV";
+            if (s.Parapet) t += " ¶" + s.ParapetHeight.ToString("0.#");
+            if (s.Fence) t += " fence";
+            if (s.Guardrail) t += " rail";
+            return t;
+        }
+
+        // ---- type dropdown ----
+
+        static List<string> TypeChoices() => new List<string>
+        { "Traffic Lane", "Turn Lane", "Bike Lane", "Shoulder", "Sidewalk", "Median", "Rail" };
+
+        static string TypeLabel(CorridorType t) => t switch
+        {
+            CorridorType.Traffic => "Traffic Lane",
+            CorridorType.Turn => "Turn Lane",
+            CorridorType.Bike => "Bike Lane",
+            CorridorType.Shoulder => "Shoulder",
+            CorridorType.Sidewalk => "Sidewalk",
+            CorridorType.Median => "Median",
+            CorridorType.Rail => "Rail",
+            _ => "Traffic Lane",
         };
 
-        // A "Label  [dropdown]" row.
+        static CorridorType ParseType(string v) => v switch
+        {
+            "Traffic Lane" => CorridorType.Traffic,
+            "Turn Lane" => CorridorType.Turn,
+            "Bike Lane" => CorridorType.Bike,
+            "Shoulder" => CorridorType.Shoulder,
+            "Sidewalk" => CorridorType.Sidewalk,
+            "Median" => CorridorType.Median,
+            "Rail" => CorridorType.Rail,
+            _ => CorridorType.Traffic,
+        };
+
         VisualElement DropdownRow(string label, Func<List<string>> choices, Func<string> get, Action<string> set)
         {
             var row = Row(label);
             var dd = new DropdownField { choices = choices(), value = get() };
-            dd.style.width = 90;
+            dd.style.width = 130;
             dd.RegisterValueChangedCallback(e => set(e.newValue));
             _sync.Add(() => { string c = get(); if (dd.value != c) dd.SetValueWithoutNotify(c); });
             row.Add(dd);
@@ -247,7 +301,7 @@ namespace NetworkDesigner.UI
             return l;
         }
 
-        // ---- profile <-> controls ----
+        // ---- profile <-> stack ----
 
         static string Sanitize(string name)
         {
@@ -259,27 +313,27 @@ namespace NetworkDesigner.UI
 
         SavedConfig BuildConfig()
         {
-            var p = new RoadProfile { Id = Sanitize(_name) };
-            p.AB = new Side();
-            for (int i = 0; i < _aLanes; i++) p.AB.Lanes.Add(new Lane { Id = "a" + i, Width = _laneW });
-            int b = _oneWay ? 0 : _bLanes;
-            p.BA = new Side();
-            for (int i = 0; i < b; i++) p.BA.Lanes.Add(new Lane { Id = "b" + i, Width = _laneW });
-            if (_center == Center.TurnLane) p.TurnLane = new TurnLane { Width = _laneW };   // turn lane = a normal lane width
-            else if (_center == Center.NormalMedian) p.Median = new Median { Width = _medianW };
-            // Wide median = one lane wide, so it lines up with a turn lane and can open into a
-            // dedicated left-turn pocket at intersection ends.
-            else if (_center == Center.WideMedian) p.Median = new Median { Width = _laneW };
-            p.ShoulderAB = new Shoulder { Width = _shoulderW };
-            p.ShoulderBA = new Shoulder { Width = _shoulderW };
-            p.Curbs = _curbs;
-            p.Elevated = _elevated;
-            p.Sidewalks = _sidewalks && !_elevated;                       // elevated forces shoulders
-            p.Guardrails = _guardrails && !(p.Sidewalks);                 // guardrails only with shoulders
-            if (_rail) p.RailCorridor = new RailCorridor { Tracks = _railTracks, Side = _railSide, LaneClearance = _railClearance };
+            string id = Sanitize(_name);
+            // Dual-write: the stack is the source of truth; Road is the derived projection consumers read.
+            RoadProfile road = _stack.ToRoadProfile(id);
             string cat = string.IsNullOrWhiteSpace(_category) ? "Uncategorized" : _category.Trim();
-            return new SavedConfig { Id = p.Id, Name = _name, Category = cat, Road = p };
+            // Store an INDEPENDENT copy — sharing the live _stack would let later edits (and LoadConfig's
+            // clear-then-copy, where st aliases _stack) corrupt the saved profile.
+            return new SavedConfig { Id = id, Name = _name, Category = cat, Road = road, Corridor = CloneStack(_stack) };
         }
+
+        static CorridorStack CloneStack(CorridorStack s)
+        {
+            var c = new CorridorStack();
+            if (s == null) return c;
+            if (s.AB != null) foreach (CorridorSegment seg in s.AB) c.AB.Add(CloneSeg(seg));
+            if (s.BA != null) foreach (CorridorSegment seg in s.BA) c.BA.Add(CloneSeg(seg));
+            if (s.Center != null) foreach (CorridorSegment seg in s.Center) c.Center.Add(CloneSeg(seg));
+            return c;
+        }
+
+        static CorridorSegment CloneSeg(CorridorSegment s) => new CorridorSegment(s.Type, s.Width)
+        { HOV = s.HOV, Fence = s.Fence, Parapet = s.Parapet, ParapetHeight = s.ParapetHeight, Guardrail = s.Guardrail };
 
         void SaveCurrent()
         {
@@ -287,41 +341,35 @@ namespace NetworkDesigner.UI
             RebuildId("Road");   // refresh the Road palette dropdown + thumbnails live
         }
 
-        void LoadConfig(SavedConfig c)
+        // Start a fresh, empty profile (clears the stacks + resets the name).
+        void NewProfile()
         {
-            if (c?.Road == null) return;
-            var p = c.Road;
-            _name = c.Name ?? c.Id;
-            _aLanes = p.AB.Lanes.Count;
-            _bLanes = p.BA.Lanes.Count;
-            _oneWay = p.IsOneWay;
-            _laneW = (p.AB.Lanes.Count > 0 ? p.AB.Lanes[0].Width : (p.BA.Lanes.Count > 0 ? p.BA.Lanes[0].Width : 3.5f));
-            if (p.TurnLane != null) { _center = Center.TurnLane; }   // turn lane is lane-width; leave the median field alone
-            else if (p.Median != null)
-            {
-                if (Mathf.Abs(p.Median.Width - _laneW) < 0.2f) _center = Center.WideMedian;   // lane-width → wide
-                else { _center = Center.NormalMedian; _medianW = p.Median.Width; }
-            }
-            else { _center = Center.None; }
-            _shoulderW = p.ShoulderAB != null ? p.ShoulderAB.Width : 2f;
-            _category = c.Category ?? "";
-            _curbs = p.Curbs;
-            _elevated = p.Elevated;
-            _sidewalks = p.Sidewalks && !p.Elevated;
-            _guardrails = p.Guardrails;
-            RailCorridor rc = p.RailCorridor;
-            _rail = rc != null;
-            if (rc != null) { _railTracks = Mathf.Max(1, rc.Tracks); _railSide = rc.Side; _railClearance = rc.LaneClearance; }
-            Rebuild();   // re-read all controls from the loaded state
+            _stack.AB.Clear(); _stack.BA.Clear(); _stack.Center.Clear();
+            _name = "new-road-profile"; _category = "";
+            _target = 2; _addType = CorridorType.Traffic; _addWidth = CorridorStack.DefaultWidth(CorridorType.Traffic);
+            RefreshStackList(); RefreshPreview(); Rebuild();
         }
 
-        // ---- profile list ----
+        void LoadConfig(SavedConfig c)
+        {
+            if (c == null) return;
+            _name = c.Name ?? c.Id;
+            _category = c.Category ?? "";
+            CorridorStack st = CloneStack(c.Corridor ?? CorridorStack.FromRoadProfile(c.Road));   // independent copy
+            _stack.AB.Clear(); _stack.AB.AddRange(st.AB);
+            _stack.BA.Clear(); _stack.BA.AddRange(st.BA);
+            _stack.Center.Clear(); _stack.Center.AddRange(st.Center);
+            RefreshStackList();
+            RefreshPreview();
+            Rebuild();   // re-read name/category fields
+        }
 
         void RefreshList()
         {
             if (_listBox == null) return;
             _listBox.Clear();
-            var user = RoadProfileLibrary.UserConfigs;
+            var user = new List<SavedConfig>(RoadProfileLibrary.UserConfigs);
+            user.Sort((a, b) => string.Compare(a?.Name ?? a?.Id, b?.Name ?? b?.Id, System.StringComparison.OrdinalIgnoreCase));
             if (user.Count == 0)
             {
                 var none = new Label("  (no saved profiles yet)");
@@ -334,60 +382,75 @@ namespace NetworkDesigner.UI
                 if (c == null) continue;
                 SavedConfig cc = c;
                 var b = MakeButton(c.Name ?? c.Id, () => LoadConfig(cc));
-                b.style.height = 26; b.style.marginBottom = 2;
+                b.style.height = 24; b.style.marginBottom = 2;
                 b.style.unityTextAlign = TextAnchor.MiddleLeft;
                 _listBox.Add(b);
             }
         }
 
-        // ---- preview: rotatable 3D road + a compact 2D cross-section strip ----
+        // ---- preview: 3D sweep + 2D cross-section strip ----
 
         void RefreshPreview()
         {
-            RoadProfile prof = BuildConfig().Road;
+            var bands = new List<RoadCrossSectionBuilder.StackBand>();
+            RoadCrossSection xs = RoadCrossSectionBuilder.FromStack(_stack, bands);
+            var marks = RoadCrossSectionBuilder.StackMarkings(bands, xs.Width);
 
-            // 3D view
             EnsureRig();
-            _rig.SetProfile(prof);
+            _rig.SetCrossSection(xs, xs.Width, marks, bands);
             if (_view3d != null && _rig.Texture != null)
                 _view3d.style.backgroundImage = new StyleBackground(Background.FromRenderTexture(_rig.Texture));
 
-            // 2D cross-section strip (same layout as the 3D mesh)
             if (_preview == null) return;
             _preview.Clear();
 
-            bool sidewalk = prof.Sidewalks && !prof.Elevated;
-            var total = new Label($"{prof.TotalWidth:0.#} m · {prof.AB.Lanes.Count}×{prof.BA.Lanes.Count} lanes"
-                                  + (string.IsNullOrWhiteSpace(_category) ? "" : " · " + _category) + (prof.Elevated ? " · Elevated" : "")
-                                  + "   (drag to orbit · wheel to zoom)");
+            var total = new Label($"{xs.Width:0.#} m wide · {_stack.AB.Count}+{_stack.BA.Count} segments"
+                                  + (string.IsNullOrWhiteSpace(_category) ? "" : " · " + _category)
+                                  + "   · cyan = A↔B midline   (drag to orbit · wheel to zoom)");
             total.style.color = Sub; total.style.fontSize = 11; total.style.marginBottom = 4;
             _preview.Add(total);
 
             var sec = HBox();
             sec.style.height = 56; sec.style.alignItems = Align.Stretch;
             SetBorder(sec, 1, new Color(1f, 1f, 1f, 0.4f));
-            foreach (var (w, k) in RoadLayout.Of(prof))
+            // One flex band per non-zero-width cross-section segment (skip the zero-width walls).
+            for (int i = 0; i < xs.Segs.Count; i++)
             {
+                float w = xs.Pts[i + 1].x - xs.Pts[i].x;
+                if (w <= 0.01f) continue;
                 var box = new VisualElement();
                 box.style.flexGrow = w;
-                box.style.backgroundColor = RoadLayout.KindColor(k, sidewalk);
-                if (RoadLayout.IsLane(k))
-                { box.style.borderRightWidth = 1; box.style.borderRightColor = new Color(1f, 1f, 1f, 0.45f); }
+                box.style.backgroundColor = SurfaceColor(xs.Segs[i]);
+                box.style.borderRightWidth = 1; box.style.borderRightColor = new Color(1f, 1f, 1f, 0.25f);
                 sec.Add(box);
+            }
+            // The A→B / B→A midline marker (cyan), absolutely positioned over the strip at the split fraction.
+            if (xs.SplitU >= 0f && xs.Width > 0.5f)
+            {
+                var mark = new VisualElement();
+                mark.style.position = Position.Absolute;
+                mark.style.top = 0; mark.style.bottom = 0; mark.style.width = 2;
+                mark.style.left = Length.Percent(Mathf.Clamp01(xs.SplitU / xs.Width) * 100f);
+                mark.style.backgroundColor = new Color(0.31f, 0.86f, 1f, 1f);
+                sec.Add(mark);
             }
             _preview.Add(sec);
         }
 
-        static Color StripColor(string kind)
+        static Color SurfaceColor(RoadSurface s) => s switch
         {
-            switch (kind)
-            {
-                case "lane": return new Color(0.28f, 0.29f, 0.31f);
-                case "shoulder": return new Color(0.18f, 0.19f, 0.20f);
-                case "median": return new Color(0.32f, 0.42f, 0.26f);   // planted median (green)
-                case "turn": return new Color(0.42f, 0.36f, 0.14f);     // turn lane (amber)
-                default: return new Color(0.25f, 0.25f, 0.25f);
-            }
-        }
+            RoadSurface.Asphalt => new Color(0.18f, 0.18f, 0.20f),
+            RoadSurface.Shoulder => new Color(0.22f, 0.22f, 0.23f),
+            RoadSurface.Concrete => new Color(0.62f, 0.62f, 0.60f),
+            RoadSurface.Grass => new Color(0.30f, 0.45f, 0.22f),
+            RoadSurface.Curb => new Color(0.72f, 0.72f, 0.72f),
+            RoadSurface.Sidewalk => new Color(0.66f, 0.66f, 0.67f),
+            RoadSurface.Guardrail => new Color(0.56f, 0.57f, 0.60f),
+            RoadSurface.Rail => new Color(0.30f, 0.28f, 0.26f),
+            RoadSurface.Fence => new Color(0.50f, 0.42f, 0.32f),
+            RoadSurface.Parapet => new Color(0.60f, 0.60f, 0.58f),
+            RoadSurface.Bike => new Color(0.20f, 0.30f, 0.22f),
+            _ => new Color(0.25f, 0.25f, 0.25f),
+        };
     }
 }

@@ -234,6 +234,12 @@ namespace NetworkDesigner.Model
         public string EndB;
         public RoadClassification Classification = RoadClassification.Secondary;
         public RoadProfile Profile = new RoadProfile();
+        /// <summary>
+        /// Authored corridor stack for this road's profile (the rendering source of truth), or null for legacy
+        /// profiles. When set, RoadPlanBuilder sweeps the body from this stack; <see cref="Profile"/> remains the
+        /// derived lane view used for agents/geometry. Set by RoadNetworkBridge from the profile library.
+        /// </summary>
+        public CorridorStack Corridor;
 
         /// <summary>
         /// Per-end setback override (meters along centerline). Nullable;

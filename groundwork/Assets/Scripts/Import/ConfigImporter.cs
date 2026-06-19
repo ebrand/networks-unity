@@ -87,6 +87,7 @@ namespace NetworkDesigner.Import
                 {
                     new DriveSideConverter(),
                     new RailCorridorSideConverter(),
+                    new CorridorTypeConverter(),
                 },
                 NullValueHandling = NullValueHandling.Ignore,
                 MissingMemberHandling = MissingMemberHandling.Ignore,
@@ -151,6 +152,33 @@ namespace NetworkDesigner.Import
                 "right" => RailCorridorSide.Right,
                 "center" => RailCorridorSide.Center,
                 _ => throw new JsonSerializationException($"Unknown RailCorridorSide value: '{s}'."),
+            };
+        }
+    }
+
+    /// <summary>
+    /// Maps <see cref="CorridorType"/> to/from lowercase strings so the corridor stack in
+    /// road-profiles-ingame.json stays human-readable.
+    /// </summary>
+    internal class CorridorTypeConverter : JsonConverter<CorridorType>
+    {
+        public override void WriteJson(JsonWriter writer, CorridorType value, JsonSerializer serializer)
+            => writer.WriteValue(value.ToString().ToLowerInvariant());
+
+        public override CorridorType ReadJson(JsonReader reader, Type objectType,
+            CorridorType existingValue, bool hasExistingValue, JsonSerializer serializer)
+        {
+            string s = (reader.Value as string)?.ToLowerInvariant();
+            return s switch
+            {
+                "traffic" => CorridorType.Traffic,
+                "turn" => CorridorType.Turn,
+                "bike" => CorridorType.Bike,
+                "shoulder" => CorridorType.Shoulder,
+                "sidewalk" => CorridorType.Sidewalk,
+                "median" => CorridorType.Median,
+                "rail" => CorridorType.Rail,
+                _ => throw new JsonSerializationException($"Unknown CorridorType value: '{s}'."),
             };
         }
     }

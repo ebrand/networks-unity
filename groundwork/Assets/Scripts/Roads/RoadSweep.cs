@@ -199,22 +199,26 @@ namespace NetworkDesigner.Roads
 
         // Public so the junction edge-band builder (RoadPlanBuilder) renders the same per-surface
         // materials/colours as the swept road body — keeping the seam at the setback line consistent.
-        public static Material SurfaceMat(RoadSurface s)
+        public static Material SurfaceMat(RoadSurface s) => PipelineMaterials.CreateLitMatte(SurfaceColorOf(s), "RoadSurface_" + s);
+
+        // Per-surface base colour — shared by the swept mesh, the designer's 2D strip, and the palette thumbnails so
+        // every cross-section view agrees.
+        public static Color SurfaceColorOf(RoadSurface s) => s switch
         {
-            Color c = s switch
-            {
-                RoadSurface.Asphalt  => new Color(0.18f, 0.18f, 0.20f),
-                RoadSurface.Shoulder => new Color(0.30f, 0.30f, 0.32f),
-                RoadSurface.Concrete => new Color(0.62f, 0.62f, 0.60f),
-                RoadSurface.Grass    => new Color(0.30f, 0.45f, 0.22f),
-                RoadSurface.Dirt     => new Color(0.40f, 0.30f, 0.20f),
-                RoadSurface.Deck     => new Color(0.45f, 0.45f, 0.48f),
-                RoadSurface.Curb     => new Color(0.72f, 0.72f, 0.72f),   // light gray
-                RoadSurface.Sidewalk => new Color(0.66f, 0.66f, 0.67f),   // light concrete (was 0.85 near-white, which tripped HDR bloom)
-                RoadSurface.Guardrail => new Color(0.56f, 0.57f, 0.60f),  // steel
-                _ => Color.magenta
-            };
-            return PipelineMaterials.CreateLitMatte(c, "RoadSurface_" + s);
-        }
+            RoadSurface.Asphalt  => new Color(0.18f, 0.18f, 0.20f),
+            RoadSurface.Shoulder => new Color(0.22f, 0.22f, 0.23f),    // darkened (was too bright vs lanes)
+            RoadSurface.Concrete => new Color(0.62f, 0.62f, 0.60f),
+            RoadSurface.Grass    => new Color(0.30f, 0.45f, 0.22f),
+            RoadSurface.Dirt     => new Color(0.40f, 0.30f, 0.20f),
+            RoadSurface.Deck     => new Color(0.45f, 0.45f, 0.48f),
+            RoadSurface.Curb     => new Color(0.72f, 0.72f, 0.72f),   // light gray
+            RoadSurface.Sidewalk => new Color(0.66f, 0.66f, 0.67f),   // light concrete
+            RoadSurface.Guardrail => new Color(0.56f, 0.57f, 0.60f),  // steel
+            RoadSurface.Rail     => new Color(0.30f, 0.28f, 0.26f),   // gravel ballast bed
+            RoadSurface.Fence    => new Color(0.50f, 0.42f, 0.32f),
+            RoadSurface.Parapet  => new Color(0.60f, 0.60f, 0.58f),
+            RoadSurface.Bike     => new Color(0.20f, 0.30f, 0.22f),   // green-tinted bike lane
+            _ => Color.magenta,
+        };
     }
 }

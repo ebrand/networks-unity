@@ -2073,8 +2073,12 @@ namespace NetworkDesigner.Terrain
                 return;
             }
 
-            // Shared cross-section layout (curbs, sidewalks, parapets, guardrails all included).
-            var lay = NetworkDesigner.Roads.RoadLayout.Of(prof);
+            // Cross-section layout: the authored corridor STACK when present (so the plan lines match rail/bike/etc.),
+            // else the legacy parametric layout.
+            var cfg = NetworkDesigner.Roads.RoadProfileLibrary.ResolveConfig(e?.Profile);
+            var lay = cfg?.Corridor != null
+                ? NetworkDesigner.Roads.RoadCrossSectionBuilder.StackLayout(cfg.Corridor)
+                : NetworkDesigner.Roads.RoadLayout.Of(prof);
             float W = 0f; foreach (var (sw, _) in lay) W += sw;
 
             float u = -W * 0.5f;

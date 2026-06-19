@@ -91,12 +91,37 @@ namespace NetworkDesigner.Roads
                 float yB = vertexElev != null ? vertexElev(road.EndB) : 0f;
                 float hA = Mathf.Lerp(yA, yB, tA), hB = Mathf.Lerp(yA, yB, tB);
 
-                RoadCrossSection xs = RoadCrossSectionBuilder.FromProfile(road.Profile);
+                // Sweep the body from the authored corridor stack when present (richer: bike/rail/fences/etc.);
+                // legacy profiles fall back to the parametric profile. Junction edge-slices use the derived
+                // profile — its outer width matches the stack's, so the setback seam still aligns.
+                var bands = road.Corridor != null ? new List<RoadCrossSectionBuilder.StackBand>() : null;
+                RoadCrossSection xs = road.Corridor != null
+                    ? RoadCrossSectionBuilder.FromStack(road.Corridor, bands)
+                    : RoadCrossSectionBuilder.FromProfile(road.Profile);
                 if (xs.Thickness < depth) xs.Thickness = depth;
 
                 var segGo = RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB, groundAt, follow);
                 WarnIfHugeMesh(segGo, road.Id);
-                BuildRoadMarkings(road.Profile, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks", groundAt, follow);
+                BuildRoadMarkings(road.Profile, road.Corridor, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks", groundAt, follow);
+                // Free-standing corridor features (parapets) extruded along the path at each segment's centre.
+                if (bands != null)
+                {
+                    float half = xs.Width * 0.5f;
+                    for (int bi = 0; bi < bands.Count; bi++)
+                    {
+                        var bd = bands[bi];
+                        float latOff = (bd.U0 + bd.U1) * 0.5f - half;
+                        if (bd.Parapet)
+                            RoadFeatureSweep.BuildParapet(a, ca, cb, b, curve, latOff,
+                                Mathf.Max(0.1f, bd.ParapetH), hA, hB, groundAt, follow, root.transform, road.Id + "_parapet" + bi);
+                        if (bd.Fence)
+                            RoadFeatureSweep.BuildFence(a, ca, cb, b, curve, latOff,
+                                hA, hB, groundAt, follow, root.transform, road.Id + "_fence" + bi);
+                        if (bd.Type == CorridorType.Rail)
+                            RoadFeatureSweep.BuildRail(a, ca, cb, b, curve, latOff,
+                                hA, hB, groundAt, follow, root.transform, road.Id + "_rail" + bi);
+                    }
+                }
                 built++;
             }
 
@@ -680,38 +705,48 @@ namespace NetworkDesigner.Roads
         // between same-direction lanes, double-yellow centre between opposing lanes, solid white edge/median
         // lines. Thin double-sided UNLIT quads lifted just above the asphalt, following the same trimmed curve
         // + design grade as the road body so they sit flush. (Lane-flow arrows come with phase 3 proper.)
-        static void BuildRoadMarkings(RoadProfile prof, Vector2 a, Vector2 ca, Vector2 cb, Vector2 b, bool curve,
+        static void BuildRoadMarkings(RoadProfile prof, CorridorStack corridor, Vector2 a, Vector2 ca, Vector2 cb, Vector2 b, bool curve,
                                       float hA, float hB, Transform parent, string name,
                                       Func<Vector2, float> groundAt = null, float follow = 0f)
         {
-            if (prof == null) return;
-            List<(float w, int k)> lay = RoadLayout.Of(prof);
-            if (lay.Count < 2) return;
-            float W = 0f; foreach (var s in lay) W += s.w;
-            float half = W * 0.5f;
-            int Med = RoadLayout.Median, Trn = RoadLayout.TurnLane;
-
-            // Markings as (lateral offset from path centre, yellow?, dashed?).
-            var marks = new List<(float u, bool yellow, bool dashed)>();
-            float acc = 0f;
-            for (int i = 0; i < lay.Count - 1; i++)
+            // Markings as (lateral offset from path centre, yellow?, dashed?). From the corridor stack when present
+            // (exact band boundaries), else from the legacy RoadLayout of the parametric profile.
+            List<(float u, bool yellow, bool dashed)> marks;
+            if (corridor != null)
             {
-                acc += lay[i].w;
-                int L = lay[i].k, R = lay[i + 1].k;
-                bool lnL = RoadLayout.IsLane(L), lnR = RoadLayout.IsLane(R);
-                float off = acc - half;
-                if (lnL && lnR)
+                var bands = new List<RoadCrossSectionBuilder.StackBand>();
+                RoadCrossSection cxs = RoadCrossSectionBuilder.FromStack(corridor, bands);
+                marks = RoadCrossSectionBuilder.StackMarkings(bands, cxs.Width);
+            }
+            else
+            {
+                if (prof == null) return;
+                List<(float w, int k)> lay = RoadLayout.Of(prof);
+                if (lay.Count < 2) return;
+                float W = 0f; foreach (var s in lay) W += s.w;
+                float half = W * 0.5f;
+                int Med = RoadLayout.Median, Trn = RoadLayout.TurnLane;
+                marks = new List<(float u, bool yellow, bool dashed)>();
+                float acc = 0f;
+                for (int i = 0; i < lay.Count - 1; i++)
                 {
-                    if (L == R) marks.Add((off, false, true));                                  // same dir → dashed white
-                    else { marks.Add((off - DblYellowSep, true, false)); marks.Add((off + DblYellowSep, true, false)); }  // opposing → double yellow
+                    acc += lay[i].w;
+                    int L = lay[i].k, R = lay[i + 1].k;
+                    bool lnL = RoadLayout.IsLane(L), lnR = RoadLayout.IsLane(R);
+                    float off = acc - half;
+                    if (lnL && lnR)
+                    {
+                        if (L == R) marks.Add((off, false, true));                                  // same dir → dashed white
+                        else { marks.Add((off - DblYellowSep, true, false)); marks.Add((off + DblYellowSep, true, false)); }  // opposing → double yellow
+                    }
+                    else if (L == Trn || R == Trn)                                                 // TWLTL turn-lane edge:
+                    {
+                        marks.Add((off, true, false));                                              //   solid yellow outer (lane edge)
+                        marks.Add((R == Trn ? off + DblYellowSep : off - DblYellowSep, true, true)); //   dashed yellow inner (turn-lane side)
+                    }
+                    else if (L == Med || R == Med) marks.Add((off, false, false));                  // median edge (white)
+                    else if (lnL || lnR) marks.Add((off, false, false));                            // lane ↔ shoulder/curb → pavement edge
                 }
-                else if (L == Trn || R == Trn)                                                 // TWLTL turn-lane edge:
-                {
-                    marks.Add((off, true, false));                                              //   solid yellow outer (lane edge)
-                    marks.Add((R == Trn ? off + DblYellowSep : off - DblYellowSep, true, true)); //   dashed yellow inner (turn-lane side)
-                }
-                else if (L == Med || R == Med) marks.Add((off, false, false));                  // median edge (white)
-                else if (lnL || lnR) marks.Add((off, false, false));                            // lane ↔ shoulder/curb → pavement edge
             }
             if (marks.Count == 0) return;
 

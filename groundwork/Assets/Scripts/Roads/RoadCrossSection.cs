@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace NetworkDesigner.Roads
 {
-    public enum RoadSurface { Asphalt, Shoulder, Concrete, Grass, Dirt, Deck, Curb, Sidewalk, Guardrail }
+    public enum RoadSurface { Asphalt, Shoulder, Concrete, Grass, Dirt, Deck, Curb, Sidewalk, Guardrail, Rail, Fence, Parapet, Bike }
 
     public class RoadCrossSection
     {
@@ -23,6 +23,7 @@ namespace NetworkDesigner.Roads
         float _u, _y;             // running lateral + height cursor
         public float Width => _u; // total lateral width once built
         public float CenterU = -1f;   // where the path centreline sits in U; < 0 = auto (geometric centre)
+        public float SplitU = -1f;    // the A→B / B→A boundary in U (the directional midline); < 0 = unset
         public float Thickness = 0f;  // deck depth below the road surface; > 0 closes the solid (bottom + edges
                                       // + end caps) so a RAISED road reads as a slab. 0 = open top skin (on-ground).
 

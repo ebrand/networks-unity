@@ -337,7 +337,9 @@ namespace NetworkDesigner.UI
             var grid = new VisualElement();
             grid.style.flexDirection = FlexDirection.Row; grid.style.flexWrap = Wrap.Wrap; grid.style.marginBottom = 4;
             int n = 0;
-            foreach (var c in RoadProfileLibrary.Configs)
+            var sorted = new List<NetworkDesigner.Import.SavedConfig>(RoadProfileLibrary.Configs);
+            sorted.Sort((a, b) => string.Compare(a?.Name ?? a?.Id, b?.Name ?? b?.Id, System.StringComparison.OrdinalIgnoreCase));
+            foreach (var c in sorted)
             {
                 if (c?.Road == null) continue;
                 string cat = string.IsNullOrWhiteSpace(c.Category) ? "Uncategorized" : c.Category.Trim();
@@ -363,11 +365,16 @@ namespace NetworkDesigner.UI
 
             var strip = HBox();
             strip.style.height = 26; strip.style.alignItems = Align.Stretch;
-            bool sidewalk = c.Road.Sidewalks && !c.Road.Elevated;
-            foreach (var (w, k) in NetworkDesigner.Roads.RoadLayout.Of(c.Road))
+            // Render the TRUE corridor cross-section (rail/bike/etc. show distinctly), matching the designer + sweep.
+            var stack = c.Corridor ?? NetworkDesigner.Model.CorridorStack.FromRoadProfile(c.Road);
+            var xs = NetworkDesigner.Roads.RoadCrossSectionBuilder.FromStack(stack);
+            for (int i = 0; i < xs.Segs.Count; i++)
             {
+                float w = xs.Pts[i + 1].x - xs.Pts[i].x;
+                if (w <= 0.01f) continue;
                 var box = new VisualElement();
-                box.style.flexGrow = w; box.style.backgroundColor = NetworkDesigner.Roads.RoadLayout.KindColor(k, sidewalk);
+                box.style.flexGrow = w;
+                box.style.backgroundColor = NetworkDesigner.Roads.RoadSweep.SurfaceColorOf(xs.Segs[i]);
                 strip.Add(box);
             }
             cell.Add(strip);

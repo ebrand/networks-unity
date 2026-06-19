@@ -15,7 +15,7 @@ namespace NetworkDesigner.UI
 
         Camera _cam;
         RenderTexture _rt;
-        GameObject _road, _lines, _guard;
+        GameObject _road, _lines, _guard, _feat;
         float _yaw = 35f, _pitch = 28f, _dist = 45f;
 
         public RenderTexture Texture { get { EnsureRig(); return _rt; } }
@@ -48,6 +48,84 @@ namespace NetworkDesigner.UI
             BuildLaneLines(p);
             BuildGuardrails(p);
             _dist = Mathf.Clamp(p.TotalWidth * 1.8f + 18f, 22f, 140f);
+        }
+
+        // Render a pre-built cross-section (the corridor-stack path). No painted lane lines/guardrails in Phase 1 —
+        // the swept bands (incl. fence/parapet/guardrail walls) carry the look.
+        public void SetCrossSection(RoadCrossSection xs, float totalWidth,
+                                    System.Collections.Generic.List<(float u, bool yellow, bool dashed)> marks,
+                                    System.Collections.Generic.List<RoadCrossSectionBuilder.StackBand> bands)
+        {
+            EnsureRig();
+            if (_road != null) DestroySafe(_road);
+            if (_lines != null) { DestroySafe(_lines); _lines = null; }
+            if (_guard != null) { DestroySafe(_guard); _guard = null; }
+            if (_feat != null) { DestroySafe(_feat); _feat = null; }
+            if (xs == null) return;
+            Vector2 a = new Vector2(Far.x - 20f, Far.z), b = new Vector2(Far.x + 20f, Far.z);
+            _road = RoadSweep.Build(xs, a, b, false, default, default, transform, "RoadPreviewMesh", Far.y, Far.y);
+            _road.hideFlags = HideFlags.DontSave;
+            BuildPreviewLines(xs, marks);
+
+            // Free-standing features (parapets) extruded along the straight stub at each parapet band's centre.
+            if (bands != null)
+            {
+                float half = totalWidth * 0.5f;
+                _feat = new GameObject("RoadPreviewFeatures") { hideFlags = HideFlags.DontSave };
+                _feat.transform.SetParent(transform, false);
+                for (int i = 0; i < bands.Count; i++)
+                {
+                    var bd = bands[i];
+                    float latOff = (bd.U0 + bd.U1) * 0.5f - half;
+                    if (bd.Parapet)
+                        RoadFeatureSweep.BuildParapet(a, default, default, b, false, latOff,
+                            Mathf.Max(0.1f, bd.ParapetH), Far.y, Far.y, null, 0f, _feat.transform, "parapet" + i);
+                    if (bd.Fence)
+                        RoadFeatureSweep.BuildFence(a, default, default, b, false, latOff,
+                            Far.y, Far.y, null, 0f, _feat.transform, "fence" + i);
+                    if (bd.Type == CorridorType.Rail)
+                        RoadFeatureSweep.BuildRail(a, default, default, b, false, latOff,
+                            Far.y, Far.y, null, 0f, _feat.transform, "rail" + i);
+                }
+            }
+            _dist = Mathf.Clamp(totalWidth * 1.8f + 18f, 22f, 140f);
+        }
+
+        static readonly Color32 Cyan = new Color32(80, 220, 255, 255);
+
+        // Lane markings (white/yellow, solid/dashed) from the stack + a bright DASHED cyan line down the A→B / B→A
+        // boundary (the directional midline). The sweep centres the section geometrically, so the split is offset.
+        void BuildPreviewLines(RoadCrossSection xs, System.Collections.Generic.List<(float u, bool yellow, bool dashed)> marks)
+        {
+            if (_lines != null) { DestroySafe(_lines); _lines = null; }
+            if (xs == null) return;
+            _lv.Clear(); _lc.Clear(); _lt.Clear();
+            if (marks != null) foreach (var m in marks) Stripe(m.u, m.yellow ? Yellow : White, m.dashed);
+            // Cyan A↔B midline aid — but ONLY where no real lane marking already sits at the split (e.g. a median or
+            // centre rail). For opposing lanes the double-yellow centreline IS the split, so the cyan would duplicate it.
+            if (xs.SplitU >= 0f && xs.Width >= 0.5f)
+            {
+                float uOff = xs.SplitU - xs.Width * 0.5f;
+                bool covered = false;
+                if (marks != null) foreach (var m in marks) if (Mathf.Abs(m.u - uOff) < 0.35f) { covered = true; break; }
+                if (!covered)
+                {
+                    float z = Far.z - uOff, hw = 0.18f, x0 = Far.x - 20f, x1 = Far.x + 20f;
+                    const float dash = 2.5f, gap = 2f;
+                    for (float xx = x0; xx < x1; xx += dash + gap) Quad(xx, Mathf.Min(xx + dash, x1), z - hw, z + hw, Cyan);
+                }
+            }
+            if (_lv.Count == 0) return;
+
+            var mesh = new Mesh { name = "RoadPreviewLines" };
+            mesh.SetVertices(_lv); mesh.SetColors(_lc); mesh.SetTriangles(_lt, 0); mesh.RecalculateBounds();
+            _lines = new GameObject("RoadPreviewLines") { hideFlags = HideFlags.DontSave };
+            _lines.transform.SetParent(transform, false);
+            _lines.AddComponent<MeshFilter>().sharedMesh = mesh;
+            Shader sh = Shader.Find("NetworkDesigner/VertexColorOverlay");
+            Material mat = sh != null ? new Material(sh) { name = "RoadPreviewLines" }
+                                      : NetworkDesigner.PipelineMaterials.CreateUnlitColor(Color.white, "RoadPreviewLines");
+            _lines.AddComponent<MeshRenderer>().sharedMaterial = mat;
         }
 
         static readonly Color32 White = new Color32(235, 235, 235, 255);
@@ -177,7 +255,7 @@ namespace NetworkDesigner.UI
 
         public void Orbit(float dx, float dy) { _yaw += dx * 0.3f; _pitch = Mathf.Clamp(_pitch + dy * 0.3f, 5f, 85f); }
         public void Zoom(float d) { _dist = Mathf.Clamp(_dist * (1f + d * 0.08f), 8f, 220f); }
-        public void SetActive(bool on) { EnsureRig(); _cam.enabled = on; if (_road != null) _road.SetActive(on); if (_lines != null) _lines.SetActive(on); if (_guard != null) _guard.SetActive(on); }
+        public void SetActive(bool on) { EnsureRig(); _cam.enabled = on; if (_road != null) _road.SetActive(on); if (_lines != null) _lines.SetActive(on); if (_guard != null) _guard.SetActive(on); if (_feat != null) _feat.SetActive(on); }
 
         void Update()
         {

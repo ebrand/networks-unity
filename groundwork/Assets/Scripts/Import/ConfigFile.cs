@@ -39,6 +39,12 @@ namespace NetworkDesigner.Import
         /// </summary>
         public string Category;
         public RoadProfile Road;
+        /// <summary>
+        /// The Transportation Corridor Designer's authored cross-section (ordered typed segment stacks). When
+        /// present this is the SOURCE OF TRUTH; <see cref="Road"/> is a derived projection written alongside it
+        /// for the existing consumers + the React tool. Null for legacy profiles (migrated from Road on load).
+        /// </summary>
+        public CorridorStack Corridor;
         public DriveSide DriveSide;
         /// <summary>
         /// Millis since the Unix epoch. The React tool writes

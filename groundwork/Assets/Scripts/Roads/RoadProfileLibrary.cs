@@ -29,6 +29,24 @@ namespace NetworkDesigner.Roads
             return null;
         }
 
+        // The full saved config (id + Road + Corridor stack + drive side) by id or name.
+        public static SavedConfig ResolveConfig(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            foreach (var c in Configs)
+                if (c != null && (c.Id == id || c.Name == id)) return c;
+            return null;
+        }
+
+        // The authored corridor STACK for a profile — the rendering source of truth. Falls back to migrating the
+        // derived RoadProfile for legacy (pre-stack) profiles so they still render via the stack pipeline.
+        public static CorridorStack ResolveStack(string id)
+        {
+            SavedConfig c = ResolveConfig(id);
+            if (c == null) return null;
+            return c.Corridor ?? CorridorStack.FromRoadProfile(c.Road);
+        }
+
         // The chosen profile's total cross-section width, or `fallback` if none/invalid.
         public static float TotalWidth(string id, float fallback)
         {
