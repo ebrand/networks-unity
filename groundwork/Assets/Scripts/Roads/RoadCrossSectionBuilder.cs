@@ -75,6 +75,9 @@ namespace NetworkDesigner.Roads
             foreach (CorridorSegment s in st.Center) EmitRec(xs, s, 1, bandsOut);   // straddles the axis
             xs.SplitU = (beforeCenter + xs.Width) * 0.5f;   // midline runs through the MIDDLE of the centre band(s)
             foreach (CorridorSegment s in st.AB) EmitRec(xs, s, 2, bandsOut);
+            // CenterU left auto = GEOMETRIC centre, so the drawn node sits in the middle of the corridor (intuitive
+            // placement). Lane alignment across a width change is handled locally by the junction taper, not by
+            // sliding the whole section onto its A↔B axis.
             return xs;
         }
 

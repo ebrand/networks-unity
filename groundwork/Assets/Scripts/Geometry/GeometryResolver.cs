@@ -192,37 +192,8 @@ namespace NetworkDesigner.Geometry
                     // sides → straight segment along the edge. A WIDTH CHANGE
                     // (the two outer corners offset laterally) → S-curve so
                     // the taper eases in/out instead of a hard diagonal.
-                    Vector2 from = self.OuterRight;
-                    Vector2 to = next.OuterLeft;
-                    Vector2 chord = to - from;
-                    // Lateral component = |chord × edgeAxis| (edge axis is unit).
-                    float lateral = Mathf.Abs(chord.x * self.OuterEdgeDir.y
-                                            - chord.y * self.OuterEdgeDir.x);
-                    if (SCurveTaper && lateral > Eps)
-                    {
-                        float handle = chord.magnitude * Mathf.Clamp01(SCurveHandleFraction);
-                        result.Outline.Add(new OutlineSegment
-                        {
-                            Kind = SegmentKind.CubicBezier,
-                            From = from,
-                            // Handles run back along each road's outer edge
-                            // (OuterEdgeDir points away from the vertex into
-                            // the body), pulling the curve into the gap so it
-                            // leaves/arrives tangent to both edges.
-                            Control = from - self.OuterEdgeDir * handle,
-                            Control2 = to - next.OuterEdgeDir * handle,
-                            To = to,
-                        });
-                    }
-                    else
-                    {
-                        result.Outline.Add(new OutlineSegment
-                        {
-                            Kind = SegmentKind.Line,
-                            From = from,
-                            To = to,
-                        });
-                    }
+                    // Width change → S-curve/straight taper between the offset outer edges.
+                    result.Outline.Add(TaperSegment(self, next));
                 }
                 else
                 {
@@ -237,26 +208,30 @@ namespace NetworkDesigner.Geometry
                         self.OuterRight, self.OuterEdgeDir,
                         next.OuterLeft, next.OuterEdgeDir);
 
+                    // A near-parallel corner — typically a collinear-ish WIDTH CHANGE the strict
+                    // JointAngleEpsilon (0.5°) didn't classify as a joint — puts the OE intersection
+                    // far away, and a quadratic to a distant control bulges into a thin spike once the
+                    // downstream clamp pulls it back. Detect that runaway control (or a parallel
+                    // no-intersection) and emit a clean taper between the two outer edges instead of a
+                    // fillet. A genuinely convex corner keeps its control near the chord → unaffected.
+                    bool runaway = !control.HasValue;
                     if (control.HasValue)
+                    {
+                        Vector2 mid = (self.OuterRight + next.OuterLeft) * 0.5f;
+                        float maxReach = Mathf.Max((next.OuterLeft - self.OuterRight).magnitude * 1.5f, 4f);
+                        if ((control.Value - mid).magnitude > maxReach) runaway = true;
+                    }
+                    if (runaway)
+                    {
+                        result.Outline.Add(TaperSegment(self, next));
+                    }
+                    else
                     {
                         result.Outline.Add(new OutlineSegment
                         {
                             Kind = SegmentKind.QuadraticBezier,
                             From = self.OuterRight,
                             Control = control.Value,
-                            To = next.OuterLeft,
-                        });
-                    }
-                    else
-                    {
-                        // Lines parallel but not collinear — shouldn't
-                        // normally happen if JointAngleEpsilon was tight
-                        // enough, but fall back to a straight line so the
-                        // outline closes.
-                        result.Outline.Add(new OutlineSegment
-                        {
-                            Kind = SegmentKind.Line,
-                            From = self.OuterRight,
                             To = next.OuterLeft,
                         });
                     }
@@ -339,6 +314,31 @@ namespace NetworkDesigner.Geometry
                 && a.Index == b.Index;
         }
 
+        // Outline transition for a (near-)collinear joint whose two outer edges are laterally
+        // offset (a width change): an S-curve taper that eases between them, or a straight diagonal
+        // when SCurveTaper is off / there's no offset. Used both for joints the angle test classified
+        // directly AND for near-parallel corners whose OE-fillet control ran away (a runaway control
+        // only occurs when the edges are near-parallel — i.e. exactly when a taper is what we want).
+        static OutlineSegment TaperSegment(VertexApproach self, VertexApproach next)
+        {
+            Vector2 from = self.OuterRight, to = next.OuterLeft;
+            Vector2 chord = to - from;
+            float lateral = Mathf.Abs(chord.x * self.OuterEdgeDir.y - chord.y * self.OuterEdgeDir.x);
+            if (SCurveTaper && lateral > Eps)
+            {
+                float handle = chord.magnitude * Mathf.Clamp01(SCurveHandleFraction);
+                return new OutlineSegment
+                {
+                    Kind = SegmentKind.CubicBezier,
+                    From = from,
+                    Control = from - self.OuterEdgeDir * handle,
+                    Control2 = to - next.OuterEdgeDir * handle,
+                    To = to,
+                };
+            }
+            return new OutlineSegment { Kind = SegmentKind.Line, From = from, To = to };
+        }
+
         /// <summary>
         /// Angular tolerance for the "straight-through" lane connection
         /// rule. An incident road counts as opposite-of-self when its
@@ -388,6 +388,7 @@ namespace NetworkDesigner.Geometry
             // it's a rare movement and would create a "free turnaround"
             // at every junction which doesn't match driving intuition.
             // Add an explicit override if a specific U-turn is needed.
+            var straightBranches = new List<VertexApproach>();
             for (int i = 0; i < n; i++)
             {
                 VertexApproach self = apps[i];
@@ -395,11 +396,20 @@ namespace NetworkDesigner.Geometry
                 List<Vector2> inboundLanes = inboundDir == Direction.AB ? self.LaneEndsAB : self.LaneEndsBA;
                 if (inboundLanes == null || inboundLanes.Count == 0) continue;
 
+                // Split outgoing approaches: TURNS keep the index-matched fan
+                // (full pathfinder freedom, unchanged routing); near-STRAIGHT
+                // branches are matched together by lateral position below so a
+                // FORK (one trunk + one diverging ramp) assigns each inbound
+                // lane to the branch it physically aligns with — index matching
+                // can't (it would feed the inner lane onto an outer ramp).
+                straightBranches.Clear();
                 for (int j = 0; j < n; j++)
                 {
                     if (j == i) continue; // skip U-turn on same road
-                    AddIndexMatchedConnections(self, apps[j], inboundDir, inboundLanes, outConnections);
+                    if (IsStraightThrough(self, apps[j])) straightBranches.Add(apps[j]);
+                    else AddIndexMatchedConnections(self, apps[j], inboundDir, inboundLanes, outConnections);
                 }
+                AddPositionMatchedConnections(self, straightBranches, inboundDir, inboundLanes, outConnections);
             }
 
             AddTurnLaneConnections(apps, driveSide, outConnections);
@@ -611,6 +621,69 @@ namespace NetworkDesigner.Geometry
                         To = new LaneRef { RoadId = opp.RoadId, Direction = outboundDir, Index = mergeTarget },
                     });
                 }
+            }
+        }
+
+        // Lateral-position matching across ALL near-straight outgoing branches.
+        // Connect each inbound lane to the outbound lane whose lateral position
+        // (component perpendicular to THIS approach's bearing) is closest.
+        //
+        // This subsumes three cases uniformly:
+        //   • Continuation (equal lanes): inbound k → outbound k (identical to
+        //     index matching when lanes line up — no regression on plain roads).
+        //   • Lane drop (more inbound): the surplus OUTER inbound lane's nearest
+        //     survivor is the outer outbound lane → outer-lane-drop merge.
+        //   • Fork (trunk + diverging ramp as two straight branches): each
+        //     inbound lane joins the branch it physically aligns with — the
+        //     outer lane(s) pick up the ramp, the inner lanes stay on the trunk.
+        //
+        // A 1-D lateral coordinate (dot with self's lateral axis) orders lanes
+        // left→right independent of each branch's own orientation, so it doesn't
+        // care which road-end (A/B) meets the vertex.
+        static void AddPositionMatchedConnections(
+            VertexApproach self, List<VertexApproach> straightBranches, Direction inboundDir,
+            List<Vector2> inboundLanes, List<LaneConnection> outConnections)
+        {
+            if (straightBranches.Count == 0) return;
+
+            float b = self.Bearing;
+            Vector2 lat = new Vector2(-Mathf.Sin(b), Mathf.Cos(b));
+
+            // Flatten every outbound lane across the straight branches into a
+            // candidate pool, tagged with its road/direction/index and lateral coord.
+            var candRoad = new List<string>();
+            var candDir = new List<Direction>();
+            var candIndex = new List<int>();
+            var candLat = new List<float>();
+            foreach (VertexApproach br in straightBranches)
+            {
+                Direction outboundDir = br.End == RoadEnd.A ? Direction.AB : Direction.BA;
+                List<Vector2> outboundLanes = outboundDir == Direction.AB ? br.LaneEndsAB : br.LaneEndsBA;
+                if (outboundLanes == null) continue;
+                for (int k = 0; k < outboundLanes.Count; k++)
+                {
+                    candRoad.Add(br.RoadId);
+                    candDir.Add(outboundDir);
+                    candIndex.Add(k);
+                    candLat.Add(Vector2.Dot(outboundLanes[k], lat));
+                }
+            }
+            if (candRoad.Count == 0) return;
+
+            for (int i = 0; i < inboundLanes.Count; i++)
+            {
+                float ci = Vector2.Dot(inboundLanes[i], lat);
+                int best = 0; float bestErr = float.MaxValue;
+                for (int c = 0; c < candLat.Count; c++)
+                {
+                    float err = Mathf.Abs(candLat[c] - ci);
+                    if (err < bestErr) { bestErr = err; best = c; }
+                }
+                outConnections.Add(new LaneConnection
+                {
+                    From = new LaneRef { RoadId = self.RoadId, Direction = inboundDir, Index = i },
+                    To = new LaneRef { RoadId = candRoad[best], Direction = candDir[best], Index = candIndex[best] },
+                });
             }
         }
 

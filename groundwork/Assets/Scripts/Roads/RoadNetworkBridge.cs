@@ -64,6 +64,30 @@ namespace NetworkDesigner.Roads
             return net;
         }
 
+        // Sub-network of only the BUILT roads (+ the vertices they touch), for the car-agent sim — agents must
+        // drive only on roads that actually have 3D geometry, never planned-but-unbuilt segments. Reuses the same
+        // Vertex/NetworkRoad instances (read-only). Drops degenerate ~0-length roads, mirroring the filter
+        // RoadPlanBuilder applies before sweeping, so the agent graph matches the built geometry exactly.
+        public static Network FilterBuilt(Network full, HashSet<string> builtRoadIds)
+        {
+            var net = new Network { DriveSide = full != null ? full.DriveSide : DriveSide.Right };
+            if (full == null || builtRoadIds == null) return net;
+
+            var vpos = new Dictionary<string, Vector2>();
+            foreach (Vertex v in full.Vertices) if (v != null) vpos[v.Id] = v.Position;
+
+            var keepV = new HashSet<string>();
+            foreach (NetworkRoad r in full.Roads)
+            {
+                if (r == null || !builtRoadIds.Contains(r.Id)) continue;
+                if (vpos.TryGetValue(r.EndA, out Vector2 pa) && vpos.TryGetValue(r.EndB, out Vector2 pb)
+                    && (pa - pb).sqrMagnitude < 0.25f) continue;   // degenerate stub
+                net.Roads.Add(r); keepV.Add(r.EndA); keepV.Add(r.EndB);
+            }
+            foreach (Vertex v in full.Vertices) if (v != null && keepV.Contains(v.Id)) net.Vertices.Add(v);
+            return net;
+        }
+
         // A plain symmetric two-way road (one lane each direction, no shoulders) whose total width matches the
         // plan's fallback width — just enough lane structure for the resolver when an edge has no real profile.
         static RoadProfile FallbackProfile(float width)

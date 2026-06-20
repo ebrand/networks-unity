@@ -2081,7 +2081,14 @@ namespace NetworkDesigner.Terrain
                 : NetworkDesigner.Roads.RoadLayout.Of(prof);
             float W = 0f; foreach (var (sw, _) in lay) W += sw;
 
-            float u = -W * 0.5f;
+            // Reference the schematic on the road's A↔B CENTRELINE (matching the swept body, which FromStack centres
+            // on CenterU = SplitU), not the geometric middle — so the plan lines sit on the built pavement for an
+            // asymmetric one-way road instead of floating off to one side.
+            float center = cfg?.Corridor != null
+                ? NetworkDesigner.Roads.RoadCrossSectionBuilder.FromStack(cfg.Corridor).Center()
+                : W * 0.5f;
+
+            float u = -center;
             EmitBoundary(field, p0, p1, p2, p3, n, u, KOut, lay.Count > 0 ? lay[0].k : KOut);
             for (int i = 0; i < lay.Count; i++)
             {
@@ -2089,7 +2096,12 @@ namespace NetworkDesigner.Terrain
                 u += lay[i].w;
                 EmitBoundary(field, p0, p1, p2, p3, n, u, lay[i].k, (i + 1 < lay.Count) ? lay[i + 1].k : KOut);
             }
-            EmitSkirt(field, p0, p1, p2, p3, n, W * 0.5f);   // excavation skirt = footprint (W/2) + margin per side
+            // Excavation skirt at the TRUE (possibly asymmetric) footprint edges + margin per side.
+            if (ExcavationMargin > 0.01f)
+            {
+                EmitOffsetLine(field, p0, p1, p2, p3, n, (W - center) + ExcavationMargin, Tn(ColSkirt), 3f, 2.2f);
+                EmitOffsetLine(field, p0, p1, p2, p3, n, -center - ExcavationMargin, Tn(ColSkirt), 3f, 2.2f);
+            }
         }
 
         // Pick the marking style for the line between two RoadLayout strip kinds, then emit it.

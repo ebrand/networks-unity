@@ -2362,6 +2362,8 @@ namespace NetworkDesigner.Terrain
         }
 
         GameObject _roadBuildRoot;   // runtime 3D road meshes from the last build (regenerated, not saved)
+        NetworkDesigner.Agents.AgentSystem _agentSim;     // runtime car-agent sim over the BUILT road network (created on first spawn)
+        NetworkDesigner.Model.Network _agentNetwork;      // built-only sub-network the sim drives (null = no built roads)
         // "Built" is a per-segment flag on the edge (RoadPlanLayer.IsEdgeBuilt), NOT an index set — so it travels
         // with the edge through the index renumbering that drawing/splitting causes (a built road stays fully built
         // when you add a crossing). It IS serialized (save v18+); building marks the world dirty so the autosave
@@ -2403,16 +2405,24 @@ namespace NetworkDesigner.Terrain
 
         void RebuildBuiltRoadsCore()
         {
+            // Resolver matches the body's GEOMETRIC centring (the node sits in the middle of the corridor — intuitive
+            // placement). The body sweeps about xs.Center() = geometric middle; GeometricCenter centres the resolver's
+            // asphalt midpoint there too, so pad/lanes/agents land on the pavement. (The derived-profile width fix in
+            // CorridorStack is what makes this exact for asymmetric one-way roads.) Lane alignment across a width
+            // change comes from the junction taper, not from sliding the section onto its axis.
+            NetworkDesigner.Geometry.GeometryResolver.CenterlineMode =
+                NetworkDesigner.Geometry.GeometryResolver.CenterlineReference.GeometricCenter;
+
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph != null && RoadPlanLayer.RemoveDegenerateEdges() > 0) RoadPlanLayer.Rebuild(Surf);   // drop 0-length stubs before resolving
             ClearRoadBuild();
-            if (graph == null) { RoadPlanLayer.ClearResolvedSetbacks(); return; }
+            if (graph == null) { RoadPlanLayer.ClearResolvedSetbacks(); ClearAgentNetwork(); return; }
             // Built edges come from the per-segment flag (survives index renumbering on draw/split).
             var only = new System.Collections.Generic.HashSet<string>();
             var bridgeEdges = new System.Collections.Generic.HashSet<int>();
             for (int e = 0; e < graph.Edges.Count; e++)
                 if (graph.Edges[e].Built) { only.Add("r" + e); if (graph.Edges[e].Bridge) bridgeEdges.Add(e); }
-            if (only.Count == 0) { RoadPlanLayer.ClearResolvedSetbacks(); return; }
+            if (only.Count == 0) { RoadPlanLayer.ClearResolvedSetbacks(); ClearAgentNetwork(); return; }
             // Per-node DESIGN elevation (vertex "v{i}" ↔ node i) — the same heights Excavate cut to, captured
             // from the shaped surface — so the swept road sits in its cut and respects carved/flattened terrain.
             var nodeElev = new System.Collections.Generic.Dictionary<string, float>(graph.Nodes.Count);
@@ -2423,9 +2433,29 @@ namespace NetworkDesigner.Terrain
                 net, vid => nodeElev.TryGetValue(vid, out float y) ? y : 0f, RoadPlanLayer.ExcavationDepth, null, only,
                 xz => Surf != null ? Surf.SampleHeight(xz.x, xz.y) : 0f, RoadPlanLayer.FollowTerrain);   // terrain-follow blend
 
+            // Hand the BUILT sub-network to the car-agent sim (only roads with real 3D geometry) and re-route
+            // any live agents onto the new geometry. Cached so a later "Spawn" can use it even if the sim
+            // wasn't created yet at build time.
+            _agentNetwork = NetworkDesigner.Roads.RoadNetworkBridge.FilterBuilt(net, only);
+            if (_agentSim != null) { _agentSim.Network = _agentNetwork; _agentSim.InvalidateAllAgents(); }
+
             // Sync the setback HANDLES to the resolver's ACTUAL setbacks (acute/secondary boosts push them far past
             // the flat default), so the orange rings sit where the road really sets back instead of at a fixed 10 m.
             var resolvedVg = NetworkDesigner.Geometry.GeometryResolver.ResolveNetwork(net);
+            // TEMP DIAG: dump per-vertex lane connectivity so we can see whether the through-connection forms at a
+            // fork/continuation node (cars dead-end at a node when no inbound→outbound lane connection exists).
+            foreach (var vg in resolvedVg)
+            {
+                if (vg == null) continue;
+                var sb = new System.Text.StringBuilder();
+                sb.Append($"[Conn] {vg.VertexId} appr:");
+                if (vg.Approaches != null) foreach (var ap in vg.Approaches)
+                    sb.Append($" {ap.RoadId}/{ap.End}(AB{(ap.LaneEndsAB != null ? ap.LaneEndsAB.Count : 0)},BA{(ap.LaneEndsBA != null ? ap.LaneEndsBA.Count : 0)})");
+                sb.Append($" | conns({(vg.Connectivity != null ? vg.Connectivity.Count : 0)}):");
+                if (vg.Connectivity != null) foreach (var cn in vg.Connectivity)
+                    sb.Append($" {cn.From.RoadId}.{cn.From.Direction}[{cn.From.Index}]->{cn.To.RoadId}.{cn.To.Direction}[{cn.To.Index}]");
+                Debug.Log(sb.ToString());
+            }
             var sbMap = new System.Collections.Generic.Dictionary<int, float>();
             foreach (var vg in resolvedVg)
             {
@@ -2447,6 +2477,50 @@ namespace NetworkDesigner.Terrain
                     RoadPlanLayer.BridgeParapets, RoadPlanLayer.BridgeParapetHeight,
                     _roadBuildRoot.transform);
         }
+
+        // ---- car-agent sim over the built road network (AgentsPalette drives these) ----
+
+        // Lazily create the AgentSystem host (a child at origin; agent visuals parent under it). The static
+        // GroundHeight hook makes agents sit on the draped road surface by sampling the active terrain.
+        NetworkDesigner.Agents.AgentSystem EnsureAgentSim()
+        {
+            if (_agentSim != null) return _agentSim;
+            var go = new GameObject("AgentSim");
+            go.transform.SetParent(transform, false);
+            _agentSim = go.AddComponent<NetworkDesigner.Agents.AgentSystem>();
+            // Runtime-added → no Inspector tuning; the defaults assume vehicle PREFABS (AgentLength 3.5 m). We render
+            // capsules, so size the follow-gap hit box to the capsule or cars keep over-long gaps and bunch/stop-go.
+            _agentSim.AgentLength = _agentSim.AgentDiameter;
+            NetworkDesigner.Agents.AgentSystem.GroundHeight = xz => Surf != null ? Surf.SampleHeight(xz.x, xz.y) : 0f;
+            return _agentSim;
+        }
+
+        // Built roads all gone → drop the drivable network and clear any live agents.
+        void ClearAgentNetwork()
+        {
+            _agentNetwork = null;
+            if (_agentSim != null) { _agentSim.Network = null; _agentSim.DespawnAll(); }
+        }
+
+        /// <summary>Spawn `count` cars on the built road network (no-op with a warning if nothing's built).</summary>
+        public void SpawnAgents(int count)
+        {
+            EnsureAgentSim();
+            if (_agentNetwork == null || _agentNetwork.Roads.Count == 0)
+            {
+                Debug.LogWarning("[Agents] No built roads to drive on — Build some road segments first.");
+                return;
+            }
+            _agentSim.Network = _agentNetwork;
+            _agentSim.Paused = false;
+            _agentSim.SpawnRandomAgents(Mathf.Max(1, count));
+        }
+
+        public void ClearAgents() { if (_agentSim != null) _agentSim.DespawnAll(); }
+        public void ToggleAgentsPaused() { EnsureAgentSim(); _agentSim.Paused = !_agentSim.Paused; }
+        public bool AgentsPaused => _agentSim != null && _agentSim.Paused;
+        public int AgentCount => _agentSim != null ? _agentSim.Agents.Count : 0;
+        public bool HasBuiltRoadsForAgents => _agentNetwork != null && _agentNetwork.Roads.Count > 0;
 
         // Re-sweep the currently-built roads (and their bridges) — e.g. after changing a bridge tunable.
         public void RefreshBuiltRoads() => RebuildBuiltRoads();

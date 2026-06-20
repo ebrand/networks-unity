@@ -804,16 +804,38 @@
       "road": {
         "id": "2-3",
         "ab": {
-          "lanes": []
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
         },
         "ba": {
-          "lanes": []
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            },
+            {
+              "id": "b2",
+              "width": 4.0
+            }
+          ]
         },
         "shoulderAB": {
-          "width": 0.0
+          "width": 1.5
         },
         "shoulderBA": {
-          "width": 0.0
+          "width": 1.5
         },
         "curbs": false,
         "sidewalks": false,
@@ -822,8 +844,1650 @@
       },
       "corridor": {
         "center": [],
-        "ab": [],
-        "ba": []
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2-M-3",
+      "name": "2-M-3",
+      "category": "Medium",
+      "road": {
+        "id": "2-M-3",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            },
+            {
+              "id": "b2",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2-T-3",
+      "name": "2-T-3",
+      "category": "Medium",
+      "road": {
+        "id": "2-T-3",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            },
+            {
+              "id": "b2",
+              "width": 4.0
+            }
+          ]
+        },
+        "turnLane": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "turn",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1-T-1",
+      "name": "1-T-1",
+      "category": "Small",
+      "road": {
+        "id": "1-T-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "turnLane": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "turn",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1-T-2",
+      "name": "1-T-2",
+      "category": "Small",
+      "road": {
+        "id": "1-T-2",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "turnLane": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "turn",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "P-2-2-P",
+      "name": "P-2-2-P",
+      "category": "Medium",
+      "road": {
+        "id": "P-2-2-P",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": true,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": true,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": true,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1-TM-1",
+      "name": "1-TM-1",
+      "category": "Small",
+      "road": {
+        "id": "1-TM-1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            }
+          ]
+        },
+        "median": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "median",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1-TM-2",
+      "name": "1-TM-2",
+      "category": "Small",
+      "road": {
+        "id": "1-TM-2",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "median": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "median",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2-TM-3",
+      "name": "2-TM-3",
+      "category": "Medium",
+      "road": {
+        "id": "2-TM-3",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            },
+            {
+              "id": "b2",
+              "width": 4.0
+            }
+          ]
+        },
+        "median": {
+          "width": 4.0
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "median",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1-2H",
+      "name": "1-2H",
+      "category": "Small",
+      "road": {
+        "id": "1-2H",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": true,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2H-2H",
+      "name": "2H-2H",
+      "category": "Medium",
+      "road": {
+        "id": "2H-2H",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": true,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": true,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "P-2-R-R-2-P",
+      "name": "P-2-R-R-2-P",
+      "category": "Rail",
+      "road": {
+        "id": "P-2-R-R-2-P",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": true,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [
+          {
+            "type": "shoulder",
+            "width": 3.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ab": [
+          {
+            "type": "rail",
+            "width": 5.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 3.0,
+            "hov": false,
+            "fence": true,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": true,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "rail",
+            "width": 5.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 3.0,
+            "hov": false,
+            "fence": true,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": true,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "1",
+      "name": "1",
+      "category": "One-Way",
+      "road": {
+        "id": "1",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "median": {
+          "width": 1.5
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "2",
+      "name": "2",
+      "category": "One-Way",
+      "road": {
+        "id": "2",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "median": {
+          "width": 1.5
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "3",
+      "name": "3",
+      "category": "One-Way",
+      "road": {
+        "id": "3",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            },
+            {
+              "id": "a2",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "median": {
+          "width": 1.5
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "4",
+      "name": "4",
+      "category": "One-Way",
+      "road": {
+        "id": "4",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            },
+            {
+              "id": "a2",
+              "width": 4.0
+            },
+            {
+              "id": "a3",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": []
+        },
+        "median": {
+          "width": 1.5
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
       },
       "driveSide": "right",
       "updatedAt": 0

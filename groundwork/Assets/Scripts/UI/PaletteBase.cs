@@ -88,6 +88,7 @@ namespace NetworkDesigner.UI
         protected virtual string Title => null;          // big header; null/empty = none
         protected virtual Color Accent => Amber;         // top rule + active toggle color
         protected virtual float PanelWidth => 300f;
+        protected virtual float PanelHeight => 0f;        // 0 = size to content; >0 = fixed panel height (capped to screen)
         protected virtual bool AnchorRight => false;     // right edge instead of left
         protected virtual bool Centered => false;        // dead-centre on screen (ignores Anchor*)
         protected virtual bool AnchorBottom => false;    // bottom edge instead of top
@@ -240,6 +241,7 @@ namespace NetworkDesigner.UI
                 if (AnchorRight) _panel.style.right = 16; else _panel.style.left = 16;
             }
             _panel.style.maxHeight = Mathf.Max(300f, Screen.height - 32f);   // tall palettes scroll
+            if (PanelHeight > 0f) _panel.style.height = Mathf.Min(PanelHeight, Screen.height - 32f);   // optional fixed height
             Pad(_panel, 14, 14, 12, 16);
             _panel.style.backgroundColor = PanelBg;
             Radius(_panel, 12);

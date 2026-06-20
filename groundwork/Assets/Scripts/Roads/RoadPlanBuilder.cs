@@ -106,11 +106,11 @@ namespace NetworkDesigner.Roads
                 // Free-standing corridor features (parapets) extruded along the path at each segment's centre.
                 if (bands != null)
                 {
-                    float half = xs.Width * 0.5f;
+                    float center = xs.Center();   // body sweeps about the A↔B centreline — place features about it too
                     for (int bi = 0; bi < bands.Count; bi++)
                     {
                         var bd = bands[bi];
-                        float latOff = (bd.U0 + bd.U1) * 0.5f - half;
+                        float latOff = (bd.U0 + bd.U1) * 0.5f - center;
                         if (bd.Parapet)
                             RoadFeatureSweep.BuildParapet(a, ca, cb, b, curve, latOff,
                                 Mathf.Max(0.1f, bd.ParapetH), hA, hB, groundAt, follow, root.transform, road.Id + "_parapet" + bi);
@@ -141,11 +141,18 @@ namespace NetworkDesigner.Roads
                     if (ring.Count < 3) continue;
                     TwistDiag("X_" + vg.VertexId, v.Position, ring, vg.Outline);   // auto-flag + dump a protruding (twisted) outline
                     float gy = vertexElev != null ? vertexElev(vg.VertexId) : 0f;
+                    // Flat at the node design grade — that's where every approaching road body's end is pinned, so
+                    // the pad sits flush with them. (Draping the pad to raw terrain makes it dip below the bodies on
+                    // fill, where the ground is under the road surface — a blade. The node grade is the right datum.)
                     BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId);
                     // Overlay the raised edge stack (shoulder/sidewalk + curb + parapet) around corners whose
                     // flanking approaches share a profile. Additive on top of the flat pad; no-op (no GO) when
                     // nothing matches or there's no edge stack, so disparate/edgeless junctions are unchanged.
-                    BuildJunctionEdgeBands(vg, profById, gy, root.transform, "XE_" + vg.VertexId);
+                    // SKIPPED at a 2-approach joint: that's a straight pass-through / width transition, not a real
+                    // intersection, so wrapping a raised parapet "corner" there just stands a wall up across the
+                    // joint. The road-body edge stacks already sweep to the setback on both sides.
+                    if (vg.Approaches != null && vg.Approaches.Count > 2)
+                        BuildJunctionEdgeBands(vg, profById, gy, root.transform, "XE_" + vg.VertexId);
                     pads++;
                 }
 
@@ -237,9 +244,14 @@ namespace NetworkDesigner.Roads
         // and renders the pad black. The ring is first oriented CW in (x,z) so the fixed windings face right.
         static void BuildIntersectionPad(List<Vector2> ring, Vector2 center, float gradeY, float depth, Transform parent, string name)
         {
-            // DIAGNOSTIC (throttled once per junction): dump the raw outline so a protruding/stray point can be located.
-            if (_xfillWarned.Add(name))
-                Debug.Log($"[Road] pad '{name}' center=({center.x:0.0},{center.y:0.0}) ring({ring.Count})={RingToStr(ring)}");
+            // TEMP DIAG: pad shape — centroid + the point farthest from it (a blade shows up as one far point).
+            {
+                Vector2 dc = Vector2.zero; for (int i = 0; i < ring.Count; i++) dc += ring[i]; if (ring.Count > 0) dc /= ring.Count;
+                int far = -1; float farD = -1f, near = float.MaxValue;
+                for (int i = 0; i < ring.Count; i++) { float d = (ring[i] - dc).magnitude; if (d > farD) { farD = d; far = i; } if (d < near) near = d; }
+                Debug.Log($"[Road] pad '{name}' gradeY={gradeY:0.0} depth={depth:0.0} ring({ring.Count}) " +
+                          $"near={near:0.0} far={farD:0.0} farPt={(far >= 0 ? $"({ring[far].x:0.0},{ring[far].y:0.0})" : "-")} centroid=({dc.x:0.0},{dc.y:0.0})");
+            }
 
             // Defense-in-depth against the triangular-spike artifact: first drop NaN/∞ points, then drop OUTLIERS —
             // points far beyond the junction's TYPICAL ring radius. A single bad outline point (e.g. a near-parallel
@@ -342,9 +354,6 @@ namespace NetworkDesigner.Roads
             WarnIfHugeMesh(go, name);
         }
 
-        // Junction outlines we've already warned about (per-vertex GameObject name), so the per-rebuild log doesn't spam.
-        static readonly HashSet<string> _xfillWarned = new HashSet<string>();
-
         static float Cross2(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
 
         // True if any two NON-adjacent edges of the closed ring properly cross (strict — touching endpoints don't count).
@@ -420,15 +429,6 @@ namespace NetworkDesigner.Roads
                 sb.Append($" T=({s.To.x:0.0},{s.To.y:0.0})]");
             }
             Debug.LogWarning(sb.ToString());
-        }
-
-        static string RingToStr(List<Vector2> r)
-        {
-            var sb = new System.Text.StringBuilder();
-            int lim = Mathf.Min(r.Count, 64);
-            for (int i = 0; i < lim; i++) sb.Append($"({r[i].x:0.0},{r[i].y:0.0}) ");
-            if (r.Count > lim) sb.Append("...");
-            return sb.ToString();
         }
 
         // Ear-clipping triangulation of a CW-wound simple polygon (XZ). Returns CW triangle index triples (into the
@@ -717,6 +717,11 @@ namespace NetworkDesigner.Roads
                 var bands = new List<RoadCrossSectionBuilder.StackBand>();
                 RoadCrossSection cxs = RoadCrossSectionBuilder.FromStack(corridor, bands);
                 marks = RoadCrossSectionBuilder.StackMarkings(bands, cxs.Width);
+                // StackMarkings centres marks on the geometric middle; the body sweeps about cxs.Center() (the A↔B
+                // centreline). Shift the marks onto the body's centre so they stay on the lanes.
+                float mShift = cxs.Width * 0.5f - cxs.Center();
+                if (Mathf.Abs(mShift) > 1e-4f)
+                    for (int mi = 0; mi < marks.Count; mi++) marks[mi] = (marks[mi].u + mShift, marks[mi].yellow, marks[mi].dashed);
             }
             else
             {

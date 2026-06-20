@@ -71,6 +71,9 @@ namespace NetworkDesigner.Terrain
             {
                 if (ei < 0 || ei >= rd.Graph.Edges.Count) continue;
                 LineEdge e = rd.Graph.Edges[ei];
+                // Suppress deck parapets when the corridor profile already carries its own parapet segments
+                // (else they double up at the deck edges).
+                bool edgeParapets = parapets && !CorridorHasParapet(rd, ei);
                 rd.EdgeBezierWorld(ei, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
                 float yA = nodeElev != null ? nodeElev(e.A) : 0f;
                 float yB = nodeElev != null ? nodeElev(e.B) : 0f;   // leveled equal for a true bridge, but lerp anyway
@@ -107,7 +110,7 @@ namespace NetworkDesigner.Terrain
                     {
                         AddBeam(verts, tris, prev, ctr, width, deckDepth);                // deck slab sub-span
                         arc += Vector2.Distance(new Vector2(prev.x, prev.z), xz);
-                        if (parapets)
+                        if (edgeParapets)
                         {
                             Vector2 d2 = new Vector2(ctr.x - prev.x, ctr.z - prev.z);
                             Vector2 perp = d2.sqrMagnitude > 1e-8f ? new Vector2(-d2.y, d2.x).normalized : Vector2.right;
@@ -179,6 +182,22 @@ namespace NetworkDesigner.Terrain
         }
 
         // Terrain height at the trestle nearest arc-distance `arc` (the arch springs from a trestle's foot).
+        // True if the edge's corridor profile carries any parapet segment (so the deck shouldn't add its own).
+        static bool CorridorHasParapet(RoadPlanLayer rd, int ei)
+        {
+            if (rd?.Graph == null || ei < 0 || ei >= rd.Graph.Edges.Count) return false;
+            var corridor = NetworkDesigner.Roads.RoadProfileLibrary.ResolveConfig(rd.Graph.Edges[ei].Profile)?.Corridor;
+            if (corridor == null) return false;
+            return AnyParapet(corridor.AB) || AnyParapet(corridor.BA) || AnyParapet(corridor.Center);
+        }
+
+        static bool AnyParapet(List<NetworkDesigner.Model.CorridorSegment> side)
+        {
+            if (side == null) return false;
+            foreach (var s in side) if (s != null && s.Parapet) return true;
+            return false;
+        }
+
         static float GroundAtArc(List<TrestleStation> st, float arc)
         {
             float best = float.MaxValue, g = 0f;

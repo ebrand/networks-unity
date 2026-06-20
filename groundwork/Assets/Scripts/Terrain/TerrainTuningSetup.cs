@@ -101,6 +101,15 @@ namespace NetworkDesigner.Terrain
             // --- Design controls / plan guides (PlanGuides; shared by rail + road plan) ---
             // Registered here so the Design Controls palette persists across games via TuningOverrides.json
             // (snapshotted on save, applied on load) — same mechanism as the Environment palette.
+            // Transportation Corridor Designer modal size (px) — live-resizable from the React panel; rebuilds the
+            // modal to apply.
+            TuningRegistry.RegisterFloat("corridor.width", "Corridor Designer", "Modal width (px)",
+                () => NetworkDesigner.UI.RoadDesignerModal.PanelW,
+                v => { NetworkDesigner.UI.RoadDesignerModal.PanelW = v; NetworkDesigner.UI.PaletteBase.RebuildId("RoadDesigner"); }, 600f, 2400f);
+            TuningRegistry.RegisterFloat("corridor.height", "Corridor Designer", "Modal height (px)",
+                () => NetworkDesigner.UI.RoadDesignerModal.PanelH,
+                v => { NetworkDesigner.UI.RoadDesignerModal.PanelH = v; NetworkDesigner.UI.PaletteBase.RebuildId("RoadDesigner"); }, 400f, 1800f);
+
             TuningRegistry.RegisterBool("guides.showNodes", "Guides", "Show nodes",
                 () => PlanGuides.ShowNodes, v => PlanGuides.ShowNodes = v);
             TuningRegistry.RegisterFloat("guides.nodeSize", "Guides", "Node size (m)",

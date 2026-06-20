@@ -25,7 +25,12 @@ namespace NetworkDesigner.UI
         protected override bool Centered => true;
         protected override bool ShowFooter => false;
         protected override string Title => "Transportation Corridor Designer";
-        protected override float PanelWidth => Mathf.Clamp(Screen.width - 720f, 760f, 1280f);
+        // Modal size — exposed as tunables (corridor.width / corridor.height) so it can be sized live in the React
+        // panel. Width sets the panel; "height" sets the 3D preview's height, which drives the modal's overall
+        // height (the panel then sizes to content). Changing a tunable rebuilds this modal.
+        public static float PanelW = 1120f;
+        public static float PanelH = 560f;
+        protected override float PanelWidth => Mathf.Clamp(PanelW, 600f, Mathf.Max(600f, Screen.width - 40f));
         protected override Color Accent => new Color(0.95f, 0.55f, 0.15f);
 
         // ---- editing state ----
@@ -40,7 +45,7 @@ namespace NetworkDesigner.UI
         bool _addHOV, _addFence, _addParapet, _addGuardrail;
         float _addParapetH = 1f;
 
-        VisualElement _preview, _listBox, _stackBox, _view3d;
+        VisualElement _preview, _listBox, _view3d, _baBox, _centerBox, _abBox;
         bool _heldModal, _dragging;
         Vector2 _lastPtr;
         RoadPreview3D _rig;
@@ -95,39 +100,76 @@ namespace NetworkDesigner.UI
 
         protected override void BuildBody(VisualElement body)
         {
-            var row = HBox();
-            row.style.flexGrow = 1; row.style.alignItems = Align.FlexStart;
-            body.Add(row);
+            // Columns stretch to the tallest (the 3D preview at PanelH); the form/save columns are alignSelf=
+            // FlexStart so they stay natural height (no empty stretch box), while the profiles list + preview +
+            // stack boxes flex-fill that height.
+            var topRow = HBox();
+            topRow.style.alignItems = Align.Stretch;
+            body.Add(topRow);
 
-            var left = new VisualElement();
-            left.style.width = 300; left.style.marginRight = 16; left.style.flexShrink = 0;
-            row.Add(left);
+            // Far-left: saved profiles, full height.
+            var profCol = new VisualElement();
+            profCol.style.width = 200; profCol.style.marginRight = 16; profCol.style.flexShrink = 0;
+            profCol.Add(Cap("Profiles:"));
+            _listBox = ScrollBox(2000); _listBox.style.flexGrow = 1;
+            SetBorder(_listBox, 1, new Color(0.3f, 0.32f, 0.36f)); Radius(_listBox, 8);
+            profCol.Add(_listBox);
+            topRow.Add(profCol);
 
-            var right = new VisualElement();
-            right.style.flexGrow = 1; right.style.minHeight = 440;
-            row.Add(right);
+            // Right of profiles: upper (form + 3D preview), lower (save controls + the three direction stacks).
+            var rightArea = new VisualElement();
+            rightArea.style.flexGrow = 1;
+            topRow.Add(rightArea);
 
+            var upper = HBox();
+            upper.style.alignItems = Align.Stretch;
+            rightArea.Add(upper);
+
+            var formCol = new VisualElement();
+            formCol.style.width = 290; formCol.style.marginRight = 16; formCol.style.flexShrink = 0;
+            formCol.style.alignSelf = Align.FlexStart;   // natural height (top), don't stretch into empty space
+            BuildSegmentForm(formCol);
+            formCol.Add(Divider());
+            BuildSaveControls(formCol);   // save controls sit directly under the segment form
+            upper.Add(formCol);
+
+            var previewCol = new VisualElement();
+            previewCol.style.flexGrow = 1;
             _view3d = new VisualElement();
-            _view3d.style.flexGrow = 1; _view3d.style.minHeight = 360;
+            _view3d.style.flexGrow = 1; _view3d.style.minHeight = PanelH;   // tunable — drives the modal height
             _view3d.style.backgroundColor = new Color(0.08f, 0.09f, 0.10f);
             _view3d.style.unityBackgroundScaleMode = ScaleMode.ScaleAndCrop;
             Radius(_view3d, 8);
-            right.Add(_view3d);
+            previewCol.Add(_view3d);
             RegisterViewportInput(_view3d);
+            _preview = new VisualElement();   // thin caption row under the 3D view
+            _preview.style.height = 18; _preview.style.marginTop = 4;
+            previewCol.Add(_preview);
+            upper.Add(previewCol);
 
-            _preview = new VisualElement();
-            _preview.style.height = 110; _preview.style.marginTop = 8;
-            right.Add(_preview);
+            var lower = HBox();
+            lower.style.height = 150; lower.style.marginTop = 8; lower.style.alignItems = Align.Stretch;
+            rightArea.Add(lower);
 
-            BuildControls(left);
+            var spacer = new VisualElement();   // aligns the stack boxes under the 3D preview (matches the form column width)
+            spacer.style.width = 290; spacer.style.marginRight = 16; spacer.style.flexShrink = 0;
+            lower.Add(spacer);
+
+            var stacks = HBox();
+            stacks.style.flexGrow = 1; stacks.style.alignItems = Align.Stretch;
+            _baBox = AddStackColumn(stacks, "B → A");
+            _centerBox = AddStackColumn(stacks, "Center");
+            _abBox = AddStackColumn(stacks, "A → B");
+            lower.Add(stacks);
+
             RefreshList();
             RefreshStackList();
             RefreshPreview();
         }
 
-        void BuildControls(VisualElement left)
+        // The segment-definition form (top of the second column): direction target + type/width/attrs + Add.
+        void BuildSegmentForm(VisualElement col)
         {
-            // Direction selector — which stack "Add →" appends to.
             var dirRow = HBox();
             var baBtn = MakeButton("B → A", () => { _target = 0; RefreshStackList(); });
             var ctBtn = MakeButton("Center", () => { _target = 1; RefreshStackList(); });
@@ -135,48 +177,35 @@ namespace NetworkDesigner.UI
             baBtn.style.marginRight = 6; ctBtn.style.marginRight = 6;
             dirRow.Add(baBtn); dirRow.Add(ctBtn); dirRow.Add(abBtn);
             dirRow.style.marginBottom = 10;
-            left.Add(dirRow);
+            col.Add(dirRow);
             _sync.Add(() => { StyleActive(baBtn, _target == 0); StyleActive(ctBtn, _target == 1); StyleActive(abBtn, _target == 2); });
 
-            // Segment definition form.
-            left.Add(DropdownRow("Type", TypeChoices, () => TypeLabel(_addType),
+            col.Add(DropdownRow("Type", TypeChoices, () => TypeLabel(_addType),
                 v => { _addType = ParseType(v); _addWidth = CorridorStack.DefaultWidth(_addType); }));
-            left.Add(NumberRow("Width", "m", () => _addWidth, v => _addWidth = v, 0.5f, 60f, "0.#"));
-            left.Add(ToggleRow("HOV", () => _addHOV, v => _addHOV = v));
-            left.Add(ToggleRow("Fence", () => _addFence, v => _addFence = v));
-            left.Add(ToggleRow("Parapet", () => _addParapet, v => _addParapet = v));
-            left.Add(NumberRow("Height", "m", () => _addParapetH, v => _addParapetH = v, 0.2f, 5f, "0.#"));
-            left.Add(ToggleRow("Guardrail", () => _addGuardrail, v => _addGuardrail = v));
+            col.Add(NumberRow("Width", "m", () => _addWidth, v => _addWidth = v, 0.5f, 60f, "0.#"));
+            col.Add(ToggleRow("HOV", () => _addHOV, v => _addHOV = v));
+            col.Add(ToggleRow("Fence", () => _addFence, v => _addFence = v));
+            col.Add(ToggleRow("Parapet", () => _addParapet, v => _addParapet = v));
+            col.Add(NumberRow("Height", "m", () => _addParapetH, v => _addParapetH = v, 0.2f, 5f, "0.#"));
+            col.Add(ToggleRow("Guardrail", () => _addGuardrail, v => _addGuardrail = v));
 
             var add = MakeButton("Add →", AddSegment);
-            add.style.marginTop = 8; add.style.marginBottom = 8;
-            left.Add(add);
+            add.style.marginTop = 8;
+            col.Add(add);
+        }
 
-            _stackBox = ScrollBox(150);
-            SetBorder(_stackBox, 1, new Color(0.3f, 0.32f, 0.36f));
-            Radius(_stackBox, 8);
-            _stackBox.style.marginBottom = 12;
-            left.Add(_stackBox);
-
-            left.Add(Divider());
-
-            // Saved-profile library.
-            left.Add(Cap("Profiles:"));
-            _listBox = ScrollBox(120);
-            SetBorder(_listBox, 1, new Color(0.3f, 0.32f, 0.36f));
-            Radius(_listBox, 8);
-            _listBox.style.marginBottom = 8;
-            left.Add(_listBox);
-
-            left.Add(Cap("Profile name:"));
+        // Profile name/category + New/Save/Delete/Close (bottom of the second column).
+        void BuildSaveControls(VisualElement col)
+        {
+            col.Add(Cap("Profile name:"));
             var nameField = new TextField { value = _name };
             nameField.RegisterValueChangedCallback(e => _name = e.newValue);
-            left.Add(nameField);
-            left.Add(Cap("Category:"));
+            col.Add(nameField);
+            col.Add(Cap("Category:"));
             var catField = new TextField { value = _category };
             catField.style.marginBottom = 6;
             catField.RegisterValueChangedCallback(e => _category = e.newValue);
-            left.Add(catField);
+            col.Add(catField);
 
             var saveRow = HBox();
             var newBtn = MakeButton("New", NewProfile);
@@ -185,10 +214,25 @@ namespace NetworkDesigner.UI
             newBtn.style.marginRight = 6; saveBtn.style.marginRight = 6;
             saveRow.Add(newBtn); saveRow.Add(saveBtn); saveRow.Add(delBtn);
             saveRow.style.marginTop = 4;
-            left.Add(saveRow);
+            col.Add(saveRow);
 
             var close = MakeButton("Close", () => SetOpen(false));
-            close.style.marginTop = 8; left.Add(close);
+            close.style.marginTop = 6; col.Add(close);
+        }
+
+        // A bottom stack column: centered header + a removable segment list; returns the list box.
+        VisualElement AddStackColumn(VisualElement parent, string title)
+        {
+            var col = new VisualElement();
+            col.style.flexGrow = 1; col.style.marginRight = 8;
+            var h = new Label(title);
+            h.style.color = Sub; h.style.fontSize = 11; h.style.unityTextAlign = TextAnchor.MiddleCenter; h.style.marginBottom = 2;
+            col.Add(h);
+            var box = ScrollBox(2000); box.style.flexGrow = 1;
+            SetBorder(box, 1, new Color(0.3f, 0.32f, 0.36f)); Radius(box, 6);
+            col.Add(box);
+            parent.Add(col);
+            return box;
         }
 
         // ---- segment add / stack list ----
@@ -211,36 +255,36 @@ namespace NetworkDesigner.UI
 
         void RefreshStackList()
         {
-            if (_stackBox == null) return;
-            _stackBox.Clear();
-            AddStackGroup("A → B", _stack.AB);
-            AddStackGroup("Center", _stack.Center);
-            AddStackGroup("B → A", _stack.BA);
-            if (_stack.AB.Count == 0 && _stack.BA.Count == 0 && _stack.Center.Count == 0)
-            {
-                var none = new Label("  (empty — define a segment and Add →)");
-                none.style.color = Sub; none.style.fontSize = 11; none.style.unityFontStyleAndWeight = FontStyle.Italic;
-                _stackBox.Add(none);
-            }
+            FillBox(_baBox, _stack.BA);
+            FillBox(_centerBox, _stack.Center);
+            FillBox(_abBox, _stack.AB);
         }
 
-        void AddStackGroup(string title, List<CorridorSegment> side)
+        // Fill one direction's box with its segments (centreline→outer), each removable.
+        void FillBox(VisualElement box, List<CorridorSegment> side)
         {
-            if (side.Count == 0) return;
-            var head = new Label(title);
-            head.style.color = Sub; head.style.fontSize = 11; head.style.unityFontStyleAndWeight = FontStyle.Bold; head.style.marginTop = 2;
-            _stackBox.Add(head);
+            if (box == null) return;
+            box.Clear();
+            if (side.Count == 0)
+            {
+                var none = new Label("  (empty)");
+                none.style.color = Sub; none.style.fontSize = 11; none.style.unityFontStyleAndWeight = FontStyle.Italic;
+                box.Add(none);
+                return;
+            }
             for (int i = 0; i < side.Count; i++)
             {
                 CorridorSegment s = side[i]; List<CorridorSegment> list = side;
                 var r = HBox();
-                r.style.justifyContent = Justify.SpaceBetween; r.style.marginBottom = 1;
-                var lbl = new Label("  " + SegLabel(s));
-                lbl.style.color = Ink; lbl.style.fontSize = 12;
+                r.style.marginBottom = 1; r.style.alignItems = Align.Center;
+                var lbl = new Label(" " + SegLabel(s));
+                lbl.style.color = Ink; lbl.style.fontSize = 12; lbl.style.flexGrow = 1; lbl.style.overflow = Overflow.Hidden;
                 var x = MakeButton("✕", () => { list.Remove(s); RefreshStackList(); RefreshPreview(); });
-                x.style.width = 24; x.style.height = 20;
+                // Fixed small width, right-justified (MakeButton defaults to flexGrow:1, which would stretch it).
+                x.style.flexGrow = 0; x.style.flexShrink = 0;
+                x.style.width = 26; x.style.minWidth = 26; x.style.maxWidth = 26; x.style.height = 18;
                 r.Add(lbl); r.Add(x);
-                _stackBox.Add(r);
+                box.Add(r);
             }
         }
 
@@ -388,7 +432,7 @@ namespace NetworkDesigner.UI
             }
         }
 
-        // ---- preview: 3D sweep + 2D cross-section strip ----
+        // ---- preview: 3D sweep (the stack contents are shown in the bottom B→A / Center / A→B boxes) ----
 
         void RefreshPreview()
         {
@@ -403,38 +447,11 @@ namespace NetworkDesigner.UI
 
             if (_preview == null) return;
             _preview.Clear();
-
-            var total = new Label($"{xs.Width:0.#} m wide · {_stack.AB.Count}+{_stack.BA.Count} segments"
+            var total = new Label($"{xs.Width:0.#} m wide · {_stack.AB.Count + _stack.BA.Count + _stack.Center.Count} segments"
                                   + (string.IsNullOrWhiteSpace(_category) ? "" : " · " + _category)
                                   + "   · cyan = A↔B midline   (drag to orbit · wheel to zoom)");
-            total.style.color = Sub; total.style.fontSize = 11; total.style.marginBottom = 4;
+            total.style.color = Sub; total.style.fontSize = 11;
             _preview.Add(total);
-
-            var sec = HBox();
-            sec.style.height = 56; sec.style.alignItems = Align.Stretch;
-            SetBorder(sec, 1, new Color(1f, 1f, 1f, 0.4f));
-            // One flex band per non-zero-width cross-section segment (skip the zero-width walls).
-            for (int i = 0; i < xs.Segs.Count; i++)
-            {
-                float w = xs.Pts[i + 1].x - xs.Pts[i].x;
-                if (w <= 0.01f) continue;
-                var box = new VisualElement();
-                box.style.flexGrow = w;
-                box.style.backgroundColor = SurfaceColor(xs.Segs[i]);
-                box.style.borderRightWidth = 1; box.style.borderRightColor = new Color(1f, 1f, 1f, 0.25f);
-                sec.Add(box);
-            }
-            // The A→B / B→A midline marker (cyan), absolutely positioned over the strip at the split fraction.
-            if (xs.SplitU >= 0f && xs.Width > 0.5f)
-            {
-                var mark = new VisualElement();
-                mark.style.position = Position.Absolute;
-                mark.style.top = 0; mark.style.bottom = 0; mark.style.width = 2;
-                mark.style.left = Length.Percent(Mathf.Clamp01(xs.SplitU / xs.Width) * 100f);
-                mark.style.backgroundColor = new Color(0.31f, 0.86f, 1f, 1f);
-                sec.Add(mark);
-            }
-            _preview.Add(sec);
         }
 
         static Color SurfaceColor(RoadSurface s) => s switch

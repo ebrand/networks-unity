@@ -69,8 +69,10 @@ namespace NetworkDesigner.Model
             int bi = 0;
             foreach (CorridorSegment s in BA) if (s.Type == CorridorType.Traffic) p.BA.Lanes.Add(new Lane { Id = "b" + bi++, Width = s.Width });
 
-            // Centre treatment = the straddling Center segments: a Turn there → turn lane, else any Median/Rail
-            // → a median-width centre gap. Width = total Center width so the lanes are offset correctly.
+            // Centre treatment = the straddling Center segments PLUS any non-traffic bands INBOARD of the innermost
+            // traffic lane on each side (e.g. a centre rail in P-2-R-R-2-P). Folding the inboard width into the centre
+            // strip keeps the derived total width + lane offsets matching the rendered cross-section — otherwise that
+            // width is lost and downstream (bridge deck, junction geometry) builds too narrow.
             float centerW = 0f; bool hasTurn = false, hasMedianish = false;
             foreach (CorridorSegment s in Center)
             {
@@ -78,8 +80,11 @@ namespace NetworkDesigner.Model
                 if (s.Type == CorridorType.Turn) hasTurn = true;
                 else if (s.Type == CorridorType.Median || s.Type == CorridorType.Rail) hasMedianish = true;
             }
+            float inboard = InboardNonTrafficWidth(AB) + InboardNonTrafficWidth(BA);
+            centerW += inboard;
+            if (inboard > 0.01f) hasMedianish = true;
             if (hasTurn) p.TurnLane = new TurnLane { Width = centerW };
-            else if (hasMedianish) p.Median = new Median { Width = centerW };
+            else if (hasMedianish && centerW > 0.01f) p.Median = new Median { Width = centerW };
 
             p.ShoulderAB = new Shoulder { Width = OutboardNonTrafficWidth(AB) };
             p.ShoulderBA = new Shoulder { Width = OutboardNonTrafficWidth(BA) };
@@ -89,6 +94,21 @@ namespace NetworkDesigner.Model
             p.Elevated = AnyAttr(a => a.Parapet);
             p.Guardrails = AnyAttr(a => a.Guardrail);
             return p;
+        }
+
+        // Total width of non-traffic segments INBOARD of (before) the first Traffic lane in a centreline→outer stack.
+        // Only meaningful when the side actually HAS a traffic lane (e.g. a centre rail inboard of the lanes). A side
+        // with NO traffic at all (a one-way road's opposite-side shoulder) is NOT an inboard centre band — it's an
+        // outboard shoulder, already counted by OutboardNonTrafficWidth. Returning its width here too double-counted
+        // it AND invented a phantom centre median, shifting the derived profile off the rendered body.
+        static float InboardNonTrafficWidth(List<CorridorSegment> side)
+        {
+            bool hasTraffic = false;
+            foreach (CorridorSegment s in side) if (s.Type == CorridorType.Traffic) { hasTraffic = true; break; }
+            if (!hasTraffic) return 0f;
+            float w = 0f;
+            foreach (CorridorSegment s in side) { if (s.Type == CorridorType.Traffic) break; w += s.Width; }
+            return w;
         }
 
         // Total width of segments outboard of (after) the last Traffic lane in a centreline→outer stack.

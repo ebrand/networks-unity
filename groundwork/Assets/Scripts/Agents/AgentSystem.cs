@@ -31,6 +31,13 @@ namespace NetworkDesigner.Agents
         // null [Serializable] sub-objects on the Network graph.
         [System.NonSerialized] public Network Network;
 
+        // Optional world-height provider so agents sit on 3D terrain instead of a flat plane.
+        // Maps an (x,z) road point to a ground Y; the agent's yLift is added on top. Left null by
+        // the flat-plane host (NetworkDesigner) → Y stays 0 + yLift exactly as before; set by the
+        // terrain host to Surf.SampleHeight so cars follow the draped road surface. Static because
+        // the terrain world adds the AgentSystem at runtime and has no Inspector hook to wire.
+        public static System.Func<Vector2, float> GroundHeight;
+
         [Header("Simulation")]
         [Tooltip("When true, all agent ticking and spawn-queue draining is suspended. Positions freeze; the speed pre-pass still runs once on the next unpause so following state is consistent. Toggled by NetworkDesigner via the Pause hotkey.")]
         public bool Paused;
@@ -155,6 +162,10 @@ namespace NetworkDesigner.Agents
         // free spawn space for new ones.
         int _pendingSpawnCount;
         readonly List<Vertex> _pendingSpawnDeadEnds = new List<Vertex>();
+        // ROUTABLE ordered (start,end) dead-end pairs, computed once per swarm. The drain only ever picks from
+        // here, so it never wastes attempts — or floods the log with "No route" — on a direction that can't route
+        // (e.g. against a one-way road, where half the random dead-end pairs are unreachable).
+        readonly List<(Vertex start, Vertex end)> _spawnPairs = new List<(Vertex start, Vertex end)>();
         // Reusable per-spawn cache: vertex ID → resolved geometry.
         // Avoids re-resolving the same vertex N times when building a
         // multi-step path.
@@ -279,12 +290,30 @@ namespace NetworkDesigner.Agents
                 return 0;
             }
 
+            // Precompute the ROUTABLE ordered pairs so the drain never attempts an impossible direction.
+            // (One-way roads + 2 dead-ends previously made the drain retry the against-flow pair forever,
+            // flooding the console and burning the spawn budget.)
+            _spawnPairs.Clear();
+            for (int i = 0; i < _pendingSpawnDeadEnds.Count; i++)
+                for (int j = 0; j < _pendingSpawnDeadEnds.Count; j++)
+                {
+                    if (i == j) continue;
+                    var p = AgentPathfinder.FindPath(Network, _pendingSpawnDeadEnds[i].Id, _pendingSpawnDeadEnds[j].Id);
+                    if (p != null && p.Count > 0) _spawnPairs.Add((_pendingSpawnDeadEnds[i], _pendingSpawnDeadEnds[j]));
+                }
+            if (_spawnPairs.Count == 0)
+            {
+                Debug.LogWarning("[AgentSystem] No routable dead-end pairs — nothing to spawn " +
+                                 "(e.g. a lone one-way road with no return path).");
+                return 0;
+            }
+
             // Queue the requested count. Update() drains the queue
             // over time, giving earlier-spawned agents room to clear
             // their dead-ends. Press G again to add more on top.
             _pendingSpawnCount += count;
             Debug.Log($"[AgentSystem] Swarm: queued {count} more agents " +
-                      $"(total pending: {_pendingSpawnCount}) across {_pendingSpawnDeadEnds.Count} dead-ends.");
+                      $"(total pending: {_pendingSpawnCount}) across {_spawnPairs.Count} routable pair(s).");
             return 0;
         }
 
@@ -295,16 +324,13 @@ namespace NetworkDesigner.Agents
         void DrainSpawnQueue()
         {
             if (_pendingSpawnCount <= 0) return;
-            if (_pendingSpawnDeadEnds.Count < 2) return;
+            if (_spawnPairs.Count == 0) return;
             int budget = Mathf.Max(1, MaxSpawnAttemptsPerFrame);
-            int n = _pendingSpawnDeadEnds.Count;
             while (budget-- > 0 && _pendingSpawnCount > 0)
             {
-                int i = Random.Range(0, n);
-                int j = Random.Range(0, n);
-                if (i == j) continue;
-                Agent a = SpawnAgent(_pendingSpawnDeadEnds[i].Id, _pendingSpawnDeadEnds[j].Id);
-                if (a != null) _pendingSpawnCount--;
+                var pair = _spawnPairs[Random.Range(0, _spawnPairs.Count)];   // routable by construction
+                Agent a = SpawnAgent(pair.start.Id, pair.end.Id);
+                if (a != null) _pendingSpawnCount--;   // gap-rejected (null) pairs just retry next frame as room clears
             }
         }
 
@@ -1900,7 +1926,8 @@ namespace NetworkDesigner.Agents
             float yLift = AgentYLift;
             AgentClickTarget tag = a.Visual.GetComponent<AgentClickTarget>();
             if (tag != null && tag.IsVehicle) yLift = AgentVehicleYLift;
-            a.Visual.transform.position = new Vector3(pos.x, yLift, pos.y);
+            float groundY = GroundHeight != null ? GroundHeight(pos) : 0f;   // 3D terrain follow (null = flat plane)
+            a.Visual.transform.position = new Vector3(pos.x, groundY + yLift, pos.y);
             if (tangent.sqrMagnitude > 1e-6f)
             {
                 Vector3 fwd = new Vector3(tangent.x, 0f, tangent.y).normalized;
