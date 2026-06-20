@@ -102,7 +102,18 @@ namespace NetworkDesigner.Roads
 
                 var segGo = RoadSweep.Build(xs, a, b, curve, ca, cb, root.transform, road.Id, hA, hB, groundAt, follow);
                 WarnIfHugeMesh(segGo, road.Id);
-                BuildRoadMarkings(road.Profile, road.Corridor, a, ca, cb, b, curve, hA, hB, root.transform, road.Id + "_marks", groundAt, follow);
+
+                // Lane markings extend to the NODE at a 2-approach end (a continuation / bend) so the dashes carry
+                // ACROSS the junction instead of breaking at the setback; at a real 3+ intersection they stop at the
+                // setback (the body trim). The road BODY still stops at the setback — only the marking path extends,
+                // painted over the junction pad.
+                bool contA = vgById.TryGetValue(road.EndA, out VertexGeometry vmA) && vmA.Approaches != null && vmA.Approaches.Count == 2;
+                bool contB = vgById.TryGetValue(road.EndB, out VertexGeometry vmB) && vmB.Approaches != null && vmB.Approaches.Count == 2;
+                float tMarkA = contA ? 0f : tA, tMarkB = contB ? 1f : tB;
+                Vector2 ma = a, mca = ca, mcb = cb, mb = b;
+                if (tMarkA != tA || tMarkB != tB) SubCubic(p0, c1, c2, p3, tMarkA, tMarkB, out ma, out mca, out mcb, out mb);
+                float hMarkA = Mathf.Lerp(yA, yB, tMarkA), hMarkB = Mathf.Lerp(yA, yB, tMarkB);
+                BuildRoadMarkings(road.Profile, road.Corridor, ma, mca, mcb, mb, curve, hMarkA, hMarkB, root.transform, road.Id + "_marks", groundAt, follow);
                 // Free-standing corridor features (parapets) extruded along the path at each segment's centre.
                 if (bands != null)
                 {
@@ -141,10 +152,13 @@ namespace NetworkDesigner.Roads
                     if (ring.Count < 3) continue;
                     TwistDiag("X_" + vg.VertexId, v.Position, ring, vg.Outline);   // auto-flag + dump a protruding (twisted) outline
                     float gy = vertexElev != null ? vertexElev(vg.VertexId) : 0f;
-                    // Flat at the node design grade — that's where every approaching road body's end is pinned, so
-                    // the pad sits flush with them. (Draping the pad to raw terrain makes it dip below the bodies on
-                    // fill, where the ground is under the road surface — a blade. The node grade is the right datum.)
-                    BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId, groundAt, follow);
+                    // A 2-approach joint (continuation / width-change) is just the small setback gap between two
+                    // abutting bodies — build its pad SHALLOW so its rim doesn't stand up as a seam wall. Real 3+
+                    // intersections keep the full depth (their pad fills the excavated junction box). The pad still
+                    // drapes (groundAt/follow) so its top follows the road surface.
+                    bool continuation = vg.Approaches != null && vg.Approaches.Count == 2;
+                    float padDepth = continuation ? Mathf.Min(depth, 0.05f) : depth;
+                    BuildIntersectionPad(ring, v.Position, gy, padDepth, root.transform, "X_" + vg.VertexId, groundAt, follow);
                     // Overlay the raised edge stack (shoulder/sidewalk + curb + parapet) around corners whose
                     // flanking approaches share a profile. Additive on top of the flat pad; no-op (no GO) when
                     // nothing matches or there's no edge stack, so disparate/edgeless junctions are unchanged.

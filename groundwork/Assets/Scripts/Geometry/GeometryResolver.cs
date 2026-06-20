@@ -964,20 +964,20 @@ namespace NetworkDesigner.Geometry
                         && Mathf.Abs(thetaCW - Mathf.PI) < JointAngleEpsilon
                         && Mathf.Abs(thetaCCW - Mathf.PI) < JointAngleEpsilon)
                     {
+                        // Collinear 2-approach joint. Matching profiles → setback 0 (bodies meet seamlessly). A WIDTH
+                        // CHANGE → a short transition setback: this gap is REQUIRED so the car-agent intersection
+                        // bezier between the two segments' lane endpoints is non-degenerate (setback 0 collapses the
+                        // lane endpoints onto the vertex and agents dead-end at the node). The fill pad in that gap is
+                        // built shallow (no rim) so it doesn't show as a seam wall — see RoadPlanBuilder.
                         RoadProfile selfProfile = self.Road != null ? self.Road.Profile : null;
                         RoadProfile otherProfile = data[nextIdx].Road != null ? data[nextIdx].Road.Profile : null;
-                        bool promote = selfProfile != null && otherProfile != null
-                            && !selfProfile.Matches(otherProfile);
+                        bool promote = selfProfile != null && otherProfile != null && !selfProfile.Matches(otherProfile);
                         if (promote)
                         {
                             float widthDelta = Mathf.Abs(self.RoadWidth - data[nextIdx].RoadWidth);
-                            setback = Mathf.Max(MinTransitionSetback,
-                                widthDelta * 0.5f * Mathf.Max(0f, TransitionLengthFactor));
+                            setback = Mathf.Max(MinTransitionSetback, widthDelta * 0.5f * Mathf.Max(0f, TransitionLengthFactor));
                         }
-                        else
-                        {
-                            setback = 0f;
-                        }
+                        else setback = 0f;
                     }
                     else if (n == 2)
                     {

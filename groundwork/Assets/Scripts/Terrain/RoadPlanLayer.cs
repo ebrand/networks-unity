@@ -145,6 +145,13 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _nv = new List<Vector3>();
         readonly List<Vector3> _nn = new List<Vector3>();
         readonly List<int> _nidx = new List<int>();
+        // PROTOTYPE: lane-node pucks — one small blue puck per TRAFFIC lane at each segment end (read-only for now).
+        // A separate mesh so they carry their own colour + size, parallel to the node-puck mesh.
+        GameObject _laneGo; MeshFilter _laneMf; MeshRenderer _laneMr; Mesh _laneMesh; Material _laneMat;
+        readonly List<Vector3> _lnv = new List<Vector3>();
+        readonly List<Vector3> _lnn = new List<Vector3>();
+        readonly List<int> _lnidx = new List<int>();
+        static readonly Color _RoadLaneNodeColor = new Color(0.25f, 0.55f, 1f, 0.9f);   // blue, distinct from the corridor node pucks
         // Hovered-node highlight: a SEPARATE per-frame overlay (golden, scaled) rebuilt only when the hover changes.
         GameObject _hoverGo; MeshFilter _hoverMf; MeshRenderer _hoverMr; Mesh _hoverMesh; Material _hoverMat;
         readonly List<Vector3> _hv = new List<Vector3>();
@@ -182,6 +189,7 @@ namespace NetworkDesigner.Terrain
             bool vis = LinesVisible;
             if (_mr != null) _mr.enabled = vis || (_paletteActive && (SetbackEditMode || ClassEditMode));
             if (_nodeMr != null) _nodeMr.enabled = PlanGuides.ShowNodes && vis && Graph != null && Graph.Nodes.Count > 0;
+            if (_laneMr != null) _laneMr.enabled = PlanGuides.ShowNodes && vis && _lnv.Count > 0;   // PROTOTYPE lane pucks
             if (_hoverMr != null && !vis) _hoverMr.enabled = false;
             if (_tailMr != null && !vis) _tailMr.enabled = false;
         }
@@ -1817,6 +1825,7 @@ namespace NetworkDesigner.Terrain
         {
             EnsureRoot();
             _v.Clear(); _idx.Clear(); _col.Clear(); _nv.Clear(); _nn.Clear(); _nidx.Clear();
+            _lnv.Clear(); _lnn.Clear(); _lnidx.Clear();
 
             int nc = Graph.Nodes.Count;
             var treated = new bool[nc];   // node gets a junction box (trim + outline)
@@ -1837,6 +1846,7 @@ namespace NetworkDesigner.Terrain
             }
             for (int v = 0; v < nc; v++) if (treated[v]) BuildJunction(field, v, boxHalf[v], boxAx[v], isX[v]);
             for (int i = 0; i < Graph.Nodes.Count; i++) DrawPuck(field, i);   // into the node mesh (own colour + toggle)
+            DrawLaneNodes(field);   // PROTOTYPE: blue per-lane pucks at each segment end
             // Setback rings show (and stay draggable) alongside the plan lines — no edit-mode button needed. Hidden
             // only when the plan overlay itself is hidden, or while another sub-mode owns the corridor colours.
             if (SetbackEditMode || (!_linesHidden && !ClassEditMode && !ElevationEditMode
@@ -1846,6 +1856,8 @@ namespace NetworkDesigner.Terrain
             _mesh.Clear(); _mesh.SetVertices(_v); _mesh.SetColors(_col); _mesh.SetIndices(_idx, MeshTopology.Lines, 0); _mesh.RecalculateBounds();
             _nodeMesh.Clear(); _nodeMesh.SetVertices(_nv); _nodeMesh.SetNormals(_nn); _nodeMesh.SetTriangles(_nidx, 0); _nodeMesh.RecalculateBounds();
             _nodeMr.enabled = PlanGuides.ShowNodes && LinesVisible && Graph.Nodes.Count > 0;   // "Show nodes" + "Plan lines" + palette gate the pucks
+            _laneMesh.Clear(); _laneMesh.SetVertices(_lnv); _laneMesh.SetNormals(_lnn); _laneMesh.SetTriangles(_lnidx, 0); _laneMesh.RecalculateBounds();
+            if (_laneMr != null) _laneMr.enabled = PlanGuides.ShowNodes && LinesVisible && _lnv.Count > 0;   // gated like the node pucks
             if (_mr != null) _mr.enabled = LinesVisible || (_paletteActive && (SetbackEditMode || ClassEditMode));   // overlay for setback handles / class colours (palette-active only)
             if (_nodeMat != null) _nodeMat.color = PlanGuides.RoadNodeColor;   // live colour
             // Topology may have shifted node indices — clear the hover so the per-frame driver re-resolves it cleanly
@@ -2228,6 +2240,48 @@ namespace NetworkDesigner.Terrain
             EmitPuck(_nv, _nn, _nidx, c, radius, baseY, topY);
         }
 
+        // PROTOTYPE: a small blue puck per TRAFFIC lane at each end of every corridor edge — the per-lane handle
+        // you'll grab to attach/extend an individual lane (vs the corridor node, which manages the whole segment).
+        // Read-only for now: no picking/selection/extend yet — just to see how they look/feel.
+        void DrawLaneNodes(ITerrainSurface field)
+        {
+            if (!PlanGuides.ShowNodes || !LinesVisible) return;
+            float radius = Mathf.Max(0.09f, NodePuckRadius * 0.375f);               // ~25% smaller than the first prototype size
+            float puckTop = Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+            var bands = new List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand>();
+            for (int ei = 0; ei < Graph.Edges.Count; ei++)
+            {
+                LineEdge e = Graph.Edges[ei];
+                if (e == null || e.A < 0 || e.B < 0 || e.A >= Graph.Nodes.Count || e.B >= Graph.Nodes.Count) continue;
+                var cfg = NetworkDesigner.Roads.RoadProfileLibrary.ResolveConfig(e.Profile);
+                if (cfg == null || cfg.Corridor == null) continue;                   // prototype: corridor roads only
+                bands.Clear();
+                var xs = NetworkDesigner.Roads.RoadCrossSectionBuilder.FromStack(cfg.Corridor, bands);
+                float center = xs.Center();
+                EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
+                float chord = Vector2.Distance(p0, p3);
+                float inset = chord > 0.01f ? Mathf.Clamp01(2.5f / chord) : 0f;       // ~2.5 m in from each node end
+                EmitLaneRow(field, p0, p1, p2, p3, inset, bands, center, radius, puckTop);
+                EmitLaneRow(field, p0, p1, p2, p3, 1f - inset, bands, center, radius, puckTop);
+            }
+        }
+
+        void EmitLaneRow(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t,
+                         List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand> bands, float center, float radius, float puckTop)
+        {
+            Vector2 pos = LineGraph.Bezier(p0, p1, p2, p3, t);
+            Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, t);
+            Vector2 perp = tan.sqrMagnitude > 1e-8f ? new Vector2(-tan.y, tan.x).normalized : Vector2.right;
+            foreach (var b in bands)
+            {
+                if (b.Type != NetworkDesigner.Model.CorridorType.Traffic) continue;
+                float off = (b.U0 + b.U1) * 0.5f - center;
+                Vector2 lp = pos + perp * off;
+                float by = (field != null ? field.SampleHeight(lp.x, lp.y) : 0f) + Lift;
+                EmitPuck(_lnv, _lnn, _lnidx, lp, radius, by, by + puckTop);
+            }
+        }
+
         // A short low-poly cylinder puck (16-sided cap + side wall) into the given vertex/normal/triangle lists.
         // Shared by the base node mesh (DrawPuck) and the per-frame hover overlay.
         static void EmitPuck(List<Vector3> v, List<Vector3> nrm, List<int> idx, Vector2 c, float radius, float baseY, float topY)
@@ -2342,6 +2396,17 @@ namespace NetworkDesigner.Terrain
             _nodeMf.sharedMesh = _nodeMesh;
             _nodeMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(PlanGuides.RoadNodeColor, 0.2f, "RoadPlanNodeMat");
             _nodeMr.sharedMaterial = _nodeMat;
+
+            // PROTOTYPE: lane-node puck layer (one blue puck per traffic lane at each segment end).
+            _laneGo = new GameObject(RootName + "_LaneNodes") { hideFlags = HideFlags.DontSave };
+            _laneGo.transform.SetParent(_root.transform, false);
+            _laneMf = _laneGo.AddComponent<MeshFilter>();
+            _laneMr = _laneGo.AddComponent<MeshRenderer>();
+            _laneMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _laneMr.receiveShadows = false;
+            _laneMesh = new Mesh { name = "RoadPlanLaneNodesMesh" };
+            _laneMf.sharedMesh = _laneMesh;
+            _laneMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(_RoadLaneNodeColor, 0.2f, "RoadPlanLaneNodeMat");
+            _laneMr.sharedMaterial = _laneMat;
 
             _hoverGo = new GameObject(RootName + "_NodeHover") { hideFlags = HideFlags.DontSave };
             _hoverGo.transform.SetParent(_root.transform, false);
