@@ -2442,20 +2442,6 @@ namespace NetworkDesigner.Terrain
             // Sync the setback HANDLES to the resolver's ACTUAL setbacks (acute/secondary boosts push them far past
             // the flat default), so the orange rings sit where the road really sets back instead of at a fixed 10 m.
             var resolvedVg = NetworkDesigner.Geometry.GeometryResolver.ResolveNetwork(net);
-            // TEMP DIAG: dump per-vertex lane connectivity so we can see whether the through-connection forms at a
-            // fork/continuation node (cars dead-end at a node when no inbound→outbound lane connection exists).
-            foreach (var vg in resolvedVg)
-            {
-                if (vg == null) continue;
-                var sb = new System.Text.StringBuilder();
-                sb.Append($"[Conn] {vg.VertexId} appr:");
-                if (vg.Approaches != null) foreach (var ap in vg.Approaches)
-                    sb.Append($" {ap.RoadId}/{ap.End}(AB{(ap.LaneEndsAB != null ? ap.LaneEndsAB.Count : 0)},BA{(ap.LaneEndsBA != null ? ap.LaneEndsBA.Count : 0)})");
-                sb.Append($" | conns({(vg.Connectivity != null ? vg.Connectivity.Count : 0)}):");
-                if (vg.Connectivity != null) foreach (var cn in vg.Connectivity)
-                    sb.Append($" {cn.From.RoadId}.{cn.From.Direction}[{cn.From.Index}]->{cn.To.RoadId}.{cn.To.Direction}[{cn.To.Index}]");
-                Debug.Log(sb.ToString());
-            }
             var sbMap = new System.Collections.Generic.Dictionary<int, float>();
             foreach (var vg in resolvedVg)
             {

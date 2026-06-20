@@ -144,7 +144,7 @@ namespace NetworkDesigner.Roads
                     // Flat at the node design grade — that's where every approaching road body's end is pinned, so
                     // the pad sits flush with them. (Draping the pad to raw terrain makes it dip below the bodies on
                     // fill, where the ground is under the road surface — a blade. The node grade is the right datum.)
-                    BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId);
+                    BuildIntersectionPad(ring, v.Position, gy, depth, root.transform, "X_" + vg.VertexId, groundAt, follow);
                     // Overlay the raised edge stack (shoulder/sidewalk + curb + parapet) around corners whose
                     // flanking approaches share a profile. Additive on top of the flat pad; no-op (no GO) when
                     // nothing matches or there's no edge stack, so disparate/edgeless junctions are unchanged.
@@ -242,17 +242,9 @@ namespace NetworkDesigner.Roads
         // (rim wall + bottom fan) so it fills the excavated cut. SINGLE-sided with consistent winding (top up,
         // bottom down, rim out) so RecalculateNormals lights it correctly — double-siding cancels the normals
         // and renders the pad black. The ring is first oriented CW in (x,z) so the fixed windings face right.
-        static void BuildIntersectionPad(List<Vector2> ring, Vector2 center, float gradeY, float depth, Transform parent, string name)
+        static void BuildIntersectionPad(List<Vector2> ring, Vector2 center, float gradeY, float depth, Transform parent, string name,
+                                         Func<Vector2, float> groundAt = null, float follow = 0f)
         {
-            // TEMP DIAG: pad shape — centroid + the point farthest from it (a blade shows up as one far point).
-            {
-                Vector2 dc = Vector2.zero; for (int i = 0; i < ring.Count; i++) dc += ring[i]; if (ring.Count > 0) dc /= ring.Count;
-                int far = -1; float farD = -1f, near = float.MaxValue;
-                for (int i = 0; i < ring.Count; i++) { float d = (ring[i] - dc).magnitude; if (d > farD) { farD = d; far = i; } if (d < near) near = d; }
-                Debug.Log($"[Road] pad '{name}' gradeY={gradeY:0.0} depth={depth:0.0} ring({ring.Count}) " +
-                          $"near={near:0.0} far={farD:0.0} farPt={(far >= 0 ? $"({ring[far].x:0.0},{ring[far].y:0.0})" : "-")} centroid=({dc.x:0.0},{dc.y:0.0})");
-            }
-
             // Defense-in-depth against the triangular-spike artifact: first drop NaN/∞ points, then drop OUTLIERS —
             // points far beyond the junction's TYPICAL ring radius. A single bad outline point (e.g. a near-parallel
             // fillet intersection) would otherwise fan into a thin spike off the road edge. Median-based so it adapts
@@ -302,12 +294,24 @@ namespace NetworkDesigner.Roads
             // Centroid (always interior for a convex/near-convex ring) — fan fallback centre and the rim's inner anchor.
             Vector2 cen = Vector2.zero; for (int i = 0; i < n; i++) cen += ring[i]; cen *= 1f / n;
 
-            float botY = gradeY - Mathf.Max(0f, depth);
+            // Per-vertex TOP elevation: DRAPE toward the ground by `follow`, exactly like the road body, so the pad
+            // sits flush on a terrain-following road instead of standing proud as a flat slab where the road drapes
+            // below the node grade. At the node ground≈gradeY (pins there); away it follows terrain. follow<=0 / no
+            // groundAt → flat node grade (design-grade roads, real graded intersections).
+            float dd = Mathf.Max(0f, depth);
+            bool drape = groundAt != null && follow > 0.001f;
+            float k = Mathf.Clamp01(follow);
+            float TopY(Vector2 xz) => drape ? Mathf.Lerp(gradeY, groundAt(xz), k) : gradeY;
+
+            var topYs = new float[n];
+            for (int i = 0; i < n; i++) topYs[i] = TopY(ring[i]);
+            float cenTopY = TopY(cen);
+
             var verts = new List<Vector3>(2 * n + 2);
-            for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, gradeY, ring[i].y));   // 0..n-1   top ring
-            for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, botY, ring[i].y));      // n..2n-1  bottom ring
-            int ct = verts.Count; verts.Add(new Vector3(cen.x, gradeY, cen.y));                  // 2n       top centre
-            int cb = verts.Count; verts.Add(new Vector3(cen.x, botY, cen.y));                    // 2n+1     bottom centre
+            for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, topYs[i], ring[i].y));        // 0..n-1   top ring
+            for (int i = 0; i < n; i++) verts.Add(new Vector3(ring[i].x, topYs[i] - dd, ring[i].y));   // n..2n-1  bottom ring
+            int ct = verts.Count; verts.Add(new Vector3(cen.x, cenTopY, cen.y));                       // 2n       top centre
+            int cb = verts.Count; verts.Add(new Vector3(cen.x, cenTopY - dd, cen.y));                  // 2n+1     bottom centre
 
             // Top face: ear-clip the ring so a non-star-shaped (asymmetric/acute) outline triangulates without the
             // spikes a vertex/centroid FAN throws when the centre isn't visible to every edge. Fall back to a centroid
