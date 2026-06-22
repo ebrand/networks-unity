@@ -42,8 +42,22 @@ namespace NetworkDesigner.Terrain
         // so it's regenerated on every road (re)build and must NOT be persisted (filtered out of CollectData). Null ⇒
         // a hand-drawn edge. Runtime-only — never written to a save. See RailTrackLayer.RegenerateRoadCorridors.
         [System.NonSerialized] public string CorridorKey;
+        // Lane-level attachment: this edge's A end was extended off a CONTIGUOUS group of lanes of another edge
+        // (a lane fork / ramp). Drives lane connectivity + the start-lane offset in the resolver. Null = normal edge.
+        // Runtime-only for now (not yet written to saves — source is referenced by edge index, which shifts on split).
+        [System.NonSerialized] public LaneAttach Attach;
         public LineEdge() { }
         public LineEdge(int a, int b) { A = a; B = b; }
+    }
+
+    // Records that an edge's A end attaches to SourceEdge's lanes [FirstLane .. FirstLane+LaneCount-1] at SourceEnd
+    // (0 = the source edge's A node, 1 = its B node). The handle behind a lane fork/ramp.
+    public class LaneAttach
+    {
+        public int SourceEdge = -1;
+        public int SourceEnd;     // 0 = source A end, 1 = source B end
+        public int FirstLane;
+        public int LaneCount = 1;
     }
 
     // An under-deck arch carrying a stretch of a bridge: springs from the trestle at StartArc to the one at EndArc

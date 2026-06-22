@@ -21,6 +21,10 @@ namespace NetworkDesigner.Terrain
 
         [Tooltip("Profile (road-config.json id/name) applied to NEW segments as you draw them; empty = use RoadWidth.")]
         public string ActiveProfileId = "";
+        // After drawing a segment, end the chain instead of continuing it — each lane-snapped segment is standalone, so
+        // the next click re-snaps fresh (and the snap preview, gated on no-open-chain, returns immediately). To continue
+        // a road, snap to the just-drawn segment's end lane nodes. (Multi-segment same-profile chains become the edge case.)
+        public bool AutoEndChain = true;
         [Tooltip("Fallback width (m) for segments with no profile — corridor footprint either side of the centreline.")]
         public float RoadWidth = 14f;
 
@@ -151,7 +155,42 @@ namespace NetworkDesigner.Terrain
         readonly List<Vector3> _lnv = new List<Vector3>();
         readonly List<Vector3> _lnn = new List<Vector3>();
         readonly List<int> _lnidx = new List<int>();
-        static readonly Color _RoadLaneNodeColor = new Color(0.25f, 0.55f, 1f, 0.9f);   // blue, distinct from the corridor node pucks
+        static readonly Color _RoadLaneNodeColor = new Color(0.25f, 0.55f, 1f, 0.5f);   // blue, semi-transparent (subordinate to the corridor node pucks)
+        // Per-lane handle record: which edge/end/lane it is + its world XZ and elevation (for screen-pick + hover).
+        public struct LaneNode { public int Edge; public int End; public int Lane; public Vector2 Pos; public float Y; }
+        readonly List<LaneNode> _laneNodes = new List<LaneNode>();
+        public System.Collections.Generic.IReadOnlyList<LaneNode> LaneNodes => _laneNodes;
+        [System.NonSerialized] LaneAttach _pendingAttach;     // attach to stamp on the first edge of a lane-snapped chain
+        [System.NonSerialized] int _pendingAttachNode = -1;   // the lane-snapped start node carrying _pendingAttach
+        // Segment-node pucks are PERMANENTLY hidden in plain (lane) mode — the lane nodes are the only handles. They
+        // reappear only in special edit modes (elevation/excavate/build/setback/class/bridge) and, later, when a
+        // specific intersection is opened in "Intersection mode". _segmentPuckNodes (the "treated" junctions) is kept
+        // for intersection-click detection. A node with no lane nodes (non-corridor) still shows so it's grabbable.
+        readonly HashSet<int> _segmentPuckNodes = new HashSet<int>();     // junctions (corners/transitions/3+ way) — used to detect intersections
+        readonly HashSet<int> _nodesWithLaneNodes = new HashSet<int>();   // nodes that have derived lane nodes
+        bool ShowAllSegmentPucks => ElevationEditMode || ExcavateSelectMode || BuildSegmentMode || BridgeSelectMode || SetbackEditMode || ClassEditMode;
+        // True when node i's segment puck is hidden because its lanes are the handles (any lane-bearing node, plain mode).
+        public bool SegmentNodeHidden(int i) => !ShowAllSegmentPucks && _nodesWithLaneNodes.Contains(i);
+        // Lane-node hover overlay (golden, scaled — mirrors the corridor node hover).
+        GameObject _laneHoverGo; MeshFilter _laneHoverMf; MeshRenderer _laneHoverMr; Mesh _laneHoverMesh; Material _laneHoverMat;
+        readonly List<Vector3> _lhv = new List<Vector3>();
+        readonly List<Vector3> _lhn = new List<Vector3>();
+        readonly List<int> _lhidx = new List<int>();
+        [System.NonSerialized] int _hoverLane = -1;
+        public int HoverLane => _hoverLane;
+        public LaneNode? HoveredLaneNode => (_hoverLane >= 0 && _hoverLane < _laneNodes.Count) ? _laneNodes[_hoverLane] : (LaneNode?)null;
+        // PROXIMITY REVEAL: lane pucks render only for the corridor node nearest the cursor (set per frame). The
+        // _laneNodes RECORDS are all built each Rebuild (for picking); the rendered MESH shows only this node's lanes.
+        [System.NonSerialized] int _revealNode = -1;
+        // Lane SELECTION: a CONTIGUOUS lane range on one (edge,end). Stored by identity so it survives rebuilds.
+        [System.NonSerialized] int _selEdge = -1, _selEnd = -1, _selLo = -1, _selHi = -1;
+        public bool HasLaneSelection => _selEdge >= 0;
+        public int SelEdge => _selEdge; public int SelEnd => _selEnd; public int SelLaneLo => _selLo; public int SelLaneHi => _selHi;
+        GameObject _laneSelGo; MeshFilter _laneSelMf; MeshRenderer _laneSelMr; Mesh _laneSelMesh; Material _laneSelMat;
+        readonly List<Vector3> _lsv = new List<Vector3>();
+        readonly List<Vector3> _lsn = new List<Vector3>();
+        readonly List<int> _lsidx = new List<int>();
+        static readonly Color _RoadLaneSelColor = new Color(0.45f, 0.5f, 1f, 0.5f);   // blue = cursor lane-node preview / snap indication (~50% alpha)
         // Hovered-node highlight: a SEPARATE per-frame overlay (golden, scaled) rebuilt only when the hover changes.
         GameObject _hoverGo; MeshFilter _hoverMf; MeshRenderer _hoverMr; Mesh _hoverMesh; Material _hoverMat;
         readonly List<Vector3> _hv = new List<Vector3>();
@@ -191,6 +230,8 @@ namespace NetworkDesigner.Terrain
             if (_nodeMr != null) _nodeMr.enabled = PlanGuides.ShowNodes && vis && Graph != null && Graph.Nodes.Count > 0;
             if (_laneMr != null) _laneMr.enabled = PlanGuides.ShowNodes && vis && _lnv.Count > 0;   // PROTOTYPE lane pucks
             if (_hoverMr != null && !vis) _hoverMr.enabled = false;
+            if (_laneHoverMr != null && !vis) _laneHoverMr.enabled = false;
+            if (_laneSelMr != null) _laneSelMr.enabled = PlanGuides.ShowNodes && vis && _lsv.Count > 0;
             if (_tailMr != null && !vis) _tailMr.enabled = false;
         }
         static readonly Color _RoadNodeHoverColor = new Color(1f, 0.85f, 0.3f, 0.85f);   // golden, matches rail pucks
@@ -236,9 +277,15 @@ namespace NetworkDesigner.Terrain
             Vector2 p = new Vector2(hit.x, hit.z);
             if (_chainTail < 0)   // start a chain: grab an existing node/edge so corridors branch + join
             {
+                _pendingAttach = null; _pendingAttachNode = -1;
+                // LANE-LEVEL start: with an N-lane profile, snap the start onto N contiguous lane nodes of an existing
+                // road end (1-lane → 1 node, 2-lane → 2 contiguous), so the new road extends those specific lanes.
+                if (TrySnapStartToLaneGroup(p, out int laneStart, out LaneAttach att))
+                { _chainTail = laneStart; _pendingAttach = att; _pendingAttachNode = laneStart; _freshStartTail = true; _cornerPending = false; return; }
                 // The screen-picked hovered node is parallax-proof (the elevated puck vs the terrain hit below it),
                 // so prefer it over the world-radius pick — otherwise clicking a node drops a duplicate beside it.
                 int near = (_hoverNode >= 0 && _hoverNode < Graph.Nodes.Count) ? _hoverNode : Graph.NearestNode(p, NodePickRadius);
+                if (near >= 0 && SegmentNodeHidden(near)) near = -1;   // hidden (lane-handled) end → don't start on its corridor node
                 if (near >= 0) { _chainTail = near; _freshStartTail = false; }                  // existing node → has edges
                 else if (NearestRoadEdge(p, out int ei, out float tt)) { _chainTail = Graph.SplitEdge(ei, tt); _freshStartTail = false; Rebuild(field); }  // split → has edges
                 else { _chainTail = Graph.AddNode(p); _freshStartTail = true; }                  // brand-new start node: keep until its first edge
@@ -256,7 +303,7 @@ namespace NetworkDesigner.Terrain
                 int endc = NearestOrNew(p);
                 if (endc == _chainTail || (Graph.Nodes[endc] - Graph.Nodes[_chainTail]).sqrMagnitude < MinSegLenSq) return;
                 AddCurvedEdge(_chainTail, endc, _corner);
-                _chainTail = endc; _cornerPending = false; _freshStartTail = false;
+                _chainTail = AutoEndChain ? -1 : endc; _cornerPending = false; _freshStartTail = false;
                 Rebuild(field);
                 return;
             }
@@ -271,12 +318,15 @@ namespace NetworkDesigner.Terrain
             { Debug.Log("[Road] segment ignored: endpoints coincide (degenerate edge)."); return; }
             if (Graph.AddEdge(start, end))
             {
-                Graph.Edges[Graph.Edges.Count - 1].Profile = ActiveProfileId;   // tag the new segment
+                LineEdge ne = Graph.Edges[Graph.Edges.Count - 1];
+                ne.Profile = ActiveProfileId;   // tag the new segment
+                if (_pendingAttach != null && start == _pendingAttachNode)   // first edge of a lane-snapped chain → carry the attach
+                { ne.Attach = _pendingAttach; _pendingAttach = null; _pendingAttachNode = -1; }
                 SplitSegmentCrossings(start, end, ActiveProfileId);             // drawn OVER existing roads → make intersection nodes
                 if (AutoBridge) TryAutoBridge(field, start, end, ActiveProfileId);   // dip under the new straight span → bridge it
             }
             else Debug.Log("[Road] segment already exists between those nodes — extending the chain from there.");
-            _chainTail = end; _freshStartTail = false;   // the tail now has an edge (new or pre-existing) → no longer a fresh start
+            _chainTail = AutoEndChain ? -1 : end; _freshStartTail = false;   // end the chain (standalone segment) unless chaining is on
             Rebuild(field);
         }
 
@@ -1593,13 +1643,14 @@ namespace NetworkDesigner.Terrain
         // SCREEN-SPACE node pick: nearest node whose puck projects within `pixelRadius` of the cursor. Robust to
         // camera angle and zoom (terrain-XZ picking drifts under oblique views and shrinks to sub-pixel when zoomed
         // out — the cause of "click a few times to select"). -1 if none.
-        public int PickNodeScreen(Camera cam, ITerrainSurface field, Vector2 screenPos, float pixelRadius)
+        public int PickNodeScreen(Camera cam, ITerrainSurface field, Vector2 screenPos, float pixelRadius, bool preferLaneNodes = false)
         {
             if (cam == null || Graph == null || Graph.Nodes.Count == 0) return -1;
             int best = -1; float bestSq = pixelRadius * pixelRadius;
             float puck = Mathf.Max(0.02f, PlanGuides.NodePuckHeight) * 0.5f;
             for (int i = 0; i < Graph.Nodes.Count; i++)
             {
+                if (preferLaneNodes && SegmentNodeHidden(i)) continue;   // end/continuation → grab its lane node, not the (hidden) segment node
                 Vector2 c = Graph.Nodes[i];
                 Vector3 sp = cam.WorldToScreenPoint(new Vector3(c.x, DesignElevation(i, field) + puck, c.y));
                 if (sp.z <= 0f) continue;   // behind the camera
@@ -1825,12 +1876,13 @@ namespace NetworkDesigner.Terrain
         {
             EnsureRoot();
             _v.Clear(); _idx.Clear(); _col.Clear(); _nv.Clear(); _nn.Clear(); _nidx.Clear();
-            _lnv.Clear(); _lnn.Clear(); _lnidx.Clear();
+            _lnv.Clear(); _lnn.Clear(); _lnidx.Clear(); _laneNodes.Clear(); _nodesWithLaneNodes.Clear(); _segmentPuckNodes.Clear();
 
             int nc = Graph.Nodes.Count;
             var treated = new bool[nc];   // node gets a junction box (trim + outline)
             var isX = new bool[nc];       // true = intersection (3+ roads) → gets stop bars / crosswalks
             ComputeJunctions(treated, isX);
+            for (int v = 0; v < nc; v++) if (treated[v]) _segmentPuckNodes.Add(v);   // corners/transitions/intersections keep a segment puck
             var boxHalf = new float[nc];  // square junction box: half-side + alignment axis (largest corridor)
             var boxAx = new Vector2[nc];
             for (int v = 0; v < nc; v++) if (treated[v]) ComputeBox(v, out boxHalf[v], out boxAx[v]);
@@ -1845,8 +1897,10 @@ namespace NetworkDesigner.Terrain
                 BuildCorridorEdge(field, p0, p1, p2, p3, e, ei, ta, tb);   // lane schematic, trimmed back to the box
             }
             for (int v = 0; v < nc; v++) if (treated[v]) BuildJunction(field, v, boxHalf[v], boxAx[v], isX[v]);
-            for (int i = 0; i < Graph.Nodes.Count; i++) DrawPuck(field, i);   // into the node mesh (own colour + toggle)
-            DrawLaneNodes(field);   // PROTOTYPE: blue per-lane pucks at each segment end
+            DrawLaneNodes(field);   // record lane nodes FIRST so SegmentNodeHidden knows which ends are lane-handled
+            // Segment-node pucks: only at junctions (corners/transitions/intersections) + special edit modes. At plain
+            // ends and colinear continuations the lane nodes are the handles, so the segment node is hidden there.
+            for (int i = 0; i < Graph.Nodes.Count; i++) if (!SegmentNodeHidden(i)) DrawPuck(field, i);
             // Setback rings show (and stay draggable) alongside the plan lines — no edit-mode button needed. Hidden
             // only when the plan overlay itself is hidden, or while another sub-mode owns the corridor colours.
             if (SetbackEditMode || (!_linesHidden && !ClassEditMode && !ElevationEditMode
@@ -1864,6 +1918,10 @@ namespace NetworkDesigner.Terrain
             // next frame (avoids a stale index highlighting the wrong node).
             _hoverNode = -1;
             if (_hoverMr != null) { _hoverMr.enabled = false; _hoverMesh.Clear(); }
+            _hoverLane = -1;   // lane-node indices shifted — force the hover overlay to re-resolve next frame
+            if (_laneHoverMr != null) { _laneHoverMr.enabled = false; _laneHoverMesh.Clear(); }
+            _revealNode = -1;  // lane records rebuilt — force the proximity reveal to re-emit next frame
+            RebuildLaneSelOverlay(field);   // re-resolve the green selection against the fresh lane-node list
         }
 
         // ---- intersections / junctions ----
@@ -2240,13 +2298,10 @@ namespace NetworkDesigner.Terrain
             EmitPuck(_nv, _nn, _nidx, c, radius, baseY, topY);
         }
 
-        // PROTOTYPE: a small blue puck per TRAFFIC lane at each end of every corridor edge — the per-lane handle
-        // you'll grab to attach/extend an individual lane (vs the corridor node, which manages the whole segment).
-        // Read-only for now: no picking/selection/extend yet — just to see how they look/feel.
+        // Build the lane-node RECORDS (one per traffic lane at each corridor-edge end). Records only — the rendered
+        // pucks are emitted on demand by SetRevealNode for the corridor node nearest the cursor (proximity reveal).
         void DrawLaneNodes(ITerrainSurface field)
         {
-            if (!PlanGuides.ShowNodes || !LinesVisible) return;
-            float radius = Mathf.Max(0.09f, NodePuckRadius * 0.375f);               // ~25% smaller than the first prototype size
             float puckTop = Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
             var bands = new List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand>();
             for (int ei = 0; ei < Graph.Edges.Count; ei++)
@@ -2254,32 +2309,76 @@ namespace NetworkDesigner.Terrain
                 LineEdge e = Graph.Edges[ei];
                 if (e == null || e.A < 0 || e.B < 0 || e.A >= Graph.Nodes.Count || e.B >= Graph.Nodes.Count) continue;
                 var cfg = NetworkDesigner.Roads.RoadProfileLibrary.ResolveConfig(e.Profile);
-                if (cfg == null || cfg.Corridor == null) continue;                   // prototype: corridor roads only
+                if (cfg == null || cfg.Corridor == null) continue;                   // corridor roads only
                 bands.Clear();
                 var xs = NetworkDesigner.Roads.RoadCrossSectionBuilder.FromStack(cfg.Corridor, bands);
                 float center = xs.Center();
                 EdgeBezier(e, out Vector2 p0, out Vector2 p1, out Vector2 p2, out Vector2 p3);
                 float chord = Vector2.Distance(p0, p3);
                 float inset = chord > 0.01f ? Mathf.Clamp01(2.5f / chord) : 0f;       // ~2.5 m in from each node end
-                EmitLaneRow(field, p0, p1, p2, p3, inset, bands, center, radius, puckTop);
-                EmitLaneRow(field, p0, p1, p2, p3, 1f - inset, bands, center, radius, puckTop);
+                RecordLaneRow(field, p0, p1, p2, p3, inset, bands, center, puckTop, ei, 0);        // A end
+                RecordLaneRow(field, p0, p1, p2, p3, 1f - inset, bands, center, puckTop, ei, 1);   // B end
+                _nodesWithLaneNodes.Add(e.A); _nodesWithLaneNodes.Add(e.B);   // both ends are handled at the lane level
             }
         }
 
-        void EmitLaneRow(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t,
-                         List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand> bands, float center, float radius, float puckTop)
+        void RecordLaneRow(ITerrainSurface field, Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t,
+                           List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand> bands, float center, float puckTop,
+                           int edgeIndex, int end)
         {
             Vector2 pos = LineGraph.Bezier(p0, p1, p2, p3, t);
             Vector2 tan = LineGraph.BezierTangent(p0, p1, p2, p3, t);
             Vector2 perp = tan.sqrMagnitude > 1e-8f ? new Vector2(-tan.y, tan.x).normalized : Vector2.right;
+            int lane = 0;
+            float radius = Mathf.Max(0.09f, NodePuckRadius * 0.375f);
             foreach (var b in bands)
             {
                 if (b.Type != NetworkDesigner.Model.CorridorType.Traffic) continue;
                 float off = (b.U0 + b.U1) * 0.5f - center;
                 Vector2 lp = pos + perp * off;
                 float by = (field != null ? field.SampleHeight(lp.x, lp.y) : 0f) + Lift;
-                EmitPuck(_lnv, _lnn, _lnidx, lp, radius, by, by + puckTop);
+                _laneNodes.Add(new LaneNode { Edge = edgeIndex, End = end, Lane = lane++, Pos = lp, Y = by + puckTop });
+                EmitPuck(_lnv, _lnn, _lnidx, lp, radius, by, by + puckTop);   // always-on: every lane node renders (segment nodes are hidden)
             }
+        }
+
+        // True if this lane node sits at graph node `nodeIdx` (its edge's A or B end).
+        bool LaneNodeAtGraphNode(LaneNode ln, int nodeIdx)
+        {
+            if (ln.Edge < 0 || ln.Edge >= Graph.Edges.Count) return false;
+            LineEdge e = Graph.Edges[ln.Edge];
+            return ln.End == 0 ? e.A == nodeIdx : e.B == nodeIdx;
+        }
+
+        // Graph node to REVEAL lane pucks for: the node owning the lane record nearest `xz` (within maxDist), else -1.
+        public int NearestLaneRevealNode(Vector2 xz, float maxDist)
+        {
+            int best = -1; float bestSq = maxDist * maxDist;
+            foreach (LaneNode ln in _laneNodes)
+            {
+                float dsq = (ln.Pos - xz).sqrMagnitude;
+                if (dsq < bestSq) { bestSq = dsq; best = ln.Edge >= 0 && ln.Edge < Graph.Edges.Count ? (ln.End == 0 ? Graph.Edges[ln.Edge].A : Graph.Edges[ln.Edge].B) : -1; }
+            }
+            return best;
+        }
+
+        // Render the lane pucks ONLY for the corridor node nearest the cursor (proximity reveal). Rebuilt on change.
+        public void SetRevealNode(ITerrainSurface field, int nodeIdx)
+        {
+            if (_laneMr == null || nodeIdx == _revealNode) return;
+            _revealNode = nodeIdx;
+            _lnv.Clear(); _lnn.Clear(); _lnidx.Clear();
+            int shown = 0;
+            if (nodeIdx >= 0)
+            {
+                float radius = Mathf.Max(0.09f, NodePuckRadius * 0.375f);
+                float puckTop = Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+                foreach (LaneNode ln in _laneNodes)
+                    if (LaneNodeAtGraphNode(ln, nodeIdx)) { EmitPuck(_lnv, _lnn, _lnidx, ln.Pos, radius, ln.Y - puckTop, ln.Y); shown++; }
+            }
+            _laneMesh.Clear();
+            _laneMesh.SetVertices(_lnv); _laneMesh.SetNormals(_lnn); _laneMesh.SetTriangles(_lnidx, 0); _laneMesh.RecalculateBounds();
+            _laneMr.enabled = shown > 0 && PlanGuides.ShowNodes && LinesVisible;
         }
 
         // A short low-poly cylinder puck (16-sided cap + side wall) into the given vertex/normal/triangle lists.
@@ -2340,6 +2439,224 @@ namespace NetworkDesigner.Terrain
             _hoverMesh.SetVertices(_hv); _hoverMesh.SetNormals(_hn); _hoverMesh.SetTriangles(_hidx, 0); _hoverMesh.RecalculateBounds();
         }
 
+        // Screen-space pick of the nearest LANE node (blue puck) within pixelRadius; -1 if none. Mirrors PickNodeScreen.
+        public int PickLaneNodeScreen(Camera cam, ITerrainSurface field, Vector2 screenPos, float pixelRadius)
+        {
+            if (cam == null || _laneNodes.Count == 0) return -1;
+            int best = -1; float bestSq = pixelRadius * pixelRadius;
+            for (int i = 0; i < _laneNodes.Count; i++)
+            {
+                LaneNode ln = _laneNodes[i];
+                Vector3 sp = cam.WorldToScreenPoint(new Vector3(ln.Pos.x, ln.Y, ln.Pos.y));
+                if (sp.z <= 0f) continue;   // behind the camera
+                float dsq = (new Vector2(sp.x, sp.y) - screenPos).sqrMagnitude;
+                if (dsq < bestSq) { bestSq = dsq; best = i; }
+            }
+            return best;
+        }
+
+        // Hover-highlight a lane node (golden, scaled up). idx is into LaneNodes; -1 clears. Mirrors SetHoverNode.
+        // showOverlay=false keeps the hover INDEX updated (the snap anchor needs it) but draws no golden puck — used in
+        // road draw mode where the N-lane snap halo is the only highlight (per-lane golden hover would compete).
+        public void SetHoverLane(ITerrainSurface field, int idx, bool showOverlay = true)
+        {
+            if (_laneHoverMr == null) return;                       // overlay not built yet
+            if (idx >= _laneNodes.Count) idx = -1;
+            bool changed = idx != _hoverLane;
+            _hoverLane = idx;                                       // always track the index (snap anchor)
+            if (!showOverlay) { if (_laneHoverMr.enabled) { _laneHoverMr.enabled = false; _laneHoverMesh.Clear(); } return; }
+            if (!changed) return;
+            _laneHoverMr.enabled = idx >= 0 && PlanGuides.ShowNodes && LinesVisible;
+            _laneHoverMesh.Clear();
+            if (idx < 0) return;
+            LaneNode ln = _laneNodes[idx];
+            float radius = Mathf.Max(0.09f, NodePuckRadius * 0.375f) * 1.5f;   // a touch larger than the lane puck
+            float topY = ln.Y;                                                 // ln.Y is already the puck top
+            float baseY = topY - Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+            _lhv.Clear(); _lhn.Clear(); _lhidx.Clear();
+            EmitPuck(_lhv, _lhn, _lhidx, ln.Pos, radius, baseY, topY + 0.03f);
+            _laneHoverMesh.SetVertices(_lhv); _laneHoverMesh.SetNormals(_lhn); _laneHoverMesh.SetTriangles(_lhidx, 0); _laneHoverMesh.RecalculateBounds();
+        }
+
+        // Select a lane node. additive (same edge+end) EXTENDS the contiguous range; otherwise starts a fresh
+        // single-lane selection. idx is into LaneNodes.
+        public void SelectLaneNode(int idx, bool additive, ITerrainSurface field)
+        {
+            if (idx < 0 || idx >= _laneNodes.Count) return;
+            LaneNode ln = _laneNodes[idx];
+            if (!additive || ln.Edge != _selEdge || ln.End != _selEnd)
+            {
+                _selEdge = ln.Edge; _selEnd = ln.End; _selLo = _selHi = ln.Lane;
+            }
+            else
+            {
+                _selLo = Mathf.Min(_selLo, ln.Lane);   // range [lo..hi] is contiguous by construction
+                _selHi = Mathf.Max(_selHi, ln.Lane);
+            }
+            RebuildLaneSelOverlay(field);
+        }
+
+        public void ClearLaneSelection(ITerrainSurface field)
+        {
+            _selEdge = _selEnd = _selLo = _selHi = -1;
+            RebuildLaneSelOverlay(field);
+        }
+
+        // (Re)build the green selection overlay from the current selection range, matching lane nodes by identity
+        // (edge,end,lane) so it survives index shifts after a Rebuild.
+        void RebuildLaneSelOverlay(ITerrainSurface field)
+        {
+            if (_laneSelMr == null) return;
+            _lsv.Clear(); _lsn.Clear(); _lsidx.Clear();
+            float radius = Mathf.Max(0.09f, NodePuckRadius * 0.375f) * 1.35f;
+            float puckTop = Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+            int n = 0;
+            if (_selEdge >= 0)
+                foreach (LaneNode ln in _laneNodes)
+                    if (ln.Edge == _selEdge && ln.End == _selEnd && ln.Lane >= _selLo && ln.Lane <= _selHi)
+                    {
+                        EmitPuck(_lsv, _lsn, _lsidx, ln.Pos, radius, ln.Y - puckTop, ln.Y + 0.04f);
+                        n++;
+                    }
+            _laneSelMesh.Clear();
+            _laneSelMesh.SetVertices(_lsv); _laneSelMesh.SetNormals(_lsn); _laneSelMesh.SetTriangles(_lsidx, 0); _laneSelMesh.RecalculateBounds();
+            _laneSelMr.enabled = n > 0 && PlanGuides.ShowNodes && LinesVisible;
+        }
+
+        // PHASE 3: extend a new segment off the selected lane group to `endXZ`. The new edge starts at the selected
+        // lanes' CENTROID (so it diverges from those lanes), carries the active design profile, and records a
+        // LaneAttach back to the source lanes (drives connectivity in Phase 4). Returns false if nothing's selected
+        // or the span is degenerate. Fork semantics: the source keeps all its lanes; this is an additional branch.
+        public bool ExtendFromLaneSelection(ITerrainSurface field, Vector2 endXZ)
+        {
+            if (_selEdge < 0) return false;
+            Vector2 sum = Vector2.zero; int cnt = 0;
+            foreach (LaneNode ln in _laneNodes)
+                if (ln.Edge == _selEdge && ln.End == _selEnd && ln.Lane >= _selLo && ln.Lane <= _selHi) { sum += ln.Pos; cnt++; }
+            if (cnt == 0) return false;
+            Vector2 start = sum / cnt;
+            if ((endXZ - start).sqrMagnitude < 1f) return false;   // too short to be a segment
+
+            int k = _selHi - _selLo + 1;   // lanes pulled off
+            int newLanes = ProfileTrafficLaneCount(ActiveProfileId);
+            if (newLanes >= 0 && newLanes != k)
+                Debug.LogWarning($"[Road] Lane-extend: pulled {k} lane(s) but the active profile '{ActiveProfileId}' has " +
+                                 $"{newLanes} traffic lane(s). The new segment's free end will expose {newLanes} lane node(s), " +
+                                 $"not {k}. Pick a {k}-lane profile to match the lanes you're extending.");
+
+            int a = Graph.AddNode(start);
+            int b = Graph.AddNode(endXZ);
+            if (!Graph.AddEdge(a, b)) return false;
+            LineEdge e = Graph.Edges[Graph.Edges.Count - 1];
+            e.Profile = ActiveProfileId;
+            e.Attach = new LaneAttach { SourceEdge = _selEdge, SourceEnd = _selEnd, FirstLane = _selLo, LaneCount = k };
+
+            _selEdge = _selEnd = _selLo = _selHi = -1;   // consume the selection
+            Rebuild(field);
+            return true;
+        }
+
+        // Traffic-lane count of a profile's corridor stack; -1 if the profile has no corridor (can't count lanes).
+        static int ProfileTrafficLaneCount(string profileId)
+        {
+            var cfg = NetworkDesigner.Roads.RoadProfileLibrary.ResolveConfig(profileId);
+            if (cfg == null || cfg.Corridor == null) return -1;
+            var bands = new List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand>();
+            NetworkDesigner.Roads.RoadCrossSectionBuilder.FromStack(cfg.Corridor, bands);
+            int n = 0;
+            foreach (var b in bands) if (b.Type == NetworkDesigner.Model.CorridorType.Traffic) n++;
+            return n;
+        }
+
+        // With an N-lane profile active, snap a new road's START onto the N contiguous lane nodes of an existing road
+        // end nearest the cursor (1-lane → 1 node, 2-lane → 2 contiguous, …). Creates the start node at their centroid
+        // and returns the attach. False if the profile has no lanes, no lane node is near, or the end has fewer than N.
+        public bool PlainDrawMode => !ShowAllSegmentPucks;
+        readonly List<Vector2> _snapTargets = new List<Vector2>();   // scratch: the N existing lane positions a snap lands on
+        readonly List<float> _snapOffsets = new List<float>();       // scratch: the active profile's traffic-lane lateral offsets
+        public float CursorHeading;   // road heading (radians) for the free-floating cursor preview; Alt+scroll rotates it
+
+        // Non-destructive lane snap: for the active N-lane profile, find the N contiguous lane nodes of an existing road
+        // end nearest the cursor; output their centroid (the new road's start), the attach, and (optionally) the N target
+        // positions. Anchors on the hovered lane node (zoom-independent 26px pick) or a generous world search.
+        bool ComputeLaneSnap(Vector2 cursor, out Vector2 centroid, out LaneAttach attach, List<Vector2> targetsOut)
+        {
+            centroid = default; attach = null; targetsOut?.Clear();
+            int n = ProfileTrafficLaneCount(ActiveProfileId);
+            if (n <= 0 || _laneNodes.Count == 0) return false;
+            // Anchor STRICTLY on the hovered lane node (the 26px screen pick) so preview and commit are identical and
+            // position-independent. A world-radius fallback diverged here: the commit cursor is the centre-snapped
+            // 'place', so it grabbed the centre lanes and centred the new road. Removed — hover a lane to snap.
+            if (_hoverLane < 0 || _hoverLane >= _laneNodes.Count) return false;
+            int best = _hoverLane;
+            LaneNode b = _laneNodes[best];
+            int laneCountAtEnd = 0;
+            foreach (LaneNode ln in _laneNodes) if (ln.Edge == b.Edge && ln.End == b.End) laneCountAtEnd++;
+            if (laneCountAtEnd < n) return false;                          // end has fewer lanes than the new road
+            int lo = Mathf.Clamp(b.Lane - n / 2, 0, laneCountAtEnd - n);   // contiguous window of n lanes containing the nearest
+            int hi = lo + n - 1;
+            Vector2 sum = Vector2.zero; int cnt = 0;
+            foreach (LaneNode ln in _laneNodes)
+                if (ln.Edge == b.Edge && ln.End == b.End && ln.Lane >= lo && ln.Lane <= hi) { sum += ln.Pos; cnt++; targetsOut?.Add(ln.Pos); }
+            if (cnt != n) return false;
+            centroid = sum / cnt;
+            attach = new LaneAttach { SourceEdge = b.Edge, SourceEnd = b.End, FirstLane = lo, LaneCount = n };
+            return true;
+        }
+
+        bool TrySnapStartToLaneGroup(Vector2 cursor, out int startNode, out LaneAttach attach)
+        {
+            startNode = -1;
+            if (!ComputeLaneSnap(cursor, out Vector2 c, out attach, null)) return false;
+            startNode = Graph.AddNode(c);
+            return true;
+        }
+
+        // The active profile's traffic-lane lateral offsets from the corridor centre (for the free-floating ghost row).
+        void ProfileTrafficLaneOffsets(string profileId, List<float> offsetsOut)
+        {
+            offsetsOut.Clear();
+            var cfg = NetworkDesigner.Roads.RoadProfileLibrary.ResolveConfig(profileId);
+            if (cfg == null || cfg.Corridor == null) return;
+            var bands = new List<NetworkDesigner.Roads.RoadCrossSectionBuilder.StackBand>();
+            var xs = NetworkDesigner.Roads.RoadCrossSectionBuilder.FromStack(cfg.Corridor, bands);
+            float center = xs.Center();
+            foreach (var bd in bands) if (bd.Type == NetworkDesigner.Model.CorridorType.Traffic) offsetsOut.Add((bd.U0 + bd.U1) * 0.5f - center);
+        }
+
+        // Cursor preview: render one ghost lane node per traffic lane of the active profile. When the cursor is near an
+        // existing road end the ghosts SNAP onto that end's matching contiguous lane nodes; otherwise they follow the
+        // cursor in a row (spread along camera-right). Reuses the (now-free) green selection overlay mesh.
+        public void UpdateLaneSnapPreview(ITerrainSurface field, Camera cam, Vector2 cursor, bool active)
+        {
+            if (_laneSelMr == null) return;
+            _lsv.Clear(); _lsn.Clear(); _lsidx.Clear();
+            int shown = 0;
+            if (active)
+            {
+                float baseR = Mathf.Max(0.09f, NodePuckRadius * 0.375f);
+                float puckTop = Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
+                if (ComputeLaneSnap(cursor, out _, out _, _snapTargets) && _snapTargets.Count > 0)
+                {
+                    float halo = baseR * 1.8f;   // snapped → a clear halo on each of the N target lane nodes
+                    foreach (Vector2 p in _snapTargets)
+                    { float by = (field != null ? field.SampleHeight(p.x, p.y) : 0f) + Lift; EmitPuck(_lsv, _lsn, _lsidx, p, halo, by, by + puckTop); shown++; }
+                }
+                else
+                {
+                    float r = baseR * 1.2f;
+                    ProfileTrafficLaneOffsets(ActiveProfileId, _snapOffsets);
+                    Vector2 dir = new Vector2(Mathf.Cos(CursorHeading), Mathf.Sin(CursorHeading));   // road heading (Alt+scroll rotates)
+                    Vector2 perp = new Vector2(-dir.y, dir.x);                                        // across the road = lane spread
+                    foreach (float off in _snapOffsets)
+                    { Vector2 p = cursor + perp * off; float by = (field != null ? field.SampleHeight(p.x, p.y) : 0f) + Lift; EmitPuck(_lsv, _lsn, _lsidx, p, r, by, by + puckTop); shown++; }
+                }
+            }
+            _laneSelMesh.Clear();
+            _laneSelMesh.SetVertices(_lsv); _laneSelMesh.SetNormals(_lsn); _laneSelMesh.SetTriangles(_lsidx, 0); _laneSelMesh.RecalculateBounds();
+            _laneSelMr.enabled = shown > 0 && PlanGuides.ShowNodes && LinesVisible;
+        }
+
         // Highlight the OPEN chain's tail (vivid green, ~1.5×) so an in-progress chain is never invisible — right-click
         // ends it. Rebuilds only when the tail node (or its position, after an index shift) changes. `active`=false (road
         // not the live layer) hides it. Call every frame alongside SetHoverNode.
@@ -2353,11 +2670,11 @@ namespace NetworkDesigner.Terrain
             _tailMr.enabled = node >= 0 && PlanGuides.ShowNodes && LinesVisible;
             _tailMesh.Clear();
             if (node < 0) return;
-            float radius = Mathf.Max(0.2f, NodePuckRadius) * 1.5f;
+            float radius = Mathf.Max(0.09f, NodePuckRadius * 0.45f);   // small tail dot (lane-node scale) — not the old giant disc
             float terrainY = field != null ? field.SampleHeight(pos.x, pos.y) : 0f;
             float designY = Graph.GetNodeY(node);
             float baseY = (float.IsNaN(designY) ? terrainY : designY) + Lift;
-            float topY = baseY + Mathf.Max(0.02f, PlanGuides.NodePuckHeight) * 1.5f;
+            float topY = baseY + Mathf.Max(0.02f, PlanGuides.NodePuckHeight);
             _tv.Clear(); _tn.Clear(); _tidx.Clear();
             EmitPuck(_tv, _tn, _tidx, pos, radius, baseY, topY);
             _tailMesh.SetVertices(_tv); _tailMesh.SetNormals(_tn); _tailMesh.SetTriangles(_tidx, 0); _tailMesh.RecalculateBounds();
@@ -2407,6 +2724,30 @@ namespace NetworkDesigner.Terrain
             _laneMf.sharedMesh = _laneMesh;
             _laneMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(_RoadLaneNodeColor, 0.2f, "RoadPlanLaneNodeMat");
             _laneMr.sharedMaterial = _laneMat;
+
+            // Lane-node hover overlay (golden, like the corridor node hover).
+            _laneHoverGo = new GameObject(RootName + "_LaneHover") { hideFlags = HideFlags.DontSave };
+            _laneHoverGo.transform.SetParent(_root.transform, false);
+            _laneHoverMf = _laneHoverGo.AddComponent<MeshFilter>();
+            _laneHoverMr = _laneHoverGo.AddComponent<MeshRenderer>();
+            _laneHoverMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _laneHoverMr.receiveShadows = false;
+            _laneHoverMesh = new Mesh { name = "RoadPlanLaneHoverMesh" };
+            _laneHoverMf.sharedMesh = _laneHoverMesh;
+            _laneHoverMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(_RoadNodeHoverColor, 0.2f, "RoadPlanLaneHoverMat");
+            _laneHoverMr.sharedMaterial = _laneHoverMat;
+            _laneHoverMr.enabled = false;
+
+            // Lane-node SELECTION overlay (bright green, persistent).
+            _laneSelGo = new GameObject(RootName + "_LaneSel") { hideFlags = HideFlags.DontSave };
+            _laneSelGo.transform.SetParent(_root.transform, false);
+            _laneSelMf = _laneSelGo.AddComponent<MeshFilter>();
+            _laneSelMr = _laneSelGo.AddComponent<MeshRenderer>();
+            _laneSelMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; _laneSelMr.receiveShadows = false;
+            _laneSelMesh = new Mesh { name = "RoadPlanLaneSelMesh" };
+            _laneSelMf.sharedMesh = _laneSelMesh;
+            _laneSelMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(_RoadLaneSelColor, 0.2f, "RoadPlanLaneSelMat");
+            _laneSelMr.sharedMaterial = _laneSelMat;
+            _laneSelMr.enabled = false;
 
             _hoverGo = new GameObject(RootName + "_NodeHover") { hideFlags = HideFlags.DontSave };
             _hoverGo.transform.SetParent(_root.transform, false);

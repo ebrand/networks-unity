@@ -3254,7 +3254,7 @@ namespace NetworkDesigner.Terrain
             bool fresh = fly == null;
             if (fresh) fly = cam.gameObject.AddComponent<FlyCameraController>();
             fly.enabled = true;   // a saved scene / force-quit can leave the component disabled → middle-mouse look + zoom dead
-            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || ShiftBrushScroll() || MouseOverMinimap() || WallTopScroll() || BridgeArchTool.AdjustingRise;
+            fly.ScrollSuppressor = () => MouseOverActivePanel() || CmdSpeedScroll() || AltParallelScroll() || RoadCursorRotate() || ShiftBrushScroll() || MouseOverMinimap() || WallTopScroll() || BridgeArchTool.AdjustingRise;
             fly.LookSuppressor = () => MouseOverActivePanel();
             fly.InputSuppressor = () => ChunkMapEditor.IsOpen;   // freeze the camera while the map trimmer is open
             fly.GroundHeight = WorldGroundHeight; // terrain-aware altitude clamp
@@ -3278,6 +3278,10 @@ namespace NetworkDesigner.Terrain
         // Option(Alt) + wheel adjusts the parallel-track count (rail Build mode, parallel on).
         bool AltParallelScroll() => RailLayer != null
             && _lineActive is RailTrackLayer && RailLayer.ParallelEnabled
+            && (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt));
+
+        // Option(Alt) + wheel while drawing a road (before the first click) rotates the cursor's lane-node orientation.
+        bool RoadCursorRotate() => _lineActive is RoadPlanLayer && RoadPlanLayer.PlainDrawMode && !RoadPlanLayer.HasOpenChain
             && (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt));
 
         // Shift + wheel resizes the brush (sculpt/scatter — i.e. not while drawing lines,
@@ -3447,6 +3451,13 @@ namespace NetworkDesigner.Terrain
                 int notches = Mathf.RoundToInt(Input.mouseScrollDelta.y);
                 if (notches != 0)
                     RailLayer.ParallelCount = Mathf.Clamp(RailLayer.ParallelCount + (notches > 0 ? 1 : -1), 1, 8);
+            }
+            // Option(Alt) + wheel while drawing a road: rotate the cursor's lane-node orientation (~9°/notch).
+            if (RoadCursorRotate())
+            {
+                Vector2 sd = Input.mouseScrollDelta;
+                float raw = Mathf.Abs(sd.x) > Mathf.Abs(sd.y) ? sd.x : sd.y;
+                if (Mathf.Abs(raw) > 0.01f) RoadPlanLayer.CursorHeading += raw * 0.15f;
             }
             // Shift + wheel: resize the brush (proportional, ~10% per notch). macOS remaps
             // Shift+wheel to HORIZONTAL scroll, so the delta lands in .x not .y — read
@@ -3708,8 +3719,10 @@ namespace NetworkDesigner.Terrain
             bool roadSelecting = _lineActive is RoadPlanLayer
                 && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand)
                  || Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl));
-            UpdateBrushCursor(ShowBrushCursor && overTerrain && !roadSelecting, cursorVis,
-                              _lineActive != null ? 5f : BrushRadius);
+            // Hide the brush cursor while a line tool (road/rail/fence/…) is active — it's a sculpt/scatter affordance
+            // and just clutters line drawing (the white disc was being mistaken for a road node).
+            UpdateBrushCursor(ShowBrushCursor && overTerrain && !roadSelecting && _lineActive == null, cursorVis,
+                              BrushRadius);
             UpdateSlopeFill();
             // Node pucks: shown while rail is the active line layer; the node under the
             // cursor (and the armed auto-slope node A) highlight.
@@ -3739,10 +3752,23 @@ namespace NetworkDesigner.Terrain
             if (RoadPlanLayer != null)
             {
                 Camera hc = PickCamera != null ? PickCamera : Camera.main;
-                int hn = (_lineActive is RoadPlanLayer rdH && overTerrain && !rdH.ElevationEditMode && hc != null)
-                    ? RoadPlanLayer.PickNodeScreen(hc, Surf, new Vector2(Input.mousePosition.x, Input.mousePosition.y), 30f) : -1;
+                bool roadHover = _lineActive is RoadPlanLayer rdH && overTerrain && !rdH.ElevationEditMode && hc != null;
+                Vector2 mouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                // Lane nodes are always shown (segment nodes are hidden at ends), so no proximity reveal — just pick.
+                // Lane pucks are the finer handle → pick them first, with a GENEROUS radius so the small pucks aren't
+                // out-competed by the bigger corridor node; the corridor node only hovers when no lane puck is near.
+                int ln = roadHover ? RoadPlanLayer.PickLaneNodeScreen(hc, Surf, mouse, 40f) : -1;
+                // While a lane is selected you're pulling a new lane out → the next click extends. Don't let the
+                // corridor segment node grab hover during the pull (that's the awkward bit). Otherwise pick nodes
+                // normally (never the lane-attach free end, which belongs to its lane node).
+                bool laneExtending = roadHover && RoadPlanLayer.HasLaneSelection;
+                int hn = (roadHover && ln < 0 && !laneExtending) ? RoadPlanLayer.PickNodeScreen(hc, Surf, mouse, 30f, preferLaneNodes: true) : -1;
                 RoadPlanLayer.SetHoverNode(Surf, hn);
-                RoadPlanLayer.RefreshTailHighlight(Surf, _lineActive is RoadPlanLayer);   // show the open-chain tail (right-click to finish)
+                RoadPlanLayer.SetHoverLane(Surf, ln, showOverlay: false);   // track anchor index, but the N-lane snap halo is the only highlight
+                RoadPlanLayer.RefreshTailHighlight(Surf, false);   // no segment-whole node — lane nodes are the handles
+                // Cursor preview: one ghost lane node per lane of the active profile, snapping to the road end's lanes.
+                bool snapPreview = roadHover && !RoadPlanLayer.HasOpenChain && RoadPlanLayer.PlainDrawMode;
+                RoadPlanLayer.UpdateLaneSnapPreview(Surf, hc, new Vector2(hit.point.x, hit.point.z), snapPreview);
             }
             // Remember the placement cursor + whether it's over terrain, for the on-screen
             // design-speed readout drawn in OnGUI.
@@ -3803,6 +3829,8 @@ namespace NetworkDesigner.Terrain
                 bool overPanel = MouseOverActivePanel();   // cursor over the rail palette
                 if (!overPanel && overTerrain && Input.GetMouseButtonDown(0))
                 {
+                    // Lane-level draw: clicks fall through to AddNode, which snaps the new road's START onto the
+                    // matching contiguous lane nodes of an existing road end (1-lane → 1 node, 2-lane → 2, …).
                     // Cmd/Ctrl-click inside a road segment's corridor → toggle it in the action queue (no node clicking).
                     // (Shift is the curve modifier, so selection uses Cmd/Ctrl.) Plain click still draws.
                     bool selMod = Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand)
