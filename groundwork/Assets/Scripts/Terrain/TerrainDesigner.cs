@@ -3829,11 +3829,15 @@ namespace NetworkDesigner.Terrain
                 bool overPanel = MouseOverActivePanel();   // cursor over the rail palette
                 if (!overPanel && overTerrain && Input.GetMouseButtonDown(0))
                 {
-                    // Lane-edge model (behind the flag): a road-plan click draws a lane-edge corridor instead (Phase 1/2).
+                    // Lane-edge model (behind the flag): a road-plan click either draws a corridor or maps a lane flow.
                     if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && _lineActive is RoadPlanLayer rdLE)
                     {
-                        NetworkDesigner.Roads.LaneEdgeWorld.Click(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId,
-                            xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);   // lift so the deck doesn't bury/z-fight
+                        if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
+                            NetworkDesigner.Roads.LaneEdgeWorld.MapClick(PickCamera != null ? PickCamera : Camera.main,
+                                new Vector2(Input.mousePosition.x, Input.mousePosition.y), xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+                        else
+                            NetworkDesigner.Roads.LaneEdgeWorld.Click(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId,
+                                xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);   // lift so the deck doesn't bury/z-fight
                         return;
                     }
                     // Lane-level draw: clicks fall through to AddNode, which snaps the new road's START onto the
@@ -3918,9 +3922,9 @@ namespace NetworkDesigner.Terrain
                 }
                 if (!overPanel && Input.GetMouseButtonDown(1))
                 {
-                    // Lane-edge model: right-click cancels an in-progress corridor draw.
-                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
-                    { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); return; }
+                    // Lane-edge model: right-click cancels an in-progress corridor draw or lane-flow mapping.
+                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && (NetworkDesigner.Roads.LaneEdgeWorld.Drawing || NetworkDesigner.Roads.LaneEdgeWorld.Mapping))
+                    { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); return; }
                     // An armed auto-slope / connect cancels first (right-click backs out).
                     if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }
                     else if (_roadConnectNodeA >= 0) { _roadConnectNodeA = -1; if (_lineActive is RoadPlanLayer rdx) rdx.HideConnectPreview(); }

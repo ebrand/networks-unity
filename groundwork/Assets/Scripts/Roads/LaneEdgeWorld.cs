@@ -18,14 +18,19 @@ namespace NetworkDesigner.Roads
         static GameObject Root() => _root != null ? _root : (_root = new GameObject("LaneEdgeWorld"));
 
         // Render every corridor, draped via groundAt. Rebuilds the whole render root (simple; optimise later).
+        public struct LaneEndpoint { public Vector2 Pos; public float Y; public int Edge; public int Node; public bool Incoming; }
+        public static readonly List<LaneEndpoint> Endpoints = new List<LaneEndpoint>();   // rebuilt each Rebuild; for picking + flow render
+
         public static void Rebuild(Func<Vector2, float> groundAt)
         {
+            ComputeEndpoints(groundAt);
             GameObject root = Root();
             for (int i = root.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(root.transform.GetChild(i).gameObject);
             foreach (Corridor c in Net.Corridors) LaneEdgeCorridorBuilder.RenderCorridor(Net, c, root.transform, groundAt);
             RenderNodes(root.transform, groundAt);
-            RenderLaneEndpoints(root.transform, groundAt);
+            RenderEndpointSpheres(root.transform);
+            RenderFlows(root.transform);
         }
 
         static Material _inMat, _outMat;
@@ -34,16 +39,19 @@ namespace NetworkDesigner.Roads
 
         // Per-node lane endpoints (#149): for each lane-edge, a puck at each end, coloured by whether traffic flows INTO
         // that node (incoming, blue) or OUT of it (outgoing, green). Laid across the road width, inset into the road.
-        static void RenderLaneEndpoints(Transform parent, Func<Vector2, float> groundAt)
+        // Compute the per-node lane endpoint records (no rendering) — used for picking, flow render, and default flows.
+        static void ComputeEndpoints(Func<Vector2, float> groundAt)
         {
-            foreach (LaneEdge e in Net.Edges)
+            Endpoints.Clear();
+            for (int ei = 0; ei < Net.Edges.Count; ei++)
             {
-                RenderEndpoint(parent, groundAt, e, e.A, e.B);
-                RenderEndpoint(parent, groundAt, e, e.B, e.A);
+                LaneEdge e = Net.Edges[ei];
+                AddEndpointRecord(groundAt, e, ei, e.A, e.B);
+                AddEndpointRecord(groundAt, e, ei, e.B, e.A);
             }
         }
 
-        static void RenderEndpoint(Transform parent, Func<Vector2, float> groundAt, LaneEdge e, int atNode, int otherNode)
+        static void AddEndpointRecord(Func<Vector2, float> groundAt, LaneEdge e, int edgeIndex, int atNode, int otherNode)
         {
             if (atNode < 0 || atNode >= Net.Nodes.Count || otherNode < 0 || otherNode >= Net.Nodes.Count) return;
             Vector2 N = Net.Nodes[atNode], O = Net.Nodes[otherNode];
@@ -55,14 +63,92 @@ namespace NetworkDesigner.Roads
             float inset = Mathf.Min(4f, len * 0.25f);
             Vector2 pos = N + toO * inset + fr * e.Offset;
             bool incoming = (e.Direction == 2 && atNode == e.B) || (e.Direction == 0 && atNode == e.A);
-            var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
-            go.GetComponent<MeshRenderer>().sharedMaterial = incoming ? InMat() : OutMat();
-            go.transform.SetParent(parent, false);
-            float y = groundAt != null ? groundAt(pos) : 0f;
-            go.transform.position = new Vector3(pos.x, y + 0.6f, pos.y);
-            go.transform.localScale = Vector3.one * 1.2f;
-            go.name = $"laneEnd_{(incoming ? "in" : "out")}_e{e.Serial}_n{atNode}";
+            float y = (groundAt != null ? groundAt(pos) : 0f) + 0.6f;
+            Endpoints.Add(new LaneEndpoint { Pos = pos, Y = y, Edge = edgeIndex, Node = atNode, Incoming = incoming });
+        }
+
+        static void RenderEndpointSpheres(Transform parent)
+        {
+            foreach (LaneEndpoint ep in Endpoints)
+            {
+                var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
+                go.GetComponent<MeshRenderer>().sharedMaterial = ep.Incoming ? InMat() : OutMat();
+                go.transform.SetParent(parent, false);
+                go.transform.position = new Vector3(ep.Pos.x, ep.Y, ep.Pos.y);
+                go.transform.localScale = Vector3.one * 1.2f;
+                go.name = $"laneEnd_{(ep.Incoming ? "in" : "out")}_e{ep.Edge}_n{ep.Node}";
+            }
+        }
+
+        // Auto default flows: straight-through, lane-aligned, same-direction. For each incoming endpoint with no MANUAL
+        // flow, map it to the best-continuing outgoing endpoint at the same node. Regenerated on any topology change.
+        public static void RegenerateDefaultFlows(Func<Vector2, float> groundAt)
+        {
+            ComputeEndpoints(groundAt);
+            Net.Flows.RemoveAll(f => f.Auto);
+            for (int i = 0; i < Endpoints.Count; i++)
+            {
+                LaneEndpoint inc = Endpoints[i];
+                if (!inc.Incoming) continue;
+                if (Net.Flows.Exists(f => f.Node == inc.Node && f.FromEdge == inc.Edge)) continue;   // a manual flow already routes this lane
+                int best = BestOutgoingMatch(i);
+                if (best >= 0) Net.Flows.Add(new LaneFlow { Node = inc.Node, FromEdge = inc.Edge, ToEdge = Endpoints[best].Edge, Auto = true });
+            }
+        }
+
+        static int BestOutgoingMatch(int incIdx)
+        {
+            LaneEndpoint inc = Endpoints[incIdx];
+            LaneEdge ie = Net.Edges[inc.Edge];
+            int io = inc.Node == ie.A ? ie.B : ie.A;
+            Vector2 inDir = Net.Nodes[inc.Node] - Net.Nodes[io]; if (inDir.sqrMagnitude < 1e-6f) return -1; inDir.Normalize();
+            int best = -1; float bestScore = -999f;
+            for (int j = 0; j < Endpoints.Count; j++)
+            {
+                LaneEndpoint outg = Endpoints[j];
+                if (outg.Incoming || outg.Node != inc.Node) continue;
+                LaneEdge oe = Net.Edges[outg.Edge];
+                int oo = outg.Node == oe.A ? oe.B : oe.A;
+                Vector2 outDir = Net.Nodes[oo] - Net.Nodes[outg.Node]; if (outDir.sqrMagnitude < 1e-6f) continue; outDir.Normalize();
+                float align = Vector2.Dot(inDir, outDir);
+                if (align <= 0.1f) continue;   // never default-map a U-turn / sharp reversal
+                float score = align * 10f - Mathf.Abs(ie.Offset - oe.Offset);   // most aligned, then closest lane offset
+                if (score > bestScore) { bestScore = score; best = j; }
+            }
+            return best;
+        }
+
+        static Material _flowMat;
+        static Material FlowMat() => _flowMat != null ? _flowMat : (_flowMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 1f, 1f, 1f), 0f, "LaneFlow"));
+
+        // Draw each mapped flow as a thin bar from its incoming endpoint to its outgoing endpoint (the #149 connectors).
+        static void RenderFlows(Transform parent)
+        {
+            foreach (LaneFlow f in Net.Flows)
+            {
+                int inc = FindEndpoint(f.Node, f.FromEdge, true);
+                int outg = FindEndpoint(f.Node, f.ToEdge, false);
+                if (inc < 0 || outg < 0) continue;
+                LaneEndpoint a = Endpoints[inc], b = Endpoints[outg];
+                Vector3 p0 = new Vector3(a.Pos.x, a.Y, a.Pos.y), p1 = new Vector3(b.Pos.x, b.Y, b.Pos.y);
+                Vector3 dir = p1 - p0; float len = dir.magnitude; if (len < 1e-3f) continue;
+                var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
+                go.GetComponent<MeshRenderer>().sharedMaterial = FlowMat();
+                go.transform.SetParent(parent, false);
+                go.transform.position = (p0 + p1) * 0.5f;
+                go.transform.rotation = Quaternion.LookRotation(dir / len, Vector3.up);
+                go.transform.localScale = new Vector3(0.3f, 0.3f, len);
+                go.name = "flow";
+            }
+        }
+
+        static int FindEndpoint(int node, int edge, bool incoming)
+        {
+            for (int i = 0; i < Endpoints.Count; i++)
+                if (Endpoints[i].Node == node && Endpoints[i].Edge == edge && Endpoints[i].Incoming == incoming) return i;
+            return -1;
         }
 
         static Material _markerMat;
@@ -113,11 +199,52 @@ namespace NetworkDesigner.Roads
             if (b == _drawStart || (Net.Nodes[b] - Net.Nodes[_drawStart]).sqrMagnitude < 1f) return false;   // degenerate
             AddCorridorFromProfile(_drawStart, b, profileId);
             _drawStart = -1;
+            RegenerateDefaultFlows(groundAt);   // straight-through defaults at any newly-connected node
             Rebuild(groundAt);
             return true;
         }
 
         public static void CancelDraw() => _drawStart = -1;
+
+        // ── lane-flow mapping (#149): click an incoming (blue) endpoint to arm, then an outgoing (green) endpoint at the
+        // SAME node to map a through/turn movement ──
+        static int _armEdge = -1, _armNode = -1;
+        public static bool Mapping => _armEdge >= 0;
+
+        static int PickEndpoint(Camera cam, Vector2 screenPos, float pixR, bool incoming)
+        {
+            int best = -1; float bestSq = pixR * pixR;
+            for (int i = 0; i < Endpoints.Count; i++)
+            {
+                if (Endpoints[i].Incoming != incoming) continue;
+                Vector3 sp = cam.WorldToScreenPoint(new Vector3(Endpoints[i].Pos.x, Endpoints[i].Y, Endpoints[i].Pos.y));
+                if (sp.z <= 0f) continue;
+                float d = (new Vector2(sp.x, sp.y) - screenPos).sqrMagnitude;
+                if (d < bestSq) { bestSq = d; best = i; }
+            }
+            return best;
+        }
+
+        public static void MapClick(Camera cam, Vector2 screenPos, Func<Vector2, float> groundAt)
+        {
+            if (cam == null) return;
+            if (_armEdge < 0)
+            {
+                int inc = PickEndpoint(cam, screenPos, 28f, true);
+                if (inc >= 0) { _armEdge = Endpoints[inc].Edge; _armNode = Endpoints[inc].Node; Debug.Log($"[LaneFlow] armed incoming edge {_armEdge} at node {_armNode} — now click an outgoing (green) endpoint"); }
+                else Debug.Log("[LaneFlow] no incoming (blue) endpoint under the cursor");
+                return;
+            }
+            int outg = PickEndpoint(cam, screenPos, 28f, false);
+            if (outg >= 0 && Endpoints[outg].Node == _armNode)
+            { Net.Flows.Add(new LaneFlow { Node = _armNode, FromEdge = _armEdge, ToEdge = Endpoints[outg].Edge }); Debug.Log($"[LaneFlow] mapped edge {_armEdge} → edge {Endpoints[outg].Edge} at node {_armNode}"); }
+            else Debug.Log("[LaneFlow] cancelled — outgoing endpoint must be at the SAME node");
+            _armEdge = -1; _armNode = -1;
+            RegenerateDefaultFlows(groundAt);   // refill defaults around the new manual flow (manual lanes are skipped)
+            Rebuild(groundAt);
+        }
+
+        public static void CancelMap() { _armEdge = -1; _armNode = -1; }
 
         // Build a corridor between two clusters from a profile's cross-section: traffic/turn/sidewalk/bike bands become
         // lane-edges; median/shoulder bands become corridor metadata.
@@ -166,6 +293,15 @@ namespace NetworkDesigner.Roads
             LaneEdgeModel.Enabled = !LaneEdgeModel.Enabled;
             CancelDraw();
             Debug.Log($"[LaneEdgeWorld] draw mode {(LaneEdgeModel.Enabled ? "ON — in road-plan mode, click-click draws a lane-edge corridor from the active profile" : "OFF")}");
+        }
+
+        [UnityEditor.MenuItem("Tools/Lane-Edge Spike/Toggle Mapping Mode (lane flows)")]
+        static void ToggleMappingMode()
+        {
+            LaneEdgeModel.MappingMode = !LaneEdgeModel.MappingMode;
+            if (LaneEdgeModel.MappingMode) LaneEdgeModel.Enabled = true;   // mapping implies the lane-edge model is active
+            CancelMap();
+            Debug.Log($"[LaneEdgeWorld] mapping mode {(LaneEdgeModel.MappingMode ? "ON — click an incoming (blue) endpoint then an outgoing (green) one at the same node" : "OFF")}");
         }
 #endif
     }

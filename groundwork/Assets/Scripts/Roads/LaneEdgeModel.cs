@@ -8,8 +8,13 @@ namespace NetworkDesigner.Roads
     // model reaches parity with the corridor-edge model — the old model stays working in the meantime.
     public static class LaneEdgeModel
     {
-        public static bool Enabled = false;   // master flag: when true, road plan uses the lane-edge model
+        public static bool Enabled = false;       // master flag: when true, road plan uses the lane-edge model
+        public static bool MappingMode = false;   // when true, road-plan clicks author lane-flow mappings instead of drawing
     }
+
+    // A through/turn movement at a node: traffic on the incoming lane-edge continues onto the outgoing lane-edge.
+    // This is the #149 intra-node mapping — the intersection routing + the agent graph through the node.
+    public class LaneFlow { public int Node; public int FromEdge; public int ToEdge; public bool Auto; }   // Auto = default (regenerated); else manual
 
     // Navigable band kinds → each is a graph edge an agent can traverse. (Median/Shoulder are bands, not edges; Rail
     // stays its own system.) Direction routing: cars→Traffic/Turn, pedestrians→Sidewalk, bikes→Bike.
@@ -45,6 +50,7 @@ namespace NetworkDesigner.Roads
         public readonly List<Vector2> Nodes = new List<Vector2>();
         public readonly List<LaneEdge> Edges = new List<LaneEdge>();
         public readonly List<Corridor> Corridors = new List<Corridor>();
+        public readonly List<LaneFlow> Flows = new List<LaneFlow>();   // intra-node lane-flow mappings (#149)
         int _serial;
 
         public int AddNode(Vector2 p) { Nodes.Add(p); return Nodes.Count - 1; }
