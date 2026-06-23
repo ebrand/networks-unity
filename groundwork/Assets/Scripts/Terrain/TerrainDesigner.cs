@@ -3924,11 +3924,36 @@ namespace NetworkDesigner.Terrain
                         // normal-draw ghost so it isn't confusing. (_leDrawCursor stays computed for the extend click.)
                         if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
                         {
-                            // Lock to straight-ahead or 90° off the source lanes (Alt = free angle).
-                            if (!leFreeAngle && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnapExtend(_leDrawCursor, out Vector2 eCol))
-                                _leDrawCursor = eCol;
+                            Vector2 leN = NetworkDesigner.Roads.LaneEdgeWorld.ExtendStartPos;
+                            if (NetworkDesigner.Roads.LaneEdgeWorld.ExtCornerPending)
+                            {
+                                // Placing the curve end: PAC equal-leg snap + ring/ticks/labels, anchored at the picked-lanes'
+                                // centre (node + frNew*mid) so the construction sits on the lanes, not the road centreline.
+                                Vector2 corner = NetworkDesigner.Roads.LaneEdgeWorld.ExtCornerPos;
+                                Vector2 gStart = leN, gCorner = corner;
+                                if (NetworkDesigner.Roads.LaneEdgeWorld.ExtendLaneOffset(corner - leN, out Vector2 frN, out float midN))
+                                { gStart = leN + frN * midN; gCorner = corner + frN * midN; }
+                                if (rdPv.SnapExternalCurveEnd(gStart, gCorner, _leDrawCursor, out Vector2 ePac))
+                                    _leDrawCursor = ePac;
+                                rdPv.ShowExternalCurveGuide(Surf, gStart, gCorner, _leDrawCursor);
+                            }
+                            else if (leShift)   // arming the bend: first leg must be colinear off the source lanes (Alt = free)
+                            {
+                                if (!leFreeAngle && NetworkDesigner.Roads.LaneEdgeWorld.SnapBendColinearExtend(_leDrawCursor, rdPv.MinFirstLeg, out Vector2 eBend))
+                                    _leDrawCursor = eBend;
+                                Vector2 gStart = leN, gBend = _leDrawCursor;
+                                if (NetworkDesigner.Roads.LaneEdgeWorld.ExtendLaneOffset(_leDrawCursor - leN, out Vector2 frN, out float midN))
+                                { gStart = leN + frN * midN; gBend = _leDrawCursor + frN * midN; }
+                                rdPv.ShowExternalBendGuide(Surf, gStart, gBend);
+                            }
+                            else
+                            {
+                                // Straight extension: lock to straight-ahead or 90° off the source lanes (Alt = free angle).
+                                if (!leFreeAngle && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnapExtend(_leDrawCursor, out Vector2 eCol))
+                                    _leDrawCursor = eCol;
+                                rdPv.ClearExternalCurveGuide();
+                            }
                             NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
-                            rdPv.ClearExternalCurveGuide();
                         }
                         else
                         {
@@ -4059,6 +4084,10 @@ namespace NetworkDesigner.Terrain
                     // Lane-edge model: right-click cancels an in-progress corridor draw or lane-flow mapping.
                     if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && (NetworkDesigner.Roads.LaneEdgeWorld.Drawing || NetworkDesigner.Roads.LaneEdgeWorld.Mapping || NetworkDesigner.Roads.LaneEdgeWorld.Extending))
                     { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); NetworkDesigner.Roads.LaneEdgeWorld.CancelExtend(); NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f); return; }
+                    // Otherwise right-click DELETES the lane-edge node / segment under the cursor.
+                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && overTerrain
+                        && NetworkDesigner.Roads.LaneEdgeWorld.DeleteAt(new Vector2(hit.point.x, hit.point.z), xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f))
+                    { _dirtySince = Time.realtimeSinceStartup; return; }
                     // An armed auto-slope / connect cancels first (right-click backs out).
                     if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }
                     else if (_roadConnectNodeA >= 0) { _roadConnectNodeA = -1; if (_lineActive is RoadPlanLayer rdx) rdx.HideConnectPreview(); }

@@ -73,7 +73,9 @@ namespace NetworkDesigner.Roads
             var mesh = BuildMesh(xs, a, b, curve, cA, cB, out var surfaces, heightA, heightB, groundAt, follow);
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             go.AddComponent<MeshRenderer>().sharedMaterials = MaterialsFor(surfaces);
-            go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            // Only add a collider when the swept mesh is real — a degenerate/empty cross-section (e.g. the modal preview
+            // before a profile is set) makes Unity warn "must have at least three distinct vertices".
+            if (mesh.vertexCount >= 3) go.AddComponent<MeshCollider>().sharedMesh = mesh;
             return go;
         }
 

@@ -624,6 +624,8 @@ namespace NetworkDesigner.Terrain
             return true;
         }
 
+        public float MinFirstLeg => MinFirstLegForSpeed();   // exposed for the lane-edge extension bend lock
+
         // Leg length at which a MinCurveDeflectionDeg curve first meets the min radius (0 if unlimited).
         float MinFirstLegForSpeed()
         {
