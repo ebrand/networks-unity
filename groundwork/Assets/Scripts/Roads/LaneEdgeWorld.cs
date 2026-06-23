@@ -1281,14 +1281,27 @@ namespace NetworkDesigner.Roads
         {
             if (node < 0) return false;   // both clicks must land on a snapped lane puck
             if (_connA < 0) { _connA = node; _connEdgeA = edge; Rebuild(groundAt); return true; }
-            if (node != _connA) BuildConnectCurve(_connA, _connEdgeA, node, groundAt);
+            if (node != _connA) BuildConnectCurve(_connA, _connEdgeA, node, edge, groundAt);
             _connA = -1; _connEdgeA = -1;
             return true;
         }
 
         static Vector2 SafeDir(Vector2 v) => v.sqrMagnitude < 1e-6f ? Vector2.right : v.normalized;
+        static bool IsIncomingAt(int edge, int node)
+        { LaneEdge e = Net.Edges[edge]; return (e.Direction == 2 && node == e.B) || (e.Direction == 0 && node == e.A); }
 
-        static void BuildConnectCurve(int a, int edgeA, int b, Func<Vector2, float> groundAt)
+        // Force a manual (non-auto) through-flow between two lanes at a node — one must be incoming, the other outgoing.
+        static void AddManualFlow(int node, int e1, int e2)
+        {
+            if (e1 < 0 || e2 < 0 || e1 >= Net.Edges.Count || e2 >= Net.Edges.Count) return;
+            bool in1 = IsIncomingAt(e1, node), in2 = IsIncomingAt(e2, node);
+            if (in1 == in2) return;                                  // need one in + one out to form a movement
+            int from = in1 ? e1 : e2, to = in1 ? e2 : e1;
+            Net.Flows.RemoveAll(f => f.Node == node && (f.FromEdge == from || f.ToEdge == to));
+            Net.Flows.Add(new LaneFlow { Node = node, FromEdge = from, ToEdge = to, Auto = false });
+        }
+
+        static void BuildConnectCurve(int a, int edgeA, int b, int edgeB, Func<Vector2, float> groundAt)
         {
             if (a < 0 || b < 0 || a == b || a >= Net.Nodes.Count || b >= Net.Nodes.Count) return;
             if (edgeA < 0 || edgeA >= Net.Edges.Count) return;
@@ -1300,7 +1313,13 @@ namespace NetworkDesigner.Roads
             float d = (pb - pa).magnitude * 0.4f;
             // profileId = null → carries EXACTLY the clicked lane (no AppendOutboard surplus); copies source profile/shoulders.
             BuildExtensionCorridor(a, b, true, pa + tanA * d, pb + tanB * d, null);
-            CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt);
+            // The connector rides the click-1 lane (sits on it at A). At B, route it to the EXACT click-2 lane via a manual
+            // flow — so it joins the lane you clicked, not lane 0. (The lane "peels" onto the connector through this flow.)
+            int cc = Net.Corridors.Count - 1;
+            int cl = (cc >= 0 && Net.Corridors[cc].Lanes.Count > 0) ? Net.Corridors[cc].Lanes[0] : -1;
+            CancelExtend(); RegenerateDefaultFlows(groundAt);
+            if (cl >= 0 && edgeB >= 0 && edgeB < Net.Edges.Count) AddManualFlow(b, cl, edgeB);
+            Rebuild(groundAt);
         }
 
         // ── connect guides: colinear + perpendicular dashed-yellow guides off the nodes near the cursor while connecting.
@@ -1363,14 +1382,20 @@ namespace NetworkDesigner.Roads
             Vector2 to = cursor - p; if (to.sqrMagnitude < 1e-4f) return; Vector2 toN = to.normalized;
             if (Mathf.Abs(Vector2.Dot(toN, tan)) >= Mathf.Abs(Vector2.Dot(toN, perp)))
             {
-                // Colinear extension: dashed line from the NODE to the CURSOR; the arrow points along the lane's DIRECTION
-                // OF TRAVEL (fixed by the lane, independent of the cursor side).
-                EmitDashGuide(p, cursor, groundAt);
+                // Colinear extension: a line ALWAYS along the lane axis (cursor projected onto it, so it never angles
+                // off), out to the cursor's projection. Arrow points along the lane's DIRECTION OF TRAVEL.
+                Vector2 proj = p + tan * Vector2.Dot(cursor - p, tan);
+                EmitDashGuide(p, proj, groundAt);
                 Vector2 travel = Net.Edges[edge].Direction == 2 ? tan : -tan;   // tan is A→B; AB travels +tan, BA travels −tan
-                EmitGuideArrow((p + cursor) * 0.5f, travel, groundAt);
+                EmitGuideArrow((p + proj) * 0.5f, travel, groundAt);
             }
             else
-            { EmitDashGuide(p, p + perp * len, groundAt); EmitDashGuide(p, p - perp * len, groundAt); }
+            {
+                // Perpendicular guide also tracks the cursor (projected onto the perpendicular axis) instead of a full
+                // ExtensionGuideLength line spanning the screen.
+                Vector2 projp = p + perp * Vector2.Dot(cursor - p, perp);
+                EmitDashGuide(p, projp, groundAt);
+            }
         }
 
         // Small filled triangle (into the guide mesh) at ctr pointing along `along` — the colinear guide's direction arrow.
