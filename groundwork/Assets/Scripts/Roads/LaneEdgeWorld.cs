@@ -58,7 +58,7 @@ namespace NetworkDesigner.Roads
         public static bool HasData => Net.Corridors.Count > 0 || Net.Edges.Count > 0;
 
         // Render every corridor, draped via groundAt. Rebuilds the whole render root (simple; optimise later).
-        public struct LaneEndpoint { public Vector2 Pos; public float Y; public int Edge; public int Node; public bool Incoming; }
+        public struct LaneEndpoint { public Vector2 Pos; public Vector2 NodePos; public float Y; public int Edge; public int Node; public bool Incoming; }
         public static readonly List<LaneEndpoint> Endpoints = new List<LaneEndpoint>();   // rebuilt each Rebuild; for picking + flow render
 
         public static void Rebuild(Func<Vector2, float> groundAt)
@@ -248,26 +248,37 @@ namespace NetworkDesigner.Roads
             Vector2 fr = LaneEdgeCorridorBuilder.PathRight(tan);
             float inset = Mathf.Min(4f, len * 0.25f);
             Vector2 pos = N + into * inset + fr * e.Offset;
+            Vector2 nodePos = N + fr * e.Offset;   // lateral-only (no inset): the in/out of a through-lane coincide here → one unified puck
             bool incoming = (e.Direction == 2 && atNode == e.B) || (e.Direction == 0 && atNode == e.A);
             float y = (groundAt != null ? groundAt(pos) : 0f) + 0.6f;
-            Endpoints.Add(new LaneEndpoint { Pos = pos, Y = y, Edge = edgeIndex, Node = atNode, Incoming = incoming });
+            Endpoints.Add(new LaneEndpoint { Pos = pos, NodePos = nodePos, Y = y, Edge = edgeIndex, Node = atNode, Incoming = incoming });
         }
 
         static Material _extSelMat;
         static Material ExtSelMat() => _extSelMat != null ? _extSelMat : (_extSelMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.4f, 1f, 1f), "LaneExtSel"));
 
+        static Material _laneNodeMat;
+        static Material LaneNodeMat() => _laneNodeMat != null ? _laneNodeMat : (_laneNodeMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.95f, 0.35f, 1f), "LaneNode"));
+
+        // One UNIFIED puck per lane at each node (the in/out endpoints of a through-lane share a NodePos, so they coincide
+        // and draw once). The blue/green in-vs-out distinction is hidden — which one you extend is resolved from the drag
+        // direction at pull time (ResolveExtBySwap), so you never have to pick the right node.
+        static readonly HashSet<long> _drawnPucks = new HashSet<long>();
         static void RenderEndpointSpheres(Transform parent)
         {
+            _drawnPucks.Clear();
             foreach (LaneEndpoint ep in Endpoints)
             {
-                bool sel = _extNode == ep.Node && _extLanes.Contains(ep.Edge);   // selected for extension → highlight
+                long key = ((long)ep.Node << 20) ^ ((long)Mathf.RoundToInt(ep.NodePos.x * 4f) << 10) ^ (long)Mathf.RoundToInt(ep.NodePos.y * 4f);
+                if (!_drawnPucks.Add(key)) continue;   // in/out (and the two corridors) coincide at NodePos → draw once
+                bool sel = _extNode == ep.Node && _extLanes.Contains(ep.Edge);
                 var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
                 var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
-                go.GetComponent<MeshRenderer>().sharedMaterial = sel ? ExtSelMat() : (ep.Incoming ? InMat() : OutMat());
+                go.GetComponent<MeshRenderer>().sharedMaterial = sel ? ExtSelMat() : LaneNodeMat();
                 go.transform.SetParent(parent, false);
-                go.transform.position = new Vector3(ep.Pos.x, ep.Y, ep.Pos.y);
-                go.transform.localScale = Vector3.one * (sel ? 2.6f : 1.4f);
-                go.name = $"laneEnd_{(ep.Incoming ? "in" : "out")}_e{ep.Edge}_n{ep.Node}";
+                go.transform.position = new Vector3(ep.NodePos.x, ep.Y, ep.NodePos.y);
+                go.transform.localScale = Vector3.one * (sel ? 2.6f : 1.6f);
+                go.name = $"laneNode_e{ep.Edge}_n{ep.Node}";
             }
         }
 
@@ -829,13 +840,22 @@ namespace NetworkDesigner.Roads
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
                 float oNew = Vector2.Dot(frS * s.Offset, frNew);
                 lo = Mathf.Min(lo, oNew - s.Width * 0.5f); hi = Mathf.Max(hi, oNew + s.Width * 0.5f);
-                if (s.Direction == 0) { gotBA++; if (Mathf.Abs(oNew) >= baMax) { baMax = Mathf.Abs(oNew); baW = s.Width; } }
+                // Count by the EXTENSION-frame direction (dirNew), matching BuildExtensionCorridor — off the A end the
+                // source direction inverts, so source-direction counts would put the surplus on the wrong side.
+                bool incN = (s.Direction == 2 && _extNode == s.B) || (s.Direction == 0 && _extNode == s.A);
+                if ((incN ? 2 : 0) == 0) { gotBA++; if (Mathf.Abs(oNew) >= baMax) { baMax = Mathf.Abs(oNew); baW = s.Width; } }
                 else { gotAB++; if (Mathf.Abs(oNew) >= abMax) { abMax = Mathf.Abs(oNew); abW = s.Width; } }
             }
             if (lo > hi) return;
             // Lane addition (two-way only — mirrors BuildExtensionCorridor's gate): widen the band on the side that gains
             // lanes (BA → lo, AB → hi) so the preview matches the built corridor, not just the grabbed-lane span.
             ProfileLaneSplit(profileId, out int wantBA, out int wantAB);
+            if (_extLanes.Count > 0 && _extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count)   // A-end pull inverts direction (match build)
+            {
+                LaneEdge sf = Net.Edges[_extLanes[0]];
+                bool inc0 = (sf.Direction == 2 && _extNode == sf.B) || (sf.Direction == 0 && _extNode == sf.A);
+                if ((inc0 ? 2 : 0) != sf.Direction) { int t = wantBA; wantBA = wantAB; wantAB = t; }
+            }
             if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // mirror — match the built side (F flip)
             if (wantBA > 0 && wantAB > 0)
             {
@@ -1002,6 +1022,11 @@ namespace NetworkDesigner.Roads
         static Vector2 _extCorner; static bool _extCornerPending;
         public static bool ExtFlipSide;                               // F while extending: append the surplus lane on the OTHER side
         public static void ToggleExtFlip() => ExtFlipSide = !ExtFlipSide;
+        // On a lane pull, what happens to the SOURCE segment's pulled lanes: Keep (continuation — today's behaviour), or
+        // delete them (an exit). DeleteOuter removes only the outermost pulled lane, so an inner pulled lane stays in the
+        // source (shared — continues AND feeds the ramp). Never empties a corridor (guards full/colinear continuations).
+        public enum ExitPullMode { Keep, DeleteAll, DeleteOuter }
+        public static ExitPullMode ExitMode = ExitPullMode.Keep;
         public static bool Extending => _extNode >= 0 && _extLanes.Count > 0;
         public static int ExtendNode => _extNode;
         public static IReadOnlyList<int> ExtendLanes => _extLanes;
@@ -1023,7 +1048,7 @@ namespace NetworkDesigner.Roads
             int best = -1; float bestSq = worldR * worldR;
             for (int i = 0; i < Endpoints.Count; i++)
             {
-                float d = (Endpoints[i].Pos - worldXz).sqrMagnitude;
+                float d = (Endpoints[i].NodePos - worldXz).sqrMagnitude;   // pick where the unified puck is drawn
                 if (d < bestSq) { bestSq = d; best = i; }
             }
             if (best < 0) return false;
@@ -1088,8 +1113,53 @@ namespace NetworkDesigner.Roads
         static bool TryEndpointPos(int node, int edge, out Vector2 pos, out float y)
         {
             for (int i = 0; i < Endpoints.Count; i++)
-                if (Endpoints[i].Node == node && Endpoints[i].Edge == edge) { pos = Endpoints[i].Pos; y = Endpoints[i].Y; return true; }
+                if (Endpoints[i].Node == node && Endpoints[i].Edge == edge) { pos = Endpoints[i].NodePos; y = Endpoints[i].Y; return true; }
             pos = Vector2.zero; y = 0f; return false;
+        }
+
+        // The lane that continues `lane` straight THROUGH `node` (same travel direction, opposite in/out endpoint, nearest
+        // by world position) — its through-pair partner on the adjoining segment. -1 if none (a road end). Used to swap a
+        // picked lane to its incoming/outgoing twin so the drag direction decides which one we extend.
+        static int ThroughPartner(int node, int lane)
+        {
+            if (lane < 0 || lane >= Net.Edges.Count) return -1;
+            LaneEdge s = Net.Edges[lane];
+            bool sIn = (s.Direction == 2 && node == s.B) || (s.Direction == 0 && node == s.A);
+            Vector2 sPos = Vector2.zero; bool have = false;
+            for (int i = 0; i < Endpoints.Count; i++)
+                if (Endpoints[i].Node == node && Endpoints[i].Edge == lane && Endpoints[i].Incoming == sIn) { sPos = Endpoints[i].NodePos; have = true; break; }
+            if (!have) return -1;
+            int best = -1; float bestD = s.Width * s.Width;   // partner sits at ~the same lateral (NodePos) → small distance
+            for (int i = 0; i < Endpoints.Count; i++)
+            {
+                LaneEndpoint e = Endpoints[i];
+                if (e.Node != node || e.Edge == lane || e.Incoming == sIn) continue;
+                if (Net.Edges[e.Edge].Direction != s.Direction) continue;   // same world travel direction
+                float d = (e.NodePos - sPos).sqrMagnitude;
+                if (d < bestD) { bestD = d; best = e.Edge; }
+            }
+            return best;
+        }
+
+        // Resolve which in/out lane each selection extends, from the drag direction: pulling in a lane's travel direction
+        // uses the INCOMING (blue) lane; pulling against it uses the OUTGOING (green) lane. Swaps each _extLanes entry to
+        // its through-partner when its in/out type doesn't match the drag (symmetric → safe to re-run every frame).
+        static void ResolveExtBySwap(Vector2 dragDir)
+        {
+            if (_extNode < 0 || dragDir.sqrMagnitude < 1e-6f) return;
+            for (int i = 0; i < _extLanes.Count; i++)
+            {
+                int li = _extLanes[i];
+                if (li < 0 || li >= Net.Edges.Count) continue;
+                LaneEdge s = Net.Edges[li];
+                int other = _extNode == s.A ? s.B : s.A;
+                if (other < 0 || other >= Net.Nodes.Count) continue;
+                Vector2 travel = s.Direction == 2 ? (Net.Nodes[s.B] - Net.Nodes[s.A]) : (Net.Nodes[s.A] - Net.Nodes[s.B]);
+                if (travel.sqrMagnitude < 1e-6f) continue;
+                bool wantIn = Vector2.Dot(dragDir, travel) > 0f;            // pulling in travel direction → incoming lane
+                bool sIn = (s.Direction == 2 && _extNode == s.B) || (s.Direction == 0 && _extNode == s.A);
+                if (sIn != wantIn) { int p = ThroughPartner(_extNode, li); if (p >= 0) _extLanes[i] = p; }
+            }
         }
 
         // Navigable (drivable) lane count of a profile — drives how many lanes an extension click grabs.
@@ -1121,6 +1191,9 @@ namespace NetworkDesigner.Roads
         {
             if (!Extending) return false;
             Vector2 start = Net.Nodes[_extNode];
+            // Resolve in/out from the pull direction (first leg): pulling in a lane's travel direction extends its incoming
+            // lane, against it the outgoing — so it never matters which unified puck you clicked.
+            ResolveExtBySwap((_extCornerPending ? _extCorner : xz) - start);
 
             if (_extCornerPending)
             {
@@ -1131,6 +1204,7 @@ namespace NetworkDesigner.Roads
                 { Debug.LogWarning("[LaneEdgeWorld] extension curve too tight — pick a wider end"); return false; }
                 int bm = Net.AddNode(end);
                 BuildExtensionCorridor(_extNode, bm, true, c1, c2, profileId);
+                ApplyExitPull(Net.Corridors.Count - 1, groundAt);
                 CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
             }
             if (curveModifier) { _extCorner = xz; _extCornerPending = true; return false; }
@@ -1138,6 +1212,7 @@ namespace NetworkDesigner.Roads
             if ((xz - start).sqrMagnitude < 1f) return false;
             int b = Net.AddNode(xz);
             BuildExtensionCorridor(_extNode, b, false, default, default, profileId);
+            ApplyExitPull(Net.Corridors.Count - 1, groundAt);
             CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
         }
 
@@ -1171,6 +1246,15 @@ namespace NetworkDesigner.Roads
             // Lane addition: append surplus profile lanes outboard on each side (median stays aligned, through-lanes stay
             // put). Scoped to TWO-WAY profiles so one-way forks (confirmed working) keep their copy-grabbed-lanes behaviour.
             ProfileLaneSplit(profileId, out int wantBA, out int wantAB);
+            // Pulling off the source's A end inverts each lane's direction label in the extension (incomingAtN flips
+            // dirNew), so the profile's per-direction counts must be swapped to match — else the surplus lands on the
+            // already-full side and a 2x3 pulled off that end wrongly grows to 3x3. Independent of (and composed with) F.
+            if (_extLanes.Count > 0 && _extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count)
+            {
+                LaneEdge s0 = Net.Edges[_extLanes[0]];
+                bool inc0 = (s0.Direction == 2 && nodeN == s0.B) || (s0.Direction == 0 && nodeN == s0.A);
+                if ((inc0 ? 2 : 0) != s0.Direction) { int t = wantBA; wantBA = wantAB; wantAB = t; }
+            }
             if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // F: mirror which side gains the surplus lane
             if (wantBA > 0 && wantAB > 0) { AppendOutboard(nc, 0, wantBA); AppendOutboard(nc, 2, wantAB); }
             Net.SortCorridorLanes(nc);
@@ -1202,6 +1286,34 @@ namespace NetworkDesigner.Roads
                 nc.Lanes.Add(ni);
                 edge = Mathf.Abs(off) + outerW * 0.5f;
             }
+        }
+
+        // Flip the corridor under the cursor in place: mirror its cross-section about the centreline (negate each lane's
+        // offset + swap its travel direction, swap the shoulders), so an asymmetric segment's surplus/asymmetry moves to
+        // the other side while each direction stays on its proper side (a 2x3 → 3x2). Symmetric roads look unchanged.
+        public static bool FlipCorridorAt(Vector2 xz, Func<Vector2, float> groundAt)
+        {
+            int best = -1; float bestD = float.PositiveInfinity;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                if (Net.Corridors[ci].Lanes.Count == 0) continue;
+                float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(Net.Corridors[ci], Net).Width * 0.5f + 1.5f;
+                float d = CorridorDistSq(Net.Corridors[ci], xz);
+                if (d < halfW * halfW && d < bestD) { bestD = d; best = ci; }
+            }
+            if (best < 0) return false;
+            Corridor c = Net.Corridors[best];
+            foreach (int li in c.Lanes)
+            {
+                LaneEdge e = Net.Edges[li];
+                e.Offset = -e.Offset;
+                e.Direction = e.Direction == 0 ? 2 : 0;
+            }
+            float t = c.ShoulderBA; c.ShoulderBA = c.ShoulderAB; c.ShoulderAB = t;
+            Net.SortCorridorLanes(c);
+            RegenerateDefaultFlows(groundAt);
+            Rebuild(groundAt);
+            return true;
         }
 
         // ── deletion: right-click a node (deletes its corridors) or a segment body (deletes that corridor) ──
@@ -1238,15 +1350,151 @@ namespace NetworkDesigner.Roads
         static float CorridorDistSq(Corridor c, Vector2 xz)
         {
             if (c.Lanes.Count == 0) return float.PositiveInfinity;
+            // An AlignLanes corridor (extension/ramp) lays its lanes at their actual Offset, so the body sits OFFSET from
+            // the centreline (which runs through the node). Sampling the bare centreline misses it — worst for a lone
+            // 1-lane ramp whose body is metres to the side. Shift samples to the lane-span centre to measure to the real
+            // asphalt. Centred corridors have bodyMid≈0, so this is a no-op for them (no regression).
+            float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
+            foreach (int li in c.Lanes)
+            { LaneEdge e = Net.Edges[li]; lo = Mathf.Min(lo, e.Offset - e.Width * 0.5f); hi = Mathf.Max(hi, e.Offset + e.Width * 0.5f); }
+            float bodyMid = (lo + hi) * 0.5f;
             float len = LaneEdgeCorridorBuilder.PathLength(Net, c);
             int n = Mathf.Clamp(Mathf.CeilToInt(len / 3f), 2, 96);
             float best = float.PositiveInfinity;
             for (int i = 0; i <= n; i++)
             {
-                Vector2 p = LaneEdgeCorridorBuilder.PathPoint(Net, c, (float)i / n);
+                float t = (float)i / n;
+                Vector2 p = LaneEdgeCorridorBuilder.PathPoint(Net, c, t)
+                          + LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t)) * bodyMid;
                 best = Mathf.Min(best, (p - xz).sqrMagnitude);
             }
             return best;
+        }
+
+        // Exit pull: after the ramp is built, the pulled lane (which FEEDS the exit) STAYS — what gets deleted is the lane
+        // it used to continue into on the DOWNSTREAM mainline segment (the through-capacity the exit replaces). For each
+        // pulled lane we find that downstream continuation (a lane at the fork node on a corridor that is NOT the source
+        // feeder and NOT the ramp) and delete it. DeleteOuter deletes only the outermost, so an inner continuation stays
+        // (shared lane). Guards against emptying the downstream corridor; sets it AlignLanes so the split stays put.
+        static void ApplyExitPull(int rampCorr, Func<Vector2, float> groundAt)
+        {
+            if (ExitMode == ExitPullMode.Keep || _extLanes.Count == 0 || _extNode < 0) return;
+            int srcCorr = (_extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count) ? Net.Edges[_extLanes[0]].CorridorId : -1;
+            ComputeEndpoints(groundAt);   // include the just-built ramp lanes
+
+            var cand = new List<int>();
+            foreach (int sl in _extLanes)
+            {
+                int d = FindContinuationLane(_extNode, sl, srcCorr, rampCorr);
+                if (d >= 0 && !cand.Contains(d)) cand.Add(d);
+            }
+            if (cand.Count == 0) return;
+
+            var del = new HashSet<int>();
+            if (ExitMode == ExitPullMode.DeleteAll)
+                foreach (int d in cand) del.Add(d);
+            else   // DeleteOuter: only the outermost downstream continuation (largest |Offset|)
+            {
+                int outer = -1; float mx = -1f;
+                foreach (int d in cand) { float a = Mathf.Abs(Net.Edges[d].Offset); if (a > mx) { mx = a; outer = d; } }
+                if (outer >= 0) del.Add(outer);
+            }
+            if (del.Count == 0) return;
+
+            // Guard: never empty a downstream corridor (protects full/colinear continuations). Then flag the affected
+            // corridors AlignLanes so the surviving lanes keep their offsets and the split stays aligned.
+            var survive = new Dictionary<int, int>();
+            foreach (int dl in del) { int ci = Net.Edges[dl].CorridorId; if (ci < 0) continue; if (!survive.ContainsKey(ci)) survive[ci] = Net.Corridors[ci].Lanes.Count; survive[ci]--; }
+            foreach (var kv in survive) if (kv.Value <= 0) return;
+            foreach (var kv in survive) Net.Corridors[kv.Key].AlignLanes = true;
+
+            DeleteLanes(del, groundAt);
+        }
+
+        // The lane that `pickedLane` continues into THROUGH `node` — same travel direction, best world-position match,
+        // on a corridor other than the feeder (srcCorr) or the ramp (rampCorr). Used to delete the downstream through
+        // lane an exit replaces. -1 if there's no such continuation (e.g. the node is the end of the mainline).
+        static int FindContinuationLane(int node, int pickedLane, int srcCorr, int rampCorr)
+        {
+            if (pickedLane < 0 || pickedLane >= Net.Edges.Count) return -1;
+            LaneEdge p = Net.Edges[pickedLane];
+            bool pIncoming = (p.Direction == 2 && node == p.B) || (p.Direction == 0 && node == p.A);
+            int po = node == p.A ? p.B : p.A;
+            if (po < 0 || po >= Net.Nodes.Count) return -1;
+            Vector2 pMotion = pIncoming ? (Net.Nodes[node] - Net.Nodes[po]) : (Net.Nodes[po] - Net.Nodes[node]);
+            if (pMotion.sqrMagnitude < 1e-6f) return -1; pMotion.Normalize();
+            Vector2 nrm = new Vector2(-pMotion.y, pMotion.x);
+            Vector2 pPos = Vector2.zero; bool havePos = false;
+            for (int i = 0; i < Endpoints.Count; i++)
+                if (Endpoints[i].Node == node && Endpoints[i].Edge == pickedLane && Endpoints[i].Incoming == pIncoming) { pPos = Endpoints[i].Pos; havePos = true; break; }
+            if (!havePos) return -1;
+            int best = -1; float bestScore = -999f;
+            for (int j = 0; j < Endpoints.Count; j++)
+            {
+                LaneEndpoint e = Endpoints[j];
+                if (e.Node != node || e.Incoming == pIncoming) continue;   // continuation is the opposite endpoint type
+                LaneEdge oe = Net.Edges[e.Edge];
+                if (oe.CorridorId == srcCorr || oe.CorridorId == rampCorr) continue;   // not the feeder, not the ramp
+                int oo = e.Node == oe.A ? oe.B : oe.A;
+                if (oo < 0 || oo >= Net.Nodes.Count) continue;
+                Vector2 eMotion = e.Incoming ? (Net.Nodes[node] - Net.Nodes[oo]) : (Net.Nodes[oo] - Net.Nodes[node]);
+                if (eMotion.sqrMagnitude < 1e-6f) continue; eMotion.Normalize();
+                float align = Vector2.Dot(pMotion, eMotion);
+                if (align <= 0.1f) continue;
+                float lateral = Mathf.Abs(Vector2.Dot(e.Pos - pPos, nrm));
+                // Only the lane DIRECTLY in line with the pulled lane is its continuation. If that slot was already
+                // deleted by a prior pull (e.g. you removed the ramp and re-pulled), the nearest survivor is a lane-width
+                // away → rejected here, so a re-pull deletes nothing extra ("delete what's there, no more").
+                if (lateral >= p.Width * 0.6f) continue;
+                float score = align * 2f - lateral;
+                if (score > bestScore) { bestScore = score; best = j; }
+            }
+            return best >= 0 ? Endpoints[best].Edge : -1;
+        }
+
+        // Delete specific lane-edges and rebuild with compacted indices (lane-granular sibling of DeleteCorridors).
+        // Corridors keep their surviving lanes; a corridor left with no lanes is dropped.
+        public static void DeleteLanes(HashSet<int> deadLanes, Func<Vector2, float> groundAt)
+        {
+            if (deadLanes == null || deadLanes.Count == 0) return;
+
+            var edgeMap = new Dictionary<int, int>(); var newEdges = new List<LaneEdge>();
+            for (int i = 0; i < Net.Edges.Count; i++) { if (deadLanes.Contains(i)) continue; edgeMap[i] = newEdges.Count; newEdges.Add(Net.Edges[i]); }
+
+            var usedNodes = new HashSet<int>(); foreach (LaneEdge e in newEdges) { usedNodes.Add(e.A); usedNodes.Add(e.B); }
+            var nodeMap = new Dictionary<int, int>(); var newNodes = new List<Vector2>(); var newNodeY = new List<float>();
+            for (int i = 0; i < Net.Nodes.Count; i++) { if (!usedNodes.Contains(i)) continue; nodeMap[i] = newNodes.Count; newNodes.Add(Net.Nodes[i]); newNodeY.Add(Net.GetNodeY(i)); }
+
+            var corrMap = new Dictionary<int, int>(); var newCorridors = new List<Corridor>();
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                Corridor c = Net.Corridors[ci];
+                c.Lanes.RemoveAll(li => deadLanes.Contains(li));
+                if (c.Lanes.Count == 0) continue;                    // emptied → drop the corridor
+                corrMap[ci] = newCorridors.Count; newCorridors.Add(c);
+            }
+
+            foreach (LaneEdge e in newEdges)
+            {
+                e.A = nodeMap[e.A]; e.B = nodeMap[e.B];
+                e.CorridorId = corrMap.TryGetValue(e.CorridorId, out int nc) ? nc : -1;
+            }
+            for (int i = 0; i < newCorridors.Count; i++)
+            {
+                Corridor c = newCorridors[i]; c.Id = i;
+                for (int k = 0; k < c.Lanes.Count; k++) c.Lanes[k] = edgeMap[c.Lanes[k]];
+            }
+            var newFlows = new List<LaneFlow>();
+            foreach (LaneFlow f in Net.Flows)
+            {
+                if (deadLanes.Contains(f.FromEdge) || deadLanes.Contains(f.ToEdge) || !nodeMap.ContainsKey(f.Node)) continue;
+                f.Node = nodeMap[f.Node]; f.FromEdge = edgeMap[f.FromEdge]; f.ToEdge = edgeMap[f.ToEdge];
+                newFlows.Add(f);
+            }
+
+            Net.LoadFrom(newNodes, newNodeY, newEdges, newCorridors, newFlows);
+            RegenerateDefaultFlows(groundAt);
+            Rebuild(groundAt);
         }
 
         public static void DeleteCorridors(HashSet<int> deadCorr, Func<Vector2, float> groundAt)

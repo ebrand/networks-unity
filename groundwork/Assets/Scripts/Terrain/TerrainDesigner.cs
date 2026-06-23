@@ -3985,7 +3985,10 @@ namespace NetworkDesigner.Terrain
                         bool leShiftClick = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                         Camera leCam = PickCamera != null ? PickCamera : Camera.main;
                         Vector2 leMouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-                        if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
+                        // Hold ',' and left-click a segment to flip it in place (mirror its cross-section).
+                        if (Input.GetKey(KeyCode.Comma))
+                            NetworkDesigner.Roads.LaneEdgeWorld.FlipCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);
+                        else if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
                             NetworkDesigner.Roads.LaneEdgeWorld.MapClick(leCam, leMouse, leGround);
                         // Lane-subset extension: clicking a lane endpoint puck toggles it into the selection; once lanes are
                         // selected, a click on open ground draws the continuation. Skipped mid normal-draw so a puck near the
