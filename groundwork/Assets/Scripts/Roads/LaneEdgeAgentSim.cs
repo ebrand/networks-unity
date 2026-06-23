@@ -90,15 +90,28 @@ namespace NetworkDesigner.Roads
             }
             c.T = Mathf.Clamp01(c.T);
             LaneEdge e = net.Edges[c.Lane];
-            Vector2 cdir = net.Nodes[e.B] - net.Nodes[e.A]; if (cdir.sqrMagnitude < 1e-6f) { Respawn(c, net); return; }
-            cdir.Normalize();
-            Vector2 fr = new Vector2(cdir.y, -cdir.x);
-            Vector2 p = Vector2.Lerp(sp, dp, c.T) + fr * e.Offset;
+            Corridor cor = (e.CorridorId >= 0 && e.CorridorId < net.Corridors.Count) ? net.Corridors[e.CorridorId] : null;
+            // Corridor reference path runs A→B; T is travel progress src→dst, so map it to the corridor param ct.
+            float ct = e.Direction == 2 ? c.T : 1f - c.T;
+            Vector2 tan, baseP;
+            if (cor != null)
+            {
+                tan = LaneEdgeCorridorBuilder.PathTangent(net, cor, ct);
+                baseP = LaneEdgeCorridorBuilder.PathPoint(net, cor, ct);
+            }
+            else
+            {
+                Vector2 cd = net.Nodes[e.B] - net.Nodes[e.A]; if (cd.sqrMagnitude < 1e-6f) { Respawn(c, net); return; }
+                tan = cd.normalized; baseP = Vector2.Lerp(net.Nodes[e.A], net.Nodes[e.B], ct);
+            }
+            Vector2 fr = LaneEdgeCorridorBuilder.PathRight(tan);
+            Vector2 p = baseP + fr * e.Offset;
             // Drive on the ROAD surface (captured design grade) once excavated; else the terrain.
             float gA = net.GetNodeY(src), gB = net.GetNodeY(dst);
             float y = (!float.IsNaN(gA) && !float.IsNaN(gB)) ? Mathf.Lerp(gA, gB, c.T) : (GroundHeight != null ? GroundHeight(p) : 0f);
             c.Vis.position = new Vector3(p.x, y + 0.5f, p.y);
-            Vector2 travel = (dp - sp); if (travel.sqrMagnitude > 1e-6f) c.Vis.rotation = Quaternion.LookRotation(new Vector3(travel.x, 0f, travel.y), Vector3.up);
+            Vector2 travel = e.Direction == 2 ? tan : -tan;   // heading = travel direction along the (curved) path
+            if (travel.sqrMagnitude > 1e-6f) c.Vis.rotation = Quaternion.LookRotation(new Vector3(travel.x, 0f, travel.y), Vector3.up);
         }
 
         // A lane-edge traversed in its travel direction: source→dest cluster (Direction 2 = A→B, 0 = B→A).
@@ -110,7 +123,9 @@ namespace NetworkDesigner.Roads
             src = e.Direction == 2 ? e.A : e.B;
             dst = e.Direction == 2 ? e.B : e.A;
             if (src < 0 || dst < 0 || src >= net.Nodes.Count || dst >= net.Nodes.Count) return false;
-            sp = net.Nodes[src]; dp = net.Nodes[dst]; len = (dp - sp).magnitude;
+            sp = net.Nodes[src]; dp = net.Nodes[dst];
+            Corridor cor = (e.CorridorId >= 0 && e.CorridorId < net.Corridors.Count) ? net.Corridors[e.CorridorId] : null;
+            len = (cor != null && cor.Curved) ? LaneEdgeCorridorBuilder.PathLength(net, cor) : (dp - sp).magnitude;
             return len >= 0.5f;
         }
 

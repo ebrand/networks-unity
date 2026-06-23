@@ -142,6 +142,30 @@ namespace NetworkDesigner.UI
             body.Add(parapetTop);
             _sync.Add(() => StyleActive(parapetTop, Designer.RoadPlanLayer.BridgeParapets));
 
+            // ---- LANE-EDGE MODEL (new lane-graph roads; replaces the Tools→Lane-Edge Spike menus) ----
+            var laneEdge = Section(body, "LANE-EDGE MODEL (NEW)");
+            var leHint = Cap("Each lane is its own graph edge; map flows at nodes. Excavate/Build use the buttons above.");
+            leHint.style.fontSize = 10; leHint.style.marginBottom = 4; laneEdge.Add(leHint);
+            laneEdge.Add(ToggleRow("Lane-edge mode",
+                () => NetworkDesigner.Roads.LaneEdgeModel.Enabled,
+                v => { NetworkDesigner.Roads.LaneEdgeModel.Enabled = v;
+                       if (!v) NetworkDesigner.Roads.LaneEdgeModel.MappingMode = false;
+                       NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); }));
+            laneEdge.Add(ToggleRow("Map lane flows",
+                () => NetworkDesigner.Roads.LaneEdgeModel.MappingMode,
+                v => { NetworkDesigner.Roads.LaneEdgeModel.MappingMode = v;
+                       if (v) NetworkDesigner.Roads.LaneEdgeModel.Enabled = true;
+                       NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); }));
+            var leDraw = Cap("Draw: pick a profile, click–click to lay a corridor. Hold Shift after the first click to bend it into a curve (design-speed radius enforced). Right-click ends the chain.");
+            leDraw.style.fontSize = 10; leDraw.style.marginTop = 2; laneEdge.Add(leDraw);
+            var carRow = HBox(); carRow.style.marginTop = 6;
+            var spawnCars = MakeButton("Spawn cars", () => NetworkDesigner.Roads.LaneEdgeAgentSim.Instance().Spawn(10));
+            spawnCars.style.flexGrow = 1; spawnCars.style.marginRight = 6;
+            spawnCars.tooltip = "Spawn 10 cars that route the authored lane flows on BUILT corridors.";
+            var clearCars = MakeButton("Clear cars", () => NetworkDesigner.Roads.LaneEdgeAgentSim.Instance().Clear());
+            clearCars.style.flexGrow = 1;
+            carRow.Add(spawnCars); carRow.Add(clearCars); laneEdge.Add(carRow);
+
             // ---- PLANS (named per-world library) ----
             body.Add(Divider());
             body.Add(SectionLabel("PLANS"));

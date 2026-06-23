@@ -75,8 +75,18 @@ namespace NetworkDesigner.Designer
             ApplyCamera();
         }
 
+        double _lastReal;   // for an UNCLAMPED frame delta (Time.deltaTime is capped at maximumDeltaTime, which makes
+        float _dt = 1f / 60f;   // the camera crawl at a low idle frame rate); capped only to avoid a teleport after a big stall
+
         void Update()
         {
+            // Real elapsed time, NOT Time.deltaTime — the latter is clamped to maximumDeltaTime (~0.333 s), so when the
+            // editor idle-throttles to a low frame rate the camera moves a tiny fixed step per frame and crawls until the
+            // mouse wakes the repaint. Cap at 1 s purely to avoid a jump after a multi-second hitch.
+            double now = Time.realtimeSinceStartupAsDouble;
+            _dt = _lastReal > 0.0 ? Mathf.Clamp((float)(now - _lastReal), 0f, 1f) : Time.deltaTime;
+            _lastReal = now;
+
             bool blocked = InputSuppressor != null && InputSuppressor();
             if (!blocked) HandleLook();
             ApplyLook();
@@ -92,7 +102,7 @@ namespace NetworkDesigner.Designer
         void ApplyZoom()
         {
             if (Mathf.Abs(_dollyPending) < 1e-4f) { _dollyPending = 0f; return; }
-            float k = ZoomSmoothing > 0f ? 1f - Mathf.Exp(-ZoomSmoothing * Time.deltaTime) : 1f;
+            float k = ZoomSmoothing > 0f ? 1f - Mathf.Exp(-ZoomSmoothing * _dt) : 1f;
             float step = _dollyPending * k;
             Vector3 newPos = transform.position + transform.forward * step;
             // Stop at the altitude limits rather than sliding along the ground/sky:
@@ -108,7 +118,7 @@ namespace NetworkDesigner.Designer
         {
             Quaternion target = Quaternion.Euler(Pitch, Yaw, 0f);
             if (Smoothing <= 0f) { transform.rotation = target; return; }
-            float k = 1f - Mathf.Exp(-Smoothing * Time.deltaTime);
+            float k = 1f - Mathf.Exp(-Smoothing * _dt);
             transform.rotation = Quaternion.Slerp(transform.rotation, target, k);
         }
 
@@ -173,9 +183,9 @@ namespace NetworkDesigner.Designer
 
             // Ease velocity toward the target so movement accelerates in, coasts
             // out, and drifts through direction changes (MoveDamping = snappiness).
-            float k = MoveDamping > 0f ? 1f - Mathf.Exp(-MoveDamping * Time.deltaTime) : 1f;
+            float k = MoveDamping > 0f ? 1f - Mathf.Exp(-MoveDamping * _dt) : 1f;
             _moveVel = Vector3.Lerp(_moveVel, targetVel, k);
-            if (_moveVel.sqrMagnitude > 1e-8f) transform.position += _moveVel * Time.deltaTime;
+            if (_moveVel.sqrMagnitude > 1e-8f) transform.position += _moveVel * _dt;
         }
 
         void ApplyCamera()

@@ -182,6 +182,10 @@ namespace NetworkDesigner.Terrain
             return (Mathf.Lerp(h0, h1, tz) - _minY) * _scale * VertExag;
         }
 
+        // Stop the diorama camera rendering its RT when the minimap UI is hidden — otherwise it does a full
+        // RenderSingleCamera every frame for a texture nobody's showing (pure wasted GPU).
+        public void SetRendering(bool on) { if (_cam != null) _cam.enabled = on; }
+
         void BuildCamera()
         {
             _rt = new RenderTexture(RtSize, RtSize, 24) { name = "MinimapRT" };

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using NetworkDesigner.Geometry;   // GeometryResolver (cubic bezier sampling + radius checks)
 
 namespace NetworkDesigner.Roads
 {
@@ -12,7 +13,11 @@ namespace NetworkDesigner.Roads
         public static readonly LaneEdgeNetwork Net = new LaneEdgeNetwork();
         static GameObject _root;
         static int _drawStart = -1;                 // first-click cluster while drawing a corridor
+        static Vector2 _corner;                      // armed bend corner of a shift-curve (between start and end)
+        static bool _cornerPending;                  // a bend is armed; the next click is the curve's end
         public static bool Drawing => _drawStart >= 0;
+        public static bool CornerPending => _cornerPending;
+        public static Vector2 CornerPos => _corner;
         public static Vector2 DrawStartPos => _drawStart >= 0 ? Net.Nodes[_drawStart] : Vector2.zero;
 
         static GameObject Root() => _root != null ? _root : (_root = new GameObject("LaneEdgeWorld"));
@@ -73,28 +78,27 @@ namespace NetworkDesigner.Roads
         }
 
         static Material _plannedMat, _excavatedMat;
-        static Material PlannedMat() => _plannedMat != null ? _plannedMat : (_plannedMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.9f, 0.35f, 0.2f, 0.9f), 0f, "LanePlanLine"));
-        static Material ExcavatedMat() => _excavatedMat != null ? _excavatedMat : (_excavatedMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.95f, 0.85f, 0.2f, 0.9f), 0f, "LaneExcavLine"));
+        static Material PlannedMat() => _plannedMat != null ? _plannedMat : (_plannedMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.9f, 0.35f, 0.2f, 0.9f), "LanePlanLine"));
+        static Material ExcavatedMat() => _excavatedMat != null ? _excavatedMat : (_excavatedMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.95f, 0.85f, 0.2f, 0.9f), "LaneExcavLine"));
 
         // Draw an un-built corridor as a draped schematic: centreline + the two outer edges. Red = planned, yellow =
         // excavated (mirrors the corridor-edge plan overlay colours).
         static void RenderPlanOverlay(Corridor c, Transform parent, Func<Vector2, float> groundAt)
         {
             if (c.Lanes.Count == 0) return;
-            LaneEdge l0 = Net.Edges[c.Lanes[0]];
-            Vector2 a = Net.Nodes[l0.A], b = Net.Nodes[l0.B];
-            if ((b - a).sqrMagnitude < 1e-4f) return;
+            if (LaneEdgeCorridorBuilder.PathLength(Net, c) < 1e-2f) return;
             float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(c, Net).Width * 0.5f;
-            Vector2 cdir = (b - a).normalized; Vector2 fr = new Vector2(cdir.y, -cdir.x);
             Material m = c.Excavated ? ExcavatedMat() : PlannedMat();
-            DrawDrapedPolyline(parent, a, b, 0f, fr, groundAt, m);
-            DrawDrapedPolyline(parent, a, b, +halfW, fr, groundAt, m);
-            DrawDrapedPolyline(parent, a, b, -halfW, fr, groundAt, m);
+            DrawCorridorPolyline(parent, c, 0f, groundAt, m);     // centreline
+            DrawCorridorPolyline(parent, c, +halfW, groundAt, m); // outer edges
+            DrawCorridorPolyline(parent, c, -halfW, groundAt, m);
         }
 
-        static void DrawDrapedPolyline(Transform parent, Vector2 a, Vector2 b, float off, Vector2 fr, Func<Vector2, float> groundAt, Material mat)
+        // Draped schematic along the corridor reference path (straight or curved) at a fixed lateral offset.
+        static void DrawCorridorPolyline(Transform parent, Corridor c, float off, Func<Vector2, float> groundAt, Material mat)
         {
-            int n = Mathf.Clamp(Mathf.CeilToInt((b - a).magnitude / 4f), 2, 96);
+            float len = LaneEdgeCorridorBuilder.PathLength(Net, c);
+            int n = Mathf.Clamp(Mathf.CeilToInt(len / 4f), 2, 128);
             var go = new GameObject("planLine"); go.transform.SetParent(parent, false);
             var lr = go.AddComponent<LineRenderer>();
             lr.sharedMaterial = mat; lr.useWorldSpace = true; lr.widthMultiplier = 0.6f; lr.numCapVertices = 2;
@@ -102,15 +106,17 @@ namespace NetworkDesigner.Roads
             lr.positionCount = n + 1;
             for (int i = 0; i <= n; i++)
             {
-                Vector2 p = Vector2.Lerp(a, b, (float)i / n) + fr * off;
+                float t = (float)i / n;
+                Vector2 fr = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t));
+                Vector2 p = LaneEdgeCorridorBuilder.PathPoint(Net, c, t) + fr * off;
                 float y = groundAt != null ? groundAt(p) : 0f;
                 lr.SetPosition(i, new Vector3(p.x, y, p.y));
             }
         }
 
         static Material _inMat, _outMat;
-        static Material InMat() => _inMat != null ? _inMat : (_inMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.30f, 0.55f, 1f, 1f), 0f, "LaneEndIn"));
-        static Material OutMat() => _outMat != null ? _outMat : (_outMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.30f, 1f, 0.5f, 1f), 0f, "LaneEndOut"));
+        static Material InMat() => _inMat != null ? _inMat : (_inMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.30f, 0.55f, 1f, 1f), "LaneEndIn"));
+        static Material OutMat() => _outMat != null ? _outMat : (_outMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.30f, 1f, 0.5f, 1f), "LaneEndOut"));
 
         // Per-node lane endpoints (#149): for each lane-edge, a puck at each end, coloured by whether traffic flows INTO
         // that node (incoming, blue) or OUT of it (outgoing, green). Laid across the road width, inset into the road.
@@ -130,13 +136,17 @@ namespace NetworkDesigner.Roads
         {
             if (atNode < 0 || atNode >= Net.Nodes.Count || otherNode < 0 || otherNode >= Net.Nodes.Count) return;
             Vector2 N = Net.Nodes[atNode], O = Net.Nodes[otherNode];
-            Vector2 toO = O - N; float len = toO.magnitude; if (len < 1e-3f) return; toO /= len;
-            // Lateral must match the body: RoadSweep lays U along Cross(up, A→B) = (dir.y, -dir.x). Use the corridor's
-            // FIXED A→B direction (not O−N, which flips between ends) so the offsets don't mirror.
-            Vector2 cdir = Net.Nodes[e.B] - Net.Nodes[e.A]; if (cdir.sqrMagnitude < 1e-6f) return; cdir.Normalize();
-            Vector2 fr = new Vector2(cdir.y, -cdir.x);
+            float len = (O - N).magnitude; if (len < 1e-3f) return;
+            // Lateral + inset follow the corridor's A→B tangent at THIS end (curve-aware). Straight corridors fall back to
+            // the chord. Using the fixed A→B direction (not O−N) keeps the offsets from mirroring between the two ends.
+            Corridor c = (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count) ? Net.Corridors[e.CorridorId] : null;
+            Vector2 tan;
+            if (c != null) tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, atNode == e.A ? 0f : 1f);
+            else { Vector2 cd = Net.Nodes[e.B] - Net.Nodes[e.A]; if (cd.sqrMagnitude < 1e-6f) return; tan = cd.normalized; }
+            Vector2 into = atNode == e.A ? tan : -tan;            // point inward along the path from this end
+            Vector2 fr = LaneEdgeCorridorBuilder.PathRight(tan);
             float inset = Mathf.Min(4f, len * 0.25f);
-            Vector2 pos = N + toO * inset + fr * e.Offset;
+            Vector2 pos = N + into * inset + fr * e.Offset;
             bool incoming = (e.Direction == 2 && atNode == e.B) || (e.Direction == 0 && atNode == e.A);
             float y = (groundAt != null ? groundAt(pos) : 0f) + 0.6f;
             Endpoints.Add(new LaneEndpoint { Pos = pos, Y = y, Edge = edgeIndex, Node = atNode, Incoming = incoming });
@@ -195,7 +205,7 @@ namespace NetworkDesigner.Roads
         }
 
         static Material _flowMat;
-        static Material FlowMat() => _flowMat != null ? _flowMat : (_flowMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 1f, 1f, 1f), 0f, "LaneFlow"));
+        static Material FlowMat() => _flowMat != null ? _flowMat : (_flowMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 1f, 1f, 1f), "LaneFlow"));
 
         // Draw each mapped flow as a thin bar from its incoming endpoint to its outgoing endpoint (the #149 connectors).
         static void RenderFlows(Transform parent)
@@ -228,7 +238,7 @@ namespace NetworkDesigner.Roads
 
         static Material _markerMat;
         static Material MarkerMat() => _markerMat != null ? _markerMat
-            : (_markerMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(1f, 0.85f, 0.15f, 1f), 0f, "LaneEdgeClusterMarker"));
+            : (_markerMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.85f, 0.15f, 1f), "LaneEdgeClusterMarker"));
 
         // Cluster markers (yellow spheres) so nodes are visible to connect to. Collider stripped so they don't block
         // the drape raycast or terrain picking.
@@ -260,7 +270,60 @@ namespace NetworkDesigner.Roads
             return best;
         }
 
-        public static bool Click(Vector2 xz, string profileId, Func<Vector2, float> groundAt)
+        // ── colinear extension guide: a new segment off an existing node snaps to continue a connected corridor straight ──
+        static readonly HashSet<int> _colSeen = new HashSet<int>();
+
+        // The connected-corridor tangent axis at `node` whose orientation best continues toward `cursor` (so the guide/
+        // snap follows whichever road you're pulling along at a multi-road node). False if the node has no corridor.
+        static bool BestColinearAxis(int node, Vector2 cursor, out Vector2 axisToward)
+        {
+            axisToward = Vector2.zero;
+            if (node < 0 || node >= Net.Nodes.Count) return false;
+            Vector2 start = Net.Nodes[node];
+            Vector2 toCur = cursor - start; float d = toCur.magnitude;
+            if (d < 1e-2f) return false;
+            Vector2 dir = toCur / d;
+            float bestDot = -2f; _colSeen.Clear();
+            for (int i = 0; i < Net.Edges.Count; i++)
+            {
+                LaneEdge e = Net.Edges[i];
+                if (e.A != node && e.B != node) continue;
+                if (e.CorridorId < 0 || e.CorridorId >= Net.Corridors.Count) continue;
+                if (!_colSeen.Add(e.CorridorId)) continue;
+                Corridor c = Net.Corridors[e.CorridorId];
+                if (c.Lanes.Count == 0) continue;
+                LaneEdge l0 = Net.Edges[c.Lanes[0]];
+                float t = node == l0.A ? 0f : (node == l0.B ? 1f : -1f);
+                if (t < 0f) continue;
+                Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, t);   // corridor A→B tangent at this end
+                float d1 = Vector2.Dot(dir, tan), d2 = Vector2.Dot(dir, -tan);  // a line → try both orientations
+                if (d1 > bestDot) { bestDot = d1; axisToward = tan; }
+                if (d2 > bestDot) { bestDot = d2; axisToward = -tan; }
+            }
+            return bestDot > -2f;
+        }
+
+        public static bool HasColinearGuide => _drawStart >= 0;
+
+        // Snap the (straight or first-leg) extension end onto the source road's colinear line, when within snapAngleDeg.
+        public static bool TryColinearSnap(Vector2 cursor, float snapAngleDeg, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (_drawStart < 0 || _cornerPending) return false;
+            if (!BestColinearAxis(_drawStart, cursor, out Vector2 axis)) return false;
+            Vector2 start = Net.Nodes[_drawStart];
+            Vector2 toCur = cursor - start; float d = toCur.magnitude;
+            if (d < 1e-2f) return false;
+            if (Vector2.Angle(toCur / d, axis) > snapAngleDeg) return false;
+            snapped = start + axis * d;
+            return true;
+        }
+
+        // 2-click straight (or 3-click shift-curve) corridor draw. curveModifier (Shift): the click AFTER the start arms a
+        // bend corner; the next click is the end and the corridor follows a cubic bezier through that corner. The design-
+        // speed turn-radius limit (limitRadius/minRadius, from the road plan layer) refuses a curve tighter than allowed.
+        public static bool Click(Vector2 xz, string profileId, Func<Vector2, float> groundAt,
+                                 bool curveModifier = false, bool limitRadius = false, float minRadius = 0f)
         {
             int near = NearestCluster(xz, ClusterSnap);   // reuse an existing cluster → corridors meet at shared nodes
             if (_drawStart < 0)
@@ -269,9 +332,37 @@ namespace NetworkDesigner.Roads
                 Debug.Log(near >= 0 ? $"[LaneEdgeWorld] start SNAPPED to cluster {near}" : "[LaneEdgeWorld] start = new cluster");
                 return false;
             }
+
+            Vector2 start = Net.Nodes[_drawStart];
+
+            if (_cornerPending)   // END click of a shift-curve: build the curve start→end through the armed corner
+            {
+                Vector2 endPos = xz;   // PAC owns the end while a bend is armed — no cluster snap (it'd break the equal-leg radius)
+                if ((endPos - start).sqrMagnitude < 1f) return false;   // end ≈ start → degenerate
+                CurveControls(start, endPos, _corner, out Vector2 c1, out Vector2 c2);
+                if (limitRadius && MinCurveRadius(start, c1, c2, endPos) < minRadius)
+                {
+                    Debug.LogWarning($"[LaneEdgeWorld] curve too tight (R {MinCurveRadius(start, c1, c2, endPos):0} < {minRadius:0} m) — pick a wider end");
+                    return false;   // keep the corner armed so the next click can finish a buildable curve
+                }
+                int bc = Net.AddNode(xz);
+                AddCorridorFromProfile(_drawStart, bc, profileId, true, c1, c2);
+                _drawStart = -1; _cornerPending = false;
+                RegenerateDefaultFlows(groundAt);
+                Rebuild(groundAt);
+                return true;
+            }
+
+            if (curveModifier)   // arm the bend; the next click is the end
+            {
+                _corner = near >= 0 ? Net.Nodes[near] : xz; _cornerPending = true;
+                Debug.Log("[LaneEdgeWorld] bend armed — click again to set the curve end");
+                return false;
+            }
+
             int b = near >= 0 ? near : Net.AddNode(xz);
             Debug.Log(near >= 0 ? $"[LaneEdgeWorld] end SNAPPED to cluster {near}" : "[LaneEdgeWorld] end = new cluster");
-            if (b == _drawStart || (Net.Nodes[b] - Net.Nodes[_drawStart]).sqrMagnitude < 1f) return false;   // degenerate
+            if (b == _drawStart || (Net.Nodes[b] - start).sqrMagnitude < 1f) return false;   // degenerate
             AddCorridorFromProfile(_drawStart, b, profileId);
             _drawStart = -1;
             RegenerateDefaultFlows(groundAt);   // straight-through defaults at any newly-connected node
@@ -279,7 +370,198 @@ namespace NetworkDesigner.Roads
             return true;
         }
 
-        public static void CancelDraw() => _drawStart = -1;
+        public static void CancelDraw() { _drawStart = -1; _cornerPending = false; }
+
+        // Cubic controls that pull the curve toward the bend corner (CurveLever ≈ 0.55 ≈ circular arc) — same lever the
+        // road plan uses, so lane-edge curves match the corridor-edge ones.
+        static void CurveControls(Vector2 a, Vector2 b, Vector2 corner, out Vector2 c1, out Vector2 c2)
+        {
+            float f = Mathf.Clamp(NetworkDesigner.Terrain.PlanGuides.CurveLever, 0.1f, 0.95f);
+            c1 = Vector2.Lerp(a, corner, f);
+            c2 = Vector2.Lerp(b, corner, f);
+        }
+
+        // Tightest radius (m) along a cubic bezier, via 3-point circumradius over samples (+inf for a straight). Mirrors
+        // RoadPlanLayer.MinCurveRadius so the lane-edge design-speed limit matches.
+        static float MinCurveRadius(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            const int N = 24;
+            float minR = float.PositiveInfinity;
+            Vector2 a = GeometryResolver.SampleCubic(p0, p1, p2, p3, 0f);
+            Vector2 b = GeometryResolver.SampleCubic(p0, p1, p2, p3, 1f / N);
+            for (int i = 2; i <= N; i++)
+            {
+                Vector2 c = GeometryResolver.SampleCubic(p0, p1, p2, p3, i / (float)N);
+                float ab = Vector2.Distance(a, b), bc = Vector2.Distance(b, c), ca = Vector2.Distance(c, a);
+                float area2 = Mathf.Abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x));
+                if (area2 > 1e-6f) minR = Mathf.Min(minR, ab * bc * ca / (2f * area2));
+                a = b; b = c;
+            }
+            return minR;
+        }
+
+        // ── live draw preview (host calls UpdatePreview each frame while in lane-edge draw mode) ──
+        static GameObject _pvRoot;
+        static LineRenderer _pvC, _pvL, _pvR, _pvLegA, _pvLegB, _pvGuide;   // path centre/left/right + bend legs + colinear guide
+        static GameObject _pvStartM, _pvCornerM, _pvEndM;          // start / armed-corner / end markers
+        static Material _pvOkM, _pvBadM, _pvLegM, _pvNodeM, _pvSnapM, _pvGuideM;
+        static Material PvOk()   => _pvOkM   != null ? _pvOkM   : (_pvOkM   = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.30f, 1f, 0.55f, 0.85f), "LanePvOk"));
+        static Material PvBad()  => _pvBadM  != null ? _pvBadM  : (_pvBadM  = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.30f, 0.25f, 0.9f), "LanePvBad"));
+        static Material PvLeg()  => _pvLegM  != null ? _pvLegM  : (_pvLegM  = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.8f, 0.8f, 0.85f, 0.6f), "LanePvLeg"));
+        static Material PvNode() => _pvNodeM != null ? _pvNodeM : (_pvNodeM = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.85f, 0.15f, 0.9f), "LanePvNode"));
+        static Material PvSnap() => _pvSnapM != null ? _pvSnapM : (_pvSnapM = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.30f, 0.6f, 1f, 0.95f), "LanePvSnap"));
+        static Material PvGuide() => _pvGuideM != null ? _pvGuideM : (_pvGuideM = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.35f, 0.95f, 1f, 0.5f), "LanePvGuide"));
+
+        static LineRenderer MakePvLine(Transform parent, float width, Material mat)
+        {
+            var go = new GameObject("pvLine"); go.transform.SetParent(parent, false);
+            var lr = go.AddComponent<LineRenderer>();
+            lr.useWorldSpace = true; lr.widthMultiplier = width; lr.numCapVertices = 2; lr.sharedMaterial = mat;
+            lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; lr.receiveShadows = false;
+            return lr;
+        }
+
+        static GameObject MakePvMarker(Transform parent, float scale, Material mat)
+        {
+            var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
+            go.GetComponent<MeshRenderer>().sharedMaterial = mat;
+            go.transform.SetParent(parent, false); go.transform.localScale = Vector3.one * scale;
+            return go;
+        }
+
+        static void EnsurePreview()
+        {
+            if (_pvRoot != null) return;
+            _pvRoot = new GameObject("LaneEdgePreview");
+            _pvC = MakePvLine(_pvRoot.transform, 0.6f, PvOk());
+            _pvL = MakePvLine(_pvRoot.transform, 0.35f, PvOk());
+            _pvR = MakePvLine(_pvRoot.transform, 0.35f, PvOk());
+            _pvLegA = MakePvLine(_pvRoot.transform, 0.25f, PvLeg());
+            _pvLegB = MakePvLine(_pvRoot.transform, 0.25f, PvLeg());
+            _pvGuide = MakePvLine(_pvRoot.transform, 0.2f, PvGuide());
+            _pvStartM = MakePvMarker(_pvRoot.transform, 2.5f, PvNode());
+            _pvCornerM = MakePvMarker(_pvRoot.transform, 2.2f, PvLeg());
+            _pvEndM = MakePvMarker(_pvRoot.transform, 2.5f, PvNode());
+        }
+
+        static void PlaceMarker(GameObject m, Vector2 p, Func<Vector2, float> groundAt, Material mat)
+        {
+            m.GetComponent<MeshRenderer>().sharedMaterial = mat;
+            float y = (groundAt != null ? groundAt(p) : 0f) + 0.6f;
+            m.transform.position = new Vector3(p.x, y, p.y);
+            m.SetActive(true);
+        }
+
+        // Fill a preview LineRenderer along a straight or cubic path at lateral offset `off`, draped + lit by `mat`.
+        static void FillPvLine(LineRenderer lr, Vector2 a, Vector2 b, bool curved, Vector2 c1, Vector2 c2, float off, Func<Vector2, float> groundAt, Material mat)
+        {
+            float len = curved ? GeometryResolver.CubicArcLength(a, c1, c2, b) : (b - a).magnitude;
+            int n = Mathf.Clamp(Mathf.CeilToInt(len / 6f), 2, 48);   // kept light — preview only, still drapes over terrain
+            lr.sharedMaterial = mat; lr.positionCount = n + 1;
+            for (int i = 0; i <= n; i++)
+            {
+                float t = (float)i / n;
+                Vector2 tan = curved ? GeometryResolver.CubicTangent(a, c1, c2, b, t) : (b - a);
+                if (tan.sqrMagnitude < 1e-8f) tan = Vector2.right; else tan.Normalize();
+                Vector2 fr = new Vector2(tan.y, -tan.x);
+                Vector2 p = (curved ? GeometryResolver.SampleCubic(a, c1, c2, b, t) : Vector2.Lerp(a, b, t)) + fr * off;
+                float y = (groundAt != null ? groundAt(p) : 0f) + 0.1f;
+                lr.SetPosition(i, new Vector3(p.x, y, p.y));
+            }
+            lr.gameObject.SetActive(true);
+        }
+
+        static string _phwId; static float _phwVal;   // cache so the per-frame preview doesn't re-resolve the profile config
+        static float ProfileHalfWidth(string profileId)
+        {
+            if (profileId == _phwId) return _phwVal;
+            float half = 6f;
+            var cfg = RoadProfileLibrary.ResolveConfig(profileId);
+            if (cfg != null && cfg.Corridor != null)
+            {
+                var bands = new List<RoadCrossSectionBuilder.StackBand>();
+                RoadCrossSectionBuilder.FromStack(cfg.Corridor, bands);
+                float total = 0f; foreach (var bd in bands) total = Mathf.Max(total, bd.U1);
+                if (total > 0.1f) half = total * 0.5f;
+            }
+            _phwId = profileId; _phwVal = half;
+            return half;
+        }
+
+        // Movement/state cache: skip the (LineRenderer + drape) rebuild when nothing changed. With the PAC snap the end is
+        // quantised to the ring/ticks, so the cursor often holds still frame-to-frame — this is the main draw-lag fix.
+        static bool _pvShown; static Vector2 _pvCursorShown; static int _pvStartShown = -2;
+        static bool _pvCornerShown, _pvCurveModShown; static string _pvProfileShown;
+        static bool _pvGuideBuilt; static Vector2 _pvGuideStart, _pvGuideAxis;   // colinear guide is fixed per draw → cache it
+
+        // Live preview of the corridor about to be drawn: ghost end marker (with cluster-snap colour), and once a start is
+        // set, the straight/curved path (centre + both edges) to the cursor, plus the bend legs while a curve is armed.
+        public static void UpdatePreview(Vector2 cursor, bool curveModifier, bool limitRadius, float minRadius,
+                                         Func<Vector2, float> groundAt, string profileId)
+        {
+            if (_pvShown && _drawStart == _pvStartShown && _cornerPending == _pvCornerShown
+                && curveModifier == _pvCurveModShown && profileId == _pvProfileShown
+                && (cursor - _pvCursorShown).sqrMagnitude < 0.04f)   // <0.2 m + same phase → nothing to redraw
+                return;
+            _pvShown = true; _pvCursorShown = cursor; _pvStartShown = _drawStart;
+            _pvCornerShown = _cornerPending; _pvCurveModShown = curveModifier; _pvProfileShown = profileId;
+
+            EnsurePreview();
+            _pvRoot.SetActive(true);
+            _pvC.gameObject.SetActive(false); _pvL.gameObject.SetActive(false); _pvR.gameObject.SetActive(false);
+            _pvLegA.gameObject.SetActive(false); _pvLegB.gameObject.SetActive(false); _pvGuide.gameObject.SetActive(false);
+            _pvCornerM.SetActive(false); _pvStartM.SetActive(false);
+
+            int snap = _cornerPending ? -1 : NearestCluster(cursor, ClusterSnap);   // PAC owns the end while a bend is armed
+            Vector2 endPos = snap >= 0 ? Net.Nodes[snap] : cursor;
+            PlaceMarker(_pvEndM, endPos, groundAt, snap >= 0 ? PvSnap() : PvNode());
+
+            if (_drawStart < 0) return;   // before the first click only the ghost end marker shows
+
+            Vector2 start = Net.Nodes[_drawStart];
+            PlaceMarker(_pvStartM, start, groundAt, PvNode());
+            float halfW = ProfileHalfWidth(profileId);
+
+            // Colinear extension guide: a long line through the start along the connected road's tangent (both ways).
+            // It's FIXED during a draw (independent of the moving cursor), so build it once and just re-show it — the
+            // 600 m draped line was being rebuilt every frame for nothing (a big chunk of the straight-draw lag).
+            if (!_cornerPending && BestColinearAxis(_drawStart, cursor, out Vector2 gax))
+            {
+                if (!_pvGuideBuilt || _pvGuideStart != start || Vector2.Dot(_pvGuideAxis, gax) < 0.999f)
+                {
+                    const float L = 300f;
+                    FillPvLine(_pvGuide, start - gax * L, start + gax * L, false, default, default, 0f, groundAt, PvGuide());
+                    _pvGuideBuilt = true; _pvGuideStart = start; _pvGuideAxis = gax;
+                }
+                else _pvGuide.gameObject.SetActive(true);   // reuse cached geometry
+            }
+
+            if (_cornerPending)
+            {
+                CurveControls(start, endPos, _corner, out Vector2 c1, out Vector2 c2);
+                bool tooTight = limitRadius && MinCurveRadius(start, c1, c2, endPos) < minRadius;
+                Material m = tooTight ? PvBad() : PvOk();
+                FillPvLine(_pvC, start, endPos, true, c1, c2, 0f, groundAt, m);
+                FillPvLine(_pvL, start, endPos, true, c1, c2, +halfW, groundAt, m);
+                FillPvLine(_pvR, start, endPos, true, c1, c2, -halfW, groundAt, m);
+                FillPvLine(_pvLegA, start, _corner, false, default, default, 0f, groundAt, PvLeg());
+                FillPvLine(_pvLegB, _corner, endPos, false, default, default, 0f, groundAt, PvLeg());
+                PlaceMarker(_pvCornerM, _corner, groundAt, PvLeg());
+            }
+            else if (curveModifier)   // about to drop a bend here → show the first leg
+            {
+                FillPvLine(_pvLegA, start, endPos, false, default, default, 0f, groundAt, PvLeg());
+            }
+            else                      // straight preview
+            {
+                FillPvLine(_pvC, start, endPos, false, default, default, 0f, groundAt, PvOk());
+                FillPvLine(_pvL, start, endPos, false, default, default, +halfW, groundAt, PvOk());
+                FillPvLine(_pvR, start, endPos, false, default, default, -halfW, groundAt, PvOk());
+            }
+        }
+
+        public static void ClearPreview() { if (_pvRoot != null) _pvRoot.SetActive(false); _pvShown = false; _pvGuideBuilt = false; }
 
         // Per-corridor excavation beds (centreline grade dropped by `depth`; flatHalf = section½ + margin) — same shape as
         // RoadPlanLayer.CollectExcavationBeds, so the existing GradeBatter/FlattenStamp terrain grading is reused verbatim.
@@ -291,15 +573,16 @@ namespace NetworkDesigner.Roads
                 if (c.Built || c.Lanes.Count == 0) continue;
                 LaneEdge l0 = Net.Edges[c.Lanes[0]];
                 Vector2 a = Net.Nodes[l0.A], b = Net.Nodes[l0.B];
-                if ((b - a).sqrMagnitude < 1e-4f) continue;
+                float pathLen = LaneEdgeCorridorBuilder.PathLength(Net, c);
+                if (pathLen < 1e-2f) continue;
                 float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(c, Net).Width * 0.5f;
-                int n = Mathf.Clamp(Mathf.CeilToInt((b - a).magnitude / 2f), 2, 128);
-                float[] grade = RoadSweep.ElevationProfile(a, b, false, default, default, n + 1,
+                int n = Mathf.Clamp(Mathf.CeilToInt(pathLen / 2f), 2, 256);
+                float[] grade = RoadSweep.ElevationProfile(a, b, c.Curved, c.ControlA, c.ControlB, n + 1,
                                     groundAt != null ? groundAt(a) : 0f, groundAt != null ? groundAt(b) : 0f, groundAt, 1f);
                 var pts = new List<Vector3>(n + 1);
                 for (int i = 0; i <= n; i++)
                 {
-                    Vector2 p = Vector2.Lerp(a, b, (float)i / n);
+                    Vector2 p = LaneEdgeCorridorBuilder.PathPoint(Net, c, (float)i / n);
                     pts.Add(new Vector3(p.x, grade[i] - depth, p.y));
                 }
                 beds.Add((pts, halfW + margin));
@@ -350,10 +633,11 @@ namespace NetworkDesigner.Roads
 
         // Build a corridor between two clusters from a profile's cross-section: traffic/turn/sidewalk/bike bands become
         // lane-edges; median/shoulder bands become corridor metadata.
-        public static Corridor AddCorridorFromProfile(int ca, int cb, string profileId)
+        public static Corridor AddCorridorFromProfile(int ca, int cb, string profileId, bool curved = false, Vector2 ctrlA = default, Vector2 ctrlB = default)
         {
             Corridor c = Net.AddCorridor();
             c.Profile = profileId;
+            c.Curved = curved; c.ControlA = ctrlA; c.ControlB = ctrlB;
             var cfg = RoadProfileLibrary.ResolveConfig(profileId);
             if (cfg == null || cfg.Corridor == null) return c;
             var bands = new List<RoadCrossSectionBuilder.StackBand>();

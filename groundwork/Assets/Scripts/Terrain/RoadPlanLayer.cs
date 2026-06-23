@@ -640,6 +640,73 @@ namespace NetworkDesigner.Terrain
         // True while positioning the END: the equal-leg ring owns the cursor exclusively.
         public bool PlacingCurveEnd => _cornerPending && CurveSymmetrySnap > 0f && LimitCurveRadius;
 
+        // ── external curve-guide drive (the lane-edge model owns its own start/corner but reuses this layer's
+        // design-speed curve math + equal-leg ring / 15° ticks / leg+angle+radius labels) ──
+        [System.NonSerialized] public bool ExternalCurveGuide;   // gates the OnGUI tick/radius labels for an external curve
+
+        // Snap an externally-owned curve END onto the equal-leg PAC ring + buildable arc + 15° ticks. Mirrors
+        // TrySnapCurveSymmetry but takes start/bend explicitly (no dependence on this layer's chain state).
+        public bool SnapExternalCurveEnd(Vector2 start, Vector2 bend, Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            if (CurveSymmetrySnap <= 0f) return false;
+            float legA = Vector2.Distance(start, bend);
+            if (legA < 0.5f) return false;
+            if (!LimitCurveRadius)
+            {
+                Vector2 t0 = cursor - bend;
+                Vector2 d0 = t0.sqrMagnitude > 1e-6f ? t0.normalized : (bend - start).normalized;
+                snapped = bend + d0 * legA; return true;
+            }
+            Vector2 toCur = cursor - bend;
+            Vector2 dir = toCur.sqrMagnitude > 1e-6f ? toCur.normalized : (bend - start).normalized;
+            ClampToBuildableArc(start, bend, legA, dir, out Vector2 cdir);
+            snapped = bend + cdir * legA;
+            return true;
+        }
+
+        Vector2 _extRingStart, _extRingBend; bool _extRingBuilt;   // cache: the ring only depends on (start,bend), not the moving end
+
+        // Drive the equal-leg ring + ticks + leg/angle/radius labels for an externally-owned armed curve (start→bend→end).
+        public void ShowExternalCurveGuide(ITerrainSurface field, Vector2 start, Vector2 bend, Vector2 end)
+        {
+            // The ring + 15° ticks depend only on start+bend (NOT the moving end), so rebuild the (expensive 512-seg +
+            // buildable-arc-scan) mesh only when the bend actually moves; otherwise just re-show the cached mesh.
+            if (!_extRingBuilt || (start - _extRingStart).sqrMagnitude > 0.01f || (bend - _extRingBend).sqrMagnitude > 0.01f)
+            {
+                BuildSymRing(field, start, bend);
+                _extRingStart = start; _extRingBend = bend; _extRingBuilt = true;
+            }
+            else if (_symMr != null) _symMr.enabled = true;   // HidePreview disabled it this frame — re-show without rebuilding
+            CurveControls(start, end, bend, out Vector2 c1, out Vector2 c2);
+            LastPreviewRadius = MinCurveRadius(start, c1, c2, end);
+            LastPreviewTooTight = LimitCurveRadius && LastPreviewRadius < MinRadiusForSpeed;
+            PreviewCurveActive = true; PreviewStraightActive = false;
+            PreviewTail = start; PreviewCorner = bend; PreviewEnd = end;
+            PreviewLegA = Vector2.Distance(start, bend);
+            PreviewLegB = Vector2.Distance(bend, end);
+            PreviewDeflectionDeg = Vector2.Angle(bend - start, end - bend);
+            ExternalCurveGuide = true;
+        }
+
+        // Drive the min-leg target ring while an externally-owned bend is being positioned (before the corner click).
+        public void ShowExternalBendGuide(ITerrainSurface field, Vector2 start, Vector2 cursor)
+        {
+            BuildMinLegGuide(field, start, cursor);
+            PreviewCurveActive = false;
+            LastPreviewRadius = float.PositiveInfinity;   // no armed curve yet → suppress the radius readout
+            ExternalCurveGuide = true;
+        }
+
+        public void ClearExternalCurveGuide()
+        {
+            _extRingBuilt = false;   // next armed curve rebuilds the ring
+            if (!ExternalCurveGuide) return;
+            ExternalCurveGuide = false; PreviewCurveActive = false;
+            LastPreviewRadius = float.PositiveInfinity;
+            HideSymRing();
+        }
+
         public void EndChain()
         {
             // Cancelling a just-started chain leaves a lone node with no edges — drop it.

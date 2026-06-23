@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using NetworkDesigner.Geometry;   // GeometryResolver (cubic bezier sampling)
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -13,6 +14,41 @@ namespace NetworkDesigner.Roads
     // only new bit is "lane-edges → cross-section".
     public static class LaneEdgeCorridorBuilder
     {
+        // ── corridor reference-path samplers (A→B param 0..1; straight chord or cubic bezier per c.Curved) ──
+        // Shared by render/overlay/endpoints/beds/agents so the lane geometry stays consistent across all of them.
+        public static bool PathEndpoints(LaneEdgeNetwork net, Corridor c, out Vector2 a, out Vector2 b)
+        {
+            a = b = Vector2.zero;
+            if (c == null || c.Lanes.Count == 0) return false;
+            LaneEdge l0 = net.Edges[c.Lanes[0]];
+            a = net.Nodes[l0.A]; b = net.Nodes[l0.B];
+            return true;
+        }
+
+        public static Vector2 PathPoint(LaneEdgeNetwork net, Corridor c, float t)
+        {
+            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return Vector2.zero;
+            return c.Curved ? GeometryResolver.SampleCubic(a, c.ControlA, c.ControlB, b, t) : Vector2.Lerp(a, b, t);
+        }
+
+        // Unit tangent of the reference path at t, pointing A→B (or +X for a degenerate corridor).
+        public static Vector2 PathTangent(LaneEdgeNetwork net, Corridor c, float t)
+        {
+            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return Vector2.right;
+            Vector2 tan = c.Curved ? GeometryResolver.CubicTangent(a, c.ControlA, c.ControlB, b, t) : (b - a);
+            return tan.sqrMagnitude < 1e-8f ? Vector2.right : tan.normalized;
+        }
+
+        // Lane lateral right vector at t — matches RoadSweep's framing: fr = Cross(up, fwd) → (tan.y, -tan.x).
+        public static Vector2 PathRight(Vector2 tangent) => new Vector2(tangent.y, -tangent.x);
+
+        // Arc length of the corridor reference path (curve) or chord (straight).
+        public static float PathLength(LaneEdgeNetwork net, Corridor c)
+        {
+            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return 0f;
+            return c.Curved ? GeometryResolver.CubicArcLength(a, c.ControlA, c.ControlB, b) : (b - a).magnitude;
+        }
+
         // The corridor's cross-section, laid left→right from its lanes (ordered by lateral offset) with the median
         // inserted at the travel-direction flip and shoulders on the outer edges. Absolute Offset values only set the
         // ORDER; the section widths come from each lane/band's width.
@@ -65,7 +101,7 @@ namespace NetworkDesigner.Roads
             float hA = haveGrade ? yA : (groundAt != null ? groundAt(a) : 0f);
             float hB = haveGrade ? yB : (groundAt != null ? groundAt(b) : 0f);
             float follow = haveGrade ? 0f : (groundAt != null ? 1f : 0f);   // design grade once excavated; else terrain-follow
-            return RoadSweep.Build(xs, a, b, false, default, default, parent, $"LaneEdgeCorridor_{c.Id}",
+            return RoadSweep.Build(xs, a, b, c.Curved, c.ControlA, c.ControlB, parent, $"LaneEdgeCorridor_{c.Id}",
                                    hA, hB, groundAt, follow);
         }
 

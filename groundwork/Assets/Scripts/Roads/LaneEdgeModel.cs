@@ -8,7 +8,7 @@ namespace NetworkDesigner.Roads
     // model reaches parity with the corridor-edge model — the old model stays working in the meantime.
     public static class LaneEdgeModel
     {
-        public static bool Enabled = false;       // master flag: when true, road plan uses the lane-edge model
+        public static bool Enabled = true;        // master flag: when true, road plan uses the lane-edge model (now the default)
         public static bool MappingMode = false;   // when true, road-plan clicks author lane-flow mappings instead of drawing
     }
 
@@ -42,6 +42,8 @@ namespace NetworkDesigner.Roads
     {
         public int Id;
         public List<int> Lanes = new List<int>();            // lane-edge indices, ordered outer-BA → centre → outer-AB (non-readonly so JsonUtility restores it)
+        public bool Curved;                                  // reference path is a cubic bezier A→B (else a straight chord)
+        public Vector2 ControlA, ControlB;                    // cubic control points in the corridor's A→B param (only when Curved)
         public float MedianWidth;                             // centre band width between BA and AB lanes (0 = none)
         public float ShoulderBA, ShoulderAB;                  // outer non-navigable shoulder widths
         public string Profile;                                // source profile id (markings/style reuse during the spike)

@@ -329,6 +329,7 @@ namespace NetworkDesigner.Terrain
         // rail nodes to a constant ramp, if the result stays within the rail's max grade.
         Vector3 _lineCursorWorld;          // placement cursor (for the on-screen speed readout)
         bool _lineCursorValid;
+        Vector2 _leDrawCursor;             // lane-edge draw cursor this frame (raw hit, PAC-snapped when a bend is armed)
         int _railSlopeNodeA = -1;          // armed A node (-1 = none)
         List<Vector2> _railSlopePath;      // this frame's preview path A -> hovered node
         float _railSlopeGradePct;          // preview grade %
@@ -416,6 +417,7 @@ namespace NetworkDesigner.Terrain
             // the (Radius-capped) eager load covers the whole tile grid regardless of yaw.
             StartChunkWorld(c, 55f, "ChunkEditsDem");
             MinimapDiorama.Spawn(ChunkCam());   // 3D relief minimap of the whole block
+            MinimapDiorama.Current?.SetRendering(_showMinimap);   // don't render the diorama RT while the minimap is hidden
         }
 
         void StartChunkWorld(Vector3 camPos, float pitch, string editSubdir)
@@ -702,6 +704,15 @@ namespace NetworkDesigner.Terrain
 
         void Start()
         {
+#if UNITY_EDITOR
+            // Frame-pacing trap: a VSync / targetFrameRate cap makes the fly camera crawl when the mouse is idle (the
+            // editor idle-throttles and Time's deltaTime clamp then starves camera motion). Force UNCAPPED in the editor
+            // regardless of QualitySettings — vSyncCount can come back as 1 when ProjectSettings are regenerated. Builds
+            // keep their own pacing (this is editor-only).
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = -1;
+            Application.runInBackground = true;   // keep the player loop stepping when the Game view is idle/unfocused
+#endif
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
             NetworkDesigner.Roads.LaneEdgeAgentSim.GroundHeight = xz => Surf.SampleHeight(xz.x, xz.y);   // lane-edge car drape fallback
@@ -1008,7 +1019,7 @@ namespace NetworkDesigner.Terrain
                         return new Vector3(rp.x, raw.y, rp.y);
                     if (pl.TrySnapToExtension(flat, out Vector2 pe)) return new Vector3(pe.x, raw.y, pe.y);
                 }
-                if (_lineActive is RoadPlanLayer rdp)
+                if (_lineActive is RoadPlanLayer rdp && !NetworkDesigner.Roads.LaneEdgeModel.Enabled)   // lane-edge ignores cursorVis (uses its own snapped cursor)
                 {
                     rdp.StraightOffAxis = false;
                     // Shift-curve: bend → equal-leg lock → PAC owns the cursor. Then node JOIN (any-angle junction).
@@ -1399,6 +1410,20 @@ namespace NetworkDesigner.Terrain
                     GUILayout.Label("● Drawing a chain (green node) — right-click to finish");
                     GUI.color = prevC;
                 }
+                // Lane-edge model draw state (own draw stack; the corridor-edge chain HUD above doesn't apply).
+                if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && _lineActive is RoadPlanLayer)
+                {
+                    Color prevC = GUI.color;
+                    if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
+                    { GUI.color = new Color(0.5f, 0.7f, 1f); GUILayout.Label("◇ Lane-edge: map flows — click blue (in) then green (out)"); }
+                    else if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending)
+                    { GUI.color = new Color(1f, 0.8f, 0.3f); GUILayout.Label("◗ Lane-edge: bend armed — click the curve end"); }
+                    else if (NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
+                    { GUI.color = new Color(0.30f, 1f, 0.5f); GUILayout.Label("● Lane-edge: click end (hold Shift for a curve) · right-click cancels"); }
+                    else
+                    { GUI.color = new Color(0.30f, 1f, 0.5f); GUILayout.Label("● Lane-edge: click to start a corridor"); }
+                    GUI.color = prevC;
+                }
                 if (_lineActive is LineworkLayer lw && lw.Asset == null)
                     GUILayout.Label("Assign an Asset prefab on the\nlayer to see it render.");
                 if (_lineActive is RailPlanLayer pl)
@@ -1573,7 +1598,7 @@ namespace NetworkDesigner.Terrain
             List<Vector3> pos = null; List<int> deg = null;
             if (_lineActive is RailTrackLayer rt && rt.PlacingCurveEnd) { pos = rt.CurveTickWorld; deg = rt.CurveTickDeg; }
             else if (_lineActive is RailPlanLayer pl && pl.PlacingCurveEnd) { pos = pl.CurveTickWorld; deg = pl.CurveTickDeg; }
-            else if (_lineActive is RoadPlanLayer rd && rd.PlacingCurveEnd) { pos = rd.CurveTickWorld; deg = rd.CurveTickDeg; }
+            else if (_lineActive is RoadPlanLayer rd && (rd.PlacingCurveEnd || rd.PreviewCurveActive)) { pos = rd.CurveTickWorld; deg = rd.CurveTickDeg; }   // PreviewCurveActive covers the lane-edge external guide
             if (pos == null || pos.Count == 0) return;
             Camera cam = PickCamera != null ? PickCamera : Camera.main;
             if (cam == null) return;
@@ -1795,7 +1820,7 @@ namespace NetworkDesigner.Terrain
             }
             string txt = $"{kmh:0} km/h";
             // While a road shift-curve is armed, show the pending radius vs. the design-speed minimum.
-            if (_lineActive is RoadPlanLayer rdp && rdp.CornerPending && !float.IsPositiveInfinity(rdp.LastPreviewRadius))
+            if (_lineActive is RoadPlanLayer rdp && (rdp.CornerPending || rdp.ExternalCurveGuide) && !float.IsPositiveInfinity(rdp.LastPreviewRadius))
                 txt += rdp.LastPreviewTooTight
                     ? $"  R {rdp.LastPreviewRadius:0} m (min {rdp.MinRadiusForSpeed:0})"
                     : $"  R {rdp.LastPreviewRadius:0} m";
@@ -3124,7 +3149,7 @@ namespace NetworkDesigner.Terrain
         public void ToggleSnap() { SnapToGrid = !SnapToGrid; SaveViewPrefs(); }
         public void ToggleTopo() { ChunkContours = !ChunkContours; SaveViewPrefs(); }
         public void ToggleRidges() { ChunkRidges = !ChunkRidges; SaveViewPrefs(); }
-        public void ToggleMinimap() { _showMinimap = !_showMinimap; SaveViewPrefs(); }
+        public void ToggleMinimap() { _showMinimap = !_showMinimap; MinimapDiorama.Current?.SetRendering(_showMinimap); SaveViewPrefs(); }
 
         // The grid / snap / topo / ridge / minimap view toggles persist across worlds in PlayerPrefs.
         const string ViewSnapKey = "ViewSnap", ViewGridKey = "ViewGrid", ViewTopoKey = "ViewTopo", ViewRidgeKey = "ViewRidge", ViewMiniKey = "ViewMinimap";
@@ -3734,7 +3759,9 @@ namespace NetworkDesigner.Terrain
             {
                 bool curveModNow = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                 if (_lineActive is RailTrackLayer railModNow) railModNow.CurveModifier = curveModNow;
-                else if (_lineActive is RoadPlanLayer roadModNow) roadModNow.CurveModifier = curveModNow;
+                // In lane-edge mode the lane-edge draw reads Shift directly; don't arm the corridor-edge curve system
+                // (its guide ring/labels would render off its empty chain — the stale ring + floating labels bug).
+                else if (_lineActive is RoadPlanLayer roadModNow) roadModNow.CurveModifier = curveModNow && !NetworkDesigner.Roads.LaneEdgeModel.Enabled;
                 else if (_lineActive is RailPlanLayer planModNow)
                 {
                     planModNow.CurveModifier = curveModNow;
@@ -3794,7 +3821,9 @@ namespace NetworkDesigner.Terrain
             }
             // Road plan: highlight the node under the cursor (screen-space pick) as the snap / delete target — like
             // the rail pucks. Hidden (−1) when road isn't the active layer, off-terrain, or in elevation-edit mode.
-            if (RoadPlanLayer != null)
+            // Skipped entirely in lane-edge mode — the corridor-edge picks + per-frame UpdateLaneSnapPreview rebuild
+            // are pure overhead there (lane-edge has its own preview); this is a key draw-lag fix.
+            if (RoadPlanLayer != null && !NetworkDesigner.Roads.LaneEdgeModel.Enabled)
             {
                 Camera hc = PickCamera != null ? PickCamera : Camera.main;
                 bool roadHover = _lineActive is RoadPlanLayer rdH && overTerrain && !rdH.ElevationEditMode && hc != null;
@@ -3812,7 +3841,8 @@ namespace NetworkDesigner.Terrain
                 RoadPlanLayer.SetHoverLane(Surf, ln, showOverlay: false);   // track anchor index, but the N-lane snap halo is the only highlight
                 RoadPlanLayer.RefreshTailHighlight(Surf, false);   // no segment-whole node — lane nodes are the handles
                 // Cursor preview: one ghost lane node per lane of the active profile, snapping to the road end's lanes.
-                bool snapPreview = roadHover && !RoadPlanLayer.HasOpenChain && RoadPlanLayer.PlainDrawMode;
+                bool snapPreview = roadHover && !RoadPlanLayer.HasOpenChain && RoadPlanLayer.PlainDrawMode
+                                   && !NetworkDesigner.Roads.LaneEdgeModel.Enabled;   // lane-edge mode has its own preview
                 RoadPlanLayer.UpdateLaneSnapPreview(Surf, hc, new Vector2(hit.point.x, hit.point.z), snapPreview);
             }
             // Remember the placement cursor + whether it's over terrain, for the on-screen
@@ -3867,8 +3897,41 @@ namespace NetworkDesigner.Terrain
                         { rdSh.HidePreview(); HandleRoadSetbackInput(rdSh, hit, overTerrain); return; }
                     }
                 }
-                if (roadSelecting || overSetbackHandle) _lineActive.HidePreview();   // hide the add-node cursor while picking / over a ring
-                else _lineActive.UpdatePreview(Surf, place, overTerrain);
+                bool leDrawMode = NetworkDesigner.Roads.LaneEdgeModel.Enabled && _lineActive is RoadPlanLayer;
+                if (roadSelecting || overSetbackHandle)
+                { _lineActive.HidePreview(); NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); if (_lineActive is RoadPlanLayer rdG0) rdG0.ClearExternalCurveGuide(); }   // hide the add-node cursor while picking / over a ring
+                else if (leDrawMode)
+                {
+                    _lineActive.HidePreview();   // the corridor-edge ghost is irrelevant in lane-edge mode
+                    var rdPv = (RoadPlanLayer)_lineActive;
+                    bool leShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                    if (!NetworkDesigner.Roads.LaneEdgeModel.MappingMode && overTerrain && !MouseOverActivePanel())
+                    {
+                        _leDrawCursor = new Vector2(hit.point.x, hit.point.z);
+                        bool leFreeAngle = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);   // Alt = free angle (skip colinear snap)
+                        // PAC snap: while a bend is armed, lock the end onto the equal-leg ring + buildable arc + ticks.
+                        if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending
+                            && rdPv.SnapExternalCurveEnd(NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos,
+                                   NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor, out Vector2 leSnap))
+                            _leDrawCursor = leSnap;
+                        // Colinear extension: continue a connected source road straight off the start node.
+                        else if (!leFreeAngle
+                            && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnap(_leDrawCursor, 14f, out Vector2 leCol))
+                            _leDrawCursor = leCol;
+                        NetworkDesigner.Roads.LaneEdgeWorld.UpdatePreview(_leDrawCursor, leShift,
+                            rdPv.LimitCurveRadius, rdPv.MinRadiusForSpeed,
+                            xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId);
+                        // PAC ring + 15° ticks + leg/angle/radius labels at the lane-edge bend.
+                        if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending)
+                            rdPv.ShowExternalCurveGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos,
+                                NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor);
+                        else if (leShift && NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
+                            rdPv.ShowExternalBendGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, _leDrawCursor);
+                        else rdPv.ClearExternalCurveGuide();
+                    }
+                    else { NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); rdPv.ClearExternalCurveGuide(); }
+                }
+                else { _lineActive.UpdatePreview(Surf, place, overTerrain); NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); if (_lineActive is RoadPlanLayer rdG1) rdG1.ClearExternalCurveGuide(); }
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);
                 bool overPanel = MouseOverActivePanel();   // cursor over the rail palette
@@ -3881,8 +3944,10 @@ namespace NetworkDesigner.Terrain
                             NetworkDesigner.Roads.LaneEdgeWorld.MapClick(PickCamera != null ? PickCamera : Camera.main,
                                 new Vector2(Input.mousePosition.x, Input.mousePosition.y), xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
                         else
-                            NetworkDesigner.Roads.LaneEdgeWorld.Click(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId,
-                                xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);   // lift so the deck doesn't bury/z-fight
+                            NetworkDesigner.Roads.LaneEdgeWorld.Click(_leDrawCursor, rdLE.ActiveProfileId,   // PAC-snapped cursor (matches the preview)
+                                xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f,   // lift so the deck doesn't bury/z-fight
+                                Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift),   // Shift arms a curve bend
+                                rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);   // refuse curves tighter than the design speed allows
                         _dirtySince = Time.realtimeSinceStartup;   // persist lane-edge draws/flows via autosave
                         return;
                     }
