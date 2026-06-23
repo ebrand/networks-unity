@@ -489,11 +489,11 @@ namespace NetworkDesigner.Roads
         public static bool Click(Vector2 xz, string profileId, Func<Vector2, float> groundAt,
                                  bool curveModifier = false, bool limitRadius = false, float minRadius = 0f)
         {
-            int near = NearestCluster(xz, ClusterSnap);   // reuse an existing cluster → corridors meet at shared nodes
+            // A normal draw never snaps to an existing SEGMENT node — you expand/connect an existing road ONLY via its lane
+            // pucks (extension). So start/bend/end are always fresh nodes; the segment-node centreline is never a draw handle.
             if (_drawStart < 0)
             {
-                _drawStart = near >= 0 ? near : Net.AddNode(xz);
-                Debug.Log(near >= 0 ? $"[LaneEdgeWorld] start SNAPPED to cluster {near}" : "[LaneEdgeWorld] start = new cluster");
+                _drawStart = Net.AddNode(xz);
                 return false;
             }
 
@@ -519,13 +519,11 @@ namespace NetworkDesigner.Roads
 
             if (curveModifier)   // arm the bend; the next click is the end
             {
-                _corner = near >= 0 ? Net.Nodes[near] : xz; _cornerPending = true;
-                Debug.Log("[LaneEdgeWorld] bend armed — click again to set the curve end");
+                _corner = xz; _cornerPending = true;
                 return false;
             }
 
-            int b = near >= 0 ? near : Net.AddNode(xz);
-            Debug.Log(near >= 0 ? $"[LaneEdgeWorld] end SNAPPED to cluster {near}" : "[LaneEdgeWorld] end = new cluster");
+            int b = Net.AddNode(xz);
             if (b == _drawStart || (Net.Nodes[b] - start).sqrMagnitude < 1f) return false;   // degenerate
             AddCorridorFromProfile(_drawStart, b, profileId);
             _drawStart = -1;
@@ -643,6 +641,21 @@ namespace NetworkDesigner.Roads
             _pvMeshGo.SetActive(_sgVerts.Count > 0);
         }
 
+        static readonly List<GameObject> _pvHover = new List<GameObject>();   // lane-snap hover halos (extension pick preview)
+        static GameObject HoverHalo(int i)
+        {
+            while (_pvHover.Count <= i)
+            {
+                var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
+                go.transform.SetParent(_pvRoot.transform, false);
+                go.transform.localScale = Vector3.one * 2.4f;
+                go.GetComponent<MeshRenderer>().sharedMaterial = ExtSelMat();
+                _pvHover.Add(go);
+            }
+            return _pvHover[i];
+        }
+
         static void PlaceMarker(GameObject m, Vector2 p, Func<Vector2, float> groundAt, Material mat)
         {
             m.GetComponent<MeshRenderer>().sharedMaterial = mat;
@@ -711,12 +724,26 @@ namespace NetworkDesigner.Roads
             _pvLegA.gameObject.SetActive(false); _pvLegB.gameObject.SetActive(false); _pvGuide.gameObject.SetActive(false);
             _pvCornerM.SetActive(false); _pvStartM.SetActive(false);
             if (_pvMeshGo != null) _pvMeshGo.SetActive(false);
+            for (int i = 0; i < _pvHover.Count; i++) _pvHover[i].SetActive(false);
 
-            int snap = _cornerPending ? -1 : NearestCluster(cursor, ClusterSnap);   // PAC owns the end while a bend is armed
-            Vector2 endPos = snap >= 0 ? Net.Nodes[snap] : cursor;
-            PlaceMarker(_pvEndM, endPos, groundAt, snap >= 0 ? PvSnap() : PvNode());
+            // No segment-node snap: the normal draw always lands a fresh node (connection is via lane pucks only), so the
+            // preview end marker just follows the cursor.
+            Vector2 endPos = cursor;
+            PlaceMarker(_pvEndM, endPos, groundAt, PvNode());
 
-            if (_drawStart < 0) return;   // before the first click only the ghost end marker shows
+            if (_drawStart < 0)   // hovering to start: snap-highlight the lane group a click would PULL OFF an existing road.
+            {
+                int shown = 0;
+                if (ComputeExtendGroup(cursor, profileId, 5f, out int hNode, out _))
+                    foreach (int edge in _grpBuf)
+                    {
+                        if (!TryEndpointPos(hNode, edge, out Vector2 hp, out float hy)) continue;
+                        GameObject h = HoverHalo(shown++);
+                        h.transform.position = new Vector3(hp.x, hy, hp.y); h.SetActive(true);
+                    }
+                if (shown > 0) _pvEndM.SetActive(false);   // snapping to lanes → drop the free ghost marker
+                return;
+            }
 
             Vector2 start = Net.Nodes[_drawStart];
             PlaceMarker(_pvStartM, start, groundAt, PvNode());
@@ -960,8 +987,13 @@ namespace NetworkDesigner.Roads
         // node (picking at a new node restarts the selection). Returns true if a puck was hit (so the caller swallows the click).
         // World-space pick: click ON a lane near its end (a wide, easy target) — far more forgiving than aiming at the
         // small endpoint sphere. Picks the nearest lane endpoint within worldR metres of the clicked ground point.
-        public static bool ToggleExtendPick(Vector2 worldXz, string profileId, float worldR = 5f)
+        static readonly List<int> _grpBuf = new List<int>(), _grpCand = new List<int>();
+
+        // The lane group a click/hover at worldXz would grab: nearest lane endpoint → a contiguous block of `profile lane
+        // count` lanes (same corridor + direction) around it (or the single lane for a 1-lane profile). Read-only → into _grpBuf.
+        static bool ComputeExtendGroup(Vector2 worldXz, string profileId, float worldR, out int node, out bool single)
         {
+            node = -1; single = false; _grpBuf.Clear();
             int best = -1; float bestSq = worldR * worldR;
             for (int i = 0; i < Endpoints.Count; i++)
             {
@@ -969,36 +1001,47 @@ namespace NetworkDesigner.Roads
                 if (d < bestSq) { bestSq = d; best = i; }
             }
             if (best < 0) return false;
-            LaneEndpoint ep = Endpoints[best];
-            if (_extNode >= 0 && ep.Node != _extNode) _extLanes.Clear();   // switched node → restart selection
-            _extNode = ep.Node;
+            LaneEndpoint ep = Endpoints[best]; node = ep.Node;
             LaneEdge picked = Net.Edges[ep.Edge];
-            int count = ProfileLaneCount(profileId);
+            if (ProfileLaneCount(profileId) <= 1) { _grpBuf.Add(ep.Edge); single = true; return true; }
 
-            if (count <= 1)   // 1-lane profile → toggle the single clicked lane
-            {
-                if (_extLanes.Contains(ep.Edge)) _extLanes.Remove(ep.Edge); else _extLanes.Add(ep.Edge);
-                if (_extLanes.Count == 0) _extNode = -1;
-                return true;
-            }
-
-            // Multi-lane profile → grab a contiguous block of `count` lanes (same corridor + direction) around the click.
-            var cand = new List<int>();
+            _grpCand.Clear();
             for (int i = 0; i < Net.Edges.Count; i++)
             {
                 LaneEdge e = Net.Edges[i];
-                if ((e.A != _extNode && e.B != _extNode) || e.CorridorId != picked.CorridorId) continue;
+                if ((e.A != node && e.B != node) || e.CorridorId != picked.CorridorId) continue;
                 if (e.Direction != picked.Direction || e.Kind == LaneKind.Sidewalk) continue;
-                cand.Add(i);
+                _grpCand.Add(i);
             }
-            cand.Sort((x, y) => Net.Edges[x].Offset.CompareTo(Net.Edges[y].Offset));
-            int pi = cand.IndexOf(ep.Edge);
-            if (pi < 0) { _extLanes.Clear(); _extLanes.Add(ep.Edge); return true; }
-            int g = Mathf.Min(count, cand.Count);
-            int startIdx = Mathf.Clamp(pi - g / 2, 0, cand.Count - g);
-            _extLanes.Clear();
-            for (int k = 0; k < g; k++) _extLanes.Add(cand[startIdx + k]);
+            _grpCand.Sort((x, y) => Net.Edges[x].Offset.CompareTo(Net.Edges[y].Offset));
+            int pi = _grpCand.IndexOf(ep.Edge);
+            if (pi < 0) { _grpBuf.Add(ep.Edge); return true; }
+            int g = Mathf.Min(ProfileLaneCount(profileId), _grpCand.Count);
+            int startIdx = Mathf.Clamp(pi - g / 2, 0, _grpCand.Count - g);
+            for (int k = 0; k < g; k++) _grpBuf.Add(_grpCand[startIdx + k]);
             return true;
+        }
+
+        public static bool ToggleExtendPick(Vector2 worldXz, string profileId, float worldR = 5f)
+        {
+            if (!ComputeExtendGroup(worldXz, profileId, worldR, out int node, out bool single)) return false;
+            if (_extNode >= 0 && node != _extNode) _extLanes.Clear();   // switched node → restart selection
+            _extNode = node;
+            if (single)   // 1-lane profile → toggle the single lane (build up multi-lane by clicking each)
+            {
+                int edge = _grpBuf[0];
+                if (_extLanes.Contains(edge)) _extLanes.Remove(edge); else _extLanes.Add(edge);
+                if (_extLanes.Count == 0) _extNode = -1;
+            }
+            else { _extLanes.Clear(); _extLanes.AddRange(_grpBuf); }   // multi-lane → grab the contiguous group
+            return true;
+        }
+
+        static bool TryEndpointPos(int node, int edge, out Vector2 pos, out float y)
+        {
+            for (int i = 0; i < Endpoints.Count; i++)
+                if (Endpoints[i].Node == node && Endpoints[i].Edge == edge) { pos = Endpoints[i].Pos; y = Endpoints[i].Y; return true; }
+            pos = Vector2.zero; y = 0f; return false;
         }
 
         // Navigable (drivable) lane count of a profile — drives how many lanes an extension click grabs.
