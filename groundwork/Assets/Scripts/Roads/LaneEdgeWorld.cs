@@ -27,10 +27,50 @@ namespace NetworkDesigner.Roads
             GameObject root = Root();
             for (int i = root.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(root.transform.GetChild(i).gameObject);
-            foreach (Corridor c in Net.Corridors) LaneEdgeCorridorBuilder.RenderCorridor(Net, c, root.transform, groundAt);
+            foreach (Corridor c in Net.Corridors)
+            {
+                if (c.Built) LaneEdgeCorridorBuilder.RenderCorridor(Net, c, root.transform, groundAt);   // real swept body
+                else RenderPlanOverlay(c, root.transform, groundAt);                                     // schematic plan line
+            }
             RenderNodes(root.transform, groundAt);
             RenderEndpointSpheres(root.transform);
             RenderFlows(root.transform);
+        }
+
+        static Material _plannedMat, _excavatedMat;
+        static Material PlannedMat() => _plannedMat != null ? _plannedMat : (_plannedMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.9f, 0.35f, 0.2f, 0.9f), 0f, "LanePlanLine"));
+        static Material ExcavatedMat() => _excavatedMat != null ? _excavatedMat : (_excavatedMat = NetworkDesigner.PipelineMaterials.CreateLitTransparent(new Color(0.95f, 0.85f, 0.2f, 0.9f), 0f, "LaneExcavLine"));
+
+        // Draw an un-built corridor as a draped schematic: centreline + the two outer edges. Red = planned, yellow =
+        // excavated (mirrors the corridor-edge plan overlay colours).
+        static void RenderPlanOverlay(Corridor c, Transform parent, Func<Vector2, float> groundAt)
+        {
+            if (c.Lanes.Count == 0) return;
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            Vector2 a = Net.Nodes[l0.A], b = Net.Nodes[l0.B];
+            if ((b - a).sqrMagnitude < 1e-4f) return;
+            float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(c, Net).Width * 0.5f;
+            Vector2 cdir = (b - a).normalized; Vector2 fr = new Vector2(cdir.y, -cdir.x);
+            Material m = c.Excavated ? ExcavatedMat() : PlannedMat();
+            DrawDrapedPolyline(parent, a, b, 0f, fr, groundAt, m);
+            DrawDrapedPolyline(parent, a, b, +halfW, fr, groundAt, m);
+            DrawDrapedPolyline(parent, a, b, -halfW, fr, groundAt, m);
+        }
+
+        static void DrawDrapedPolyline(Transform parent, Vector2 a, Vector2 b, float off, Vector2 fr, Func<Vector2, float> groundAt, Material mat)
+        {
+            int n = Mathf.Clamp(Mathf.CeilToInt((b - a).magnitude / 4f), 2, 96);
+            var go = new GameObject("planLine"); go.transform.SetParent(parent, false);
+            var lr = go.AddComponent<LineRenderer>();
+            lr.sharedMaterial = mat; lr.useWorldSpace = true; lr.widthMultiplier = 0.6f; lr.numCapVertices = 2;
+            lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; lr.receiveShadows = false;
+            lr.positionCount = n + 1;
+            for (int i = 0; i <= n; i++)
+            {
+                Vector2 p = Vector2.Lerp(a, b, (float)i / n) + fr * off;
+                float y = groundAt != null ? groundAt(p) : 0f;
+                lr.SetPosition(i, new Vector3(p.x, y, p.y));
+            }
         }
 
         static Material _inMat, _outMat;
@@ -205,6 +245,33 @@ namespace NetworkDesigner.Roads
         }
 
         public static void CancelDraw() => _drawStart = -1;
+
+        // Per-corridor excavation beds (centreline grade dropped by `depth`; flatHalf = section½ + margin) — same shape as
+        // RoadPlanLayer.CollectExcavationBeds, so the existing GradeBatter/FlattenStamp terrain grading is reused verbatim.
+        // Captures the centreline grade into NodeY so Build sits the body on the same design grade the bed was cut to.
+        public static void CollectExcavationBeds(Func<Vector2, float> groundAt, float depth, float margin, List<(List<Vector3> pts, float flatHalf)> beds)
+        {
+            foreach (Corridor c in Net.Corridors)
+            {
+                if (c.Built || c.Lanes.Count == 0) continue;
+                LaneEdge l0 = Net.Edges[c.Lanes[0]];
+                Vector2 a = Net.Nodes[l0.A], b = Net.Nodes[l0.B];
+                if ((b - a).sqrMagnitude < 1e-4f) continue;
+                float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(c, Net).Width * 0.5f;
+                int n = Mathf.Clamp(Mathf.CeilToInt((b - a).magnitude / 2f), 2, 128);
+                float[] grade = RoadSweep.ElevationProfile(a, b, false, default, default, n + 1,
+                                    groundAt != null ? groundAt(a) : 0f, groundAt != null ? groundAt(b) : 0f, groundAt, 1f);
+                var pts = new List<Vector3>(n + 1);
+                for (int i = 0; i <= n; i++)
+                {
+                    Vector2 p = Vector2.Lerp(a, b, (float)i / n);
+                    pts.Add(new Vector3(p.x, grade[i] - depth, p.y));
+                }
+                beds.Add((pts, halfW + margin));
+                Net.SetNodeY(l0.A, grade[0]); Net.SetNodeY(l0.B, grade[n]);   // design grade captured for Build
+                c.Excavated = true; c.BedDepth = depth;
+            }
+        }
 
         // ── lane-flow mapping (#149): click an incoming (blue) endpoint to arm, then an outgoing (green) endpoint at the
         // SAME node to map a through/turn movement ──

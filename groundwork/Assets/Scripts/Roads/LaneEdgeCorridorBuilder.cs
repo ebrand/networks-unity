@@ -57,12 +57,16 @@ namespace NetworkDesigner.Roads
             LaneEdge l0 = net.Edges[c.Lanes[0]];
             Vector2 a = net.Nodes[l0.A], b = net.Nodes[l0.B];
             RoadCrossSection xs = BuildCrossSection(c, net);
-            // RoadSweep's follow mode PINS the endpoints to the design grade (heightA/heightB) and drapes the middle
-            // relative to them — pass the terrain height at each end (not 0), else the whole road sinks to Y≈0.
-            float hA = groundAt != null ? groundAt(a) : 0f;
-            float hB = groundAt != null ? groundAt(b) : 0f;
+            // Once excavated, sit the body on the CAPTURED design grade (NodeY) as a slab of the bed depth — so it fills
+            // the cut bed at the original level instead of draping into the (now-lowered) terrain. Un-excavated → drape.
+            float yA = net.GetNodeY(l0.A), yB = net.GetNodeY(l0.B);
+            bool haveGrade = !float.IsNaN(yA) && !float.IsNaN(yB);
+            if (haveGrade && c.BedDepth > 0f) xs.Thickness = c.BedDepth;
+            float hA = haveGrade ? yA : (groundAt != null ? groundAt(a) : 0f);
+            float hB = haveGrade ? yB : (groundAt != null ? groundAt(b) : 0f);
+            float follow = haveGrade ? 0f : (groundAt != null ? 1f : 0f);   // design grade once excavated; else terrain-follow
             return RoadSweep.Build(xs, a, b, false, default, default, parent, $"LaneEdgeCorridor_{c.Id}",
-                                   hA, hB, groundAt, groundAt != null ? 1f : 0f);
+                                   hA, hB, groundAt, follow);
         }
 
 #if UNITY_EDITOR

@@ -98,10 +98,10 @@ namespace NetworkDesigner.UI
             body.Add(selCount);
 
             var actRow = HBox(); actRow.style.marginBottom = 4;
-            var excBtn = MakeButton("Excavate", () => Designer.ExcavateSelectedRoads());
+            var excBtn = MakeButton("Excavate", () => { if (NetworkDesigner.Roads.LaneEdgeModel.Enabled) Designer.ExcavateRoadCorridor(); else Designer.ExcavateSelectedRoads(); });
             excBtn.style.flexGrow = 1; excBtn.style.marginRight = 6;
             excBtn.tooltip = "Cut + fill the bed of every SELECTED planned (red) segment → they turn yellow, ready to build. Bridges are skipped.";
-            var bldBtn = MakeButton("Build", () => Designer.BuildSelectedRoads());
+            var bldBtn = MakeButton("Build", () => { if (NetworkDesigner.Roads.LaneEdgeModel.Enabled) Designer.BuildRoadPlan(); else Designer.BuildSelectedRoads(); });
             bldBtn.style.flexGrow = 1;
             bldBtn.tooltip = "Sweep the 3D road on every SELECTED segment that's excavated (yellow) or a bridge, each with its own profile.";
             actRow.Add(excBtn); actRow.Add(bldBtn);
@@ -122,7 +122,10 @@ namespace NetworkDesigner.UI
             {
                 int c = Designer.RoadSelectionCount;
                 selCount.text = c + " selected";
-                excBtn.SetEnabled(c > 0); bldBtn.SetEnabled(c > 0); brBtn.SetEnabled(c > 0);   // Clear Plan always enabled
+                // Lane-edge model: the main Excavate acts on all drawn corridors (no segment selection), so enable it
+                // whenever corridors exist. (Build wired in a later phase; Force-Bridge stays corridor-edge only.)
+                bool le = NetworkDesigner.Roads.LaneEdgeModel.Enabled && NetworkDesigner.Roads.LaneEdgeWorld.Net.Corridors.Count > 0;
+                excBtn.SetEnabled(le || c > 0); bldBtn.SetEnabled(le || c > 0); brBtn.SetEnabled(c > 0);   // Clear Plan always enabled
             });
 
             // Show/hide the plan-line markings (nodes stay visible). Highlighted = lines shown.

@@ -42,18 +42,25 @@ namespace NetworkDesigner.Roads
         public float MedianWidth;                             // centre band width between BA and AB lanes (0 = none)
         public float ShoulderBA, ShoulderAB;                  // outer non-navigable shoulder widths
         public string Profile;                                // source profile id (markings/style reuse during the spike)
+        public bool Planned = true;                           // drawn, not yet excavated/built (plan→excavate→build, mirrors LineEdge)
+        public bool Excavated;                                // terrain bed cut under the corridor footprint
+        public bool Built;                                    // 3D body swept + registered for agents
+        public float BedDepth;                                // excavation depth (built body becomes a slab of this thickness)
     }
 
     // The lane-edge graph: a shared node list + lane-edges + corridors. Parallels LineGraph but at lane granularity.
     public class LaneEdgeNetwork
     {
         public readonly List<Vector2> Nodes = new List<Vector2>();
+        public readonly List<float> NodeY = new List<float>();         // captured design grade per node (NaN = not captured)
         public readonly List<LaneEdge> Edges = new List<LaneEdge>();
         public readonly List<Corridor> Corridors = new List<Corridor>();
         public readonly List<LaneFlow> Flows = new List<LaneFlow>();   // intra-node lane-flow mappings (#149)
         int _serial;
 
-        public int AddNode(Vector2 p) { Nodes.Add(p); return Nodes.Count - 1; }
+        public int AddNode(Vector2 p) { Nodes.Add(p); NodeY.Add(float.NaN); return Nodes.Count - 1; }
+        public float GetNodeY(int i) => i >= 0 && i < NodeY.Count ? NodeY[i] : float.NaN;
+        public void SetNodeY(int i, float y) { if (i >= 0 && i < NodeY.Count) NodeY[i] = y; }
 
         public int AddLane(LaneEdge e) { e.Serial = ++_serial; Edges.Add(e); return Edges.Count - 1; }
 

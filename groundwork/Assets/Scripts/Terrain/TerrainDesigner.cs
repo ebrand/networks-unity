@@ -2291,8 +2291,35 @@ namespace NetworkDesigner.Terrain
         // Cut a smoothed, slightly-sunken roadbed along the road plan: each segment is flattened to its
         // own smoothed terrain-follow elevation (dropped ExcavationDepth below ground) across its profile
         // footprint, feathering out beyond. Routes through the chunk overlay or the DEM backend like rail.
+        // Lane-edge model: excavate un-built corridors by reusing the SAME terrain-grading (GradeBatter / FlattenStamp).
+        void ExcavateLaneEdgeCorridors()
+        {
+            var beds = new List<(List<Vector3> pts, float flatHalf)>();
+            NetworkDesigner.Roads.LaneEdgeWorld.CollectExcavationBeds(xz => Surf.SampleHeight(xz.x, xz.y),
+                RoadPlanLayer.ExcavationDepth, RoadPlanLayer.ExcavationMargin, beds);
+            if (beds.Count == 0) { Debug.LogWarning("[LaneEdge] No un-built corridors to excavate — draw one first."); return; }
+            if (ChunkWorld.Active)
+            {
+                foreach (var b in beds)
+                    ChunkWorld.GradeBatter(b.pts, b.flatHalf, Mathf.Max(0.25f, RoadPlanLayer.CutBatter), Mathf.Max(0.25f, RoadPlanLayer.FillBatter), RoadPlanLayer.FillReach);
+            }
+            else if (DemTerrainWorld.HasWorld)
+            {
+                float feather = Mathf.Max(0.1f, RoadPlanLayer.CutFeather);
+                foreach (var b in beds) { float r = b.flatHalf + feather; float innerFrac = b.flatHalf / r; foreach (Vector3 p in b.pts) DemTerrainWorld.FlattenStamp(p, r, innerFrac, p.y); }
+                DemTerrainWorld.StitchAllSeams();
+                TreeLayer.ConformToSurface(Surf); RockLayer.ConformToSurface(Surf);
+            }
+            else { Debug.LogWarning("[LaneEdge] Excavation needs the chunk or DEM world."); return; }
+            NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+            ConformScatterAndLines();
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[LaneEdge] Excavated {beds.Count} corridors.");
+        }
+
         public void ExcavateRoadCorridor()
         {
+            if (NetworkDesigner.Roads.LaneEdgeModel.Enabled) { ExcavateLaneEdgeCorridors(); return; }
             var beds = new List<(List<Vector3> pts, float flatHalf)>();
             // Node grades come from the per-node DESIGN elevation (captured from the SHAPED surface and
             // stored) — so the cut respects terrain you carved/flattened and re-running is idempotent.
@@ -2372,8 +2399,20 @@ namespace NetworkDesigner.Terrain
         // Build Plan (phase 1): convert the road plan to a Network, resolve it with the GeometryResolver brain
         // (setbacks / intersections / lane flow), then sweep each road BODY — setback-trimmed, draped at the
         // node-to-node grade line — into the excavated bed. Marks EVERY edge built, then re-sweeps.
+        // Lane-edge model: mark every drawn corridor Built → LaneEdgeWorld.Rebuild sweeps the body on the cut bed.
+        // (Agent registration is the next phase — corridor-vs-lane routing decision.)
+        void BuildLaneEdgeCorridors()
+        {
+            int n = 0;
+            foreach (var c in NetworkDesigner.Roads.LaneEdgeWorld.Net.Corridors) if (!c.Built) { c.Built = true; n++; }
+            NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+            _dirtySince = Time.realtimeSinceStartup;
+            Debug.Log($"[LaneEdge] Built {n} corridors (agent registration pending).");
+        }
+
         public void BuildRoadPlan()
         {
+            if (NetworkDesigner.Roads.LaneEdgeModel.Enabled) { BuildLaneEdgeCorridors(); return; }
             LineGraph graph = RoadPlanLayer.Graph;
             if (graph == null || graph.Edges.Count == 0) { Debug.LogWarning("[Road] No road plan to build — draw a corridor first (;)."); return; }
             for (int e = 0; e < graph.Edges.Count; e++) RoadPlanLayer.SetEdgeBuilt(e, true);
