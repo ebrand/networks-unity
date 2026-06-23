@@ -704,6 +704,7 @@ namespace NetworkDesigner.Terrain
         {
             if (PickCamera == null) PickCamera = Camera.main;
             if (PickCamera == null) PickCamera = FindFirstObjectByType<Camera>();
+            NetworkDesigner.Roads.LaneEdgeAgentSim.GroundHeight = xz => Surf.SampleHeight(xz.x, xz.y);   // lane-edge car drape fallback
 
             StripStaleHostMesh();
             EnsureScatterDefaults();
