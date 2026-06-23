@@ -1301,24 +1301,63 @@ namespace NetworkDesigner.Roads
             Net.Flows.Add(new LaneFlow { Node = node, FromEdge = from, ToEdge = to, Auto = false });
         }
 
+        // Peel: when a clicked lane sits laterally off its cluster centre, give it a graph endpoint AT its puck position so
+        // the connector can attach there. Returns the new node (or the cluster node when no peel is needed). Keeps the
+        // source corridor's path stable (never lets the peeled lane define Lanes[0]) and drops the lane's old movements.
+        static bool NeedsPeel(int edge) => edge >= 0 && edge < Net.Edges.Count && Mathf.Abs(Net.Edges[edge].Offset) > 0.05f;
+
+        static int PeelLaneEndpoint(int clusterNode, int edge, Func<Vector2, float> groundAt)
+        {
+            if (edge < 0 || edge >= Net.Edges.Count) return clusterNode;
+            LaneEdge e = Net.Edges[edge];
+            if (e.A != clusterNode && e.B != clusterNode) return clusterNode;
+            Vector2 puck; if (!TryEndpointPos(clusterNode, edge, out puck, out _)) puck = Net.Nodes[clusterNode];
+            int pn = Net.AddNode(puck);
+            if (e.A == clusterNode) e.A = pn; else e.B = pn;             // re-point the clicked end onto the puck node
+            if (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count)
+            {
+                Corridor c = Net.Corridors[e.CorridorId];
+                if (c.Lanes.Count > 1 && c.Lanes[0] == edge)             // don't let the peeled lane define the corridor path
+                    for (int i = 1; i < c.Lanes.Count; i++)
+                    { LaneEdge sib = Net.Edges[c.Lanes[i]]; if (sib.A == clusterNode || sib.B == clusterNode) { c.Lanes[0] = c.Lanes[i]; c.Lanes[i] = edge; break; } }
+                c.AlignLanes = true;                                     // remaining lanes keep their offsets
+            }
+            Net.Flows.RemoveAll(f => f.Node == clusterNode && (f.FromEdge == edge || f.ToEdge == edge));
+            return pn;
+        }
+
+        // A centred 1-lane connector corridor whose single lane IS the cubic nodeA→nodeB (Offset 0, not AlignLanes) so the
+        // body runs puck-A → puck-B. Copies kind/width/shoulders from the source lane. Returns the connector lane id.
+        static int BuildConnectorCorridor(int nodeA, int nodeB, int srcEdge, bool curved, Vector2 ctrlA, Vector2 ctrlB)
+        {
+            Corridor cc = Net.AddCorridor();
+            cc.Curved = curved; cc.ControlA = ctrlA; cc.ControlB = ctrlB; cc.AlignLanes = false;
+            LaneEdge s = (srcEdge >= 0 && srcEdge < Net.Edges.Count) ? Net.Edges[srcEdge] : null;
+            Corridor sc = (s != null && s.CorridorId >= 0 && s.CorridorId < Net.Corridors.Count) ? Net.Corridors[s.CorridorId] : null;
+            if (sc != null) { cc.Profile = sc.Profile; cc.ShoulderBA = sc.ShoulderBA; cc.ShoulderAB = sc.ShoulderAB; }
+            int dir = (s != null && IsIncomingAt(srcEdge, nodeA)) ? 2 : 0;   // arriving at A → continue outward (A→B)
+            int li = Net.AddLane(new LaneEdge { A = nodeA, B = nodeB, CorridorId = cc.Id, Kind = s != null ? s.Kind : LaneKind.Traffic, Direction = dir, Width = s != null ? s.Width : 3.5f, Offset = 0f });
+            cc.Lanes.Add(li);
+            return li;
+        }
+
         static void BuildConnectCurve(int a, int edgeA, int b, int edgeB, Func<Vector2, float> groundAt)
         {
             if (a < 0 || b < 0 || a == b || a >= Net.Nodes.Count || b >= Net.Nodes.Count) return;
             if (edgeA < 0 || edgeA >= Net.Edges.Count) return;
-            Vector2 pa = Net.Nodes[a], pb = Net.Nodes[b];
-            _extLanes.Clear(); _extLanes.Add(edgeA); _extNode = a;   // connect exactly the clicked lane (not the whole road)
-            // tangent-continuous controls: leave A toward B along A's road, arrive at B along B's road.
+            // Peel each clicked lane onto a node at its puck so the connector lands on BOTH clicked lanes (visual realign).
+            bool peelA = NeedsPeel(edgeA), peelB = edgeB >= 0 && edgeB < Net.Edges.Count && NeedsPeel(edgeB);
+            int nodeA = peelA ? PeelLaneEndpoint(a, edgeA, groundAt) : a;
+            int nodeB = peelB ? PeelLaneEndpoint(b, edgeB, groundAt) : b;
+            Vector2 pa = Net.Nodes[nodeA], pb = Net.Nodes[nodeB];
+            // tangent-continuous controls off each source road (keyed on the CLUSTER node, whose siblings still define it).
             Vector2 tanA; if (!BestColinearAxis(a, pb, out tanA) || tanA.sqrMagnitude < 1e-6f) tanA = SafeDir(pb - pa);
             Vector2 tanB; if (!BestColinearAxis(b, pa, out tanB) || tanB.sqrMagnitude < 1e-6f) tanB = SafeDir(pa - pb);
             float d = (pb - pa).magnitude * 0.4f;
-            // profileId = null → carries EXACTLY the clicked lane (no AppendOutboard surplus); copies source profile/shoulders.
-            BuildExtensionCorridor(a, b, true, pa + tanA * d, pb + tanB * d, null);
-            // The connector rides the click-1 lane (sits on it at A). At B, route it to the EXACT click-2 lane via a manual
-            // flow — so it joins the lane you clicked, not lane 0. (The lane "peels" onto the connector through this flow.)
-            int cc = Net.Corridors.Count - 1;
-            int cl = (cc >= 0 && Net.Corridors[cc].Lanes.Count > 0) ? Net.Corridors[cc].Lanes[0] : -1;
-            CancelExtend(); RegenerateDefaultFlows(groundAt);
-            if (cl >= 0 && edgeB >= 0 && edgeB < Net.Edges.Count) AddManualFlow(b, cl, edgeB);
+            int cl = BuildConnectorCorridor(nodeA, nodeB, edgeA, true, pa + tanA * d, pb + tanB * d);
+            RegenerateDefaultFlows(groundAt);                            // auto-connects at the (shared) peel nodes
+            if (!peelA) AddManualFlow(a, cl, edgeA);                     // unpeeled cluster ends still need an explicit route
+            if (!peelB && edgeB >= 0 && edgeB < Net.Edges.Count) AddManualFlow(b, cl, edgeB);
             Rebuild(groundAt);
         }
 
