@@ -14,6 +14,7 @@ namespace NetworkDesigner.Roads
 
     // A through/turn movement at a node: traffic on the incoming lane-edge continues onto the outgoing lane-edge.
     // This is the #149 intra-node mapping — the intersection routing + the agent graph through the node.
+    [System.Serializable]
     public class LaneFlow { public int Node; public int FromEdge; public int ToEdge; public bool Auto; }   // Auto = default (regenerated); else manual
 
     // Navigable band kinds → each is a graph edge an agent can traverse. (Median/Shoulder are bands, not edges; Rail
@@ -22,6 +23,7 @@ namespace NetworkDesigner.Roads
 
     // One navigable lane = one graph edge between two nodes. Offset is the signed lateral distance of the lane's CENTRE
     // from the corridor centreline (− = BA/left side, + = AB/right side), so lanes order naturally by Offset.
+    [System.Serializable]
     public class LaneEdge
     {
         public int A, B;                       // node indices into LaneEdgeNetwork.Nodes
@@ -35,10 +37,11 @@ namespace NetworkDesigner.Roads
 
     // A road = an ordered set of parallel lane-edges plus the non-navigable bands around/within them. The corridor's
     // reference path is derived from its lanes (they share endpoints until a lane diverges — Phase 4).
+    [System.Serializable]
     public class Corridor
     {
         public int Id;
-        public readonly List<int> Lanes = new List<int>();   // lane-edge indices, ordered outer-BA → centre → outer-AB
+        public List<int> Lanes = new List<int>();            // lane-edge indices, ordered outer-BA → centre → outer-AB (non-readonly so JsonUtility restores it)
         public float MedianWidth;                             // centre band width between BA and AB lanes (0 = none)
         public float ShoulderBA, ShoulderAB;                  // outer non-navigable shoulder widths
         public string Profile;                                // source profile id (markings/style reuse during the spike)
@@ -61,6 +64,21 @@ namespace NetworkDesigner.Roads
         public int AddNode(Vector2 p) { Nodes.Add(p); NodeY.Add(float.NaN); return Nodes.Count - 1; }
         public float GetNodeY(int i) => i >= 0 && i < NodeY.Count ? NodeY[i] : float.NaN;
         public void SetNodeY(int i, float y) { if (i >= 0 && i < NodeY.Count) NodeY[i] = y; }
+
+        public void Clear() { Nodes.Clear(); NodeY.Clear(); Edges.Clear(); Corridors.Clear(); Flows.Clear(); _serial = 0; }
+
+        // Replace the whole network from a deserialized save (persistence).
+        public void LoadFrom(List<Vector2> nodes, List<float> nodeY, List<LaneEdge> edges, List<Corridor> corridors, List<LaneFlow> flows)
+        {
+            Clear();
+            if (nodes != null) Nodes.AddRange(nodes);
+            if (nodeY != null) NodeY.AddRange(nodeY);
+            while (NodeY.Count < Nodes.Count) NodeY.Add(float.NaN);
+            if (edges != null) Edges.AddRange(edges);
+            if (corridors != null) Corridors.AddRange(corridors);
+            if (flows != null) Flows.AddRange(flows);
+            foreach (LaneEdge e in Edges) if (e.Serial > _serial) _serial = e.Serial;
+        }
 
         public int AddLane(LaneEdge e) { e.Serial = ++_serial; Edges.Add(e); return Edges.Count - 1; }
 

@@ -3408,7 +3408,12 @@ namespace NetworkDesigner.Terrain
             if (_roadRebuildAfterLoad >= 0f)
             {
                 _roadRebuildAfterLoad -= Time.unscaledDeltaTime;
-                if (_roadRebuildAfterLoad < 0f) RebuildBuiltRoads();
+                if (_roadRebuildAfterLoad < 0f)
+                {
+                    RebuildBuiltRoads();
+                    if (NetworkDesigner.Roads.LaneEdgeWorld.HasData)   // render the restored lane-edge net now the terrain's settled
+                        NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+                }
             }
             // A modal (e.g. New Map name entry) owns the keyboard — suspend tool input so
             // typing a name doesn't fire hotkeys or sculpt.
@@ -3878,6 +3883,7 @@ namespace NetworkDesigner.Terrain
                         else
                             NetworkDesigner.Roads.LaneEdgeWorld.Click(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId,
                                 xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);   // lift so the deck doesn't bury/z-fight
+                        _dirtySince = Time.realtimeSinceStartup;   // persist lane-edge draws/flows via autosave
                         return;
                     }
                     // Lane-level draw: clicks fall through to AddNode, which snaps the new road's START onto the
@@ -5708,6 +5714,7 @@ namespace NetworkDesigner.Terrain
                 Plan = PlanLayer.CollectData(),
                 RoadPlan = RoadPlanLayer.CollectData(),
                 RetainingWalls = RetainingWallLayer.CollectData(),
+                LaneEdgeJson = NetworkDesigner.Roads.LaneEdgeWorld.ToJson(),   // v22: lane-edge network (main thread; written off-thread)
                 HasCamera = haveCam,
                 CamPos = camPos,
                 CamYaw = camYaw,
@@ -5824,12 +5831,12 @@ namespace NetworkDesigner.Terrain
                           + TreeBytes(save.Trees) + TreeBytes(save.Rocks)
                           + GraphBytes(save.Fences) + GraphBytes(save.PowerLines)
                           + GraphBytes(save.Rails) + GraphBytes(save.Plan) + GraphBytes(save.RoadPlan)
-                          + ForestBytes(save.Forest) + 256;
+                          + ForestBytes(save.Forest) + (save.LaneEdgeJson?.Length ?? 0) + 256;
                 using var ms = new System.IO.MemoryStream(cap);
                 using (var w = new System.IO.BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                 {
                     w.Write(SaveMagic);
-                    w.Write(21); // version (21 added per-edge bridge arches + per-level water bodies)
+                    w.Write(22); // version (22 added the lane-edge road network JSON)
                     w.Write(save.ColumnsX);
                     w.Write(save.RowsZ);
                     w.Write(save.CellSize);
@@ -5877,6 +5884,7 @@ namespace NetworkDesigner.Terrain
                     int nb = wb?.Count ?? 0;
                     w.Write(nb);
                     for (int i = 0; i < nb; i++) { w.Write(wb[i].Seed.x); w.Write(wb[i].Seed.y); w.Write(wb[i].Level); }
+                    w.Write(save.LaneEdgeJson ?? "");   // v22+: lane-edge road network
                 }
                 System.IO.File.WriteAllBytes(path, ms.ToArray());
             }
@@ -6039,6 +6047,7 @@ namespace NetworkDesigner.Terrain
                 RailLayer.LoadState(save.Rails);
                 PlanLayer.LoadState(save.Plan);
                 RoadPlanLayer.LoadState(save.RoadPlan);
+                NetworkDesigner.Roads.LaneEdgeWorld.LoadData(save.LaneEdgeJson);   // v22: restore lane-edge net (render on the deferred tick)
                 _roadRebuildAfterLoad = 0.6f;   // re-sweep the 3D roads once the world has settled (covers all load paths / async chunk streaming)
                 RetainingWallLayer.LoadState(save.RetainingWalls);   // mesh rebuilt after chunks; terrain grade already in the saved edits
                 // Stage the camera pose; applied in Start once the fly camera exists.
@@ -6143,6 +6152,8 @@ namespace NetworkDesigner.Terrain
                     for (int i = 0; i < nb; i++)
                         s.WaterBodies.Add(new WaterBodies.Save { Seed = new Vector2(r.ReadSingle(), r.ReadSingle()), Level = r.ReadSingle() });
                 }
+                if (version >= 22) // lane-edge road network (JSON)
+                    s.LaneEdgeJson = r.ReadString();
                 return s;
             }
             catch { return null; }

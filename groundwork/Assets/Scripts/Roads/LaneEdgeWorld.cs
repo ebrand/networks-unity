@@ -17,6 +17,41 @@ namespace NetworkDesigner.Roads
 
         static GameObject Root() => _root != null ? _root : (_root = new GameObject("LaneEdgeWorld"));
 
+        // ── persistence (JSON via JsonUtility; stored as one string in the binary autosave) ──
+        [System.Serializable]
+        public class NetSave
+        {
+            public List<Vector2> Nodes = new List<Vector2>();
+            public List<float> NodeY = new List<float>();
+            public List<LaneEdge> Edges = new List<LaneEdge>();
+            public List<Corridor> Corridors = new List<Corridor>();
+            public List<LaneFlow> Flows = new List<LaneFlow>();
+        }
+
+        public static string ToJson()
+        {
+            if (Net.Edges.Count == 0 && Net.Corridors.Count == 0) return "";
+            return JsonUtility.ToJson(new NetSave
+            {
+                Nodes = new List<Vector2>(Net.Nodes),
+                NodeY = new List<float>(Net.NodeY),
+                Edges = new List<LaneEdge>(Net.Edges),
+                Corridors = new List<Corridor>(Net.Corridors),
+                Flows = new List<LaneFlow>(Net.Flows),
+            });
+        }
+
+        // Restore the network data (no render — caller rebuilds once the terrain is ready).
+        public static void LoadData(string json)
+        {
+            if (string.IsNullOrEmpty(json)) { Net.Clear(); return; }
+            NetSave s = JsonUtility.FromJson<NetSave>(json);
+            if (s == null) { Net.Clear(); return; }
+            Net.LoadFrom(s.Nodes, s.NodeY, s.Edges, s.Corridors, s.Flows);
+        }
+
+        public static bool HasData => Net.Corridors.Count > 0 || Net.Edges.Count > 0;
+
         // Render every corridor, draped via groundAt. Rebuilds the whole render root (simple; optimise later).
         public struct LaneEndpoint { public Vector2 Pos; public float Y; public int Edge; public int Node; public bool Incoming; }
         public static readonly List<LaneEndpoint> Endpoints = new List<LaneEndpoint>();   // rebuilt each Rebuild; for picking + flow render
