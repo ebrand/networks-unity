@@ -1294,8 +1294,51 @@ namespace NetworkDesigner.Terrain
         public bool ShowModeHud = false;
 
         // Palette IMGUI for the active scatter layer, or a hint for linework.
+        Texture2D _ringTex;
+        Texture2D RingTex()
+        {
+            if (_ringTex != null) return _ringTex;
+            int sz = 48; var t = new Texture2D(sz, sz, TextureFormat.RGBA32, false);
+            var px = new Color32[sz * sz]; float c = (sz - 1) * 0.5f, rO = sz * 0.46f, rI = sz * 0.33f;
+            for (int y = 0; y < sz; y++)
+                for (int x = 0; x < sz; x++)
+                {
+                    float dx = x - c, dy = y - c, dr = Mathf.Sqrt(dx * dx + dy * dy);
+                    px[y * sz + x] = (dr <= rO && dr >= rI) ? new Color32(255, 235, 50, 255) : new Color32(0, 0, 0, 0);
+                }
+            t.SetPixels32(px); t.Apply(); t.hideFlags = HideFlags.HideAndDontSave;
+            return _ringTex = t;
+        }
+
+        bool _roadCursorHasWorld; Vector3 _roadCursorWorld;   // snapped cursor (set in the lane-edge update block)
+        bool _leSnapActive; Vector2 _leSnapXz;                // ray-based node snap this frame (moves the cursor onto a puck)
+        bool _leAnySnap;                                      // any snap active (node OR guide line) → _leSnapXz holds it
+        int _leSnapNode = -1, _leSnapEdge = -1;               // exact puck (node,edge) the ray snapped to (-1 = none)
+        // Road-mode cursor: a yellow empty ring at the mouse (snapping to a node while connecting); C → a "1"/"2" numeral.
+        void DrawRoadCursor()
+        {
+            if (Event.current.type != EventType.Repaint) return;
+            if (!(NetworkDesigner.Roads.LaneEdgeModel.Enabled && _lineActive is RoadPlanLayer)) return;
+            if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode || MouseOverActivePanel()) return;
+            Vector2 m = Event.current.mousePosition;
+            if (_roadCursorHasWorld)   // snapped to a node → draw the ring there
+            {
+                Camera cam = PickCamera != null ? PickCamera : Camera.main;
+                if (cam != null) { Vector3 sp = cam.WorldToScreenPoint(_roadCursorWorld); if (sp.z > 0f) m = new Vector2(sp.x, Screen.height - sp.y); }
+            }
+            float s = _roadCursorHasWorld ? 30f : 24f;
+            GUI.DrawTexture(new Rect(m.x - s * 0.5f, m.y - s * 0.5f, s, s), RingTex());
+            if (Input.GetKey(KeyCode.C))
+            {
+                var st = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, fontSize = 15 };
+                st.normal.textColor = new Color(1f, 0.92f, 0.2f);
+                GUI.Label(new Rect(m.x + s * 0.5f + 1f, m.y - s * 0.5f - 2f, 22f, 22f), NetworkDesigner.Roads.LaneEdgeWorld.ConnectStage.ToString(), st);
+            }
+        }
+
         void OnGUI()
         {
+            DrawRoadCursor();
             // Loading overlay (drawn before the early-return below, in real screen space).
             if (DemTerrainWorld.Building)
             {
@@ -3907,19 +3950,40 @@ namespace NetworkDesigner.Terrain
                     _lineActive.HidePreview();   // the corridor-edge ghost is irrelevant in lane-edge mode
                     var rdPv = (RoadPlanLayer)_lineActive;
                     bool leShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
-                    if (!NetworkDesigner.Roads.LaneEdgeModel.MappingMode && overTerrain && !MouseOverActivePanel())
+                    // Node snap (M = EndSnapRadius) + guides (N = GuideRange), always active in road mode. The snap is
+                    // RAY-based (robust to camera parallax) and actually MOVES the cursor onto the nearest lane puck.
+                    System.Func<Vector2, float> leGfn = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
+                    _roadCursorHasWorld = false; _leSnapActive = false; _leAnySnap = false; _leSnapNode = -1; _leSnapEdge = -1;
+                    _leSnapXz = new Vector2(hit.point.x, hit.point.z);
+                    if (overTerrain && !MouseOverActivePanel())
                     {
-                        _leDrawCursor = new Vector2(hit.point.x, hit.point.z);
+                        Camera leSnapCam = PickCamera != null ? PickCamera : Camera.main;
+                        if (NetworkDesigner.Roads.LaneEdgeWorld.SnapLanePuckToRay(
+                                leSnapCam, Input.mousePosition, NetworkDesigner.Terrain.PlanGuides.EndSnapRadius, leGfn,
+                                out Vector2 leSnapXz, out Vector3 leSnapWp, out int leSnapNode, out int leSnapEdge))
+                        { _leSnapActive = true; _leAnySnap = true; _leSnapXz = leSnapXz; _leSnapNode = leSnapNode; _leSnapEdge = leSnapEdge; _roadCursorHasWorld = true; _roadCursorWorld = leSnapWp; }
+                        else if (NetworkDesigner.Roads.LaneEdgeWorld.SnapToGuideLine(_leSnapXz, out Vector2 leGuide))   // snap onto a colinear/perpendicular guide
+                        { _leAnySnap = true; _leSnapXz = leGuide; _roadCursorHasWorld = true; _roadCursorWorld = new Vector3(leGuide.x, leGfn(leGuide), leGuide.y); }
+                        NetworkDesigner.Roads.LaneEdgeWorld.UpdateConnectGuides(new Vector2(hit.point.x, hit.point.z), leGfn);
+                    }
+                    else NetworkDesigner.Roads.LaneEdgeWorld.ClearConnectGuides();
+                    if (!NetworkDesigner.Roads.LaneEdgeModel.MappingMode && overTerrain && !MouseOverActivePanel() && !Input.GetKey(KeyCode.C))
+                    {
+                        _leDrawCursor = _leAnySnap ? _leSnapXz : new Vector2(hit.point.x, hit.point.z);
                         bool leFreeAngle = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);   // Alt = free angle (skip colinear snap)
-                        // PAC snap: while a bend is armed, lock the end onto the equal-leg ring + buildable arc + ticks.
-                        if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending
-                            && rdPv.SnapExternalCurveEnd(NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos,
-                                   NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor, out Vector2 leSnap))
-                            _leDrawCursor = leSnap;
-                        // Colinear extension: continue a connected source road straight off the start node.
-                        else if (!leFreeAngle
-                            && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnap(_leDrawCursor, 14f, out Vector2 leCol))
-                            _leDrawCursor = leCol;
+                        // A node/guide snap wins outright; otherwise apply the PAC / colinear guides.
+                        if (!_leAnySnap)
+                        {
+                            // PAC snap: while a bend is armed, lock the end onto the equal-leg ring + buildable arc + ticks.
+                            if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending
+                                && rdPv.SnapExternalCurveEnd(NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos,
+                                       NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor, out Vector2 leSnap))
+                                _leDrawCursor = leSnap;
+                            // Colinear extension: continue a connected source road straight off the start node.
+                            else if (!leFreeAngle
+                                && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnap(_leDrawCursor, 14f, out Vector2 leCol))
+                                _leDrawCursor = leCol;
+                        }
                         // While selecting/extending lanes the magenta puck highlights are the feedback — suppress the
                         // normal-draw ghost so it isn't confusing. (_leDrawCursor stays computed for the extend click.)
                         if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
@@ -3975,6 +4039,8 @@ namespace NetworkDesigner.Terrain
                 else { _lineActive.UpdatePreview(Surf, place, overTerrain); NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); if (_lineActive is RoadPlanLayer rdG1) rdG1.ClearExternalCurveGuide(); }
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                 bool connectMod = Input.GetKey(KeyCode.C);
+                if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && !connectMod && NetworkDesigner.Roads.LaneEdgeWorld.Connecting)
+                    NetworkDesigner.Roads.LaneEdgeWorld.CancelConnect();   // releasing C mid-connect cancels the pending first click
                 bool overPanel = MouseOverActivePanel();   // cursor over the rail palette
                 if (!overPanel && overTerrain && Input.GetMouseButtonDown(0))
                 {
@@ -3985,8 +4051,12 @@ namespace NetworkDesigner.Terrain
                         bool leShiftClick = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                         Camera leCam = PickCamera != null ? PickCamera : Camera.main;
                         Vector2 leMouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                        // Hold 'C' and click two nodes to connect them with a smooth (S or simple) curve. Use the snapped
+                        // cursor (ray-based node snap) so the click lands on the node, not the parallax terrain-hit.
+                        if (connectMod)
+                            NetworkDesigner.Roads.LaneEdgeWorld.ConnectClick(_leSnapNode, _leSnapEdge, leGround);
                         // Hold ',' and left-click a segment to flip it in place (mirror its cross-section).
-                        if (Input.GetKey(KeyCode.Comma))
+                        else if (Input.GetKey(KeyCode.Comma))
                             NetworkDesigner.Roads.LaneEdgeWorld.FlipCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);
                         else if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
                             NetworkDesigner.Roads.LaneEdgeWorld.MapClick(leCam, leMouse, leGround);
@@ -4086,8 +4156,8 @@ namespace NetworkDesigner.Terrain
                 if (!overPanel && Input.GetMouseButtonDown(1))
                 {
                     // Lane-edge model: right-click cancels an in-progress corridor draw or lane-flow mapping.
-                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && (NetworkDesigner.Roads.LaneEdgeWorld.Drawing || NetworkDesigner.Roads.LaneEdgeWorld.Mapping || NetworkDesigner.Roads.LaneEdgeWorld.Extending))
-                    { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); NetworkDesigner.Roads.LaneEdgeWorld.CancelExtend(); NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f); return; }
+                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && (NetworkDesigner.Roads.LaneEdgeWorld.Drawing || NetworkDesigner.Roads.LaneEdgeWorld.Mapping || NetworkDesigner.Roads.LaneEdgeWorld.Extending || NetworkDesigner.Roads.LaneEdgeWorld.Connecting))
+                    { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); NetworkDesigner.Roads.LaneEdgeWorld.CancelExtend(); NetworkDesigner.Roads.LaneEdgeWorld.CancelConnect(); NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f); return; }
                     // Otherwise right-click DELETES the lane-edge node / segment under the cursor.
                     if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && overTerrain
                         && NetworkDesigner.Roads.LaneEdgeWorld.DeleteAt(new Vector2(hit.point.x, hit.point.z), xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f))

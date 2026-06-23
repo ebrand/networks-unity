@@ -174,6 +174,7 @@ namespace NetworkDesigner.Roads
 
             var verts = new List<Vector3>(); var tris = new List<int>();
             BuildStyledGuides(verts, tris, cp, rg, groundAt);
+            BuildPlanArrows(c, pathLen, verts, tris, cp, rg, groundAt);   // travel triangles on one-way plans (~every 200 m)
             if (verts.Count == 0) return;
 
             var mesh = new Mesh { name = $"LanePlanGuides_{c.Id}" };
@@ -214,6 +215,44 @@ namespace NetworkDesigner.Roads
         }
 
         static Vector3 Drape(Vector2 p, Func<Vector2, float> groundAt) => new Vector3(p.x, (groundAt != null ? groundAt(p) : 0f) + LineLift, p.y);
+
+        // Travel-direction triangles on a ONE-WAY plan (every navigable lane the same direction): one per drivable lane,
+        // ~every 200 m, pointing the way traffic flows. Appended to the plan mesh so they share the red/yellow plan colour.
+        static void BuildPlanArrows(Corridor c, float pathLen, List<Vector3> verts, List<int> tris, Vector2[] cp, Vector2[] rg, Func<Vector2, float> groundAt)
+        {
+            int dir = -1, nav = 0;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= Net.Edges.Count) continue;
+                LaneEdge e = Net.Edges[li];
+                if (e.Kind == LaneKind.Sidewalk) continue;
+                nav++;
+                if (dir < 0) dir = e.Direction; else if (e.Direction != dir) return;   // mixed directions → two-way → no arrows
+            }
+            if (nav == 0 || cp.Length < 2) return;
+            int numArrows = Mathf.Max(1, Mathf.RoundToInt(pathLen / 200f));
+            const float fwd = 1.6f, back = 1.0f, half = 0.9f;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= Net.Edges.Count) continue;
+                LaneEdge e = Net.Edges[li];
+                if (e.Kind != LaneKind.Traffic && e.Kind != LaneKind.Turn) continue;
+                for (int k = 0; k < numArrows; k++)
+                {
+                    int fi = Mathf.Clamp(Mathf.RoundToInt((k + 0.5f) / numArrows * (cp.Length - 1)), 0, cp.Length - 1);
+                    Vector2 rgN = rg[fi];
+                    Vector2 tan = new Vector2(-rgN.y, rgN.x);             // tangent recovered from the right vector
+                    Vector2 along = (e.Direction == 2 ? tan : -tan).normalized;
+                    Vector2 lat = new Vector2(along.y, -along.x);
+                    Vector2 ctr = cp[fi] + rgN * e.Offset;
+                    int s = verts.Count;
+                    verts.Add(Drape(ctr + along * fwd, groundAt));
+                    verts.Add(Drape(ctr - along * back - lat * half, groundAt));
+                    verts.Add(Drape(ctr - along * back + lat * half, groundAt));
+                    tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 1);   // 2-sided
+                }
+            }
+        }
 
         static Material _inMat, _outMat;
         static Material InMat() => _inMat != null ? _inMat : (_inMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.30f, 0.55f, 1f, 1f), "LaneEndIn"));
@@ -1184,6 +1223,201 @@ namespace NetworkDesigner.Roads
         }
 
         public static void CancelExtend() { _extNode = -1; _extLanes.Clear(); _extCornerPending = false; ExtFlipSide = false; }
+
+        // ── C-connect: hold C, click two existing nodes → a smooth curve between them. The cubic leaves node A tangent to
+        // A's road and arrives at node B tangent to B's road, so an S-curve (parallel-offset ends) or a simple bend (angled
+        // ends) falls out of the geometry automatically — no mode to pick. Carries node A's lanes; built as a plan corridor.
+        static int _connA = -1, _connEdgeA = -1;
+        public static bool Connecting => _connA >= 0;
+        public static int ConnectStage => _connA < 0 ? 1 : 2;   // cursor numeral: 1 before the first click, 2 after
+        public static void CancelConnect() { _connA = -1; _connEdgeA = -1; }
+
+        // Nearest lane endpoint (the unified puck position) within r — gives the specific lane + node you're pointing at.
+        static bool NearestLaneEndpoint(Vector2 xz, float r, out int node, out int edge)
+        {
+            node = -1; edge = -1; int bi = -1; float best = r * r;
+            for (int i = 0; i < Endpoints.Count; i++)
+            { float d = (Endpoints[i].NodePos - xz).sqrMagnitude; if (d < best) { best = d; bi = i; } }
+            if (bi < 0) return false;
+            node = Endpoints[bi].Node; edge = Endpoints[bi].Edge; return true;
+        }
+
+        // Cursor snap: world position of the nearest lane puck within r (for the ring to jump onto a node).
+        public static bool TrySnapCursor(Vector2 xz, float r, out Vector2 pos)
+        {
+            pos = xz;
+            if (!NearestLaneEndpoint(xz, r, out _, out int e) || e < 0) return false;
+            for (int i = 0; i < Endpoints.Count; i++) if (Endpoints[i].Edge == e) { pos = Endpoints[i].NodePos; return true; }
+            return false;
+        }
+
+        // Puck snap: among lane pucks within m metres of the mouse line-of-sight, pick the one nearest the mouse ON SCREEN
+        // — i.e. the puck literally under the cursor, robust to camera angle/zoom/parallax. Returns its xz + world pos + ids.
+        public static bool SnapLanePuckToRay(Camera cam, Vector2 mouseScreen, float m, Func<Vector2, float> groundAt, out Vector2 xz, out Vector3 worldPos, out int node, out int edge)
+        {
+            xz = Vector2.zero; worldPos = Vector3.zero; node = -1; edge = -1;
+            if (cam == null) return false;
+            int best = -1; float bestScreenSq = float.MaxValue, m2 = m * m;
+            Ray ray = cam.ScreenPointToRay(mouseScreen);
+            Vector3 ro = ray.origin, rd = ray.direction.normalized;
+            for (int i = 0; i < Endpoints.Count; i++)
+            {
+                Vector2 np = Endpoints[i].NodePos;
+                Vector3 wp = new Vector3(np.x, (groundAt != null ? groundAt(np) : 0f) + 0.6f, np.y);
+                Vector3 to = wp - ro; float t = Vector3.Dot(to, rd);
+                if (t <= 0f) continue;
+                if ((to - rd * t).sqrMagnitude >= m2) continue;        // gate: within M of the line of sight
+                Vector3 sp = cam.WorldToScreenPoint(wp); if (sp.z <= 0f) continue;
+                float dsq = (new Vector2(sp.x, sp.y) - mouseScreen).sqrMagnitude;   // pick the closest ON SCREEN
+                if (dsq < bestScreenSq) { bestScreenSq = dsq; best = i; worldPos = wp; }
+            }
+            if (best < 0) return false;
+            xz = Endpoints[best].NodePos; node = Endpoints[best].Node; edge = Endpoints[best].Edge; return true;
+        }
+
+        // node/edge come straight from the ray snap (the exact puck under the cursor) — no re-derivation, so the curve
+        // ends on the node you clicked, not a coincident neighbour.
+        public static bool ConnectClick(int node, int edge, Func<Vector2, float> groundAt)
+        {
+            if (node < 0) return false;   // both clicks must land on a snapped lane puck
+            if (_connA < 0) { _connA = node; _connEdgeA = edge; Rebuild(groundAt); return true; }
+            if (node != _connA) BuildConnectCurve(_connA, _connEdgeA, node, groundAt);
+            _connA = -1; _connEdgeA = -1;
+            return true;
+        }
+
+        static Vector2 SafeDir(Vector2 v) => v.sqrMagnitude < 1e-6f ? Vector2.right : v.normalized;
+
+        static void BuildConnectCurve(int a, int edgeA, int b, Func<Vector2, float> groundAt)
+        {
+            if (a < 0 || b < 0 || a == b || a >= Net.Nodes.Count || b >= Net.Nodes.Count) return;
+            if (edgeA < 0 || edgeA >= Net.Edges.Count) return;
+            Vector2 pa = Net.Nodes[a], pb = Net.Nodes[b];
+            _extLanes.Clear(); _extLanes.Add(edgeA); _extNode = a;   // connect exactly the clicked lane (not the whole road)
+            // tangent-continuous controls: leave A toward B along A's road, arrive at B along B's road.
+            Vector2 tanA; if (!BestColinearAxis(a, pb, out tanA) || tanA.sqrMagnitude < 1e-6f) tanA = SafeDir(pb - pa);
+            Vector2 tanB; if (!BestColinearAxis(b, pa, out tanB) || tanB.sqrMagnitude < 1e-6f) tanB = SafeDir(pa - pb);
+            float d = (pb - pa).magnitude * 0.4f;
+            // profileId = null → carries EXACTLY the clicked lane (no AppendOutboard surplus); copies source profile/shoulders.
+            BuildExtensionCorridor(a, b, true, pa + tanA * d, pb + tanB * d, null);
+            CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt);
+        }
+
+        // ── connect guides: colinear + perpendicular dashed-yellow guides off the nodes near the cursor while connecting.
+        static GameObject _connGuideGo; static Mesh _connGuideMesh; static Material _connGuideMat;
+        static Material ConnGuideMat() => _connGuideMat != null ? _connGuideMat
+            : (_connGuideMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(1f, 0.92f, 0.2f, 1f), "LaneConnectGuide"));
+        public static void ClearConnectGuides() { if (_connGuideGo != null) _connGuideGo.SetActive(false); }
+
+        // A node emits guides when within N (PlanGuides.GuideRange) of the cursor; the first-clicked node always emits so
+        // the 2nd click can align colinear/perpendicular to it. Guide length = PlanGuides.ExtensionGuideLength.
+        public static void UpdateConnectGuides(Vector2 cursor, Func<Vector2, float> groundAt)
+        {
+            if (_connGuideGo == null)
+            {
+                _connGuideGo = new GameObject("LaneConnectGuides");
+                _connGuideGo.AddComponent<MeshFilter>();
+                var mr0 = _connGuideGo.AddComponent<MeshRenderer>();
+                mr0.sharedMaterial = ConnGuideMat();
+                mr0.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr0.receiveShadows = false;
+                _connGuideMesh = new Mesh { name = "LaneConnectGuides" };
+                _connGuideGo.GetComponent<MeshFilter>().sharedMesh = _connGuideMesh;
+            }
+            float n = Mathf.Max(1f, NetworkDesigner.Terrain.PlanGuides.GuideRange);
+            float len = Mathf.Max(1f, NetworkDesigner.Terrain.PlanGuides.ExtensionGuideLength);
+            _sgVerts.Clear(); _sgTris.Clear();
+            int bi = -1; float bestSq = n * n;   // nearest LANE PUCK within N (guides emit from the lane node, not the cluster)
+            for (int i = 0; i < Endpoints.Count; i++) { float d = (Endpoints[i].NodePos - cursor).sqrMagnitude; if (d < bestSq) { bestSq = d; bi = i; } }
+            // Each emitting node draws a colinear line to the cursor; the arrow shows that lane's direction of travel.
+            if (bi >= 0) AddLaneGuides(Endpoints[bi].Node, Endpoints[bi].Edge, cursor, len, groundAt);
+            if (_connA >= 0 && _connEdgeA >= 0) AddLaneGuides(_connA, _connEdgeA, cursor, len, groundAt);
+            _connGuideMesh.Clear();
+            if (_sgVerts.Count == 0) { _connGuideGo.SetActive(false); return; }
+            _connGuideMesh.SetVertices(_sgVerts); _connGuideMesh.SetTriangles(_sgTris, 0); _connGuideMesh.RecalculateBounds();
+            _connGuideGo.SetActive(true);
+        }
+
+        // Tangent of a lane (node, edge) at the node, and the lane puck position. False if degenerate.
+        static bool LaneGuideFrame(int node, int edge, out Vector2 p, out Vector2 tan)
+        {
+            p = Vector2.zero; tan = Vector2.zero;
+            if (edge < 0 || edge >= Net.Edges.Count) return false;
+            LaneEdge e = Net.Edges[edge];
+            Corridor c = (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count) ? Net.Corridors[e.CorridorId] : null;
+            if (c == null) return false;
+            bool have = false;
+            for (int i = 0; i < Endpoints.Count; i++)
+                if (Endpoints[i].Node == node && Endpoints[i].Edge == edge) { p = Endpoints[i].NodePos; have = true; break; }
+            if (!have) return false;
+            tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, node == e.A ? 0f : 1f);
+            if (tan.sqrMagnitude < 1e-6f) return false;
+            tan.Normalize(); return true;
+        }
+
+        // Guides off an individual LANE puck (not the cluster centre), along that lane's direction. Shows only the guide
+        // the cursor is lined up with — colinear if more along the road, else perpendicular.
+        static void AddLaneGuides(int node, int edge, Vector2 cursor, float len, Func<Vector2, float> groundAt)
+        {
+            if (!LaneGuideFrame(node, edge, out Vector2 p, out Vector2 tan)) return;
+            Vector2 perp = new Vector2(-tan.y, tan.x);
+            Vector2 to = cursor - p; if (to.sqrMagnitude < 1e-4f) return; Vector2 toN = to.normalized;
+            if (Mathf.Abs(Vector2.Dot(toN, tan)) >= Mathf.Abs(Vector2.Dot(toN, perp)))
+            {
+                // Colinear extension: dashed line from the NODE to the CURSOR; the arrow points along the lane's DIRECTION
+                // OF TRAVEL (fixed by the lane, independent of the cursor side).
+                EmitDashGuide(p, cursor, groundAt);
+                Vector2 travel = Net.Edges[edge].Direction == 2 ? tan : -tan;   // tan is A→B; AB travels +tan, BA travels −tan
+                EmitGuideArrow((p + cursor) * 0.5f, travel, groundAt);
+            }
+            else
+            { EmitDashGuide(p, p + perp * len, groundAt); EmitDashGuide(p, p - perp * len, groundAt); }
+        }
+
+        // Small filled triangle (into the guide mesh) at ctr pointing along `along` — the colinear guide's direction arrow.
+        static void EmitGuideArrow(Vector2 ctr, Vector2 along, Func<Vector2, float> groundAt)
+        {
+            Vector2 lat = new Vector2(along.y, -along.x);
+            const float fwd = 1.8f, back = 1.1f, half = 1.0f;
+            Vector3 tip = Drape(ctr + along * fwd, groundAt), bl = Drape(ctr - along * back - lat * half, groundAt), br = Drape(ctr - along * back + lat * half, groundAt);
+            int s = _sgVerts.Count; _sgVerts.Add(tip); _sgVerts.Add(bl); _sgVerts.Add(br);
+            _sgTris.Add(s); _sgTris.Add(s + 1); _sgTris.Add(s + 2); _sgTris.Add(s); _sgTris.Add(s + 2); _sgTris.Add(s + 1);
+        }
+
+        // Snap the cursor onto the nearest lane puck's colinear/perpendicular guide line, within GuideSnapRadius.
+        public static bool SnapToGuideLine(Vector2 cursor, out Vector2 snapped)
+        {
+            snapped = cursor;
+            float n = Mathf.Max(1f, NetworkDesigner.Terrain.PlanGuides.GuideRange);
+            float r = Mathf.Max(0.01f, NetworkDesigner.Terrain.PlanGuides.GuideSnapRadius); float r2 = r * r;
+            int bi = -1; float bestSq = n * n;
+            for (int i = 0; i < Endpoints.Count; i++) { float d = (Endpoints[i].NodePos - cursor).sqrMagnitude; if (d < bestSq) { bestSq = d; bi = i; } }
+            if (bi < 0) return false;
+            if (!LaneGuideFrame(Endpoints[bi].Node, Endpoints[bi].Edge, out Vector2 p, out Vector2 tan)) return false;
+            Vector2 perp = new Vector2(-tan.y, tan.x);
+            Vector2 projC = p + tan * Vector2.Dot(cursor - p, tan);     // onto the colinear line
+            Vector2 projP = p + perp * Vector2.Dot(cursor - p, perp);   // onto the perpendicular line
+            float dC = (projC - cursor).sqrMagnitude, dP = (projP - cursor).sqrMagnitude;
+            if (dC <= dP && dC < r2) { snapped = projC; return true; }
+            if (dP < dC && dP < r2) { snapped = projP; return true; }
+            return false;
+        }
+
+        static void EmitDashGuide(Vector2 a, Vector2 b, Func<Vector2, float> groundAt)
+        {
+            Vector2 dir = b - a; float len = dir.magnitude; if (len < 0.1f) return; dir /= len;
+            Vector2 pr = new Vector2(-dir.y, dir.x) * (LineHalfW * 0.5f);   // thin guide line
+            const float dash = 2.5f, gap = 2f; float walked = 0f;
+            while (walked < len)
+            {
+                float seg = Mathf.Min(dash, len - walked);
+                Vector2 q0 = a + dir * walked, q1 = a + dir * (walked + seg);
+                Vector3 l0 = Drape(q0 - pr, groundAt), r0 = Drape(q0 + pr, groundAt), l1 = Drape(q1 - pr, groundAt), r1 = Drape(q1 + pr, groundAt);
+                int s = _sgVerts.Count; _sgVerts.Add(l0); _sgVerts.Add(r0); _sgVerts.Add(r1); _sgVerts.Add(l1);
+                _sgTris.Add(s); _sgTris.Add(s + 1); _sgTris.Add(s + 2); _sgTris.Add(s); _sgTris.Add(s + 2); _sgTris.Add(s + 3);
+                _sgTris.Add(s); _sgTris.Add(s + 2); _sgTris.Add(s + 1); _sgTris.Add(s); _sgTris.Add(s + 3); _sgTris.Add(s + 2);
+                walked += dash + gap;
+            }
+        }
 
         // Draw the extension end (straight, or shift-curve through a bend). Builds the aligned subset corridor + lets the
         // default-flow regen wire continuations (selected) and merges (dropped). Mirrors Click's straight/curve flow.

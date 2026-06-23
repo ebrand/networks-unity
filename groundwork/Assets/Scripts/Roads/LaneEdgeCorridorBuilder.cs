@@ -135,6 +135,7 @@ namespace NetworkDesigner.Roads
             GameObject body = RoadSweep.Build(xs, a, b, c.Curved, c.ControlA, c.ControlB, parent, $"LaneEdgeCorridor_{c.Id}",
                                               hA, hB, groundAt, follow);
             BuildMarkings(net, c, parent, hA, hB, groundAt, follow);   // painted lane lines, riding the same path + grade
+            BuildDirectionArrows(net, c, parent, hA, hB, groundAt, follow);   // travel arrows on one-way roads (~every 200 m)
             return body;
         }
 
@@ -229,6 +230,70 @@ namespace NetworkDesigner.Roads
             var mr = go.AddComponent<MeshRenderer>();
             mr.sharedMaterials = new[] { MarkWhiteMat(), MarkYellowMat() };
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+        }
+
+        // ---- direction arrows on one-way roads ----
+        const float ArrowSpacing = 200f;   // metres between arrows along a lane
+        // Draw a flat travel-direction arrow per traffic lane every ~200 m, but ONLY on a one-way corridor (every
+        // navigable lane the same direction). Arrows ride the corridor path + grade like the markings, lifted just above.
+        static void BuildDirectionArrows(LaneEdgeNetwork net, Corridor c, Transform parent, float hA, float hB, Func<Vector2, float> groundAt, float follow)
+        {
+            int dir = -1, nav = 0; bool twoWay = false;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= net.Edges.Count) continue;
+                LaneEdge e = net.Edges[li];
+                if (e.Kind == LaneKind.Sidewalk) continue;
+                nav++;
+                if (dir < 0) dir = e.Direction; else if (e.Direction != dir) twoWay = true;
+            }
+            if (twoWay || nav == 0 || !PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return;   // two-way → no arrows
+
+            float len = PathLength(net, c);
+            if (len < 4f) return;
+            int frames = Mathf.Clamp(Mathf.CeilToInt(len / 0.5f) + 1, 2, 2048);
+            float[] aY = RoadSweep.ElevationProfile(a, b, c.Curved, c.ControlA, c.ControlB, frames, hA, hB, groundAt, follow);
+            int numArrows = Mathf.Max(1, Mathf.RoundToInt(len / ArrowSpacing));
+
+            var verts = new List<Vector3>(); var tris = new List<int>();
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= net.Edges.Count) continue;
+                LaneEdge e = net.Edges[li];
+                if (e.Kind != LaneKind.Traffic && e.Kind != LaneKind.Turn) continue;   // arrows on drivable lanes only
+                for (int k = 0; k < numArrows; k++)
+                {
+                    float t = (k + 0.5f) / numArrows;
+                    Vector2 tan = PathTangent(net, c, t);
+                    if (tan.sqrMagnitude < 1e-8f) continue; tan.Normalize();
+                    Vector2 rt = PathRight(tan);
+                    Vector2 ctr = PathPoint(net, c, t) + rt * e.Offset;
+                    float y = aY[Mathf.Clamp(Mathf.RoundToInt(t * (frames - 1)), 0, frames - 1)] + MarkLift + 0.02f;
+                    Vector2 along = e.Direction == 2 ? tan : -tan;   // travel direction of this lane
+                    EmitArrow(verts, tris, ctr, y, along, new Vector2(along.y, -along.x));
+                }
+            }
+            if (verts.Count == 0) return;
+
+            var mesh = new Mesh { name = $"LaneArrows_{c.Id}" };
+            if (verts.Count > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateBounds();
+            var go = new GameObject($"LaneArrows_{c.Id}");
+            go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = MarkWhiteMat();
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+        }
+
+        // A flat 2-sided triangle centred at ctr at height y, pointing along `along` (lat = perpendicular).
+        static void EmitArrow(List<Vector3> verts, List<int> tris, Vector2 ctr, float y, Vector2 along, Vector2 lat)
+        {
+            const float fwd = 1.6f, back = 1.0f, half = 0.9f;
+            Vector2 tip = ctr + along * fwd, bl = ctr - along * back - lat * half, br = ctr - along * back + lat * half;
+            int s = verts.Count;
+            verts.Add(new Vector3(tip.x, y, tip.y)); verts.Add(new Vector3(bl.x, y, bl.y)); verts.Add(new Vector3(br.x, y, br.y));
+            tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 1);   // 2-sided
         }
 
 #if UNITY_EDITOR
