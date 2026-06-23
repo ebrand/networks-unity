@@ -23,6 +23,7 @@ namespace NetworkDesigner.Roads
         float _u, _y;             // running lateral + height cursor
         public float Width => _u; // total lateral width once built
         public float CenterU = -1f;   // where the path centreline sits in U; < 0 = auto (geometric centre)
+        public bool CenterUSet;       // explicit override: honour CenterU even when negative (centreline can sit left of the band)
         public float SplitU = -1f;    // the A→B / B→A boundary in U (the directional midline); < 0 = unset
         public float Thickness = 0f;  // deck depth below the road surface; > 0 closes the solid (bottom + edges
                                       // + end caps) so a RAISED road reads as a slab. 0 = open top skin (on-ground).
@@ -62,6 +63,6 @@ namespace NetworkDesigner.Roads
         public RoadCrossSection Median(float width = 2.0f, float h = 0.15f)
             => Step(h, RoadSurface.Concrete).Flat(width, RoadSurface.Grass).Step(-h, RoadSurface.Concrete);
 
-        public float Center() => CenterU >= 0f ? CenterU : _u * 0.5f;
+        public float Center() => CenterUSet ? CenterU : (CenterU >= 0f ? CenterU : _u * 0.5f);
     }
 }

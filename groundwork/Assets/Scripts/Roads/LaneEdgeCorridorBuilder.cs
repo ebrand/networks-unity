@@ -59,6 +59,27 @@ namespace NetworkDesigner.Roads
             lanes.Sort((a, b) => a.Offset.CompareTo(b.Offset));   // left → right across the section
 
             var xs = new RoadCrossSection();
+
+            // Lane-subset extension: lay each lane at its ACTUAL Offset (fill any gaps between non-adjacent lanes with
+            // asphalt) and shift the centreline (CenterU) so the swept body sits on the source lanes, not re-centred.
+            if (c.AlignLanes && lanes.Count > 0)
+            {
+                float leftEdge = lanes[0].Offset - lanes[0].Width * 0.5f;   // lanes sorted ascending by offset
+                if (c.ShoulderBA > 0f) xs.ShoulderBand(c.ShoulderBA);       // outer shoulder before the lanes
+                float cursor = leftEdge;
+                foreach (LaneEdge e in lanes)
+                {
+                    float laneLeft = e.Offset - e.Width * 0.5f;
+                    if (laneLeft - cursor > 0.01f) xs.Lane(laneLeft - cursor);   // gap filler (asphalt) between non-adjacent lanes
+                    AddBand(xs, e.Kind, e.Width);
+                    cursor = e.Offset + e.Width * 0.5f;
+                }
+                if (c.ShoulderAB > 0f) xs.ShoulderBand(c.ShoulderAB);       // outer shoulder after the lanes
+                // body lateral of a lane = U − CenterU = Offset; the leading shoulder shifts every lane's U by ShoulderBA.
+                xs.CenterU = c.ShoulderBA - leftEdge; xs.CenterUSet = true;
+                return xs;
+            }
+
             if (c.ShoulderBA > 0f) xs.ShoulderBand(c.ShoulderBA);
             int prevDir = lanes.Count > 0 ? lanes[0].Direction : -1;
             bool medianPlaced = false;
@@ -101,8 +122,103 @@ namespace NetworkDesigner.Roads
             float hA = haveGrade ? yA : (groundAt != null ? groundAt(a) : 0f);
             float hB = haveGrade ? yB : (groundAt != null ? groundAt(b) : 0f);
             float follow = haveGrade ? 0f : (groundAt != null ? 1f : 0f);   // design grade once excavated; else terrain-follow
-            return RoadSweep.Build(xs, a, b, c.Curved, c.ControlA, c.ControlB, parent, $"LaneEdgeCorridor_{c.Id}",
-                                   hA, hB, groundAt, follow);
+            GameObject body = RoadSweep.Build(xs, a, b, c.Curved, c.ControlA, c.ControlB, parent, $"LaneEdgeCorridor_{c.Id}",
+                                              hA, hB, groundAt, follow);
+            BuildMarkings(net, c, parent, hA, hB, groundAt, follow);   // painted lane lines, riding the same path + grade
+            return body;
+        }
+
+        // ---- lane markings (painted lines on the asphalt) ----
+        static readonly Color MarkWhite = new Color(0.93f, 0.93f, 0.93f);
+        static readonly Color MarkYellow = new Color(0.96f, 0.80f, 0.18f);
+        const float MarkWidth = 0.15f, MarkLift = 0.05f, MarkDash = 3f, MarkGap = 2.5f, DblYellowSep = 0.18f;
+        static Material _markWhiteMat, _markYellowMat;
+        static Material MarkWhiteMat() => _markWhiteMat != null ? _markWhiteMat : (_markWhiteMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(MarkWhite, "LaneMarkWhite"));
+        static Material MarkYellowMat() => _markYellowMat != null ? _markYellowMat : (_markYellowMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(MarkYellow, "LaneMarkYellow"));
+
+        // Marking layout from the corridor's own lanes (offset, yellow?, dashed?): solid white outer edge lines,
+        // dashed white between same-direction lanes, double-yellow between opposing directions, solid white beside a
+        // bike lane. Offsets are in the body's frame (lane Offset = lateral from centreline), so they sit on the lanes.
+        static List<(float u, bool yellow, bool dashed)> CorridorMarks(LaneEdgeNetwork net, Corridor c)
+        {
+            var marks = new List<(float, bool, bool)>();
+            var lanes = new List<LaneEdge>();
+            foreach (int li in c.Lanes)
+                if (li >= 0 && li < net.Edges.Count && net.Edges[li].Kind != LaneKind.Sidewalk) lanes.Add(net.Edges[li]);
+            if (lanes.Count == 0) return marks;
+            lanes.Sort((x, y) => x.Offset.CompareTo(y.Offset));
+            // Outer edge lines (solid white) at the outer edges of the outermost roadway lanes.
+            marks.Add((lanes[0].Offset - lanes[0].Width * 0.5f, false, false));
+            marks.Add((lanes[lanes.Count - 1].Offset + lanes[lanes.Count - 1].Width * 0.5f, false, false));
+            for (int i = 0; i < lanes.Count - 1; i++)
+            {
+                LaneEdge L = lanes[i], R = lanes[i + 1];
+                float boundary = (L.Offset + L.Width * 0.5f + R.Offset - R.Width * 0.5f) * 0.5f;
+                if (L.Direction != R.Direction)                                                  // opposing → double yellow
+                { marks.Add((boundary - DblYellowSep, true, false)); marks.Add((boundary + DblYellowSep, true, false)); }
+                else if (L.Kind == LaneKind.Bike || R.Kind == LaneKind.Bike) marks.Add((boundary, false, false));   // bike-lane edge → solid white
+                else marks.Add((boundary, false, true));                                         // same dir → dashed white
+            }
+            return marks;
+        }
+
+        // Sweep thin double-sided unlit marking quads along the corridor path, riding the SAME path + grade as the body
+        // (lifted MarkLift above it). Mirrors RoadPlanBuilder.BuildRoadMarkings, but curve-aware via the corridor path.
+        static void BuildMarkings(LaneEdgeNetwork net, Corridor c, Transform parent, float hA, float hB, Func<Vector2, float> groundAt, float follow)
+        {
+            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return;
+            var marks = CorridorMarks(net, c);
+            if (marks.Count == 0) return;
+            float mlen = PathLength(net, c);
+            int frames = Mathf.Clamp(Mathf.CeilToInt(mlen / 0.5f) + 1, 2, 2048);
+            var fp = new Vector3[frames]; var fr = new Vector3[frames];
+            float[] markY = RoadSweep.ElevationProfile(a, b, c.Curved, c.ControlA, c.ControlB, frames, hA, hB, groundAt, follow);
+            for (int f = 0; f < frames; f++)
+            {
+                float t = f / (float)(frames - 1);
+                Vector2 p = PathPoint(net, c, t);
+                Vector2 tan = PathTangent(net, c, t);
+                Vector3 fwd = new Vector3(tan.x, 0f, tan.y); fwd = fwd.sqrMagnitude < 1e-8f ? Vector3.forward : fwd.normalized;
+                fp[f] = new Vector3(p.x, markY[f] + MarkLift, p.y);
+                fr[f] = Vector3.Cross(Vector3.up, fwd).normalized;
+            }
+
+            var verts = new List<Vector3>(); var triW = new List<int>(); var triY = new List<int>();
+            float hw = MarkWidth * 0.5f, period = MarkDash + MarkGap;
+            foreach (var m in marks)
+            {
+                List<int> tl = m.yellow ? triY : triW;
+                float walked = 0f;
+                for (int f = 0; f < frames - 1; f++)
+                {
+                    float segLen = (fp[f + 1] - fp[f]).magnitude;
+                    bool on = !m.dashed || (walked % period) < MarkDash;
+                    walked += segLen;
+                    if (!on) continue;
+                    Vector3 l0 = fp[f] + fr[f] * (m.u - hw), r0 = fp[f] + fr[f] * (m.u + hw);
+                    Vector3 l1 = fp[f + 1] + fr[f + 1] * (m.u - hw), r1 = fp[f + 1] + fr[f + 1] * (m.u + hw);
+                    int s = verts.Count;
+                    verts.Add(l0); verts.Add(r0); verts.Add(r1); verts.Add(l1);
+                    tl.Add(s); tl.Add(s + 1); tl.Add(s + 2); tl.Add(s); tl.Add(s + 2); tl.Add(s + 3);   // up
+                    tl.Add(s); tl.Add(s + 2); tl.Add(s + 1); tl.Add(s); tl.Add(s + 3); tl.Add(s + 2);   // down (2-sided)
+                }
+            }
+            if (verts.Count == 0) return;
+
+            var mesh = new Mesh { name = $"LaneMarks_{c.Id}" };
+            if (verts.Count > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts);
+            mesh.subMeshCount = 2;
+            mesh.SetTriangles(triW, 0);
+            mesh.SetTriangles(triY, 1);
+            mesh.RecalculateBounds();
+
+            var go = new GameObject($"LaneMarks_{c.Id}");
+            go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterials = new[] { MarkWhiteMat(), MarkYellowMat() };
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
         }
 
 #if UNITY_EDITOR

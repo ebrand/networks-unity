@@ -44,6 +44,8 @@ namespace NetworkDesigner.Roads
         public List<int> Lanes = new List<int>();            // lane-edge indices, ordered outer-BA → centre → outer-AB (non-readonly so JsonUtility restores it)
         public bool Curved;                                  // reference path is a cubic bezier A→B (else a straight chord)
         public Vector2 ControlA, ControlB;                    // cubic control points in the corridor's A→B param (only when Curved)
+        public bool AlignLanes;                              // lane-subset extension: lay the body at each lane's actual Offset
+                                                             // (fill gaps with asphalt + shift CenterU) so it sits on the source lanes
         public float MedianWidth;                             // centre band width between BA and AB lanes (0 = none)
         public float ShoulderBA, ShoulderAB;                  // outer non-navigable shoulder widths
         public string Profile;                                // source profile id (markings/style reuse during the spike)

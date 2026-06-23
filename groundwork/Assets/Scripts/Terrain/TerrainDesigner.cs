@@ -1416,6 +1416,8 @@ namespace NetworkDesigner.Terrain
                     Color prevC = GUI.color;
                     if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
                     { GUI.color = new Color(0.5f, 0.7f, 1f); GUILayout.Label("◇ Lane-edge: map flows — click blue (in) then green (out)"); }
+                    else if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
+                    { GUI.color = new Color(1f, 0.4f, 1f); GUILayout.Label($"⑂ Lane-edge: extending {NetworkDesigner.Roads.LaneEdgeWorld.ExtendLanes.Count} lane(s) — click more pucks, or click ground (Shift=curve) to draw · right-click cancels"); }
                     else if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending)
                     { GUI.color = new Color(1f, 0.8f, 0.3f); GUILayout.Label("◗ Lane-edge: bend armed — click the curve end"); }
                     else if (NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
@@ -3918,16 +3920,29 @@ namespace NetworkDesigner.Terrain
                         else if (!leFreeAngle
                             && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnap(_leDrawCursor, 14f, out Vector2 leCol))
                             _leDrawCursor = leCol;
-                        NetworkDesigner.Roads.LaneEdgeWorld.UpdatePreview(_leDrawCursor, leShift,
-                            rdPv.LimitCurveRadius, rdPv.MinRadiusForSpeed,
-                            xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId);
-                        // PAC ring + 15° ticks + leg/angle/radius labels at the lane-edge bend.
-                        if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending)
-                            rdPv.ShowExternalCurveGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos,
-                                NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor);
-                        else if (leShift && NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
-                            rdPv.ShowExternalBendGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, _leDrawCursor);
-                        else rdPv.ClearExternalCurveGuide();
+                        // While selecting/extending lanes the magenta puck highlights are the feedback — suppress the
+                        // normal-draw ghost so it isn't confusing. (_leDrawCursor stays computed for the extend click.)
+                        if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
+                        {
+                            // Lock to straight-ahead or 90° off the source lanes (Alt = free angle).
+                            if (!leFreeAngle && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnapExtend(_leDrawCursor, out Vector2 eCol))
+                                _leDrawCursor = eCol;
+                            NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+                            rdPv.ClearExternalCurveGuide();
+                        }
+                        else
+                        {
+                            NetworkDesigner.Roads.LaneEdgeWorld.UpdatePreview(_leDrawCursor, leShift,
+                                rdPv.LimitCurveRadius, rdPv.MinRadiusForSpeed,
+                                xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId);
+                            // PAC ring + 15° ticks + leg/angle/radius labels at the lane-edge bend.
+                            if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending)
+                                rdPv.ShowExternalCurveGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos,
+                                    NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor);
+                            else if (leShift && NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
+                                rdPv.ShowExternalBendGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, _leDrawCursor);
+                            else rdPv.ClearExternalCurveGuide();
+                        }
                     }
                     else { NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); rdPv.ClearExternalCurveGuide(); }
                 }
@@ -3940,14 +3955,22 @@ namespace NetworkDesigner.Terrain
                     // Lane-edge model (behind the flag): a road-plan click either draws a corridor or maps a lane flow.
                     if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && _lineActive is RoadPlanLayer rdLE)
                     {
+                        System.Func<Vector2, float> leGround = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
+                        bool leShiftClick = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                        Camera leCam = PickCamera != null ? PickCamera : Camera.main;
+                        Vector2 leMouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                         if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
-                            NetworkDesigner.Roads.LaneEdgeWorld.MapClick(PickCamera != null ? PickCamera : Camera.main,
-                                new Vector2(Input.mousePosition.x, Input.mousePosition.y), xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+                            NetworkDesigner.Roads.LaneEdgeWorld.MapClick(leCam, leMouse, leGround);
+                        // Lane-subset extension: clicking a lane endpoint puck toggles it into the selection; once lanes are
+                        // selected, a click on open ground draws the continuation. Skipped mid normal-draw so a puck near the
+                        // end click can't hijack it. Otherwise fall through to a normal draw.
+                        else if (!NetworkDesigner.Roads.LaneEdgeWorld.Drawing && NetworkDesigner.Roads.LaneEdgeWorld.ToggleExtendPick(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId))
+                            NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(leGround);   // refresh the selected-puck highlight
+                        else if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
+                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);
                         else
                             NetworkDesigner.Roads.LaneEdgeWorld.Click(_leDrawCursor, rdLE.ActiveProfileId,   // PAC-snapped cursor (matches the preview)
-                                xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f,   // lift so the deck doesn't bury/z-fight
-                                Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift),   // Shift arms a curve bend
-                                rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);   // refuse curves tighter than the design speed allows
+                                leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);
                         _dirtySince = Time.realtimeSinceStartup;   // persist lane-edge draws/flows via autosave
                         return;
                     }
@@ -4034,8 +4057,8 @@ namespace NetworkDesigner.Terrain
                 if (!overPanel && Input.GetMouseButtonDown(1))
                 {
                     // Lane-edge model: right-click cancels an in-progress corridor draw or lane-flow mapping.
-                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && (NetworkDesigner.Roads.LaneEdgeWorld.Drawing || NetworkDesigner.Roads.LaneEdgeWorld.Mapping))
-                    { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); return; }
+                    if (NetworkDesigner.Roads.LaneEdgeModel.Enabled && (NetworkDesigner.Roads.LaneEdgeWorld.Drawing || NetworkDesigner.Roads.LaneEdgeWorld.Mapping || NetworkDesigner.Roads.LaneEdgeWorld.Extending))
+                    { NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); NetworkDesigner.Roads.LaneEdgeWorld.CancelExtend(); NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f); return; }
                     // An armed auto-slope / connect cancels first (right-click backs out).
                     if (_railConnectNodeA >= 0) { _railConnectNodeA = -1; if (_lineActive is RailTrackLayer rcx) rcx.HideConnectPreview(); }
                     else if (_roadConnectNodeA >= 0) { _roadConnectNodeA = -1; if (_lineActive is RoadPlanLayer rdx) rdx.HideConnectPreview(); }
