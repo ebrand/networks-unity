@@ -287,12 +287,23 @@ namespace NetworkDesigner.Roads
             }
         }
 
+        // Fork/drop matching. Score by WORLD continuation, not per-corridor offset: the best outgoing lane is the
+        // forward-heading lane whose entry sits closest to the incoming lane's straight continuation line. This is
+        // cross-corridor correct — a parent lane forks onto whichever branch (trunk or ramp) physically lines up with
+        // it, and an offset shared by two corridors with different centrelines no longer mis-scores. Lateral world
+        // distance is the primary discriminator (so lanes assign by POSITION); heading is a gate + light tiebreak.
+        // A lane with no straight continuation simply takes its nearest forward outgoing → that's the lane-drop/merge:
+        // traffic carries into the neighbour instead of dead-ending. (Geometry/taper of the drop is Phase-2.)
+        const float FlowAlignWeight = 2f;        // heading weight; lateral metres dominate the score
+        const float FlowMinForwardAlign = 0.1f;  // reject U-turns / sharp reversals only
+
         static int BestOutgoingMatch(int incIdx)
         {
             LaneEndpoint inc = Endpoints[incIdx];
             LaneEdge ie = Net.Edges[inc.Edge];
             int io = inc.Node == ie.A ? ie.B : ie.A;
             Vector2 inDir = Net.Nodes[inc.Node] - Net.Nodes[io]; if (inDir.sqrMagnitude < 1e-6f) return -1; inDir.Normalize();
+            Vector2 nrm = new Vector2(-inDir.y, inDir.x);   // lateral axis of the incoming lane's continuation line
             int best = -1; float bestScore = -999f;
             for (int j = 0; j < Endpoints.Count; j++)
             {
@@ -302,8 +313,9 @@ namespace NetworkDesigner.Roads
                 int oo = outg.Node == oe.A ? oe.B : oe.A;
                 Vector2 outDir = Net.Nodes[oo] - Net.Nodes[outg.Node]; if (outDir.sqrMagnitude < 1e-6f) continue; outDir.Normalize();
                 float align = Vector2.Dot(inDir, outDir);
-                if (align <= 0.1f) continue;   // never default-map a U-turn / sharp reversal
-                float score = align * 10f - Mathf.Abs(ie.Offset - oe.Offset);   // most aligned, then closest lane offset
+                if (align <= FlowMinForwardAlign) continue;   // never default-map a U-turn / sharp reversal
+                float lateral = Mathf.Abs(Vector2.Dot(outg.Pos - inc.Pos, nrm));   // world ⊥ distance from the continuation line
+                float score = align * FlowAlignWeight - lateral;
                 if (score > bestScore) { bestScore = score; best = j; }
             }
             return best;
@@ -785,7 +797,7 @@ namespace NetworkDesigner.Roads
 
         // Live preview while pulling out a lane-subset extension: the new road outline (centre + edges), offset onto the
         // selected lanes exactly as it will build, from the source node to the cursor (straight, or curved via shift-bend).
-        public static void UpdateExtendPreview(Vector2 cursor, bool curveModifier, Func<Vector2, float> groundAt)
+        public static void UpdateExtendPreview(Vector2 cursor, bool curveModifier, Func<Vector2, float> groundAt, string profileId)
         {
             EnsurePreview();
             _pvRoot.SetActive(true);
@@ -806,6 +818,7 @@ namespace NetworkDesigner.Roads
             Vector2 frNew = new Vector2(tanN.y, -tanN.x);
 
             float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
+            int gotBA = 0, gotAB = 0; float baW = 3.5f, abW = 3.5f, baMax = -1f, abMax = -1f;
             foreach (int sl in _extLanes)
             {
                 if (sl < 0 || sl >= Net.Edges.Count) continue;
@@ -816,8 +829,19 @@ namespace NetworkDesigner.Roads
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
                 float oNew = Vector2.Dot(frS * s.Offset, frNew);
                 lo = Mathf.Min(lo, oNew - s.Width * 0.5f); hi = Mathf.Max(hi, oNew + s.Width * 0.5f);
+                if (s.Direction == 0) { gotBA++; if (Mathf.Abs(oNew) >= baMax) { baMax = Mathf.Abs(oNew); baW = s.Width; } }
+                else { gotAB++; if (Mathf.Abs(oNew) >= abMax) { abMax = Mathf.Abs(oNew); abW = s.Width; } }
             }
             if (lo > hi) return;
+            // Lane addition (two-way only — mirrors BuildExtensionCorridor's gate): widen the band on the side that gains
+            // lanes (BA → lo, AB → hi) so the preview matches the built corridor, not just the grabbed-lane span.
+            ProfileLaneSplit(profileId, out int wantBA, out int wantAB);
+            if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // mirror — match the built side (F flip)
+            if (wantBA > 0 && wantAB > 0)
+            {
+                if (gotAB > 0 && wantAB > gotAB) hi += (wantAB - gotAB) * abW;
+                if (gotBA > 0 && wantBA > gotBA) lo -= (wantBA - gotBA) * baW;
+            }
             // The built extension carries the source road's shoulders (BuildExtensionCorridor) — include them so the
             // preview width matches the source plan + the built body (not just the bare lane span).
             float shoulder = 0f;
@@ -976,6 +1000,8 @@ namespace NetworkDesigner.Roads
         static int _extNode = -1;
         static readonly List<int> _extLanes = new List<int>();        // selected lane-edge indices to extend
         static Vector2 _extCorner; static bool _extCornerPending;
+        public static bool ExtFlipSide;                               // F while extending: append the surplus lane on the OTHER side
+        public static void ToggleExtFlip() => ExtFlipSide = !ExtFlipSide;
         public static bool Extending => _extNode >= 0 && _extLanes.Count > 0;
         public static int ExtendNode => _extNode;
         public static IReadOnlyList<int> ExtendLanes => _extLanes;
@@ -1005,14 +1031,36 @@ namespace NetworkDesigner.Roads
             LaneEdge picked = Net.Edges[ep.Edge];
             if (ProfileLaneCount(profileId) <= 1) { _grpBuf.Add(ep.Edge); single = true; return true; }
 
+            // A two-way profile extends the FULL cross-section (both travel directions + the median divider), so we don't
+            // restrict the group to the clicked lane's direction. A one-way profile is a fork → same-direction lanes only.
+            bool twoWay = ProfileIsTwoWay(profileId);
             _grpCand.Clear();
             for (int i = 0; i < Net.Edges.Count; i++)
             {
                 LaneEdge e = Net.Edges[i];
                 if ((e.A != node && e.B != node) || e.CorridorId != picked.CorridorId) continue;
-                if (e.Direction != picked.Direction || e.Kind == LaneKind.Sidewalk) continue;
+                if (e.Kind == LaneKind.Sidewalk) continue;
+                if (!twoWay && e.Direction != picked.Direction) continue;
                 _grpCand.Add(i);
             }
+            if (twoWay)
+            {
+                // Direction-balanced grab: take the profile's per-direction lane counts, the lanes NEAREST THE MEDIAN on
+                // each side. Inner-first keeps the extension centred on the source centreline (centrelines align) and makes
+                // a mis-split (e.g. 3+1 off a 3x2) impossible — surplus outer lanes simply drop. Pick position is ignored.
+                ProfileLaneSplit(profileId, out int nBA, out int nAB);
+                _grpCand.Sort((x, y) => Mathf.Abs(Net.Edges[x].Offset).CompareTo(Mathf.Abs(Net.Edges[y].Offset)));   // median-hugging first
+                int gotBA = 0, gotAB = 0;
+                foreach (int ei in _grpCand)
+                {
+                    if (Net.Edges[ei].Direction == 0) { if (gotBA < nBA) { _grpBuf.Add(ei); gotBA++; } }
+                    else { if (gotAB < nAB) { _grpBuf.Add(ei); gotAB++; } }
+                }
+                if (_grpBuf.Count == 0) _grpBuf.Add(ep.Edge);
+                return true;
+            }
+
+            // one-way fork: contiguous same-direction block centred on the pick.
             _grpCand.Sort((x, y) => Net.Edges[x].Offset.CompareTo(Net.Edges[y].Offset));
             int pi = _grpCand.IndexOf(ep.Edge);
             if (pi < 0) { _grpBuf.Add(ep.Edge); return true; }
@@ -1045,23 +1093,31 @@ namespace NetworkDesigner.Roads
         }
 
         // Navigable (drivable) lane count of a profile — drives how many lanes an extension click grabs.
-        static int ProfileLaneCount(string profileId)
+        static int ProfileLaneCount(string profileId) { ProfileLaneSplit(profileId, out int nBA, out int nAB); return Mathf.Max(1, nBA + nAB); }
+
+        // Does the profile carry navigable lanes in BOTH travel directions (a two-way road)? Drives whether an extension
+        // click grabs both sides of the cross-section (two-way continuation) or one direction only (one-way fork).
+        static bool ProfileIsTwoWay(string profileId) { ProfileLaneSplit(profileId, out int nBA, out int nAB); return nBA > 0 && nAB > 0; }
+
+        // Per-direction navigable lane counts of a profile (nBA = BA/left zone, nAB = AB/right zone). Drives a direction-
+        // balanced extension grab so a two-way pull can't mis-split (e.g. 3+1 off a 3x2) — see ComputeExtendGroup.
+        static void ProfileLaneSplit(string profileId, out int nBA, out int nAB)
         {
+            nBA = 0; nAB = 0;
             var cfg = RoadProfileLibrary.ResolveConfig(profileId);
-            if (cfg == null || cfg.Corridor == null) return 1;
+            if (cfg == null || cfg.Corridor == null) return;
             var bands = new List<RoadCrossSectionBuilder.StackBand>();
             RoadCrossSectionBuilder.FromStack(cfg.Corridor, bands);
-            int n = 0;
             foreach (var bd in bands)
-                if (bd.Type == Model.CorridorType.Traffic || bd.Type == Model.CorridorType.Turn || bd.Type == Model.CorridorType.Bike) n++;
-            return Mathf.Max(1, n);
+                if (bd.Type == Model.CorridorType.Traffic || bd.Type == Model.CorridorType.Turn || bd.Type == Model.CorridorType.Bike)
+                { if (bd.Zone == 0) nBA++; else nAB++; }
         }
 
-        public static void CancelExtend() { _extNode = -1; _extLanes.Clear(); _extCornerPending = false; }
+        public static void CancelExtend() { _extNode = -1; _extLanes.Clear(); _extCornerPending = false; ExtFlipSide = false; }
 
         // Draw the extension end (straight, or shift-curve through a bend). Builds the aligned subset corridor + lets the
         // default-flow regen wire continuations (selected) and merges (dropped). Mirrors Click's straight/curve flow.
-        public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius)
+        public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius, string profileId)
         {
             if (!Extending) return false;
             Vector2 start = Net.Nodes[_extNode];
@@ -1074,20 +1130,22 @@ namespace NetworkDesigner.Roads
                 if (limitRadius && MinCurveRadius(start, c1, c2, end) < minRadius)
                 { Debug.LogWarning("[LaneEdgeWorld] extension curve too tight — pick a wider end"); return false; }
                 int bm = Net.AddNode(end);
-                BuildExtensionCorridor(_extNode, bm, true, c1, c2);
+                BuildExtensionCorridor(_extNode, bm, true, c1, c2, profileId);
                 CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
             }
             if (curveModifier) { _extCorner = xz; _extCornerPending = true; return false; }
 
             if ((xz - start).sqrMagnitude < 1f) return false;
             int b = Net.AddNode(xz);
-            BuildExtensionCorridor(_extNode, b, false, default, default);
+            BuildExtensionCorridor(_extNode, b, false, default, default, profileId);
             CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
         }
 
         // Build a corridor (nodeN→nodeM) whose lanes copy the selected source lanes, positioned (via Offset projection +
-        // AlignLanes/CenterU) to sit exactly on the source lanes at nodeN so the fork is geometrically continuous.
-        static void BuildExtensionCorridor(int nodeN, int nodeM, bool curved, Vector2 c1, Vector2 c2)
+        // AlignLanes/CenterU) to sit exactly on the source lanes at nodeN so the fork is geometrically continuous. If the
+        // active profile asks for MORE lanes per direction than the source provided (e.g. continue a 2x2 with a 2x3 to
+        // replace a lane that peeled off to a ramp), the surplus is appended OUTBOARD — see AppendOutboard.
+        static void BuildExtensionCorridor(int nodeN, int nodeM, bool curved, Vector2 c1, Vector2 c2, string profileId)
         {
             Corridor nc = Net.AddCorridor();
             nc.Curved = curved; nc.ControlA = c1; nc.ControlB = c2; nc.AlignLanes = true;
@@ -1108,9 +1166,42 @@ namespace NetworkDesigner.Roads
                 int dirNew = incomingAtN ? 2 : 0;                  // arriving lane → continue outward (A'=N→B'); return lane → inbound
                 int li = Net.AddLane(new LaneEdge { A = nodeN, B = nodeM, CorridorId = nc.Id, Kind = s.Kind, Direction = dirNew, Width = s.Width, Offset = oNew });
                 nc.Lanes.Add(li);
-                if (string.IsNullOrEmpty(nc.Profile) && sc != null) { nc.Profile = sc.Profile; nc.ShoulderBA = sc.ShoulderBA; nc.ShoulderAB = sc.ShoulderAB; }
+                if (string.IsNullOrEmpty(nc.Profile) && sc != null) { nc.Profile = sc.Profile; nc.ShoulderBA = sc.ShoulderBA; nc.ShoulderAB = sc.ShoulderAB; nc.MedianWidth = sc.MedianWidth; }
             }
+            // Lane addition: append surplus profile lanes outboard on each side (median stays aligned, through-lanes stay
+            // put). Scoped to TWO-WAY profiles so one-way forks (confirmed working) keep their copy-grabbed-lanes behaviour.
+            ProfileLaneSplit(profileId, out int wantBA, out int wantAB);
+            if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // F: mirror which side gains the surplus lane
+            if (wantBA > 0 && wantAB > 0) { AppendOutboard(nc, 0, wantBA); AppendOutboard(nc, 2, wantAB); }
             Net.SortCorridorLanes(nc);
+        }
+
+        // Append (want − current) navigable lanes in travel direction `dir` OUTBOARD of the corridor's outermost lane on
+        // that side, matching its width (continuity). dir 0 = BA (offsets < 0, outboard = more negative); dir 2 = AB
+        // (offsets > 0, outboard = more positive). The added lane begins here (no source feed) — the flow matcher leaves
+        // it unconnected at nodeN and traffic merges into it downstream. No-op when there's no anchor lane or already ≥want.
+        static void AppendOutboard(Corridor nc, int dir, int want)
+        {
+            if (nc.Lanes.Count == 0) return;
+            int a = Net.Edges[nc.Lanes[0]].A, b = Net.Edges[nc.Lanes[0]].B;
+            int cur = 0; float outerOff = 0f, outerW = 3.5f; bool any = false;
+            foreach (int li in nc.Lanes)
+            {
+                LaneEdge e = Net.Edges[li];
+                if (e.Direction != dir || e.Kind == LaneKind.Sidewalk) continue;
+                cur++;
+                if (!any || Mathf.Abs(e.Offset) > Mathf.Abs(outerOff)) { outerOff = e.Offset; outerW = e.Width; any = true; }
+            }
+            if (!any || cur >= want) return;
+            float sign = outerOff < 0f ? -1f : 1f;
+            float edge = Mathf.Abs(outerOff) + outerW * 0.5f;   // outer edge of the current outermost lane on this side
+            for (int k = cur; k < want; k++)
+            {
+                float off = sign * (edge + outerW * 0.5f);
+                int ni = Net.AddLane(new LaneEdge { A = a, B = b, CorridorId = nc.Id, Kind = LaneKind.Traffic, Direction = dir, Width = outerW, Offset = off });
+                nc.Lanes.Add(ni);
+                edge = Mathf.Abs(off) + outerW * 0.5f;
+            }
         }
 
         // ── deletion: right-click a node (deletes its corridors) or a segment body (deletes that corridor) ──

@@ -1417,7 +1417,7 @@ namespace NetworkDesigner.Terrain
                     if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
                     { GUI.color = new Color(0.5f, 0.7f, 1f); GUILayout.Label("◇ Lane-edge: map flows — click blue (in) then green (out)"); }
                     else if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
-                    { GUI.color = new Color(1f, 0.4f, 1f); GUILayout.Label($"⑂ Lane-edge: extending {NetworkDesigner.Roads.LaneEdgeWorld.ExtendLanes.Count} lane(s) — click more pucks, or click ground (Shift=curve) to draw · right-click cancels"); }
+                    { GUI.color = new Color(1f, 0.4f, 1f); GUILayout.Label($"⑂ Lane-edge: extending {NetworkDesigner.Roads.LaneEdgeWorld.ExtendLanes.Count} lane(s) — click more pucks, or click ground (Shift=curve) to draw · F=flip surplus side ({(NetworkDesigner.Roads.LaneEdgeWorld.ExtFlipSide ? "mirrored" : "default")}) · right-click cancels"); }
                     else if (NetworkDesigner.Roads.LaneEdgeWorld.CornerPending)
                     { GUI.color = new Color(1f, 0.8f, 0.3f); GUILayout.Label("◗ Lane-edge: bend armed — click the curve end"); }
                     else if (NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
@@ -3461,7 +3461,7 @@ namespace NetworkDesigner.Terrain
             // key again to return to sculpt).
             if (Input.GetKeyDown(KeyCode.T)) { SetScatterMode(TreeLayer); SyncScatterPalette(); }
             if (Input.GetKeyDown(KeyCode.R)) { SetScatterMode(RockLayer); SyncScatterPalette(); }
-            if (Input.GetKeyDown(KeyCode.F)) { SetLineMode(FenceLayer); SyncScatterPalette(); }
+            if (Input.GetKeyDown(KeyCode.F) && !NetworkDesigner.Roads.LaneEdgeWorld.Extending) { SetLineMode(FenceLayer); SyncScatterPalette(); }   // F flips the extension side while extending (handled below)
             if (Input.GetKeyDown(KeyCode.P)) SetLineMode(PowerLineLayer);
             if (Input.GetKeyDown(KeyCode.L)) { SetLineMode(RailLayer); SyncPaletteToMode(); }
             if (Input.GetKeyDown(KeyCode.K)) { SetLineMode(PlanLayer); SyncPaletteToMode(); }
@@ -3924,6 +3924,7 @@ namespace NetworkDesigner.Terrain
                         // normal-draw ghost so it isn't confusing. (_leDrawCursor stays computed for the extend click.)
                         if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
                         {
+                            if (Input.GetKeyDown(KeyCode.F)) NetworkDesigner.Roads.LaneEdgeWorld.ToggleExtFlip();   // mirror the surplus-lane side
                             Vector2 leN = NetworkDesigner.Roads.LaneEdgeWorld.ExtendStartPos;
                             if (NetworkDesigner.Roads.LaneEdgeWorld.ExtCornerPending)
                             {
@@ -3953,7 +3954,7 @@ namespace NetworkDesigner.Terrain
                                     _leDrawCursor = eCol;
                                 rdPv.ClearExternalCurveGuide();
                             }
-                            NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f);
+                            NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId);
                         }
                         else
                         {
@@ -3992,7 +3993,7 @@ namespace NetworkDesigner.Terrain
                         else if (!NetworkDesigner.Roads.LaneEdgeWorld.Drawing && NetworkDesigner.Roads.LaneEdgeWorld.ToggleExtendPick(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId))
                             NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(leGround);   // refresh the selected-puck highlight
                         else if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
-                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);
+                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed, rdLE.ActiveProfileId);
                         else
                             NetworkDesigner.Roads.LaneEdgeWorld.Click(_leDrawCursor, rdLE.ActiveProfileId,   // PAC-snapped cursor (matches the preview)
                                 leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);

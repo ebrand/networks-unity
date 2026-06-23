@@ -67,12 +67,22 @@ namespace NetworkDesigner.Roads
                 float leftEdge = lanes[0].Offset - lanes[0].Width * 0.5f;   // lanes sorted ascending by offset
                 if (c.ShoulderBA > 0f) xs.ShoulderBand(c.ShoulderBA);       // outer shoulder before the lanes
                 float cursor = leftEdge;
+                int alPrevDir = lanes[0].Direction; bool alMedianPlaced = false;
                 foreach (LaneEdge e in lanes)
                 {
                     float laneLeft = e.Offset - e.Width * 0.5f;
-                    if (laneLeft - cursor > 0.01f) xs.Lane(laneLeft - cursor);   // gap filler (asphalt) between non-adjacent lanes
+                    float gap = laneLeft - cursor;
+                    if (gap > 0.01f)
+                    {
+                        // The gap straddling the travel-direction flip IS the median (a two-way extension); fill it as a
+                        // median band (paints the double-yellow + keeps it non-navigable). Same-direction gaps stay asphalt.
+                        if (!alMedianPlaced && c.MedianWidth > 0f && e.Direction != alPrevDir)
+                        { float u0 = xs.Width; xs.Median(gap); xs.SplitU = (u0 + xs.Width) * 0.5f; alMedianPlaced = true; }
+                        else xs.Lane(gap);
+                    }
                     AddBand(xs, e.Kind, e.Width);
                     cursor = e.Offset + e.Width * 0.5f;
+                    alPrevDir = e.Direction;
                 }
                 if (c.ShoulderAB > 0f) xs.ShoulderBand(c.ShoulderAB);       // outer shoulder after the lanes
                 // body lateral of a lane = U − CenterU = Offset; the leading shoulder shifts every lane's U by ShoulderBA.
