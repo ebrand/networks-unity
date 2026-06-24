@@ -60,6 +60,10 @@ namespace NetworkDesigner.Roads
         // Render every corridor, draped via groundAt. Rebuilds the whole render root (simple; optimise later).
         public struct LaneEndpoint { public Vector2 Pos; public Vector2 NodePos; public float Y; public int Edge; public int Node; public bool Incoming; }
         public static readonly List<LaneEndpoint> Endpoints = new List<LaneEndpoint>();   // rebuilt each Rebuild; for picking + flow render
+        // (node, edge) → index into Endpoints. Rebuilt alongside Endpoints so TryEndpointPos is O(1) instead of a linear
+        // scan — DetectLaneDropTapers calls it inside a double loop over all edges, so a linear scan made Rebuild O(E³).
+        static readonly Dictionary<long, int> _endpointIndex = new Dictionary<long, int>();
+        static long EpKey(int node, int edge) => ((long)node << 32) | (uint)edge;
 
         public static void Rebuild(Func<Vector2, float> groundAt)
         {
@@ -105,6 +109,10 @@ namespace NetworkDesigner.Roads
             _laneBuf.Clear(); shBA = c.ShoulderBA; shAB = c.ShoulderAB;
             if (ShoulderSuppressed(c, -1f)) shBA = 0f;   // a taper owns this shoulder → drawn along the wedge instead
             if (ShoulderSuppressed(c, 1f)) shAB = 0f;
+            // A taper that's the outermost lane owns the road's solid outer edge → don't draw the body's solid edge at the
+            // surviving lanes' boundary (that's the dropped lane's DASHED inner divider, drawn by the taper).
+            _suppLeftEdge = OuterEdgeSuppressed(c, -1f);   // BA / leftmost (most negative offset)
+            _suppRightEdge = OuterEdgeSuppressed(c, 1f);   // AB / rightmost (most positive offset)
             foreach (int li in c.Lanes)
             {
                 if (li < 0 || li >= Net.Edges.Count) continue;
@@ -118,6 +126,7 @@ namespace NetworkDesigner.Roads
         static void ProfileLanes(string profileId, out float shBA, out float shAB)
         {
             _laneBuf.Clear(); shBA = 0f; shAB = 0f;
+            _suppLeftEdge = _suppRightEdge = false;   // profile preview has no tapers
             var cfg = RoadProfileLibrary.ResolveConfig(profileId);
             if (cfg == null || cfg.Corridor == null) return;
             var bands = new List<RoadCrossSectionBuilder.StackBand>();
@@ -136,6 +145,7 @@ namespace NetworkDesigner.Roads
         // Turn the lane set into styled guide lines (offset, dash, gap): small-dash outer edges, large-dash same-direction
         // lane dividers, and a DOUBLE solid line at any direction flip (the A→B/B→A divider).
         static float _shBA, _shAB;   // lane-set shoulder widths, set before CollectGuideLines
+        static bool _suppLeftEdge, _suppRightEdge;   // a taper owns the solid outer edge on this side → body skips it
         static void CollectGuideLines()
         {
             _guideBuf.Clear();
@@ -143,8 +153,8 @@ namespace NetworkDesigner.Roads
             _laneBuf.Sort((a, b) => a.off.CompareTo(b.off));
             float laneLeft = _laneBuf[0].off - _laneBuf[0].w * 0.5f;                                  // outermost lane edges → SOLID
             float laneRight = _laneBuf[_laneBuf.Count - 1].off + _laneBuf[_laneBuf.Count - 1].w * 0.5f;
-            _guideBuf.Add((laneLeft, 0f, 0f));
-            _guideBuf.Add((laneRight, 0f, 0f));
+            if (!_suppLeftEdge) _guideBuf.Add((laneLeft, 0f, 0f));    // taper owns this edge → skip (its dashed inner divider shows instead)
+            if (!_suppRightEdge) _guideBuf.Add((laneRight, 0f, 0f));
             if (_shBA > 0.01f) _guideBuf.Add((laneLeft - _shBA, OuterDash, OuterGap));                // shoulder outside → small dashes
             if (_shAB > 0.01f) _guideBuf.Add((laneRight + _shAB, OuterDash, OuterGap));
             for (int i = 0; i < _laneBuf.Count - 1; i++)
@@ -156,12 +166,37 @@ namespace NetworkDesigner.Roads
             }
         }
 
+        // A corridor's path is sane to render only when its endpoint nodes are finite and within a reasonable span. Used to
+        // refuse plan-overlay rendering of a corridor a bad peel/extend left degenerate (would otherwise hang the editor).
+        static bool IsSanePath(Corridor c, float pathLen, out string why)
+        {
+            why = null;
+            if (float.IsNaN(pathLen) || float.IsInfinity(pathLen)) { why = $"pathLen={pathLen}"; return false; }
+            if (pathLen > 20000f) { why = $"pathLen={pathLen:F0} m (>20 km)"; return false; }
+            if (c.Lanes.Count > 0 && c.Lanes[0] >= 0 && c.Lanes[0] < Net.Edges.Count)
+            {
+                LaneEdge l0 = Net.Edges[c.Lanes[0]];
+                Vector2 a = Net.Nodes[l0.A], b = Net.Nodes[l0.B];
+                if (!IsFinite(a) || !IsFinite(b)) { why = $"non-finite node A={a} B={b}"; return false; }
+            }
+            return true;
+        }
+        static bool IsFinite(Vector2 v) => !(float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsInfinity(v.x) || float.IsInfinity(v.y));
+
         // Committed un-built corridor: draped styled guide-line mesh (red planned / yellow excavated), matching the live preview.
         static void RenderPlanOverlay(Corridor c, Transform parent, Func<Vector2, float> groundAt)
         {
             if (c.Lanes.Count == 0) return;
             float pathLen = LaneEdgeCorridorBuilder.PathLength(Net, c);
             if (pathLen < 1e-2f) return;
+            // A degenerate corridor (a node placed at a NaN/huge coordinate by a bad peel/extend) gives an astronomical
+            // pathLen → BuildPlanArrows emits pathLen/200 arrows and EmitDashedPolyline float-stalls → the editor HANGS.
+            // Skip such a corridor (and log it once) instead of freezing. The logged nodes/length point at the source.
+            if (!IsSanePath(c, pathLen, out string pathWhy))
+            {
+                Debug.LogError($"[LaneEdgeWorld] skipped plan overlay for corridor #{c.Id} ({c.Lanes.Count} lanes) — {pathWhy}");
+                return;
+            }
             CorridorLanes(c, out _shBA, out _shAB);
             CollectGuideLines();
             bool hasTaper = c.Tapers != null && c.Tapers.Count > 0;
@@ -243,14 +278,16 @@ namespace NetworkDesigner.Roads
             TaperWedge(c, tp, M, _twIn, _twOut, sh, _twSh);
             int n = _twIn.Count;
             if (n < 2) return;
-            EmitDashedPolyline(_twOut, LaneDash, LaneGap, verts, tris, groundAt);     // outer S-curve edge (lane-line dash)
-            EmitDashedPolyline(_twIn, LaneDash, LaneGap, verts, tris, groundAt);      // inner straight edge
-            EmitLineSeg(_twIn[n - 1], _twOut[n - 1], verts, tris, groundAt);          // full-width end cap (solid)
+            // The outer S-curve edge is the ROAD BOUNDARY when this taper is the outermost lane → draw it SOLID, matching the
+            // straight road's solid outermost-lane edge (which is solid whether or not a shoulder sits outside it; the
+            // shoulder line itself is the small-dashed _twSh further out). Interior taper → dashed lane line.
+            if (TaperIsOutermost(c, tp)) EmitPolyline(_twOut, verts, tris, groundAt);    // solid outermost road edge
+            else EmitDashedPolyline(_twOut, LaneDash, LaneGap, verts, tris, groundAt);   // interior lane line (dashed)
+            EmitDashedPolyline(_twIn, LaneDash, LaneGap, verts, tris, groundAt);      // inner straight edge (lane divider)
+            // No end cap at the full-width end: the dropped lane MERGES into the road body there (it doesn't terminate), so a
+            // solid perpendicular bar across the lane is spurious — the inner (dashed) + outer (solid) edges just continue.
             if (sh > 0.01f && _twSh.Count == n)                                       // shoulder edge following the taper
-            {
                 EmitDashedPolyline(_twSh, OuterDash, OuterGap, verts, tris, groundAt);
-                EmitLineSeg(_twOut[n - 1], _twSh[n - 1], verts, tris, groundAt);      // shoulder end cap (solid)
-            }
         }
 
         // Dashed version of EmitPolyline: walks the polyline by arc length, emitting only the dash-on portions.
@@ -263,7 +300,16 @@ namespace NetworkDesigner.Roads
                 Vector2 a = pts[k], b = pts[k + 1];
                 Vector2 seg = b - a; float segLen = seg.magnitude; if (segLen < 1e-4f) continue;
                 Vector2 dir = seg / segLen; float pos = 0f;
-                while (pos < segLen)
+                // Hard cap: at most (segLen/period)+2 dash periods fit in this segment. Without it, a huge segLen (a
+                // degenerate taper span) drives pos so high that pos += tiny_piece is lost to float32 precision → pos
+                // stops advancing → infinite loop → editor freeze. A non-finite segLen would also never terminate.
+                if (float.IsNaN(segLen) || float.IsInfinity(segLen)) continue;
+                // A segment longer than any real road is degenerate (a node/control point at a huge coordinate) — skip it
+                // rather than emit millions of dashes (or float-stall). Real segments draw fully: ~2 loop iterations per
+                // dash period, so the cap must be 2×(segLen/period), not 1× (which cut long dashed lines off halfway).
+                if (segLen > 50000f) { Debug.LogError($"[EmitDashedPolyline] skipped degenerate segment k={k} segLen={segLen:F0} a={a} b={b} (pts={pts.Count})"); continue; }
+                int safety = 2 * Mathf.CeilToInt(segLen / period) + 8;
+                while (pos < segLen && safety-- > 0)
                 {
                     float phase = walked % period;
                     if (phase < dash)
@@ -338,7 +384,7 @@ namespace NetworkDesigner.Roads
                 if (dir < 0) dir = e.Direction; else if (e.Direction != dir) return;   // mixed directions → two-way → no arrows
             }
             if (nav == 0 || cp.Length < 2) return;
-            int numArrows = Mathf.Max(1, Mathf.RoundToInt(pathLen / 200f));
+            int numArrows = Mathf.Clamp(Mathf.RoundToInt(pathLen / 200f), 1, 200);   // clamp: a degenerate pathLen must never explode the arrow count
             const float fwd = 1.6f, back = 1.0f, half = 0.9f;
             foreach (int li in c.Lanes)
             {
@@ -429,13 +475,12 @@ namespace NetworkDesigner.Roads
             return false;
         }
 
-        // If the tapering lane is the OUTERMOST drivable lane on its side, the corridor's shoulder on that side follows the
-        // wedge (drawn alongside it, and suppressed on the uniform body). Returns that shoulder width, else 0.
-        public static float TaperOuterShoulder(Corridor c, LaneDropTaper tp)
+        // True if the tapering lane is the OUTERMOST drivable lane on its side (no other same-side lane sits further out) —
+        // i.e. its outer S-curve edge IS the road boundary, so it must be drawn SOLID (matching the straight road's solid
+        // outermost-lane edge), not as a dashed lane line.
+        public static bool TaperIsOutermost(Corridor c, LaneDropTaper tp)
         {
             float sgn = tp.Offset >= 0f ? 1f : -1f;
-            float sh = sgn > 0f ? c.ShoulderAB : c.ShoulderBA;
-            if (sh <= 0.01f) return 0f;
             float tpOuter = Mathf.Abs(tp.Offset) + tp.Width * 0.5f;
             foreach (int li in c.Lanes)
             {
@@ -443,9 +488,19 @@ namespace NetworkDesigner.Roads
                 LaneEdge e = Net.Edges[li];
                 if (e.Kind == LaneKind.Sidewalk) continue;
                 if ((e.Offset >= 0f ? 1f : -1f) != sgn) continue;                  // same side only
-                if (Mathf.Abs(e.Offset) + e.Width * 0.5f > tpOuter + 0.01f) return 0f;   // a lane sits further out → not outermost
+                if (Mathf.Abs(e.Offset) + e.Width * 0.5f > tpOuter + 0.01f) return false;   // a lane sits further out → not outermost
             }
-            return sh;
+            return true;
+        }
+
+        // If the tapering lane is the OUTERMOST drivable lane on its side, the corridor's shoulder on that side follows the
+        // wedge (drawn alongside it, and suppressed on the uniform body). Returns that shoulder width, else 0.
+        public static float TaperOuterShoulder(Corridor c, LaneDropTaper tp)
+        {
+            float sgn = tp.Offset >= 0f ? 1f : -1f;
+            float sh = sgn > 0f ? c.ShoulderAB : c.ShoulderBA;
+            if (sh <= 0.01f) return 0f;
+            return TaperIsOutermost(c, tp) ? sh : 0f;
         }
 
         // True if a taper on side `sgn` (+1 = AB, −1 = BA) owns that shoulder, so the uniform body must NOT draw it there.
@@ -457,9 +512,21 @@ namespace NetworkDesigner.Roads
             return false;
         }
 
+        // True if a taper on side `sgn` is the OUTERMOST lane there → it owns the road's outer boundary (drawn SOLID along its
+        // outer S-curve, with its inner edge a DASHED lane divider). The uniform body must then NOT draw its own solid outer
+        // edge at the surviving lanes' boundary — that boundary is the dropped lane's INNER (dashed) divider, not a road edge.
+        public static bool OuterEdgeSuppressed(Corridor c, float sgn)
+        {
+            if (c.Tapers == null) return false;
+            foreach (var tp in c.Tapers)
+                if ((tp.Offset >= 0f ? 1f : -1f) == sgn && TaperIsOutermost(c, tp)) return true;
+            return false;
+        }
+
         static void ComputeEndpoints(Func<Vector2, float> groundAt)
         {
             Endpoints.Clear();
+            _endpointIndex.Clear();
             for (int ei = 0; ei < Net.Edges.Count; ei++)
             {
                 LaneEdge e = Net.Edges[ei];
@@ -497,6 +564,7 @@ namespace NetworkDesigner.Roads
             Vector2 nodePos = N + fr * lat;   // lateral-only (no inset): the in/out of a through-lane coincide here → one unified puck
             bool incoming = (e.Direction == 2 && atNode == e.B) || (e.Direction == 0 && atNode == e.A);
             float y = (groundAt != null ? groundAt(pos) : 0f) + 0.6f;
+            _endpointIndex[EpKey(atNode, edgeIndex)] = Endpoints.Count;
             Endpoints.Add(new LaneEndpoint { Pos = pos, NodePos = nodePos, Y = y, Edge = edgeIndex, Node = atNode, Incoming = incoming });
         }
 
@@ -1367,8 +1435,8 @@ namespace NetworkDesigner.Roads
 
         static bool TryEndpointPos(int node, int edge, out Vector2 pos, out float y)
         {
-            for (int i = 0; i < Endpoints.Count; i++)
-                if (Endpoints[i].Node == node && Endpoints[i].Edge == edge) { pos = Endpoints[i].NodePos; y = Endpoints[i].Y; return true; }
+            if (_endpointIndex.TryGetValue(EpKey(node, edge), out int i))
+            { pos = Endpoints[i].NodePos; y = Endpoints[i].Y; return true; }
             pos = Vector2.zero; y = 0f; return false;
         }
 
@@ -1732,6 +1800,9 @@ namespace NetworkDesigner.Roads
         static void EmitDashGuide(Vector2 a, Vector2 b, Func<Vector2, float> groundAt)
         {
             Vector2 dir = b - a; float len = dir.magnitude; if (len < 0.1f) return; dir /= len;
+            // A guide drawn from a degenerate node (placed at a huge coordinate) to the cursor would be astronomically
+            // long → millions of dash quads / float-stall → editor freeze. Skip such a guide.
+            if (float.IsNaN(len) || float.IsInfinity(len) || len > 50000f) { Debug.LogError($"[EmitDashGuide] skipped degenerate guide len={len:F0} a={a} b={b}"); return; }
             Vector2 pr = new Vector2(-dir.y, dir.x) * (LineHalfW * 0.5f);   // thin guide line
             const float dash = 2.5f, gap = 2f; float walked = 0f;
             while (walked < len)

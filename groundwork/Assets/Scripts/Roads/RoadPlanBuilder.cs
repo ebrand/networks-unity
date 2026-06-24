@@ -368,7 +368,8 @@ namespace NetworkDesigner.Roads
             if (parent != null) go.transform.SetParent(parent, false);
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             go.AddComponent<MeshRenderer>().sharedMaterial = PipelineMaterials.CreateLitMatte(AsphaltColor, "RoadXFill");
-            go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            if (RoadSweep.IsCookable(mesh, out string xfWhy)) go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            else Debug.LogError($"[RoadPlanBuilder] skipped MeshCollider on '{name}' — {xfWhy}.");
             WarnIfHugeMesh(go, name);
         }
 
@@ -660,7 +661,8 @@ namespace NetworkDesigner.Roads
             var mats = new Material[order.Count];
             for (int s = 0; s < order.Count; s++) mats[s] = RoadSweep.SurfaceMat(order[s]);
             go.AddComponent<MeshRenderer>().sharedMaterials = mats;
-            go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            if (RoadSweep.IsCookable(mesh, out string esWhy)) go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            else Debug.LogError($"[RoadPlanBuilder] skipped MeshCollider on '{name}' — {esWhy}.");
         }
 
         // Edge-stack slice from a profile: the transverse polyline from the OUTER footprint edge inward to

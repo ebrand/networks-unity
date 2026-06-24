@@ -73,10 +73,40 @@ namespace NetworkDesigner.Roads
             var mesh = BuildMesh(xs, a, b, curve, cA, cB, out var surfaces, heightA, heightB, groundAt, follow);
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             go.AddComponent<MeshRenderer>().sharedMaterials = MaterialsFor(surfaces);
-            // Only add a collider when the swept mesh is real — a degenerate/empty cross-section (e.g. the modal preview
-            // before a profile is set) makes Unity warn "must have at least three distinct vertices".
-            if (mesh.vertexCount >= 3) go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            // Only cook a collider for a sane mesh. A degenerate cross-section (NaN/Inf vertex from a bad node or runaway
+            // offset, or an absurd coordinate span) makes PhysX's TriangleMeshBuilder::cleanMesh HANG the whole editor —
+            // not a warning, a force-quit-level freeze. Validate first; skip + log the bad object instead of cooking it.
+            if (IsCookable(mesh, out string why)) go.AddComponent<MeshCollider>().sharedMesh = mesh;
+            else Debug.LogError($"[RoadSweep] skipped MeshCollider on '{name}' — {why}. Mesh left visible but non-collidable.");
             return go;
+        }
+
+        // Guard against meshes that hang PhysX cooking: non-finite vertices, a runaway vertex count, or an absurd extent
+        // (a single corridor sweep can't legitimately span tens of km). Checks EXTENT, not absolute position, so a valid
+        // road far from the origin (large-coordinate terrain world) is not falsely rejected.
+        public static bool IsCookable(Mesh mesh, out string reason)
+        {
+            reason = null;
+            if (mesh == null) { reason = "null mesh"; return false; }
+            if (mesh.vertexCount < 3) { reason = $"only {mesh.vertexCount} vertices"; return false; }
+            if (mesh.vertexCount > 500000) { reason = $"runaway vertex count {mesh.vertexCount}"; return false; }
+            var vs = mesh.vertices;
+            float minX = float.PositiveInfinity, minY = float.PositiveInfinity, minZ = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity, maxZ = float.NegativeInfinity;
+            for (int i = 0; i < vs.Length; i++)
+            {
+                Vector3 v = vs[i];
+                if (float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z) ||
+                    float.IsInfinity(v.x) || float.IsInfinity(v.y) || float.IsInfinity(v.z))
+                { reason = $"non-finite vertex #{i} = {v}"; return false; }
+                if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+                if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+                if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
+            }
+            const float MaxExtent = 20000f;   // 20 km — far beyond any single corridor sweep
+            if (maxX - minX > MaxExtent || maxY - minY > MaxExtent || maxZ - minZ > MaxExtent)
+            { reason = $"extent ({maxX - minX:F0},{maxY - minY:F0},{maxZ - minZ:F0}) m exceeds {MaxExtent:F0} m"; return false; }
+            return true;
         }
 
         public static Mesh BuildMesh(RoadCrossSection xs, Vector2 a, Vector2 b, bool curve, Vector2 cA, Vector2 cB,

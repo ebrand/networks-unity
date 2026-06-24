@@ -202,7 +202,36 @@ namespace NetworkDesigner.Roads
                 }
                 BuildTaperStrip(inner, outer, parent, $"LaneDropTaper_{c.Id}", TaperMat());
                 if (sh > 0.01f) BuildTaperStrip(outer, shel, parent, $"LaneDropTaperShoulder_{c.Id}", TaperShoulderMat());
+                // The wedge's outer S-curve is the road boundary when this taper is the outermost lane (the body's solid
+                // edge there was suppressed) → paint it SOLID white. The inner divider is the dashed CorridorMarks line.
+                if (LaneEdgeWorld.TaperIsOutermost(c, tp)) BuildRailLine(outer, MarkWhiteMat(), parent, $"LaneDropTaperEdge_{c.Id}");
             }
+        }
+
+        // Solid painted line swept along a rail polyline (the taper wedge's outer edge), lifted above the asphalt.
+        static void BuildRailLine(List<Vector3> rail, Material mat, Transform parent, string name)
+        {
+            int n = rail.Count; if (n < 2) return;
+            float hw = MarkWidth * 0.5f;
+            var verts = new List<Vector3>(); var tris = new List<int>();
+            for (int k = 0; k < n - 1; k++)
+            {
+                Vector3 a = rail[k] + Vector3.up * MarkLift, b = rail[k + 1] + Vector3.up * MarkLift;
+                Vector3 seg = b - a; seg.y = 0f; if (seg.sqrMagnitude < 1e-6f) continue;
+                Vector3 fr = Vector3.Cross(Vector3.up, seg.normalized) * hw;
+                int s = verts.Count;
+                verts.Add(a - fr); verts.Add(a + fr); verts.Add(b + fr); verts.Add(b - fr);
+                tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 3);   // up
+                tris.Add(s); tris.Add(s + 2); tris.Add(s + 1); tris.Add(s); tris.Add(s + 3); tris.Add(s + 2);   // down (2-sided)
+            }
+            if (verts.Count == 0) return;
+            var mesh = new Mesh { name = name };
+            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateBounds();
+            var go = new GameObject(name); go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
         }
 
         // A draped, double-sided triangle strip between two equal-length rails, with the given material.
@@ -219,7 +248,12 @@ namespace NetworkDesigner.Roads
                 tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 1); tris.Add(b0); tris.Add(b0 + 2); tris.Add(b0 + 3);   // back (2-sided)
             }
             var mesh = new Mesh { name = name };
-            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            // The strip is 2-sided (top + back tris on the SAME verts). RecalculateNormals would average the opposing
+            // faces to ~zero at every vertex → the surface catches no light and renders BLACK. The wedge lies flat on the
+            // road, so set explicit upward normals — it then lights like the (near-horizontal) pavement instead of black.
+            var normals = new Vector3[verts.Count];
+            for (int i = 0; i < normals.Length; i++) normals[i] = Vector3.up;
+            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.SetNormals(normals); mesh.RecalculateBounds();
             var go = new GameObject(name); go.transform.SetParent(parent, false);
             go.AddComponent<MeshFilter>().sharedMesh = mesh;
             var mr = go.AddComponent<MeshRenderer>();
@@ -246,9 +280,11 @@ namespace NetworkDesigner.Roads
                 if (li >= 0 && li < net.Edges.Count && net.Edges[li].Kind != LaneKind.Sidewalk && !LaneTapered(c, li)) lanes.Add(net.Edges[li]);
             if (lanes.Count == 0) return marks;
             lanes.Sort((x, y) => x.Offset.CompareTo(y.Offset));
-            // Outer edge lines (solid white) at the outer edges of the outermost roadway lanes.
-            marks.Add((lanes[0].Offset - lanes[0].Width * 0.5f, false, false));
-            marks.Add((lanes[lanes.Count - 1].Offset + lanes[lanes.Count - 1].Width * 0.5f, false, false));
+            // Outer edge lines (solid white) at the outer edges of the outermost roadway lanes — but SKIP the side a taper
+            // owns: there the dropped lane is still a viable lane, so its INNER edge is a dashed divider (added below), not
+            // the solid road edge (the solid edge is the taper wedge's outer S-curve, painted in BuildTaperBodies).
+            if (!LaneEdgeWorld.OuterEdgeSuppressed(c, -1f)) marks.Add((lanes[0].Offset - lanes[0].Width * 0.5f, false, false));
+            if (!LaneEdgeWorld.OuterEdgeSuppressed(c, 1f)) marks.Add((lanes[lanes.Count - 1].Offset + lanes[lanes.Count - 1].Width * 0.5f, false, false));
             for (int i = 0; i < lanes.Count - 1; i++)
             {
                 LaneEdge L = lanes[i], R = lanes[i + 1];
@@ -258,6 +294,14 @@ namespace NetworkDesigner.Roads
                 else if (L.Kind == LaneKind.Bike || R.Kind == LaneKind.Bike) marks.Add((boundary, false, false));   // bike-lane edge → solid white
                 else marks.Add((boundary, false, true));                                         // same dir → dashed white
             }
+            // A dropped (tapered) lane is excluded from `lanes` but is still drivable in the taper segment → paint its INNER
+            // divider as a dashed white line at the lane's inner edge (constant offset toward the surviving lanes).
+            if (c.Tapers != null)
+                foreach (var tp in c.Tapers)
+                {
+                    float sgn = tp.Offset >= 0f ? 1f : -1f;
+                    marks.Add((tp.Offset - sgn * tp.Width * 0.5f, false, true));   // dashed white inner divider
+                }
             return marks;
         }
 
