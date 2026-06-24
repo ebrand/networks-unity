@@ -103,6 +103,8 @@ namespace NetworkDesigner.Roads
         static void CorridorLanes(Corridor c, out float shBA, out float shAB)
         {
             _laneBuf.Clear(); shBA = c.ShoulderBA; shAB = c.ShoulderAB;
+            if (ShoulderSuppressed(c, -1f)) shBA = 0f;   // a taper owns this shoulder → drawn along the wedge instead
+            if (ShoulderSuppressed(c, 1f)) shAB = 0f;
             foreach (int li in c.Lanes)
             {
                 if (li < 0 || li >= Net.Edges.Count) continue;
@@ -195,47 +197,102 @@ namespace NetworkDesigner.Roads
         // ── lane-drop taper wedge ── the dropped lane's slot opens from ZERO width at the junction, S-curves up to full
         // lane width over `Length`, then stays full to the far corridor end (the lane grows into the larger segment). The
         // inner edge (toward the surviving lanes) is straight; the outer edge is the S-curve. AtA = junction at the A end.
-        static readonly List<Vector2> _twIn = new List<Vector2>(), _twOut = new List<Vector2>();
-        static void TaperCross(Corridor c, float t, float innerOff, float outerOff, List<Vector2> inner, List<Vector2> outer)
+        static readonly List<Vector2> _twIn = new List<Vector2>(), _twOut = new List<Vector2>(), _twSh = new List<Vector2>();
+        static void TaperCross(Corridor c, float t, float innerOff, float outerOff, float shoulderOff, bool wantSh,
+                               List<Vector2> inner, List<Vector2> outer, List<Vector2> shoulder)
         {
             Vector2 p = LaneEdgeCorridorBuilder.PathPoint(Net, c, t);
             Vector2 fr = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t));
             inner.Add(p + fr * innerOff); outer.Add(p + fr * outerOff);
+            if (wantSh) shoulder.Add(p + fr * shoulderOff);
         }
-        public static void TaperWedge(Corridor c, LaneDropTaper tp, int M, List<Vector2> inner, List<Vector2> outer)
+        // Samples the taper wedge edges. When `shoulder` > 0, also fills `shOut` with the outer SHOULDER edge (it follows
+        // the wedge's outer S-curve, offset further out by the shoulder width).
+        public static void TaperWedge(Corridor c, LaneDropTaper tp, int M, List<Vector2> inner, List<Vector2> outer,
+                                      float shoulder = 0f, List<Vector2> shOut = null)
         {
-            inner.Clear(); outer.Clear();
+            inner.Clear(); outer.Clear(); shOut?.Clear();
             float pathLen = LaneEdgeCorridorBuilder.PathLength(Net, c);
             if (pathLen < 1e-2f || M < 1) return;
             float frac = Mathf.Clamp01(tp.Length / pathLen);          // taper run as a fraction of the path
             float sgn = tp.Offset >= 0f ? 1f : -1f;
             float innerOff = tp.Offset - sgn * tp.Width * 0.5f;       // straight edge toward the surviving lanes
+            bool wantSh = shoulder > 0.01f && shOut != null;
             for (int k = 0; k <= M; k++)                              // S-curve region: zero at junction → full over `frac`
             {
                 float a = k / (float)M;                              // 0 at the junction → 1 at the end of the taper
                 float u = a * frac;                                  // distance fraction from the junction
                 float t = tp.AtA ? u : (1f - u);                     // junction at A → grow toward B; else toward A
                 float e = a * a * (3f - 2f * a);                     // smoothstep → S-curve outer edge
-                TaperCross(c, t, innerOff, innerOff + sgn * tp.Width * e, inner, outer);
+                float outerOff = innerOff + sgn * tp.Width * e;
+                TaperCross(c, t, innerOff, outerOff, outerOff + sgn * shoulder, wantSh, inner, outer, shOut);
             }
             if (frac < 0.999f)                                       // full-width tail from the taper end to the far end
-                TaperCross(c, tp.AtA ? 1f : 0f, innerOff, innerOff + sgn * tp.Width, inner, outer);
+            {
+                float outerOff = innerOff + sgn * tp.Width;
+                TaperCross(c, tp.AtA ? 1f : 0f, innerOff, outerOff, outerOff + sgn * shoulder, wantSh, inner, outer, shOut);
+            }
         }
 
-        // Draped, double-sided filled wedge into the plan-overlay mesh (verts/tris).
+        // Draped OUTLINE of the taper wedge into the plan-overlay mesh: thin ribbons along the outer S-curve edge, the
+        // inner (straight) edge, and the end cap at the full-width end. The tip end is a point (outer==inner), so no cap.
         static void AppendTaperMesh(Corridor c, LaneDropTaper tp, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
         {
             const int M = 14;
-            TaperWedge(c, tp, M, _twIn, _twOut);
-            if (_twIn.Count < 2) return;
-            for (int k = 0; k < _twIn.Count - 1; k++)
+            float sh = TaperOuterShoulder(c, tp);
+            TaperWedge(c, tp, M, _twIn, _twOut, sh, _twSh);
+            int n = _twIn.Count;
+            if (n < 2) return;
+            EmitDashedPolyline(_twOut, LaneDash, LaneGap, verts, tris, groundAt);     // outer S-curve edge (lane-line dash)
+            EmitDashedPolyline(_twIn, LaneDash, LaneGap, verts, tris, groundAt);      // inner straight edge
+            EmitLineSeg(_twIn[n - 1], _twOut[n - 1], verts, tris, groundAt);          // full-width end cap (solid)
+            if (sh > 0.01f && _twSh.Count == n)                                       // shoulder edge following the taper
             {
-                int b = verts.Count;
-                verts.Add(Drape(_twIn[k], groundAt)); verts.Add(Drape(_twOut[k], groundAt));
-                verts.Add(Drape(_twOut[k + 1], groundAt)); verts.Add(Drape(_twIn[k + 1], groundAt));
-                tris.Add(b); tris.Add(b + 1); tris.Add(b + 2); tris.Add(b); tris.Add(b + 2); tris.Add(b + 3);   // top face
-                tris.Add(b); tris.Add(b + 2); tris.Add(b + 1); tris.Add(b); tris.Add(b + 3); tris.Add(b + 2);   // back face (double-sided)
+                EmitDashedPolyline(_twSh, OuterDash, OuterGap, verts, tris, groundAt);
+                EmitLineSeg(_twOut[n - 1], _twSh[n - 1], verts, tris, groundAt);      // shoulder end cap (solid)
             }
+        }
+
+        // Dashed version of EmitPolyline: walks the polyline by arc length, emitting only the dash-on portions.
+        static void EmitDashedPolyline(List<Vector2> pts, float dash, float gap, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
+        {
+            float period = dash + gap; if (period < 0.01f) { EmitPolyline(pts, verts, tris, groundAt); return; }
+            float walked = 0f;
+            for (int k = 0; k < pts.Count - 1; k++)
+            {
+                Vector2 a = pts[k], b = pts[k + 1];
+                Vector2 seg = b - a; float segLen = seg.magnitude; if (segLen < 1e-4f) continue;
+                Vector2 dir = seg / segLen; float pos = 0f;
+                while (pos < segLen)
+                {
+                    float phase = walked % period;
+                    if (phase < dash)
+                    {
+                        float piece = Mathf.Min(dash - phase, segLen - pos);
+                        EmitLineSeg(a + dir * pos, a + dir * (pos + piece), verts, tris, groundAt);
+                        pos += piece; walked += piece;
+                    }
+                    else { float piece = Mathf.Min(period - phase, segLen - pos); pos += piece; walked += piece; }
+                }
+            }
+        }
+
+        // A thin, draped, double-sided line ribbon for one segment (LineHalfW wide) — the plan-line primitive used for the
+        // taper outline.
+        static void EmitLineSeg(Vector2 a, Vector2 b, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
+        {
+            Vector2 dir = b - a; if (dir.sqrMagnitude < 1e-8f) return; dir.Normalize();
+            Vector2 nrm = new Vector2(-dir.y, dir.x) * LineHalfW;
+            int s = verts.Count;
+            verts.Add(Drape(a - nrm, groundAt)); verts.Add(Drape(a + nrm, groundAt));
+            verts.Add(Drape(b + nrm, groundAt)); verts.Add(Drape(b - nrm, groundAt));
+            tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 3);
+            tris.Add(s); tris.Add(s + 2); tris.Add(s + 1); tris.Add(s); tris.Add(s + 3); tris.Add(s + 2);   // 2-sided
+        }
+
+        static void EmitPolyline(List<Vector2> pts, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
+        {
+            for (int k = 0; k < pts.Count - 1; k++) EmitLineSeg(pts[k], pts[k + 1], verts, tris, groundAt);
         }
 
         // Emit the current _guideBuf lines as a draped thin-quad mesh along precomputed frames cp/rg.
@@ -369,6 +426,34 @@ namespace NetworkDesigner.Roads
         {
             if (c.Tapers == null) return false;
             for (int i = 0; i < c.Tapers.Count; i++) if (c.Tapers[i].LaneEdge == li) return true;
+            return false;
+        }
+
+        // If the tapering lane is the OUTERMOST drivable lane on its side, the corridor's shoulder on that side follows the
+        // wedge (drawn alongside it, and suppressed on the uniform body). Returns that shoulder width, else 0.
+        public static float TaperOuterShoulder(Corridor c, LaneDropTaper tp)
+        {
+            float sgn = tp.Offset >= 0f ? 1f : -1f;
+            float sh = sgn > 0f ? c.ShoulderAB : c.ShoulderBA;
+            if (sh <= 0.01f) return 0f;
+            float tpOuter = Mathf.Abs(tp.Offset) + tp.Width * 0.5f;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= Net.Edges.Count || li == tp.LaneEdge) continue;
+                LaneEdge e = Net.Edges[li];
+                if (e.Kind == LaneKind.Sidewalk) continue;
+                if ((e.Offset >= 0f ? 1f : -1f) != sgn) continue;                  // same side only
+                if (Mathf.Abs(e.Offset) + e.Width * 0.5f > tpOuter + 0.01f) return 0f;   // a lane sits further out → not outermost
+            }
+            return sh;
+        }
+
+        // True if a taper on side `sgn` (+1 = AB, −1 = BA) owns that shoulder, so the uniform body must NOT draw it there.
+        public static bool ShoulderSuppressed(Corridor c, float sgn)
+        {
+            if (c.Tapers == null) return false;
+            foreach (var tp in c.Tapers)
+                if ((tp.Offset >= 0f ? 1f : -1f) == sgn && TaperOuterShoulder(c, tp) > 0f) return true;
             return false;
         }
 

@@ -73,13 +73,16 @@ namespace NetworkDesigner.Roads
             lanes.Sort((a, b) => a.Offset.CompareTo(b.Offset));   // left → right across the section
 
             var xs = new RoadCrossSection();
+            // A taper that owns a side's shoulder draws it along the wedge (BuildTaperBodies), so drop it from the body.
+            float shBA = LaneEdgeWorld.ShoulderSuppressed(c, -1f) ? 0f : c.ShoulderBA;
+            float shAB = LaneEdgeWorld.ShoulderSuppressed(c, 1f) ? 0f : c.ShoulderAB;
 
             // Lane-subset extension: lay each lane at its ACTUAL Offset (fill any gaps between non-adjacent lanes with
             // asphalt) and shift the centreline (CenterU) so the swept body sits on the source lanes, not re-centred.
             if (c.AlignLanes && lanes.Count > 0)
             {
                 float leftEdge = lanes[0].Offset - lanes[0].Width * 0.5f;   // lanes sorted ascending by offset
-                if (c.ShoulderBA > 0f) xs.ShoulderBand(c.ShoulderBA);       // outer shoulder before the lanes
+                if (shBA > 0f) xs.ShoulderBand(shBA);                       // outer shoulder before the lanes
                 float cursor = leftEdge;
                 int alPrevDir = lanes[0].Direction; bool alMedianPlaced = false;
                 foreach (LaneEdge e in lanes)
@@ -98,13 +101,13 @@ namespace NetworkDesigner.Roads
                     cursor = e.Offset + e.Width * 0.5f;
                     alPrevDir = e.Direction;
                 }
-                if (c.ShoulderAB > 0f) xs.ShoulderBand(c.ShoulderAB);       // outer shoulder after the lanes
-                // body lateral of a lane = U − CenterU = Offset; the leading shoulder shifts every lane's U by ShoulderBA.
-                xs.CenterU = c.ShoulderBA - leftEdge; xs.CenterUSet = true;
+                if (shAB > 0f) xs.ShoulderBand(shAB);                       // outer shoulder after the lanes
+                // body lateral of a lane = U − CenterU = Offset; the leading shoulder shifts every lane's U by shBA.
+                xs.CenterU = shBA - leftEdge; xs.CenterUSet = true;
                 return xs;
             }
 
-            if (c.ShoulderBA > 0f) xs.ShoulderBand(c.ShoulderBA);
+            if (shBA > 0f) xs.ShoulderBand(shBA);
             int prevDir = lanes.Count > 0 ? lanes[0].Direction : -1;
             bool medianPlaced = false;
             foreach (LaneEdge e in lanes)
@@ -117,7 +120,7 @@ namespace NetworkDesigner.Roads
                 AddBand(xs, e.Kind, e.Width);
                 prevDir = e.Direction;
             }
-            if (c.ShoulderAB > 0f) xs.ShoulderBand(c.ShoulderAB);
+            if (shAB > 0f) xs.ShoulderBand(shAB);
             return xs;
         }
 
@@ -158,9 +161,9 @@ namespace NetworkDesigner.Roads
         // drop end and narrowing to zero over Length, riding the same path + grade as the corridor body. Placeholder flat
         // material (not the textured surface shader). Mirrors LaneEdgeWorld.TaperWedge but carries the body's elevation.
         const float TaperLift = 0.03f;
-        static Material _taperMat;
-        static Material TaperMat() => _taperMat != null ? _taperMat
-            : (_taperMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(0.17f, 0.17f, 0.18f), "LaneDropTaperBody"));
+        static Material _taperMat, _taperShoulderMat;
+        static Material TaperMat() => _taperMat != null ? _taperMat : (_taperMat = RoadSweep.SurfaceMat(RoadSurface.Asphalt));
+        static Material TaperShoulderMat() => _taperShoulderMat != null ? _taperShoulderMat : (_taperShoulderMat = RoadSweep.SurfaceMat(RoadSurface.Shoulder));
 
         static void BuildTaperBodies(LaneEdgeNetwork net, Corridor c, Transform parent, float hA, float hB, Func<Vector2, float> groundAt, float follow)
         {
@@ -176,9 +179,9 @@ namespace NetworkDesigner.Roads
                 float frac = Mathf.Clamp01(tp.Length / pathLen);
                 float sgn = tp.Offset >= 0f ? 1f : -1f;
                 float innerOff = tp.Offset - sgn * tp.Width * 0.5f;
-                var verts = new List<Vector3>(); var tris = new List<int>();
-                // S-curve region (zero at junction → full over `frac`) plus a full-width tail to the far corridor end.
-                int cross = (frac < 0.999f) ? M + 2 : M + 1;
+                float sh = LaneEdgeWorld.TaperOuterShoulder(c, tp);   // shoulder follows the wedge when it's the outer lane
+                int cross = (frac < 0.999f) ? M + 2 : M + 1;          // S-curve region + full-width tail to the far end
+                var inner = new List<Vector3>(cross); var outer = new List<Vector3>(cross); var shel = new List<Vector3>(cross);
                 for (int k = 0; k < cross; k++)
                 {
                     float t; float outerOff;
@@ -193,23 +196,35 @@ namespace NetworkDesigner.Roads
                     Vector2 fr = PathRight(PathTangent(net, c, t));
                     float y = elev[Mathf.Clamp(Mathf.RoundToInt(t * (frames - 1)), 0, frames - 1)] + TaperLift;
                     Vector2 ip = p + fr * innerOff, op = p + fr * outerOff;
-                    verts.Add(new Vector3(ip.x, y, ip.y));
-                    verts.Add(new Vector3(op.x, y, op.y));
+                    inner.Add(new Vector3(ip.x, y, ip.y));
+                    outer.Add(new Vector3(op.x, y, op.y));
+                    if (sh > 0.01f) { Vector2 spq = p + fr * (outerOff + sgn * sh); shel.Add(new Vector3(spq.x, y, spq.y)); }
                 }
-                for (int k = 0; k < cross - 1; k++)
-                {
-                    int b0 = k * 2;
-                    tris.Add(b0); tris.Add(b0 + 1); tris.Add(b0 + 3); tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 2);   // top
-                    tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 1); tris.Add(b0); tris.Add(b0 + 2); tris.Add(b0 + 3);   // back (double-sided)
-                }
-                var mesh = new Mesh { name = $"LaneDropTaper_{c.Id}" };
-                mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateNormals(); mesh.RecalculateBounds();
-                var go = new GameObject($"LaneDropTaper_{c.Id}"); go.transform.SetParent(parent, false);
-                go.AddComponent<MeshFilter>().sharedMesh = mesh;
-                var mr = go.AddComponent<MeshRenderer>();
-                mr.sharedMaterial = TaperMat();
-                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+                BuildTaperStrip(inner, outer, parent, $"LaneDropTaper_{c.Id}", TaperMat());
+                if (sh > 0.01f) BuildTaperStrip(outer, shel, parent, $"LaneDropTaperShoulder_{c.Id}", TaperShoulderMat());
             }
+        }
+
+        // A draped, double-sided triangle strip between two equal-length rails, with the given material.
+        static void BuildTaperStrip(List<Vector3> left, List<Vector3> right, Transform parent, string name, Material mat)
+        {
+            int n = left.Count;
+            if (n < 2 || right.Count != n) return;
+            var verts = new List<Vector3>(n * 2); var tris = new List<int>();
+            for (int k = 0; k < n; k++) { verts.Add(left[k]); verts.Add(right[k]); }
+            for (int k = 0; k < n - 1; k++)
+            {
+                int b0 = k * 2;
+                tris.Add(b0); tris.Add(b0 + 1); tris.Add(b0 + 3); tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 2);   // top
+                tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 1); tris.Add(b0); tris.Add(b0 + 2); tris.Add(b0 + 3);   // back (2-sided)
+            }
+            var mesh = new Mesh { name = name };
+            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateNormals(); mesh.RecalculateBounds();
+            var go = new GameObject(name); go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
         }
 
         // ---- lane markings (painted lines on the asphalt) ----
