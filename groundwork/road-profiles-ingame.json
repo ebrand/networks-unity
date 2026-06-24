@@ -2491,6 +2491,294 @@
       },
       "driveSide": "right",
       "updatedAt": 0
+    },
+    {
+      "id": "4x4",
+      "name": "4x4",
+      "category": "Large",
+      "road": {
+        "id": "4x4",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            },
+            {
+              "id": "a2",
+              "width": 4.0
+            },
+            {
+              "id": "a3",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            },
+            {
+              "id": "b2",
+              "width": 4.0
+            },
+            {
+              "id": "b3",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
+    },
+    {
+      "id": "3x3",
+      "name": "3x3",
+      "category": "Large",
+      "road": {
+        "id": "3x3",
+        "ab": {
+          "lanes": [
+            {
+              "id": "a0",
+              "width": 4.0
+            },
+            {
+              "id": "a1",
+              "width": 4.0
+            },
+            {
+              "id": "a2",
+              "width": 4.0
+            }
+          ]
+        },
+        "ba": {
+          "lanes": [
+            {
+              "id": "b0",
+              "width": 4.0
+            },
+            {
+              "id": "b1",
+              "width": 4.0
+            },
+            {
+              "id": "b2",
+              "width": 4.0
+            }
+          ]
+        },
+        "shoulderAB": {
+          "width": 1.5
+        },
+        "shoulderBA": {
+          "width": 1.5
+        },
+        "curbs": false,
+        "sidewalks": false,
+        "elevated": false,
+        "guardrails": false
+      },
+      "corridor": {
+        "center": [],
+        "ab": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ],
+        "ba": [
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "traffic",
+            "width": 4.0,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          },
+          {
+            "type": "shoulder",
+            "width": 1.5,
+            "hov": false,
+            "fence": false,
+            "parapet": false,
+            "parapetHeight": 1.0,
+            "guardrail": false
+          }
+        ]
+      },
+      "driveSide": "right",
+      "updatedAt": 0
     }
   ]
 }

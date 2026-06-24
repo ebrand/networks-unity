@@ -52,10 +52,24 @@ namespace NetworkDesigner.Roads
         // The corridor's cross-section, laid left→right from its lanes (ordered by lateral offset) with the median
         // inserted at the travel-direction flip and shoulders on the outer edges. Absolute Offset values only set the
         // ORDER; the section widths come from each lane/band's width.
+        // A lane rendered as a taper wedge (BuildTaperBodies) is excluded from the uniform body/markings so the wedge isn't
+        // drawn on top of a full lane.
+        static bool LaneTapered(Corridor c, int li)
+        {
+            if (c.Tapers == null) return false;
+            for (int i = 0; i < c.Tapers.Count; i++) if (c.Tapers[i].LaneEdge == li) return true;
+            return false;
+        }
+
         public static RoadCrossSection BuildCrossSection(Corridor c, LaneEdgeNetwork net)
         {
             var lanes = new List<LaneEdge>();
-            foreach (int li in c.Lanes) if (li >= 0 && li < net.Edges.Count) lanes.Add(net.Edges[li]);
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= net.Edges.Count) continue;
+                if (LaneTapered(c, li)) continue;   // rendered as a taper wedge (BuildTaperBodies), not a uniform lane
+                lanes.Add(net.Edges[li]);
+            }
             lanes.Sort((a, b) => a.Offset.CompareTo(b.Offset));   // left → right across the section
 
             var xs = new RoadCrossSection();
@@ -136,7 +150,66 @@ namespace NetworkDesigner.Roads
                                               hA, hB, groundAt, follow);
             BuildMarkings(net, c, parent, hA, hB, groundAt, follow);   // painted lane lines, riding the same path + grade
             BuildDirectionArrows(net, c, parent, hA, hB, groundAt, follow);   // travel arrows on one-way roads (~every 200 m)
+            BuildTaperBodies(net, c, parent, hA, hB, groundAt, follow);   // paved lane-drop wedges in dropped-lane slots
             return body;
+        }
+
+        // ── lane-drop taper bodies ── a flat asphalt-grey wedge filling each dropped lane's slot, full lane width at the
+        // drop end and narrowing to zero over Length, riding the same path + grade as the corridor body. Placeholder flat
+        // material (not the textured surface shader). Mirrors LaneEdgeWorld.TaperWedge but carries the body's elevation.
+        const float TaperLift = 0.03f;
+        static Material _taperMat;
+        static Material TaperMat() => _taperMat != null ? _taperMat
+            : (_taperMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(0.17f, 0.17f, 0.18f), "LaneDropTaperBody"));
+
+        static void BuildTaperBodies(LaneEdgeNetwork net, Corridor c, Transform parent, float hA, float hB, Func<Vector2, float> groundAt, float follow)
+        {
+            if (c.Tapers == null || c.Tapers.Count == 0) return;
+            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return;
+            float pathLen = PathLength(net, c);
+            if (pathLen < 1e-2f) return;
+            int frames = Mathf.Clamp(Mathf.CeilToInt(pathLen / 0.5f) + 1, 2, 2048);
+            float[] elev = RoadSweep.ElevationProfile(a, b, c.Curved, c.ControlA, c.ControlB, frames, hA, hB, groundAt, follow);
+            foreach (var tp in c.Tapers)
+            {
+                const int M = 18;
+                float frac = Mathf.Clamp01(tp.Length / pathLen);
+                float sgn = tp.Offset >= 0f ? 1f : -1f;
+                float innerOff = tp.Offset - sgn * tp.Width * 0.5f;
+                var verts = new List<Vector3>(); var tris = new List<int>();
+                // S-curve region (zero at junction → full over `frac`) plus a full-width tail to the far corridor end.
+                int cross = (frac < 0.999f) ? M + 2 : M + 1;
+                for (int k = 0; k < cross; k++)
+                {
+                    float t; float outerOff;
+                    if (k <= M)
+                    {
+                        float s = k / (float)M, u = s * frac, e = s * s * (3f - 2f * s);
+                        t = tp.AtA ? u : (1f - u);
+                        outerOff = innerOff + sgn * tp.Width * e;
+                    }
+                    else { t = tp.AtA ? 1f : 0f; outerOff = innerOff + sgn * tp.Width; }   // full-width tail
+                    Vector2 p = PathPoint(net, c, t);
+                    Vector2 fr = PathRight(PathTangent(net, c, t));
+                    float y = elev[Mathf.Clamp(Mathf.RoundToInt(t * (frames - 1)), 0, frames - 1)] + TaperLift;
+                    Vector2 ip = p + fr * innerOff, op = p + fr * outerOff;
+                    verts.Add(new Vector3(ip.x, y, ip.y));
+                    verts.Add(new Vector3(op.x, y, op.y));
+                }
+                for (int k = 0; k < cross - 1; k++)
+                {
+                    int b0 = k * 2;
+                    tris.Add(b0); tris.Add(b0 + 1); tris.Add(b0 + 3); tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 2);   // top
+                    tris.Add(b0); tris.Add(b0 + 3); tris.Add(b0 + 1); tris.Add(b0); tris.Add(b0 + 2); tris.Add(b0 + 3);   // back (double-sided)
+                }
+                var mesh = new Mesh { name = $"LaneDropTaper_{c.Id}" };
+                mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateNormals(); mesh.RecalculateBounds();
+                var go = new GameObject($"LaneDropTaper_{c.Id}"); go.transform.SetParent(parent, false);
+                go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                var mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = TaperMat();
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+            }
         }
 
         // ---- lane markings (painted lines on the asphalt) ----
@@ -155,7 +228,7 @@ namespace NetworkDesigner.Roads
             var marks = new List<(float, bool, bool)>();
             var lanes = new List<LaneEdge>();
             foreach (int li in c.Lanes)
-                if (li >= 0 && li < net.Edges.Count && net.Edges[li].Kind != LaneKind.Sidewalk) lanes.Add(net.Edges[li]);
+                if (li >= 0 && li < net.Edges.Count && net.Edges[li].Kind != LaneKind.Sidewalk && !LaneTapered(c, li)) lanes.Add(net.Edges[li]);
             if (lanes.Count == 0) return marks;
             lanes.Sort((x, y) => x.Offset.CompareTo(y.Offset));
             // Outer edge lines (solid white) at the outer edges of the outermost roadway lanes.

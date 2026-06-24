@@ -3964,7 +3964,7 @@ namespace NetworkDesigner.Terrain
                         { _leSnapActive = true; _leAnySnap = true; _leSnapXz = leSnapXz; _leSnapNode = leSnapNode; _leSnapEdge = leSnapEdge; _roadCursorHasWorld = true; _roadCursorWorld = leSnapWp; }
                         else if (NetworkDesigner.Roads.LaneEdgeWorld.SnapToGuideLine(_leSnapXz, out Vector2 leGuide))   // snap onto a colinear/perpendicular guide
                         { _leAnySnap = true; _leSnapXz = leGuide; _roadCursorHasWorld = true; _roadCursorWorld = new Vector3(leGuide.x, leGfn(leGuide), leGuide.y); }
-                        NetworkDesigner.Roads.LaneEdgeWorld.UpdateConnectGuides(new Vector2(hit.point.x, hit.point.z), leGfn);
+                        NetworkDesigner.Roads.LaneEdgeWorld.UpdateConnectGuides(_leSnapXz, _leSnapNode, _leSnapEdge, leGfn);
                     }
                     else NetworkDesigner.Roads.LaneEdgeWorld.ClearConnectGuides();
                     if (!NetworkDesigner.Roads.LaneEdgeModel.MappingMode && overTerrain && !MouseOverActivePanel() && !Input.GetKey(KeyCode.C))
@@ -4066,7 +4066,7 @@ namespace NetworkDesigner.Terrain
                         else if (!NetworkDesigner.Roads.LaneEdgeWorld.Drawing && NetworkDesigner.Roads.LaneEdgeWorld.ToggleExtendPick(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId))
                             NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(leGround);   // refresh the selected-puck highlight
                         else if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
-                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed, rdLE.ActiveProfileId);
+                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed, rdLE.ActiveProfileId, rdLE.DesignSpeedKmh);
                         else
                             NetworkDesigner.Roads.LaneEdgeWorld.Click(_leDrawCursor, rdLE.ActiveProfileId,   // PAC-snapped cursor (matches the preview)
                                 leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);

@@ -35,6 +35,19 @@ namespace NetworkDesigner.Roads
         public int Serial;                     // stable id for persistence / connectivity references
     }
 
+    // A lane-drop taper: where a lane was dropped (an exit pull reduced the lane count), the dropped lane's slot is paved
+    // as a wedge that runs from FULL lane width at one corridor end and narrows to zero over `Length` (MUTCD-ish, speed-
+    // based). The inner edge (toward the surviving lanes) stays straight; the outer edge converges in.
+    [System.Serializable]
+    public struct LaneDropTaper
+    {
+        public bool AtA;       // the zero-width TIP is at the corridor's A end (else the B end) — the mismatch node
+        public float Offset;   // signed lateral offset of the tapering lane's centre, in the corridor frame (m)
+        public float Width;    // tapering lane width = the wedge's full width away from the tip (m)
+        public float Length;   // taper run length from the tip into the corridor (m)
+        public int LaneEdge;   // the lane-edge index this taper REPLACES (rebuild-scoped; excluded from the uniform body)
+    }
+
     // A road = an ordered set of parallel lane-edges plus the non-navigable bands around/within them. The corridor's
     // reference path is derived from its lanes (they share endpoints until a lane diverges — Phase 4).
     [System.Serializable]
@@ -53,6 +66,7 @@ namespace NetworkDesigner.Roads
         public bool Excavated;                                // terrain bed cut under the corridor footprint
         public bool Built;                                    // 3D body swept + registered for agents
         public float BedDepth;                                // excavation depth (built body becomes a slab of this thickness)
+        public List<LaneDropTaper> Tapers = new List<LaneDropTaper>();   // paved lane-drop wedges (Phase-2 taper geometry)
     }
 
     // The lane-edge graph: a shared node list + lane-edges + corridors. Parallels LineGraph but at lane granularity.

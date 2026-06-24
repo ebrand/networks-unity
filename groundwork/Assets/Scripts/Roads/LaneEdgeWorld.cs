@@ -64,6 +64,7 @@ namespace NetworkDesigner.Roads
         public static void Rebuild(Func<Vector2, float> groundAt)
         {
             ComputeEndpoints(groundAt);
+            DetectLaneDropTapers();   // derive lane-drop tapers from lane-count mismatches at shared nodes
             GameObject root = Root();
             for (int i = root.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(root.transform.GetChild(i).gameObject);
@@ -107,6 +108,7 @@ namespace NetworkDesigner.Roads
                 if (li < 0 || li >= Net.Edges.Count) continue;
                 LaneEdge e = Net.Edges[li];
                 if (e.Kind == LaneKind.Sidewalk) continue;
+                if (LaneIsTapered(c, li)) continue;   // rendered as a taper wedge, not a uniform lane
                 _laneBuf.Add((e.Offset, e.Width, e.Direction));
             }
         }
@@ -160,7 +162,8 @@ namespace NetworkDesigner.Roads
             if (pathLen < 1e-2f) return;
             CorridorLanes(c, out _shBA, out _shAB);
             CollectGuideLines();
-            if (_guideBuf.Count == 0) return;
+            bool hasTaper = c.Tapers != null && c.Tapers.Count > 0;
+            if (_guideBuf.Count == 0 && !hasTaper) return;   // still render even if every lane is a taper wedge
 
             int frames = Mathf.Clamp(Mathf.CeilToInt(pathLen / 1.5f) + 1, 2, 1024);
             var cp = new Vector2[frames]; var rg = new Vector2[frames];
@@ -175,6 +178,8 @@ namespace NetworkDesigner.Roads
             var verts = new List<Vector3>(); var tris = new List<int>();
             BuildStyledGuides(verts, tris, cp, rg, groundAt);
             BuildPlanArrows(c, pathLen, verts, tris, cp, rg, groundAt);   // travel triangles on one-way plans (~every 200 m)
+            if (c.Tapers != null)
+                foreach (var tp in c.Tapers) AppendTaperMesh(c, tp, verts, tris, groundAt);   // paved lane-drop wedge
             if (verts.Count == 0) return;
 
             var mesh = new Mesh { name = $"LanePlanGuides_{c.Id}" };
@@ -185,6 +190,52 @@ namespace NetworkDesigner.Roads
             var mr = go.AddComponent<MeshRenderer>();
             mr.sharedMaterial = c.Excavated ? ExcavatedMat() : PlannedMat();
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+        }
+
+        // ── lane-drop taper wedge ── the dropped lane's slot opens from ZERO width at the junction, S-curves up to full
+        // lane width over `Length`, then stays full to the far corridor end (the lane grows into the larger segment). The
+        // inner edge (toward the surviving lanes) is straight; the outer edge is the S-curve. AtA = junction at the A end.
+        static readonly List<Vector2> _twIn = new List<Vector2>(), _twOut = new List<Vector2>();
+        static void TaperCross(Corridor c, float t, float innerOff, float outerOff, List<Vector2> inner, List<Vector2> outer)
+        {
+            Vector2 p = LaneEdgeCorridorBuilder.PathPoint(Net, c, t);
+            Vector2 fr = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t));
+            inner.Add(p + fr * innerOff); outer.Add(p + fr * outerOff);
+        }
+        public static void TaperWedge(Corridor c, LaneDropTaper tp, int M, List<Vector2> inner, List<Vector2> outer)
+        {
+            inner.Clear(); outer.Clear();
+            float pathLen = LaneEdgeCorridorBuilder.PathLength(Net, c);
+            if (pathLen < 1e-2f || M < 1) return;
+            float frac = Mathf.Clamp01(tp.Length / pathLen);          // taper run as a fraction of the path
+            float sgn = tp.Offset >= 0f ? 1f : -1f;
+            float innerOff = tp.Offset - sgn * tp.Width * 0.5f;       // straight edge toward the surviving lanes
+            for (int k = 0; k <= M; k++)                              // S-curve region: zero at junction → full over `frac`
+            {
+                float a = k / (float)M;                              // 0 at the junction → 1 at the end of the taper
+                float u = a * frac;                                  // distance fraction from the junction
+                float t = tp.AtA ? u : (1f - u);                     // junction at A → grow toward B; else toward A
+                float e = a * a * (3f - 2f * a);                     // smoothstep → S-curve outer edge
+                TaperCross(c, t, innerOff, innerOff + sgn * tp.Width * e, inner, outer);
+            }
+            if (frac < 0.999f)                                       // full-width tail from the taper end to the far end
+                TaperCross(c, tp.AtA ? 1f : 0f, innerOff, innerOff + sgn * tp.Width, inner, outer);
+        }
+
+        // Draped, double-sided filled wedge into the plan-overlay mesh (verts/tris).
+        static void AppendTaperMesh(Corridor c, LaneDropTaper tp, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
+        {
+            const int M = 14;
+            TaperWedge(c, tp, M, _twIn, _twOut);
+            if (_twIn.Count < 2) return;
+            for (int k = 0; k < _twIn.Count - 1; k++)
+            {
+                int b = verts.Count;
+                verts.Add(Drape(_twIn[k], groundAt)); verts.Add(Drape(_twOut[k], groundAt));
+                verts.Add(Drape(_twOut[k + 1], groundAt)); verts.Add(Drape(_twIn[k + 1], groundAt));
+                tris.Add(b); tris.Add(b + 1); tris.Add(b + 2); tris.Add(b); tris.Add(b + 2); tris.Add(b + 3);   // top face
+                tris.Add(b); tris.Add(b + 2); tris.Add(b + 1); tris.Add(b); tris.Add(b + 3); tris.Add(b + 2);   // back face (double-sided)
+            }
         }
 
         // Emit the current _guideBuf lines as a draped thin-quad mesh along precomputed frames cp/rg.
@@ -261,6 +312,66 @@ namespace NetworkDesigner.Roads
         // Per-node lane endpoints (#149): for each lane-edge, a puck at each end, coloured by whether traffic flows INTO
         // that node (incoming, blue) or OUT of it (outgoing, green). Laid across the road width, inset into the road.
         // Compute the per-node lane endpoint records (no rendering) — used for picking, flow render, and default flows.
+        // ── lane-drop taper detection ── general, geometry-driven, run each Rebuild AFTER ComputeEndpoints. A lane that
+        // meets a junction node where NO colinear, in-line lane of another corridor continues it is a drop/merge: it tapers
+        // to zero AT that node (and is excluded from the uniform body, rendered as the taper wedge instead). A lane at a
+        // plain terminus (no other corridor at the node) does NOT taper — the road just ends.
+        static Vector2 LaneTravelDir(LaneEdge L, Corridor c)
+        {
+            Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, 0.5f);
+            if (tan.sqrMagnitude < 1e-6f)
+            { Vector2 d = Net.Nodes[L.B] - Net.Nodes[L.A]; tan = d.sqrMagnitude < 1e-6f ? Vector2.right : d.normalized; }
+            tan.Normalize();
+            return L.Direction == 2 ? tan : -tan;
+        }
+
+        static void DetectLaneDropTapers()
+        {
+            foreach (Corridor c in Net.Corridors) { if (c.Tapers == null) c.Tapers = new List<LaneDropTaper>(); else c.Tapers.Clear(); }
+            for (int li = 0; li < Net.Edges.Count; li++)
+            {
+                LaneEdge L = Net.Edges[li];
+                if (L.Kind == LaneKind.Sidewalk) continue;
+                Corridor c = (L.CorridorId >= 0 && L.CorridorId < Net.Corridors.Count) ? Net.Corridors[L.CorridorId] : null;
+                if (c == null) continue;
+                Vector2 travel = LaneTravelDir(L, c);
+                if (travel.sqrMagnitude < 1e-6f) continue;
+                Vector2 perp = new Vector2(-travel.y, travel.x);
+                for (int endSel = 0; endSel < 2; endSel++)
+                {
+                    int N = endSel == 0 ? L.A : L.B;
+                    if (N < 0 || N >= Net.Nodes.Count) continue;
+                    if (!TryEndpointPos(N, li, out Vector2 pL, out _)) continue;
+                    bool throughExists = false, continued = false;   // throughExists = the road continues STRAIGHT past N
+                    for (int mj = 0; mj < Net.Edges.Count && !continued; mj++)
+                    {
+                        if (mj == li) continue;
+                        LaneEdge M = Net.Edges[mj];
+                        if (M.A != N && M.B != N) continue;
+                        if (M.CorridorId == L.CorridorId) continue;        // a sibling lane isn't a through-connection
+                        Corridor mc = (M.CorridorId >= 0 && M.CorridorId < Net.Corridors.Count) ? Net.Corridors[M.CorridorId] : null;
+                        if (mc == null) continue;
+                        if (Vector2.Dot(travel, LaneTravelDir(M, mc)) < 0.8f) continue;   // not colinear → a turn, not a through lane
+                        throughExists = true;                              // a colinear corridor continues the road past N
+                        if (TryEndpointPos(N, mj, out Vector2 pM, out _) && Mathf.Abs(Vector2.Dot(pM - pL, perp)) < 0.6f * L.Width)
+                            continued = true;                              // an in-line lane continues L specifically → no taper
+                    }
+                    // Taper ONLY when the road continues straight (a colinear corridor) but THIS lane has no in-line
+                    // counterpart — a genuine lane-count mismatch. Corners / T-junctions / termini (no colinear corridor) don't taper.
+                    if (throughExists && !continued)
+                        c.Tapers.Add(new LaneDropTaper { AtA = (N == L.A), Offset = L.Offset, Width = L.Width, Length = TaperLength(TaperSpeedKmh, L.Width), LaneEdge = li });
+                }
+            }
+        }
+
+        // True if lane `li` is rendered as a taper wedge (so it should be excluded from the corridor's uniform body/lines).
+        public static bool LaneIsTapered(Corridor c, int li)
+        {
+            if (c.Tapers == null) return false;
+            for (int i = 0; i < c.Tapers.Count; i++) if (c.Tapers[i].LaneEdge == li) return true;
+            return false;
+        }
+
         static void ComputeEndpoints(Func<Vector2, float> groundAt)
         {
             Endpoints.Clear();
@@ -286,8 +397,19 @@ namespace NetworkDesigner.Roads
             Vector2 into = atNode == e.A ? tan : -tan;            // point inward along the path from this end
             Vector2 fr = LaneEdgeCorridorBuilder.PathRight(tan);
             float inset = Mathf.Min(4f, len * 0.25f);
-            Vector2 pos = N + into * inset + fr * e.Offset;
-            Vector2 nodePos = N + fr * e.Offset;   // lateral-only (no inset): the in/out of a through-lane coincide here → one unified puck
+            // A peeled lane endpoint sits on its OWN node placed at the lane puck (cluster + fr*Offset). Re-adding fr*Offset
+            // there would DOUBLE-offset it — a skewed puck and a flow-match position that no longer coincides with the
+            // connector at the shared peel node. Detect a peeled end (node differs from the corridor's path node at this
+            // end) and treat the node itself as the puck (lat = 0).
+            float lat = e.Offset;
+            if (c != null && c.Lanes.Count > 0 && c.Lanes[0] != edgeIndex)
+            {
+                LaneEdge path = Net.Edges[c.Lanes[0]];
+                int pathNode = (atNode == e.A) ? path.A : path.B;
+                if (atNode != pathNode) lat = 0f;   // this end was peeled onto its own node, already at the lane position
+            }
+            Vector2 pos = N + into * inset + fr * lat;
+            Vector2 nodePos = N + fr * lat;   // lateral-only (no inset): the in/out of a through-lane coincide here → one unified puck
             bool incoming = (e.Direction == 2 && atNode == e.B) || (e.Direction == 0 && atNode == e.A);
             float y = (groundAt != null ? groundAt(pos) : 0f) + 0.6f;
             Endpoints.Add(new LaneEndpoint { Pos = pos, NodePos = nodePos, Y = y, Edge = edgeIndex, Node = atNode, Incoming = incoming });
@@ -523,7 +645,7 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float oNew = Vector2.Dot(frS * s.Offset, frNew);
+                float oNew = (s.Offset * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
                 lo = Mathf.Min(lo, oNew); hi = Mathf.Max(hi, oNew);
             }
             if (lo > hi) return false;
@@ -813,16 +935,25 @@ namespace NetworkDesigner.Roads
             // Colinear extension guide: a long line through the start along the connected road's tangent (both ways).
             // It's FIXED during a draw (independent of the moving cursor), so build it once and just re-show it — the
             // 600 m draped line was being rebuilt every frame for nothing (a big chunk of the straight-draw lag).
+            // Only SHOW it when the cursor is roughly IN FRONT of the road (within GuideConeDeg of its forward axis) so it
+            // stops cluttering the view when you're pulling well off to the side.
+            bool showGuide = false;
             if (!_cornerPending && BestColinearAxis(_drawStart, cursor, out Vector2 gax))
             {
-                if (!_pvGuideBuilt || _pvGuideStart != start || Vector2.Dot(_pvGuideAxis, gax) < 0.999f)
+                Vector2 toCur = cursor - start; float dCur = toCur.magnitude;
+                if (dCur > 1e-2f && Vector2.Angle(toCur / dCur, gax) <= NetworkDesigner.Terrain.PlanGuides.GuideConeDeg)
                 {
-                    const float L = 300f;
-                    FillPvLine(_pvGuide, start - gax * L, start + gax * L, false, default, default, 0f, groundAt, PvGuide());
-                    _pvGuideBuilt = true; _pvGuideStart = start; _pvGuideAxis = gax;
+                    showGuide = true;
+                    if (!_pvGuideBuilt || _pvGuideStart != start || Vector2.Dot(_pvGuideAxis, gax) < 0.999f)
+                    {
+                        const float L = 300f;
+                        FillPvLine(_pvGuide, start - gax * L, start + gax * L, false, default, default, 0f, groundAt, PvGuide());
+                        _pvGuideBuilt = true; _pvGuideStart = start; _pvGuideAxis = gax;
+                    }
+                    else _pvGuide.gameObject.SetActive(true);   // reuse cached geometry
                 }
-                else _pvGuide.gameObject.SetActive(true);   // reuse cached geometry
             }
+            if (!showGuide && _pvGuide != null) _pvGuide.gameObject.SetActive(false);
 
             if (_cornerPending)
             {
@@ -877,7 +1008,7 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float oNew = Vector2.Dot(frS * s.Offset, frNew);
+                float oNew = (s.Offset * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
                 lo = Mathf.Min(lo, oNew - s.Width * 0.5f); hi = Mathf.Max(hi, oNew + s.Width * 0.5f);
                 // Count by the EXTENSION-frame direction (dirNew), matching BuildExtensionCorridor — off the A end the
                 // source direction inverts, so source-direction counts would put the surplus on the wrong side.
@@ -1065,7 +1196,7 @@ namespace NetworkDesigner.Roads
         // delete them (an exit). DeleteOuter removes only the outermost pulled lane, so an inner pulled lane stays in the
         // source (shared — continues AND feeds the ramp). Never empties a corridor (guards full/colinear continuations).
         public enum ExitPullMode { Keep, DeleteAll, DeleteOuter }
-        public static ExitPullMode ExitMode = ExitPullMode.Keep;
+        public static ExitPullMode ExitMode = ExitPullMode.DeleteOuter;   // default: an exit pull drops the outer downstream lane
         public static bool Extending => _extNode >= 0 && _extLanes.Count > 0;
         public static int ExtendNode => _extNode;
         public static IReadOnlyList<int> ExtendLanes => _extLanes;
@@ -1304,7 +1435,14 @@ namespace NetworkDesigner.Roads
         // Peel: when a clicked lane sits laterally off its cluster centre, give it a graph endpoint AT its puck position so
         // the connector can attach there. Returns the new node (or the cluster node when no peel is needed). Keeps the
         // source corridor's path stable (never lets the peeled lane define Lanes[0]) and drops the lane's old movements.
-        static bool NeedsPeel(int edge) => edge >= 0 && edge < Net.Edges.Count && Mathf.Abs(Net.Edges[edge].Offset) > 0.05f;
+        static bool NeedsPeel(int edge)
+        {
+            if (edge < 0 || edge >= Net.Edges.Count) return false;
+            LaneEdge e = Net.Edges[edge];
+            if (Mathf.Abs(e.Offset) <= 0.05f) return false;
+            Corridor c = (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count) ? Net.Corridors[e.CorridorId] : null;
+            return c != null && c.Lanes.Count > 1;   // a 1-lane corridor's only lane IS its path → peeling moves the road (skew) and strands the peel node on delete
+        }
 
         static int PeelLaneEndpoint(int clusterNode, int edge, Func<Vector2, float> groundAt)
         {
@@ -1345,14 +1483,21 @@ namespace NetworkDesigner.Roads
         {
             if (a < 0 || b < 0 || a == b || a >= Net.Nodes.Count || b >= Net.Nodes.Count) return;
             if (edgeA < 0 || edgeA >= Net.Edges.Count) return;
+            // Road tangents from the CLICKED lanes, read BEFORE peeling (peeling moves the lane off its cluster, so a
+            // cluster-keyed lookup would fail for a 1-lane source and fall back to a straight line). Oriented toward the
+            // other end so the curve leaves each lane along its own road → a smooth tangent-continuous S / bend.
+            Vector2 pa0 = Net.Nodes[a], pb0 = Net.Nodes[b];
+            TryEndpointPos(a, edgeA, out pa0, out _);
+            if (edgeB >= 0 && edgeB < Net.Edges.Count) TryEndpointPos(b, edgeB, out pb0, out _);
+            Vector2 tanA = SafeDir(pb0 - pa0);
+            if (LaneGuideFrame(a, edgeA, out _, out Vector2 ta)) tanA = Vector2.Dot(ta, pb0 - pa0) >= 0f ? ta : -ta;
+            Vector2 tanB = SafeDir(pa0 - pb0);
+            if (edgeB >= 0 && edgeB < Net.Edges.Count && LaneGuideFrame(b, edgeB, out _, out Vector2 tb)) tanB = Vector2.Dot(tb, pa0 - pb0) >= 0f ? tb : -tb;
             // Peel each clicked lane onto a node at its puck so the connector lands on BOTH clicked lanes (visual realign).
             bool peelA = NeedsPeel(edgeA), peelB = edgeB >= 0 && edgeB < Net.Edges.Count && NeedsPeel(edgeB);
             int nodeA = peelA ? PeelLaneEndpoint(a, edgeA, groundAt) : a;
             int nodeB = peelB ? PeelLaneEndpoint(b, edgeB, groundAt) : b;
             Vector2 pa = Net.Nodes[nodeA], pb = Net.Nodes[nodeB];
-            // tangent-continuous controls off each source road (keyed on the CLUSTER node, whose siblings still define it).
-            Vector2 tanA; if (!BestColinearAxis(a, pb, out tanA) || tanA.sqrMagnitude < 1e-6f) tanA = SafeDir(pb - pa);
-            Vector2 tanB; if (!BestColinearAxis(b, pa, out tanB) || tanB.sqrMagnitude < 1e-6f) tanB = SafeDir(pa - pb);
             float d = (pb - pa).magnitude * 0.4f;
             int cl = BuildConnectorCorridor(nodeA, nodeB, edgeA, true, pa + tanA * d, pb + tanB * d);
             RegenerateDefaultFlows(groundAt);                            // auto-connects at the (shared) peel nodes
@@ -1367,9 +1512,33 @@ namespace NetworkDesigner.Roads
             : (_connGuideMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(1f, 0.92f, 0.2f, 1f), "LaneConnectGuide"));
         public static void ClearConnectGuides() { if (_connGuideGo != null) _connGuideGo.SetActive(false); }
 
+        // Live preview of the would-be connector curve from the first-clicked lane puck to the cursor / snapped target lane
+        // (same tangent-continuous cubic BuildConnectCurve will create). Sampled as short segments into the guide mesh.
+        static void AppendConnectPreview(Vector2 toXz, int toNode, int toEdge, Func<Vector2, float> groundAt)
+        {
+            if (!TryEndpointPos(_connA, _connEdgeA, out Vector2 fromP, out _)) return;
+            Vector2 toP = toXz;
+            if (toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && TryEndpointPos(toNode, toEdge, out Vector2 tp, out _)) toP = tp;
+            if ((toP - fromP).sqrMagnitude < 1f) return;
+            Vector2 tanA = SafeDir(toP - fromP);
+            if (LaneGuideFrame(_connA, _connEdgeA, out _, out Vector2 ta)) tanA = Vector2.Dot(ta, toP - fromP) >= 0f ? ta : -ta;
+            Vector2 tanB = SafeDir(fromP - toP);
+            if (toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && LaneGuideFrame(toNode, toEdge, out _, out Vector2 tb)) tanB = Vector2.Dot(tb, fromP - toP) >= 0f ? tb : -tb;
+            float d = (toP - fromP).magnitude * 0.4f;
+            Vector2 c1 = fromP + tanA * d, c2 = toP + tanB * d;
+            Vector2 prev = fromP; const int N = 24;
+            for (int i = 1; i <= N; i++)
+            {
+                float t = i / (float)N, u = 1f - t;
+                Vector2 pt = u * u * u * fromP + 3f * u * u * t * c1 + 3f * u * t * t * c2 + t * t * t * toP;
+                EmitDashGuide(prev, pt, groundAt);
+                prev = pt;
+            }
+        }
+
         // A node emits guides when within N (PlanGuides.GuideRange) of the cursor; the first-clicked node always emits so
         // the 2nd click can align colinear/perpendicular to it. Guide length = PlanGuides.ExtensionGuideLength.
-        public static void UpdateConnectGuides(Vector2 cursor, Func<Vector2, float> groundAt)
+        public static void UpdateConnectGuides(Vector2 cursor, int snapNode, int snapEdge, Func<Vector2, float> groundAt)
         {
             if (_connGuideGo == null)
             {
@@ -1388,7 +1557,11 @@ namespace NetworkDesigner.Roads
             for (int i = 0; i < Endpoints.Count; i++) { float d = (Endpoints[i].NodePos - cursor).sqrMagnitude; if (d < bestSq) { bestSq = d; bi = i; } }
             // Each emitting node draws a colinear line to the cursor; the arrow shows that lane's direction of travel.
             if (bi >= 0) AddLaneGuides(Endpoints[bi].Node, Endpoints[bi].Edge, cursor, len, groundAt);
-            if (_connA >= 0 && _connEdgeA >= 0) AddLaneGuides(_connA, _connEdgeA, cursor, len, groundAt);
+            if (_connA >= 0 && _connEdgeA >= 0)
+            {
+                AddLaneGuides(_connA, _connEdgeA, cursor, len, groundAt);
+                AppendConnectPreview(cursor, snapNode, snapEdge, groundAt);   // live preview of the would-be connector curve
+            }
             _connGuideMesh.Clear();
             if (_sgVerts.Count == 0) { _connGuideGo.SetActive(false); return; }
             _connGuideMesh.SetVertices(_sgVerts); _connGuideMesh.SetTriangles(_sgTris, 0); _connGuideMesh.RecalculateBounds();
@@ -1419,7 +1592,12 @@ namespace NetworkDesigner.Roads
             if (!LaneGuideFrame(node, edge, out Vector2 p, out Vector2 tan)) return;
             Vector2 perp = new Vector2(-tan.y, tan.x);
             Vector2 to = cursor - p; if (to.sqrMagnitude < 1e-4f) return; Vector2 toN = to.normalized;
-            if (Mathf.Abs(Vector2.Dot(toN, tan)) >= Mathf.Abs(Vector2.Dot(toN, perp)))
+            // Only show a guide when the cursor is actually LINED UP with the node — within GuideConeDeg of the lane axis
+            // (colinear) or of its perpendicular. Outside both cones emit nothing, instead of the old 45° split that lit a
+            // colinear guide whenever the cursor was merely nearby.
+            float coneCos = Mathf.Cos(NetworkDesigner.Terrain.PlanGuides.GuideConeDeg * Mathf.Deg2Rad);
+            float axisDot = Mathf.Abs(Vector2.Dot(toN, tan)), perpDot = Mathf.Abs(Vector2.Dot(toN, perp));
+            if (axisDot >= coneCos && axisDot >= perpDot)
             {
                 // Colinear extension: a line ALWAYS along the lane axis (cursor projected onto it, so it never angles
                 // off), out to the cursor's projection. Arrow points along the lane's DIRECTION OF TRAVEL.
@@ -1428,7 +1606,7 @@ namespace NetworkDesigner.Roads
                 Vector2 travel = Net.Edges[edge].Direction == 2 ? tan : -tan;   // tan is A→B; AB travels +tan, BA travels −tan
                 EmitGuideArrow((p + proj) * 0.5f, travel, groundAt);
             }
-            else
+            else if (perpDot >= coneCos)
             {
                 // Perpendicular guide also tracks the cursor (projected onto the perpendicular axis) instead of a full
                 // ExtensionGuideLength line spanning the screen.
@@ -1485,7 +1663,7 @@ namespace NetworkDesigner.Roads
 
         // Draw the extension end (straight, or shift-curve through a bend). Builds the aligned subset corridor + lets the
         // default-flow regen wire continuations (selected) and merges (dropped). Mirrors Click's straight/curve flow.
-        public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius, string profileId)
+        public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius, string profileId, float designSpeedKmh = 40f)
         {
             if (!Extending) return false;
             Vector2 start = Net.Nodes[_extNode];
@@ -1502,7 +1680,7 @@ namespace NetworkDesigner.Roads
                 { Debug.LogWarning("[LaneEdgeWorld] extension curve too tight — pick a wider end"); return false; }
                 int bm = Net.AddNode(end);
                 BuildExtensionCorridor(_extNode, bm, true, c1, c2, profileId);
-                ApplyExitPull(Net.Corridors.Count - 1, groundAt);
+                ApplyExitPull(Net.Corridors.Count - 1, groundAt, designSpeedKmh);
                 CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
             }
             if (curveModifier) { _extCorner = xz; _extCornerPending = true; return false; }
@@ -1510,7 +1688,7 @@ namespace NetworkDesigner.Roads
             if ((xz - start).sqrMagnitude < 1f) return false;
             int b = Net.AddNode(xz);
             BuildExtensionCorridor(_extNode, b, false, default, default, profileId);
-            ApplyExitPull(Net.Corridors.Count - 1, groundAt);
+            ApplyExitPull(Net.Corridors.Count - 1, groundAt, designSpeedKmh);
             CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
         }
 
@@ -1534,7 +1712,7 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, nodeN == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float oNew = Vector2.Dot(frS * s.Offset, frNew);   // keep the lane's world lateral, in the new corridor's frame
+                float oNew = (s.Offset * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));   // preserve the lane's offset magnitude (re-spread on the new frame) so a turn doesn't collapse lanes to centre
                 bool incomingAtN = (s.Direction == 2 && nodeN == s.B) || (s.Direction == 0 && nodeN == s.A);
                 int dirNew = incomingAtN ? 2 : 0;                  // arriving lane → continue outward (A'=N→B'); return lane → inbound
                 int li = Net.AddLane(new LaneEdge { A = nodeN, B = nodeM, CorridorId = nc.Id, Kind = s.Kind, Direction = dirNew, Width = s.Width, Offset = oNew });
@@ -1674,8 +1852,20 @@ namespace NetworkDesigner.Roads
         // pulled lane we find that downstream continuation (a lane at the fork node on a corridor that is NOT the source
         // feeder and NOT the ramp) and delete it. DeleteOuter deletes only the outermost, so an inner continuation stays
         // (shared lane). Guards against emptying the downstream corridor; sets it AlignLanes so the split stays put.
-        static void ApplyExitPull(int rampCorr, Func<Vector2, float> groundAt)
+        public static float TaperSpeedKmh = 40f;   // design speed used to size lane-drop tapers at Rebuild (set by the UI/pull)
+
+        // MUTCD-ish lane-drop taper length (metric approximation). W = lane width (m), S = design speed (km/h).
+        // High speed (≥70 km/h): L ≈ 0.62·W·S (imperial L=WS). Low speed: L ≈ W·S²/155 (imperial L=WS²/60). Clamped sane.
+        static float TaperLength(float speedKmh, float width)
         {
+            float w = Mathf.Max(1f, width), s = Mathf.Max(5f, speedKmh);
+            float L = s >= 70f ? 0.62f * w * s : w * s * s / 155f;
+            return Mathf.Clamp(L, 12f, 300f);
+        }
+
+        static void ApplyExitPull(int rampCorr, Func<Vector2, float> groundAt, float designSpeedKmh = 40f)
+        {
+            TaperSpeedKmh = designSpeedKmh;   // remember the design speed so the Rebuild-time taper detection sizes correctly
             if (ExitMode == ExitPullMode.Keep || _extLanes.Count == 0 || _extNode < 0) return;
             int srcCorr = (_extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count) ? Net.Edges[_extLanes[0]].CorridorId : -1;
             ComputeEndpoints(groundAt);   // include the just-built ramp lanes
@@ -1706,6 +1896,8 @@ namespace NetworkDesigner.Roads
             foreach (var kv in survive) if (kv.Value <= 0) return;
             foreach (var kv in survive) Net.Corridors[kv.Key].AlignLanes = true;
 
+            // Tapers are NOT recorded here — they're derived generally at Rebuild (DetectLaneDropTapers) from lane-count
+            // mismatches at shared nodes, wherever they occur, not pinned to this pull.
             DeleteLanes(del, groundAt);
         }
 

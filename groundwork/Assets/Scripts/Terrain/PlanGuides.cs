@@ -19,6 +19,8 @@ namespace NetworkDesigner.Terrain
         // ── guides ──
         public static float ExtensionGuideLength = 120f;   // m: how far the collinear ("colinear") extension guide runs
         public static float ExtensionSnapRadius  = 4f;     // m: snap onto that guide
+        public static float GuideConeDeg         = 25f;    // deg: only SHOW the colinear extension guide when the cursor is
+                                                           // within this cone of the road's forward axis (mouse "in front")
         public static bool  ProximitySnapOn      = true;   // snap onto a plan's own nodes/edges?
         public static float EndSnapRadius         = 8f;    // m: that proximity snap radius (snap the cursor ONTO a node)
         public static float NodePickRadius        = 2.5f;  // m: grab an existing node when starting/joining
