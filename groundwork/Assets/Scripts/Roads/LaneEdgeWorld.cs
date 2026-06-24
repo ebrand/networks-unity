@@ -1724,6 +1724,215 @@ namespace NetworkDesigner.Roads
             _connGuideGo.SetActive(true);
         }
 
+        // ── parallel draw (hold Ctrl after placing the start on a node's perpendicular guide) ──
+        // Workflow: click to place the new road's START on a lane node's PERPENDICULAR guide → hold Ctrl → drag. The road
+        // grows from that start, runs PARALLEL to the corridor whose guide the start sits on (following its curvature), and
+        // ends where you drag (length = the source param the cursor projects to). A second click commits it. The clone reuses
+        // the source's own profile. Ghost = the offset centreline + a direction arrow.
+        static GameObject _parGuideGo; static Mesh _parGuideMesh; static Material _parGuideMat;
+        static Material ParGuideMat() => _parGuideMat != null ? _parGuideMat
+            : (_parGuideMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(0.25f, 0.95f, 0.85f, 1f), "LaneParallelGuide"));
+        static bool _parArmed; static Vector2 _parQ0, _parQ1, _parQ2, _parQ3; static bool _parCurved; static string _parProfile;
+        static int _parStartEnd;   // which clone end coincides with the placed start: 0 = q0 (A), 1 = q3 (B)
+        public static bool ParallelArmed => _parArmed;
+
+        public static void ClearParallelPreview()
+        {
+            _parArmed = false;
+            if (_parGuideGo != null) _parGuideGo.SetActive(false);
+        }
+
+        // Cubic sub-segment over [lo,hi] (0≤lo≤hi≤1) of the bezier (p0,c1,c2,p3), via two de Casteljau splits.
+        static void SubCubic(Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, float lo, float hi,
+                             out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3)
+        {
+            // split at hi → LEFT sub-cubic over [0,hi]
+            Vector2 a01 = Vector2.Lerp(p0, c1, hi), a12 = Vector2.Lerp(c1, c2, hi), a23 = Vector2.Lerp(c2, p3, hi);
+            Vector2 a012 = Vector2.Lerp(a01, a12, hi), a123 = Vector2.Lerp(a12, a23, hi);
+            Vector2 a0123 = Vector2.Lerp(a012, a123, hi);
+            Vector2 L0 = p0, L1 = a01, L2 = a012, L3 = a0123;
+            // within L, original param lo maps to u = lo/hi → split L at u, take its RIGHT sub-cubic = [lo,hi]
+            float u = hi > 1e-6f ? lo / hi : 0f;
+            Vector2 b01 = Vector2.Lerp(L0, L1, u), b12 = Vector2.Lerp(L1, L2, u), b23 = Vector2.Lerp(L2, L3, u);
+            Vector2 b012 = Vector2.Lerp(b01, b12, u), b123 = Vector2.Lerp(b12, b23, u);
+            Vector2 b0123 = Vector2.Lerp(b012, b123, u);
+            q0 = b0123; q1 = b123; q2 = b23; q3 = L3;
+        }
+
+        // Right-perpendicular unit normal of the leg a→b (zero if degenerate).
+        static Vector2 LegNormal(Vector2 a, Vector2 b)
+        {
+            Vector2 d = b - a;
+            if (d.sqrMagnitude < 1e-10f) return Vector2.zero;
+            d.Normalize(); return new Vector2(d.y, -d.x);
+        }
+
+        // Intersection of infinite lines (p + s·dp) and (q + s·dq); fallback if near-parallel.
+        static Vector2 LineX(Vector2 p, Vector2 dp, Vector2 q, Vector2 dq, Vector2 fallback)
+        {
+            float denom = dp.x * dq.y - dp.y * dq.x;
+            if (Mathf.Abs(denom) < 1e-6f) return fallback;
+            float t = ((q.x - p.x) * dq.y - (q.y - p.y) * dq.x) / denom;
+            return p + dp * t;
+        }
+
+        // Parallel offset of cubic (p0,c1,c2,p3) to its right by signed d (Tiller–Hanson: offset each control-polygon leg by
+        // d, intersect adjacent offset legs for the interior controls). Far closer to a true EQUIDISTANT parallel than
+        // offsetting the control points by the endpoint normals. Endpoints/tangents are preserved (q0,q3 land on the legs).
+        static void OffsetCubic(Vector2 p0, Vector2 c1, Vector2 c2, Vector2 p3, float d,
+                                out Vector2 q0, out Vector2 q1, out Vector2 q2, out Vector2 q3)
+        {
+            Vector2 n0 = LegNormal(p0, c1), n1 = LegNormal(c1, c2), n2 = LegNormal(c2, p3);
+            if (n0 == Vector2.zero) n0 = n1; if (n2 == Vector2.zero) n2 = n1; if (n1 == Vector2.zero) n1 = n0;
+            Vector2 a0 = p0 + n0 * d, a1 = c1 + n0 * d;     // offset leg L0
+            Vector2 b0 = c1 + n1 * d, b1 = c2 + n1 * d;     // offset leg L1
+            Vector2 g0 = c2 + n2 * d, g1 = p3 + n2 * d;     // offset leg L2
+            q0 = a0; q3 = g1;
+            q1 = LineX(a0, a1 - a0, b0, b1 - b0, c1 + n1 * d);
+            q2 = LineX(b0, b1 - b0, g0, g1 - g0, c2 + n1 * d);
+        }
+
+        // One parallel-offset candidate: the segment that would be drawn paralleling corridor `c` off its `sourceNode` end.
+        struct ParCand { public bool Ok; public Vector2 Q0, Q1, Q2, Q3, Far; public bool Curved; public string Profile; public int StartEnd; }
+        static readonly System.Collections.Generic.HashSet<long> _parSeen = new System.Collections.Generic.HashSet<long>();
+
+        // Build the parallel segment for corridor c off its `sourceNode` end, given the placed start + drag cursor.
+        static ParCand BuildParallelSeg(Corridor c, int sourceNode, Vector2 startPos, Vector2 cursor)
+        {
+            ParCand r = default;
+            if (c == null || c.Lanes.Count == 0) return r;
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            if (sourceNode != l0.A && sourceNode != l0.B) return r;
+            if (!LaneEdgeCorridorBuilder.PathEndpoints(Net, c, out Vector2 A, out Vector2 B)) return r;
+            float tN = (sourceNode == l0.A) ? 0f : 1f;
+            Vector2 Ncl = (tN == 0f) ? A : B;
+            Vector2 tanN = LaneEdgeCorridorBuilder.PathTangent(Net, c, tN);
+            Vector2 to = startPos - Ncl;
+            float offR = Vector2.Dot(to, LaneEdgeCorridorBuilder.PathRight(tanN));   // signed perpendicular offset of the start
+            float along = Vector2.Dot(to, tanN);
+            if (Mathf.Abs(offR) < 0.3f) return r;                                    // start basically on the road → no parallel
+            if (Mathf.Abs(along) > Mathf.Abs(offR) + 6f) return r;                   // start must sit ~perpendicular off THIS end
+            // Length: the source param whose offset point is nearest the cursor (offset rotates with the curve).
+            const int K = 48; float tEnd = tN, bd = float.MaxValue;
+            for (int i = 0; i <= K; i++)
+            {
+                float t = i / (float)K;
+                Vector2 op = LaneEdgeCorridorBuilder.PathPoint(Net, c, t)
+                           + LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t)) * offR;
+                float d = (op - cursor).sqrMagnitude; if (d < bd) { bd = d; tEnd = t; }
+            }
+            float lo = Mathf.Min(tN, tEnd), hi = Mathf.Max(tN, tEnd);
+            if (hi - lo <= 1e-3f) return r;
+            r.Curved = c.Curved; r.Profile = c.Profile;
+            if (c.Curved)
+            {
+                SubCubic(A, c.ControlA, c.ControlB, B, lo, hi, out Vector2 s0, out Vector2 s1, out Vector2 s2, out Vector2 s3);
+                OffsetCubic(s0, s1, s2, s3, offR, out r.Q0, out r.Q1, out r.Q2, out r.Q3);
+            }
+            else
+            {
+                Vector2 rr = LaneEdgeCorridorBuilder.PathRight((B - A).normalized);
+                r.Q0 = Vector2.Lerp(A, B, lo) + rr * offR; r.Q3 = Vector2.Lerp(A, B, hi) + rr * offR;
+                r.Q1 = r.Q0; r.Q2 = r.Q3;
+            }
+            // Orient the built road from the placed START toward the drawn END (the drag direction), so a one-way flows the
+            // way you draw it instead of blindly inheriting the source's A→B. The quad above runs lo→hi; if the start sits at
+            // the hi end, reverse it (P0,P1,P2,P3 → P3,P2,P1,P0) so q0 = start, q3 = far.
+            if (tN != 0f)
+            {
+                Vector2 a = r.Q0, b = r.Q1, cc = r.Q2, dd = r.Q3;
+                r.Q0 = dd; r.Q1 = cc; r.Q2 = b; r.Q3 = a;
+            }
+            r.StartEnd = 0;        // after the optional reverse the start is always q0…
+            r.Far = r.Q3;          // …and the far (drawn) end is always q3
+            r.Ok = true;
+            return r;
+        }
+
+        // Build the parallel-offset segment for a placed start + drag cursor, and ghost it. Returns true when armed. Evaluates
+        // every source corridor whose end sits near the start (excluding our own road), and picks the one whose far end is
+        // nearest the cursor — i.e. the segment that CONTINUES FORWARD. This lets a run carry on past a junction or start
+        // beside a mid-road node, not just off a road's free end.
+        public static bool UpdateParallelDraw(Vector2 startPos, Vector2 cursor, Func<Vector2, float> groundAt)
+        {
+            _parArmed = false;
+            float rng = Mathf.Max(40f, NetworkDesigner.Terrain.PlanGuides.GuideRange); float rng2 = rng * rng;
+            _parSeen.Clear();
+            ParCand best = default; float bestFar = float.MaxValue;
+            for (int i = 0; i < Endpoints.Count; i++)
+            {
+                if (Endpoints[i].Node == _drawStart) continue;                       // our own road's chained end → skip
+                if ((Endpoints[i].NodePos - startPos).sqrMagnitude > rng2) continue;
+                LaneEdge e = Net.Edges[Endpoints[i].Edge];
+                if (e.CorridorId < 0 || e.CorridorId >= Net.Corridors.Count) continue;
+                long key = ((long)e.CorridorId << 24) ^ (uint)Endpoints[i].Node;
+                if (!_parSeen.Add(key)) continue;                                   // one eval per (corridor, end)
+                ParCand cand = BuildParallelSeg(Net.Corridors[e.CorridorId], Endpoints[i].Node, startPos, cursor);
+                if (!cand.Ok) continue;
+                float d = (cand.Far - cursor).sqrMagnitude;
+                if (d < bestFar) { bestFar = d; best = cand; }
+            }
+            if (best.Ok)
+            {
+                _parQ0 = best.Q0; _parQ1 = best.Q1; _parQ2 = best.Q2; _parQ3 = best.Q3;
+                _parCurved = best.Curved; _parProfile = best.Profile; _parStartEnd = best.StartEnd;
+                _parArmed = true;
+            }
+
+            if (_parGuideGo == null)
+            {
+                _parGuideGo = new GameObject("LaneParallelGuide");
+                _parGuideGo.AddComponent<MeshFilter>();
+                var mr = _parGuideGo.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = ParGuideMat();
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+                _parGuideMesh = new Mesh { name = "LaneParallelGuide" };
+                _parGuideGo.GetComponent<MeshFilter>().sharedMesh = _parGuideMesh;
+            }
+            _sgVerts.Clear(); _sgTris.Clear();
+            if (_parArmed)
+            {
+                Vector2 prev = _parQ0; const int N = 28;
+                for (int i = 1; i <= N; i++)
+                {
+                    float t = i / (float)N;
+                    Vector2 pt = _parCurved ? GeometryResolver.SampleCubic(_parQ0, _parQ1, _parQ2, _parQ3, t) : Vector2.Lerp(_parQ0, _parQ3, t);
+                    EmitDashGuide(prev, pt, groundAt);
+                    prev = pt;
+                }
+                Vector2 mid = _parCurved ? GeometryResolver.SampleCubic(_parQ0, _parQ1, _parQ2, _parQ3, 0.5f) : (_parQ0 + _parQ3) * 0.5f;
+                Vector2 mtan = _parCurved ? GeometryResolver.CubicTangent(_parQ0, _parQ1, _parQ2, _parQ3, 0.5f) : (_parQ3 - _parQ0);
+                // Arrow points from the placed start toward the drawn end.
+                if (_parStartEnd == 1) mtan = -mtan;
+                if (mtan.sqrMagnitude > 1e-6f) EmitGuideArrow(mid, mtan.normalized, groundAt);
+            }
+            _parGuideMesh.Clear();
+            if (_sgVerts.Count == 0) { _parGuideGo.SetActive(false); return _parArmed; }
+            _parGuideMesh.SetVertices(_sgVerts); _parGuideMesh.SetTriangles(_sgTris, 0); _parGuideMesh.RecalculateBounds();
+            _parGuideGo.SetActive(true);
+            return _parArmed;
+        }
+
+        // Commit the armed parallel segment: reuse the placed start node for its near end, add a node for the far end, build
+        // the corridor with the source profile/curve, then CHAIN — keep drawing from the committed far end so the run can
+        // continue alongside the next source segment past a junction. Press Escape to end the chain. Returns false if nothing
+        // is armed / the segment is degenerate.
+        public static bool CommitParallelDraw(Func<Vector2, float> groundAt)
+        {
+            if (!_parArmed || _drawStart < 0) return false;
+            _parArmed = false;
+            if (_parGuideGo != null) _parGuideGo.SetActive(false);
+            if ((_parQ3 - _parQ0).sqrMagnitude < 1f) return false;
+            int startNode = _drawStart;
+            int q0Node, q3Node, farNode;
+            if (_parStartEnd == 0) { Net.Nodes[startNode] = _parQ0; q0Node = startNode; q3Node = Net.AddNode(_parQ3); farNode = q3Node; }
+            else { Net.Nodes[startNode] = _parQ3; q3Node = startNode; q0Node = Net.AddNode(_parQ0); farNode = q0Node; }
+            AddCorridorFromProfile(q0Node, q3Node, _parProfile, _parCurved, _parQ1, _parQ2);
+            _drawStart = farNode; _cornerPending = false;   // chain from the committed end
+            Rebuild(groundAt);
+            return true;
+        }
+
         // Tangent of a lane (node, edge) at the node, and the lane puck position. False if degenerate.
         static bool LaneGuideFrame(int node, int edge, out Vector2 p, out Vector2 tan)
         {

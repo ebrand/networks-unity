@@ -3856,7 +3856,10 @@ namespace NetworkDesigner.Terrain
             // new-node preview so the cursor reverts to the plain OS arrow for picking segments.
             bool roadSelecting = _lineActive is RoadPlanLayer
                 && (Input.GetKey(KeyCode.LeftCommand) || Input.GetKey(KeyCode.RightCommand)
-                 || Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl));
+                 || Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))
+                // …but while a lane-edge draw is in progress, Ctrl means "draw parallel", not "select" — don't let the
+                // selection gate hide the preview and swallow the draw frame.
+                && !(NetworkDesigner.Roads.LaneEdgeModel.Enabled && NetworkDesigner.Roads.LaneEdgeWorld.Drawing);
             // Hide the brush cursor while a line tool (road/rail/fence/…) is active — it's a sculpt/scatter affordance
             // and just clutters line drawing (the white disc was being mistaken for a road node).
             UpdateBrushCursor(ShowBrushCursor && overTerrain && !roadSelecting && _lineActive == null, cursorVis,
@@ -3992,6 +3995,20 @@ namespace NetworkDesigner.Terrain
                     {
                         _leDrawCursor = _leAnySnap ? _leSnapXz : new Vector2(hit.point.x, hit.point.z);
                         bool leFreeAngle = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);   // Alt = free angle (skip colinear snap)
+                        bool leCtrlPar = (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))
+                            && NetworkDesigner.Roads.LaneEdgeWorld.Drawing && !NetworkDesigner.Roads.LaneEdgeWorld.Extending
+                            && !NetworkDesigner.Roads.LaneEdgeWorld.CornerPending;
+                        if (leCtrlPar && NetworkDesigner.Roads.LaneEdgeWorld.UpdateParallelDraw(
+                                NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, new Vector2(hit.point.x, hit.point.z), leGfn))
+                        {
+                            // Hold Ctrl after placing the start on a node's perpendicular guide: draw a road parallel to
+                            // that segment (follows its curvature), length set by the drag. Suppress the normal straight ghost.
+                            NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview();
+                            rdPv.ClearExternalCurveGuide();
+                        }
+                        else
+                        {
+                        NetworkDesigner.Roads.LaneEdgeWorld.ClearParallelPreview();
                         // A node/guide snap wins outright; otherwise apply the PAC / colinear guides.
                         if (!_leAnySnap)
                         {
@@ -4056,8 +4073,9 @@ namespace NetworkDesigner.Terrain
                                 rdPv.ShowExternalStraightGuide(NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, _leDrawCursor);
                             else rdPv.ClearExternalCurveGuide();
                         }
+                        }
                     }
-                    else { NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); rdPv.ClearExternalCurveGuide(); }
+                    else { NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); rdPv.ClearExternalCurveGuide(); NetworkDesigner.Roads.LaneEdgeWorld.ClearParallelPreview(); }
                 }
                 else { _lineActive.UpdatePreview(Surf, place, overTerrain); NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); if (_lineActive is RoadPlanLayer rdG1) rdG1.ClearExternalCurveGuide(); }
                 bool altMod = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
@@ -4074,6 +4092,15 @@ namespace NetworkDesigner.Terrain
                         bool leShiftClick = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                         Camera leCam = PickCamera != null ? PickCamera : Camera.main;
                         Vector2 leMouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                        // Drawing a parallel road (start placed on a perpendicular guide, Ctrl held): a click commits it.
+                        bool leCtrlClick = (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl))
+                            && NetworkDesigner.Roads.LaneEdgeWorld.Drawing && !NetworkDesigner.Roads.LaneEdgeWorld.Extending;
+                        if (leCtrlClick && NetworkDesigner.Roads.LaneEdgeWorld.ParallelArmed)
+                        {
+                            NetworkDesigner.Roads.LaneEdgeWorld.CommitParallelDraw(leGround);
+                            _dirtySince = Time.realtimeSinceStartup;
+                            return;
+                        }
                         // Hold 'C' and click two nodes to connect them with a smooth (S or simple) curve. Use the snapped
                         // cursor (ray-based node snap) so the click lands on the node, not the parallax terrain-hit.
                         if (connectMod)
