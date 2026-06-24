@@ -696,15 +696,26 @@ namespace NetworkDesigner.Terrain
         {
             BuildMinLegGuide(field, start, cursor);
             PreviewCurveActive = false;
+            PreviewStraightActive = true; PreviewStraightFrom = start; PreviewStraightTo = cursor;   // first leg distance
+            PreviewStraightDist = Vector2.Distance(start, cursor);
             LastPreviewRadius = float.PositiveInfinity;   // no armed curve yet → suppress the radius readout
             ExternalCurveGuide = true;
+        }
+
+        // Live distance label for an externally-owned STRAIGHT draw (tail→cursor); no ring.
+        public void ShowExternalStraightGuide(Vector2 from, Vector2 to)
+        {
+            PreviewStraightActive = true; PreviewCurveActive = false;
+            PreviewStraightFrom = from; PreviewStraightTo = to;
+            PreviewStraightDist = Vector2.Distance(from, to);
+            ExternalCurveGuide = false; _extRingBuilt = false; HideSymRing();
         }
 
         public void ClearExternalCurveGuide()
         {
             _extRingBuilt = false;   // next armed curve rebuilds the ring
-            if (!ExternalCurveGuide) return;
-            ExternalCurveGuide = false; PreviewCurveActive = false;
+            if (!ExternalCurveGuide && !PreviewStraightActive) return;
+            ExternalCurveGuide = false; PreviewCurveActive = false; PreviewStraightActive = false;
             LastPreviewRadius = float.PositiveInfinity;
             HideSymRing();
         }

@@ -1431,6 +1431,7 @@ namespace NetworkDesigner.Terrain
             DrawSpeedLabels();
             DrawDesignSpeedReadout();
             DrawRoadCurveLabels();
+            DrawLaneEdgeSegmentLabels();   // persistent length labels on committed lane-edge corridors
             DrawCurveInspectLabels();
             DrawSlopeCurveBadge();
             DrawSlopeGradeReadout();
@@ -1894,6 +1895,26 @@ namespace NetworkDesigner.Terrain
                 // Live span while extending a straight off the tail (and the first leg while arming a curve).
                 DrawWorldText(cam, s, ToWorldXZ((rd.PreviewStraightFrom + rd.PreviewStraightTo) * 0.5f, 2f),
                     $"{rd.PreviewStraightDist:0} m", new Color(1f, 0.85f, 0.3f));
+            }
+        }
+
+        // Persistent length label at each committed lane-edge corridor's midpoint (shown while the road plan tool is active).
+        void DrawLaneEdgeSegmentLabels()
+        {
+            if (!(_lineActive is RoadPlanLayer) || !NetworkDesigner.Roads.LaneEdgeModel.Enabled) return;
+            var net = NetworkDesigner.Roads.LaneEdgeWorld.Net;
+            if (net == null || net.Corridors == null || net.Corridors.Count == 0) return;
+            Camera cam = PickCamera != null ? PickCamera : Camera.main;
+            if (cam == null) return;
+            float s = Mathf.Max(0.25f, UiScale);
+            var col = new Color(0.92f, 0.92f, 0.92f);   // light grey — distinct from the yellow live-draw label
+            foreach (var c in net.Corridors)
+            {
+                if (c.Lanes == null || c.Lanes.Count == 0) continue;
+                float len = NetworkDesigner.Roads.LaneEdgeCorridorBuilder.PathLength(net, c);
+                if (len < 1f) continue;
+                Vector2 mid = NetworkDesigner.Roads.LaneEdgeCorridorBuilder.PathPoint(net, c, 0.5f);
+                DrawWorldText(cam, s, ToWorldXZ(mid, 2f), $"{len:0} m", col);
             }
         }
 
@@ -4016,7 +4037,7 @@ namespace NetworkDesigner.Terrain
                                 // Straight extension: lock to straight-ahead or 90° off the source lanes (Alt = free angle).
                                 if (!leFreeAngle && NetworkDesigner.Roads.LaneEdgeWorld.TryColinearSnapExtend(_leDrawCursor, out Vector2 eCol))
                                     _leDrawCursor = eCol;
-                                rdPv.ClearExternalCurveGuide();
+                                rdPv.ShowExternalStraightGuide(leN, _leDrawCursor);   // straight extension → live length label
                             }
                             NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId);
                         }
@@ -4031,6 +4052,8 @@ namespace NetworkDesigner.Terrain
                                     NetworkDesigner.Roads.LaneEdgeWorld.CornerPos, _leDrawCursor);
                             else if (leShift && NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
                                 rdPv.ShowExternalBendGuide(Surf, NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, _leDrawCursor);
+                            else if (NetworkDesigner.Roads.LaneEdgeWorld.Drawing)   // straight draw → live length label
+                                rdPv.ShowExternalStraightGuide(NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, _leDrawCursor);
                             else rdPv.ClearExternalCurveGuide();
                         }
                     }
