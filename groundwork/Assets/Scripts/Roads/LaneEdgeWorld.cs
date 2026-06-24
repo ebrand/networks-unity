@@ -286,40 +286,43 @@ namespace NetworkDesigner.Roads
             EmitDashedPolyline(_twIn, LaneDash, LaneGap, verts, tris, groundAt);      // inner straight edge (lane divider)
             // No end cap at the full-width end: the dropped lane MERGES into the road body there (it doesn't terminate), so a
             // solid perpendicular bar across the lane is spurious — the inner (dashed) + outer (solid) edges just continue.
-            if (sh > 0.01f && _twSh.Count == n)                                       // shoulder edge following the taper
-                EmitDashedPolyline(_twSh, OuterDash, OuterGap, verts, tris, groundAt);
+            // Shoulder edge following the taper. The straight road's shoulder line is drawn frame-quantized (EmitGuideLine)
+            // which renders OuterDash≈lane-length dashes; the taper uses true dashing, so match the visible plan by using the
+            // lane dash here (small OuterDash would render as tiny dots that don't match the rest of the plan).
+            if (sh > 0.01f && _twSh.Count == n)
+                EmitDashedPolyline(_twSh, LaneDash, LaneGap, verts, tris, groundAt);
         }
 
-        // Dashed version of EmitPolyline: walks the polyline by arc length, emitting only the dash-on portions.
+        // Dashed version of EmitPolyline: walks the polyline by arc length, emitting only the dash-on portions. Dash-on
+        // intervals are [m·period, m·period + dash] in global arc length, computed by integer index m — drift-free and
+        // stall-proof. (The old `pos += dash-phase` walk could land `walked % period` infinitesimally below `dash`, making
+        // the piece ≈ 0, so it spun without advancing and emitted almost nothing — the sparse-shoulder-dash bug.)
         static void EmitDashedPolyline(List<Vector2> pts, float dash, float gap, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
         {
             float period = dash + gap; if (period < 0.01f) { EmitPolyline(pts, verts, tris, groundAt); return; }
-            float walked = 0f;
+            float gStart = 0f;   // arc length from the polyline start to the current segment's start (continuous dash phase)
             for (int k = 0; k < pts.Count - 1; k++)
             {
                 Vector2 a = pts[k], b = pts[k + 1];
-                Vector2 seg = b - a; float segLen = seg.magnitude; if (segLen < 1e-4f) continue;
-                Vector2 dir = seg / segLen; float pos = 0f;
-                // Hard cap: at most (segLen/period)+2 dash periods fit in this segment. Without it, a huge segLen (a
-                // degenerate taper span) drives pos so high that pos += tiny_piece is lost to float32 precision → pos
-                // stops advancing → infinite loop → editor freeze. A non-finite segLen would also never terminate.
-                if (float.IsNaN(segLen) || float.IsInfinity(segLen)) continue;
-                // A segment longer than any real road is degenerate (a node/control point at a huge coordinate) — skip it
-                // rather than emit millions of dashes (or float-stall). Real segments draw fully: ~2 loop iterations per
-                // dash period, so the cap must be 2×(segLen/period), not 1× (which cut long dashed lines off halfway).
-                if (segLen > 50000f) { Debug.LogError($"[EmitDashedPolyline] skipped degenerate segment k={k} segLen={segLen:F0} a={a} b={b} (pts={pts.Count})"); continue; }
-                int safety = 2 * Mathf.CeilToInt(segLen / period) + 8;
-                while (pos < segLen && safety-- > 0)
+                Vector2 seg = b - a; float segLen = seg.magnitude;
+                // A non-finite or absurdly long (>50 km) segment is degenerate (a node/control point at a huge coordinate) —
+                // skip it (and don't advance the phase) rather than emit millions of dashes.
+                if (float.IsNaN(segLen) || float.IsInfinity(segLen) || segLen > 50000f)
                 {
-                    float phase = walked % period;
-                    if (phase < dash)
-                    {
-                        float piece = Mathf.Min(dash - phase, segLen - pos);
-                        EmitLineSeg(a + dir * pos, a + dir * (pos + piece), verts, tris, groundAt);
-                        pos += piece; walked += piece;
-                    }
-                    else { float piece = Mathf.Min(period - phase, segLen - pos); pos += piece; walked += piece; }
+                    if (segLen > 50000f) Debug.LogError($"[EmitDashedPolyline] skipped degenerate segment k={k} segLen={segLen:F0} (pts={pts.Count})");
+                    continue;
                 }
+                if (segLen < 1e-4f) continue;
+                Vector2 dir = seg / segLen;
+                float segEnd = gStart + segLen;
+                for (int m = Mathf.FloorToInt(gStart / period); m * period < segEnd; m++)   // each dash interval overlapping this segment
+                {
+                    float onLo = Mathf.Max(m * period, gStart);
+                    float onHi = Mathf.Min(m * period + dash, segEnd);
+                    if (onHi - onLo > 1e-4f)
+                        EmitLineSeg(a + dir * (onLo - gStart), a + dir * (onHi - gStart), verts, tris, groundAt);
+                }
+                gStart = segEnd;
             }
         }
 
