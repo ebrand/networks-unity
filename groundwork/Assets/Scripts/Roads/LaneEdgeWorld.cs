@@ -90,7 +90,7 @@ namespace NetworkDesigner.Roads
             RenderEndpointSpheres(root.transform);
         }
 
-        static readonly Color PlanCol = new Color(.5f, 0f, 0f, 1f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);   // white plan lines on green terrain
+        static readonly Color PlanCol = new Color(.5f, 0f, 0f, .25f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);   // white plan lines on green terrain
         static Material _plannedMat, _excavatedMat;
         static Material PlannedMat() => _plannedMat != null ? _plannedMat : (_plannedMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(PlanCol, "LanePlanLine"));
         static Material ExcavatedMat() => _excavatedMat != null ? _excavatedMat : (_excavatedMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(ExcCol, "LaneExcavLine"));
@@ -442,6 +442,19 @@ namespace NetworkDesigner.Roads
             return L.Direction == 2 ? tan : -tan;
         }
 
+        // Travel direction AT a specific node end of the corridor (curve-aware) — for colinearity tests at a junction, where the
+        // midpoint tangent of a curved corridor can diverge from its heading at the node and wrongly read as "not a through lane".
+        static Vector2 LaneTravelDirAt(LaneEdge L, Corridor c, int node)
+        {
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            float t = (node == l0.A) ? 0f : (node == l0.B) ? 1f : 0.5f;
+            Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, t);
+            if (tan.sqrMagnitude < 1e-6f)
+            { Vector2 d = Net.Nodes[L.B] - Net.Nodes[L.A]; tan = d.sqrMagnitude < 1e-6f ? Vector2.right : d.normalized; }
+            tan.Normalize();
+            return L.Direction == 2 ? tan : -tan;
+        }
+
         static void DetectLaneDropTapers()
         {
             foreach (Corridor c in Net.Corridors) { if (c.Tapers == null) c.Tapers = new List<LaneDropTaper>(); else c.Tapers.Clear(); }
@@ -451,14 +464,14 @@ namespace NetworkDesigner.Roads
                 if (L.Kind == LaneKind.Sidewalk) continue;
                 Corridor c = (L.CorridorId >= 0 && L.CorridorId < Net.Corridors.Count) ? Net.Corridors[L.CorridorId] : null;
                 if (c == null) continue;
-                Vector2 travel = LaneTravelDir(L, c);
-                if (travel.sqrMagnitude < 1e-6f) continue;
-                Vector2 perp = new Vector2(-travel.y, travel.x);
                 for (int endSel = 0; endSel < 2; endSel++)
                 {
                     int N = endSel == 0 ? L.A : L.B;
                     if (N < 0 || N >= Net.Nodes.Count) continue;
                     if (!TryEndpointPos(N, li, out Vector2 pL, out _)) continue;
+                    Vector2 travel = LaneTravelDirAt(L, c, N);        // heading AT this node (curve-aware), not the midpoint
+                    if (travel.sqrMagnitude < 1e-6f) continue;
+                    Vector2 perp = new Vector2(-travel.y, travel.x);
                     bool throughExists = false, continued = false;   // throughExists = the road continues STRAIGHT past N
                     for (int mj = 0; mj < Net.Edges.Count && !continued; mj++)
                     {
@@ -468,7 +481,7 @@ namespace NetworkDesigner.Roads
                         if (M.CorridorId == L.CorridorId) continue;        // a sibling lane isn't a through-connection
                         Corridor mc = (M.CorridorId >= 0 && M.CorridorId < Net.Corridors.Count) ? Net.Corridors[M.CorridorId] : null;
                         if (mc == null) continue;
-                        if (Vector2.Dot(travel, LaneTravelDir(M, mc)) < 0.8f) continue;   // not colinear → a turn, not a through lane
+                        if (Vector2.Dot(travel, LaneTravelDirAt(M, mc, N)) < 0.8f) continue;   // not colinear AT this node → a turn, not a through lane
                         throughExists = true;                              // a colinear corridor continues the road past N
                         if (TryEndpointPos(N, mj, out Vector2 pM, out _) && Mathf.Abs(Vector2.Dot(pM - pL, perp)) < 0.6f * L.Width)
                             continued = true;                              // an in-line lane continues L specifically → no taper
@@ -2875,6 +2888,14 @@ namespace NetworkDesigner.Roads
             var cand = new List<int>();
             foreach (int sl in _extLanes)
             {
+                if (sl < 0 || sl >= Net.Edges.Count) continue;
+                LaneEdge se = Net.Edges[sl];
+                // EXIT only: the dropped lane is the through-lane an exit REPLACES — valid only when the pulled lane flows TOWARD
+                // the fork (incoming to _extNode) so it diverges downstream. An ENTRANCE ramp's source flows AWAY from the fork
+                // (outgoing); it adds capacity, replacing no through-lane — finding/deleting a "continuation" there grabs the
+                // UPSTREAM lane and corrupts the road (the curved segment).
+                bool incoming = (se.Direction == 2 && _extNode == se.B) || (se.Direction == 0 && _extNode == se.A);
+                if (!incoming) continue;
                 int d = FindContinuationLane(_extNode, sl, srcCorr, rampCorr);
                 if (d >= 0 && !cand.Contains(d)) cand.Add(d);
             }
@@ -2933,7 +2954,12 @@ namespace NetworkDesigner.Roads
             bool pIncoming = (p.Direction == 2 && node == p.B) || (p.Direction == 0 && node == p.A);
             int po = node == p.A ? p.B : p.A;
             if (po < 0 || po >= Net.Nodes.Count) return -1;
-            Vector2 pMotion = pIncoming ? (Net.Nodes[node] - Net.Nodes[po]) : (Net.Nodes[po] - Net.Nodes[node]);
+            // Direction of travel through the node from the CURVE TANGENT (oriented by the node chord), not the chord itself —
+            // near a curve the chord diverges from the lane's real heading, which made the align test below reject the genuine
+            // downstream continuation (so an exit near a curve dropped no lane).
+            Vector2 pChord = pIncoming ? (Net.Nodes[node] - Net.Nodes[po]) : (Net.Nodes[po] - Net.Nodes[node]);
+            Vector2 pMotion = pChord;
+            if (LaneGuideFrame(node, pickedLane, out _, out Vector2 pTan) && pTan.sqrMagnitude > 1e-6f) pMotion = Vector2.Dot(pTan, pChord) >= 0f ? pTan : -pTan;
             if (pMotion.sqrMagnitude < 1e-6f) return -1; pMotion.Normalize();
             Vector2 nrm = new Vector2(-pMotion.y, pMotion.x);
             Vector2 pPos = Vector2.zero; bool havePos = false;
@@ -2949,15 +2975,18 @@ namespace NetworkDesigner.Roads
                 if (oe.CorridorId == srcCorr || oe.CorridorId == rampCorr) continue;   // not the feeder, not the ramp
                 int oo = e.Node == oe.A ? oe.B : oe.A;
                 if (oo < 0 || oo >= Net.Nodes.Count) continue;
-                Vector2 eMotion = e.Incoming ? (Net.Nodes[node] - Net.Nodes[oo]) : (Net.Nodes[oo] - Net.Nodes[node]);
+                Vector2 eChord = e.Incoming ? (Net.Nodes[node] - Net.Nodes[oo]) : (Net.Nodes[oo] - Net.Nodes[node]);
+                Vector2 eMotion = eChord;
+                if (LaneGuideFrame(node, e.Edge, out _, out Vector2 eTan) && eTan.sqrMagnitude > 1e-6f) eMotion = Vector2.Dot(eTan, eChord) >= 0f ? eTan : -eTan;
                 if (eMotion.sqrMagnitude < 1e-6f) continue; eMotion.Normalize();
                 float align = Vector2.Dot(pMotion, eMotion);
                 if (align <= 0.1f) continue;
                 float lateral = Mathf.Abs(Vector2.Dot(e.Pos - pPos, nrm));
-                // Only the lane DIRECTLY in line with the pulled lane is its continuation. If that slot was already
-                // deleted by a prior pull (e.g. you removed the ramp and re-pulled), the nearest survivor is a lane-width
-                // away → rejected here, so a re-pull deletes nothing extra ("delete what's there, no more").
-                if (lateral >= p.Width * 0.6f) continue;
+                // Only the lane DIRECTLY in line with the pulled lane is its continuation. Tolerance is just under one lane
+                // width so a re-pull (nearest survivor a full lane away) still deletes nothing extra — but wide enough to
+                // absorb the puck shift where a straight segment meets a curve (different tangents displace a lane's puck by
+                // ~offset·kink, worst for the outer lane, which previously fell outside 0.6·width and never dropped).
+                if (lateral >= p.Width * 0.9f) continue;
                 float score = align * 2f - lateral;
                 if (score > bestScore) { bestScore = score; best = j; }
             }
