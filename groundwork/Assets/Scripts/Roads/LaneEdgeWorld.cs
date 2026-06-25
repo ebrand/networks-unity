@@ -129,7 +129,7 @@ namespace NetworkDesigner.Roads
         static void ProfileLanes(string profileId, out float shBA, out float shAB)
         {
             _laneBuf.Clear(); shBA = 0f; shAB = 0f;
-            _suppLeftEdge = _suppRightEdge = false; _goreSuppressEdgeSide = 0; _goreSuppressShoulderSide = 0;   // profile preview has no tapers/gores
+            _suppLeftEdge = _suppRightEdge = false; _goreSuppressEdgeMask = 0; _goreSuppressShoulderMask = 0;   // profile preview has no tapers/gores
             var cfg = RoadProfileLibrary.ResolveConfig(profileId);
             if (cfg == null || cfg.Corridor == null) return;
             var bands = new List<RoadCrossSectionBuilder.StackBand>();
@@ -151,7 +151,7 @@ namespace NetworkDesigner.Roads
         static bool _suppLeftEdge, _suppRightEdge;   // a taper owns the solid outer edge on this side → body skips it
         // Exit-gore suppression: the side whose LANE EDGE (ramp inner) and/or SHOULDER (ramp inner + through outer) is hidden
         // here and redrawn clipped at the nose/gore. -1=left, +1=right, 0=none.
-        static int _goreSuppressEdgeSide, _goreSuppressShoulderSide;
+        static int _goreSuppressEdgeMask, _goreSuppressShoulderMask;   // bit0 = BA/left side, bit1 = AB/right side; a corridor can carry gores on BOTH sides (exit one side + entrance the other)
         static void CollectGuideLines()
         {
             _guideBuf.Clear();
@@ -159,10 +159,10 @@ namespace NetworkDesigner.Roads
             _laneBuf.Sort((a, b) => a.off.CompareTo(b.off));
             float laneLeft = _laneBuf[0].off - _laneBuf[0].w * 0.5f;                                  // outermost lane edges → SOLID
             float laneRight = _laneBuf[_laneBuf.Count - 1].off + _laneBuf[_laneBuf.Count - 1].w * 0.5f;
-            if (!_suppLeftEdge && _goreSuppressEdgeSide != -1) _guideBuf.Add((laneLeft, 0f, 0f));    // taper/gore owns this edge → skip (drawn clipped elsewhere)
-            if (!_suppRightEdge && _goreSuppressEdgeSide != 1) _guideBuf.Add((laneRight, 0f, 0f));
-            if (_shBA > 0.01f && _goreSuppressShoulderSide != -1) _guideBuf.Add((laneLeft - _shBA, OuterDash, OuterGap));   // shoulder outside → small dashes
-            if (_shAB > 0.01f && _goreSuppressShoulderSide != 1) _guideBuf.Add((laneRight + _shAB, OuterDash, OuterGap));
+            if (!_suppLeftEdge && (_goreSuppressEdgeMask & 1) == 0) _guideBuf.Add((laneLeft, 0f, 0f));    // taper/gore owns this edge → skip (drawn clipped elsewhere)
+            if (!_suppRightEdge && (_goreSuppressEdgeMask & 2) == 0) _guideBuf.Add((laneRight, 0f, 0f));
+            if (_shBA > 0.01f && (_goreSuppressShoulderMask & 1) == 0) _guideBuf.Add((laneLeft - _shBA, OuterDash, OuterGap));   // shoulder outside → small dashes
+            if (_shAB > 0.01f && (_goreSuppressShoulderMask & 2) == 0) _guideBuf.Add((laneRight + _shAB, OuterDash, OuterGap));
             for (int i = 0; i < _laneBuf.Count - 1; i++)
             {
                 float boundary = (_laneBuf[i].off + _laneBuf[i].w * 0.5f + _laneBuf[i + 1].off - _laneBuf[i + 1].w * 0.5f) * 0.5f;
@@ -204,7 +204,7 @@ namespace NetworkDesigner.Roads
                 return;
             }
             CorridorLanes(c, out _shBA, out _shAB);
-            GoreSuppress(c, out _goreSuppressEdgeSide, out _goreSuppressShoulderSide);   // hide gore ramp/through edges (drawn clipped at nose/gore)
+            GoreSuppress(c, out _goreSuppressEdgeMask, out _goreSuppressShoulderMask);   // hide gore ramp/through edges (drawn clipped at nose/gore)
             CollectGuideLines();
             bool hasTaper = c.Tapers != null && c.Tapers.Count > 0;
             if (_guideBuf.Count == 0 && !hasTaper) return;   // still render even if every lane is a taper wedge
@@ -480,10 +480,14 @@ namespace NetworkDesigner.Roads
                         if (M.CorridorId == L.CorridorId) continue;        // a sibling lane isn't a through-connection
                         Corridor mc = (M.CorridorId >= 0 && M.CorridorId < Net.Corridors.Count) ? Net.Corridors[M.CorridorId] : null;
                         if (mc == null) continue;
-                        if (Vector2.Dot(travel, LaneTravelDirAt(M, mc, N)) < 0.8f) continue;   // not colinear AT this node → a turn, not a through lane
-                        throughExists = true;                              // a colinear corridor continues the road past N
+                        float al = Vector2.Dot(travel, LaneTravelDirAt(M, mc, N));
+                        if (al < 0.25f) continue;                          // sharp turn / opposing → not a continuation of this lane
+                        if (al >= 0.8f) throughExists = true;              // a colinear corridor continues the road straight past N
+                        // An in-line forward lane continues L specifically: colinear (a parallel through) OR diverging (L bends off
+                        // onto a ramp here). Either way L isn't dropped, so no taper. The diverging case stops a lane that EXITS to a
+                        // ramp from being mistaken for a lane-drop — its spurious taper shoulder was leaking across the gore.
                         if (TryEndpointPos(N, mj, out Vector2 pM, out _) && Mathf.Abs(Vector2.Dot(pM - pL, perp)) < 0.6f * L.Width)
-                            continued = true;                              // an in-line lane continues L specifically → no taper
+                            continued = true;
                     }
                     // Taper ONLY when the road continues straight (a colinear corridor) but THIS lane has no in-line
                     // counterpart — a genuine lane-count mismatch. Corners / T-junctions / termini (no colinear corridor) don't taper.
@@ -616,7 +620,11 @@ namespace NetworkDesigner.Roads
                         if (!NearestOnPath(M, Nr, out Vector2 Pm, out float tm)) continue;
                         float dn = (Pm - Nr).magnitude; if (dn > GoreSnap) continue;
                         Vector2 Tm = LaneEdgeCorridorBuilder.PathTangent(Net, M, tm);
-                        if (Vector2.Dot(Tr, Tm) < 0.3f) continue;                // same general downstream direction (exit only; entrances unsupported)
+                        // Ramp must be roughly PARALLEL to the through axis — but sign-agnostic: a two-way road's BA-side lanes
+                        // travel AGAINST the corridor's A→B tangent, so a BA exit runs anti-parallel to Tm. |dot| accepts both
+                        // travel sides (was `<0.3` non-abs → rejected every BA-direction exit as wrong-way, so gores formed on
+                        // one side of the road only). The side is derived from M's own A→B frame below, so this stays correct.
+                        if (Mathf.Abs(Vector2.Dot(Tr, Tm)) < 0.3f) continue;
                         // M must CONTINUE downstream past the fork (so the nose/gore, which land downstream, are on M's path).
                         LaneEdgeCorridorBuilder.PathEndpoints(Net, M, out Vector2 mA, out Vector2 mB);
                         Vector2 mFar = Vector2.Dot(mB - Pm, Tr) > Vector2.Dot(mA - Pm, Tr) ? mB : mA;
@@ -701,15 +709,19 @@ namespace NetworkDesigner.Roads
             rampSide = 0f; nosePt = Vector2.zero; gorePt = Vector2.zero; return false;
         }
 
-        static void GoreSuppress(Corridor c, out int edgeSide, out int shoulderSide)
+        // Per-side suppression masks (bit0 = BA/left, bit1 = AB/right). Accumulated over ALL gores so a corridor that is the
+        // through for an exit on one side AND an entrance on the other suppresses BOTH (a single side int let the second gore
+        // clobber the first → the first side's shoulder/edge dashes came back unclipped).
+        static int SideBit(float side) => side < 0f ? 1 : (side > 0f ? 2 : 0);
+        static void GoreSuppress(Corridor c, out int edgeMask, out int shoulderMask)
         {
-            edgeSide = 0; shoulderSide = 0;
+            edgeMask = 0; shoulderMask = 0;
             foreach (var g in _gores)
             {
                 if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c))
-                { edgeSide = (int)g.RampSide; shoulderSide = (int)g.RampSide; return; }
+                { int b = SideBit(g.RampSide); edgeMask |= b; shoulderMask |= b; }   // ramp: inner lane EDGE + inner shoulder, drawn clipped at nose/gore
                 if (g.Through >= 0 && g.Through < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Through], c))
-                { edgeSide = (int)g.ThroughSide; shoulderSide = (int)g.ThroughSide; }   // through: its exit-side outer lane EDGE + shoulder are interior in the shared region → drawn clipped from the nose/gore
+                { int b = SideBit(g.ThroughSide); edgeMask |= b; shoulderMask |= b; }   // through: its exit-side outer lane EDGE + shoulder are interior in the shared region → drawn clipped from the nose/gore
             }
         }
 
