@@ -16,10 +16,11 @@ namespace NetworkDesigner.Roads
     {
         // ── corridor reference-path samplers (A→B param 0..1; straight chord or cubic bezier per c.Curved) ──
         // Shared by render/overlay/endpoints/beds/agents so the lane geometry stays consistent across all of them.
-        // Reference-path frame: lane[0]'s graph nodes + controls, laterally offset by CenterShift/CenterShiftB (canonicalised
-        // pull-off or connector — the body renders on a slewed centreline while the lanes' nodes stay put for flow). Each END is
-        // shifted along ITS OWN tangent normal (A: control−node dir; B: node−control dir), NOT the chord normal — so when the
-        // corridor leaves at an angle the body stays flush with the road it meets (chord-normal shifting tilted the join).
+        // Reference-path frame: lane[0]'s graph nodes + controls, laterally offset by CenterShift/CenterShiftB so the body renders
+        // on a shifted centreline while the lanes' nodes stay put for flow. Two cases:
+        //  • UNIFORM shift (CenterShift==CenterShiftB — a canonicalised pull-off): RIGID-translate the whole curve by one normal,
+        //    preserving its shape so a CURVED ramp's lanes don't splay. (Shifting the two ends along different normals skewed it.)
+        //  • TWO-ENDED shift (a connector): slew — shift each end along ITS OWN tangent normal so an angled join isn't tilted.
         static bool PathFrame(LaneEdgeNetwork net, Corridor c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)
         {
             a = b = c1 = c2 = Vector2.zero;
@@ -32,11 +33,15 @@ namespace NetworkDesigner.Roads
                 if (chord.sqrMagnitude > 1e-8f)
                 {
                     Vector2 tA = c.Curved && (c1 - a).sqrMagnitude > 1e-8f ? (c1 - a).normalized : chord.normalized;   // tangent at A
-                    Vector2 tB = c.Curved && (b - c2).sqrMagnitude > 1e-8f ? (b - c2).normalized : chord.normalized;   // tangent at B (A→B dir)
                     Vector2 nrmA = new Vector2(tA.y, -tA.x);
-                    Vector2 nrmB = new Vector2(tB.y, -tB.x);
+                    Vector2 nrmB = nrmA;                                       // uniform shift → rigid translate (no splay)
+                    if (Mathf.Abs(c.CenterShift - c.CenterShiftB) > 1e-3f)     // two-ended (connector) → slew along each end's own normal
+                    {
+                        Vector2 tB = c.Curved && (b - c2).sqrMagnitude > 1e-8f ? (b - c2).normalized : chord.normalized;
+                        nrmB = new Vector2(tB.y, -tB.x);
+                    }
                     a += nrmA * c.CenterShift;  c1 += nrmA * c.CenterShift;    // A end + its control
-                    b += nrmB * c.CenterShiftB; c2 += nrmB * c.CenterShiftB;   // B end + its control → the path slews A→B
+                    b += nrmB * c.CenterShiftB; c2 += nrmB * c.CenterShiftB;   // B end + its control
                 }
             }
             return true;
@@ -47,6 +52,11 @@ namespace NetworkDesigner.Roads
             b = Vector2.zero;
             return PathFrame(net, c, out a, out b, out _, out _);
         }
+
+        // CenterShift-aware reference frame: shifted endpoints AND cubic controls together, for consumers that rebuild a
+        // sub-curve (e.g. parallel draw) — using shifted endpoints with raw c.ControlA/B would distort the curve.
+        public static bool PathFrameShifted(LaneEdgeNetwork net, Corridor c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)
+            => PathFrame(net, c, out a, out b, out c1, out c2);
 
         public static Vector2 PathPoint(LaneEdgeNetwork net, Corridor c, float t)
         {

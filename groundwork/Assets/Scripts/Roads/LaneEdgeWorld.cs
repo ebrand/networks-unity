@@ -90,7 +90,7 @@ namespace NetworkDesigner.Roads
             RenderEndpointSpheres(root.transform);
         }
 
-        static readonly Color PlanCol = new Color(1f, 0.5f, 0.3f, 1f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);   // brighter red-orange — reads better on green terrain
+        static readonly Color PlanCol = new Color(.5f, 0f, 0f, 1f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);   // white plan lines on green terrain
         static Material _plannedMat, _excavatedMat;
         static Material PlannedMat() => _plannedMat != null ? _plannedMat : (_plannedMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(PlanCol, "LanePlanLine"));
         static Material ExcavatedMat() => _excavatedMat != null ? _excavatedMat : (_excavatedMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(ExcCol, "LaneExcavLine"));
@@ -1122,7 +1122,7 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float srcOff = s.Offset + (sc != null ? sc.CenterShift : 0f);              // body position (incl. CenterShift) so the start frame sits on the source's pavement
+                float srcOff = s.Offset + ShiftAtNode(sc, _extNode);                       // body position at the PULLED end (per-end shift) so the start frame sits on the source's pavement
                 float oNew = (srcOff * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
                 lo = Mathf.Min(lo, oNew); hi = Mathf.Max(hi, oNew);
             }
@@ -1486,7 +1486,7 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float srcOff = s.Offset + (sc != null ? sc.CenterShift : 0f);             // body position (incl. CenterShift), to match BuildExtensionCorridor + the source's actual pavement
+                float srcOff = s.Offset + ShiftAtNode(sc, _extNode);                      // body position at the PULLED end (per-end shift), to match BuildExtensionCorridor + the source's actual pavement
                 float oNew = (srcOff * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
                 lo = Mathf.Min(lo, oNew - s.Width * 0.5f); hi = Mathf.Max(hi, oNew + s.Width * 0.5f);
                 // Count by the EXTENSION-frame direction (dirNew), matching BuildExtensionCorridor — off the A end the
@@ -2053,11 +2053,55 @@ namespace NetworkDesigner.Roads
             return Net.Nodes[node] + fr * (LaneSpanCentre(c) + ShiftAtNode(c, node));
         }
 
-        // WHOLE-ROAD connect (road-to-road): join the corridor at node `a` to the corridor at node `b` with ONE tangent-continuous
-        // connector carrying the source road's profile (one shoulder set, all lanes). It SHARES the clicked end nodes — no peeling —
-        // so RegenerateDefaultFlows wires the movements through. Both ends land flush via a TWO-ENDED body shift: CenterShift slews
-        // the body onto the SOURCE's pavement at `a`, CenterShiftB onto the TARGET's at `b`. The shifts are derived from each road's
-        // actual body centre, so they're correct whether a joined road is centred, a canonicalised pull-off, or reversed in sense.
+        // Split corridor c's navigable lanes at `node` into those flowing TOWARD the node (incoming) and AWAY (outgoing).
+        static void SplitByFlow(Corridor c, int node, List<int> inc, List<int> outg)
+        {
+            if (c == null) return;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= Net.Edges.Count) continue;
+                LaneEdge e = Net.Edges[li]; if (e.Kind != LaneKind.Traffic) continue;
+                if (e.A != node && e.B != node) continue;
+                ((e.Direction == 2 && node == e.B) || (e.Direction == 0 && node == e.A) ? inc : outg).Add(li);
+            }
+        }
+
+        // World body position of lane `li` (of corridor c) at `node` = node + right·(offset + shift at this end).
+        static Vector2 LaneBodyPos(Corridor c, int li, int node)
+        {
+            if (node < 0 || node >= Net.Nodes.Count) return Vector2.zero;
+            if (c == null || c.Lanes.Count == 0 || li < 0 || li >= Net.Edges.Count) return Net.Nodes[node];
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            float t = (node == l0.A) ? 0f : 1f;
+            Vector2 fr = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t));
+            return Net.Nodes[node] + fr * (Net.Edges[li].Offset + ShiftAtNode(c, node));
+        }
+
+        // Body centre of a SUBSET of corridor c's lanes at `node` (world). Falls back to the whole-corridor centre if empty.
+        static Vector2 SubsetBodyCentre(Corridor c, int node, List<int> lanes)
+        {
+            if (c == null || lanes == null || lanes.Count == 0 || node < 0 || node >= Net.Nodes.Count) return CorridorBodyCentre(c, node);
+            float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
+            foreach (int li in lanes) { if (li < 0 || li >= Net.Edges.Count) continue; LaneEdge e = Net.Edges[li]; lo = Mathf.Min(lo, e.Offset - e.Width * 0.5f); hi = Mathf.Max(hi, e.Offset + e.Width * 0.5f); }
+            if (float.IsInfinity(lo)) return CorridorBodyCentre(c, node);
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            float t = (node == l0.A) ? 0f : 1f;
+            Vector2 fr = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t));
+            return Net.Nodes[node] + fr * ((lo + hi) * 0.5f + ShiftAtNode(c, node));
+        }
+
+        static void SortByLateral(List<int> lanes, Corridor c, int node, Vector2 perp)
+        {
+            Vector2 n = (node >= 0 && node < Net.Nodes.Count) ? Net.Nodes[node] : Vector2.zero;
+            lanes.Sort((x, y) => Vector2.Dot(LaneBodyPos(c, x, node) - n, perp).CompareTo(Vector2.Dot(LaneBodyPos(c, y, node) - n, perp)));
+        }
+
+        // WHOLE-ROAD connect (road-to-road): ONE tangent-continuous connector joining node `a` to node `b`. CLEAN DIVIDED-HIGHWAY
+        // SPLIT — only the lanes that actually CONTINUE through connect: A's lanes feeding the join (incoming to a) pair with B's
+        // lanes carrying it onward (outgoing from b), and the return direction pairs B-incoming with A-outgoing; each direction
+        // joins min(counts) lanes by lateral order. So a one-way ↔ ONE direction of a two-way joins only that direction's lanes,
+        // aligned to its off-centre half. The connector adopts the matched cross-section's profile (one shoulder set), shares both
+        // end nodes (flow auto-wires, no peeling), and lands flush via the TWO-ENDED body shift onto each MATCHED subset's centre.
         static void BuildCorridorConnectCurve(int a, int edgeA, int b, int edgeB, Func<Vector2, float> groundAt)
         {
             if (a < 0 || b < 0 || a == b || a >= Net.Nodes.Count || b >= Net.Nodes.Count) return;
@@ -2072,14 +2116,29 @@ namespace NetworkDesigner.Roads
             Vector2 tanB = SafeDir(pa - pb);
             if (eB0 != null) tanB = CorridorEndTangent(cB, eB0, b, pa - pb, SafeDir(pa - pb));
             float d = (pb - pa).magnitude * 0.4f;
+            Vector2 perp = LaneEdgeCorridorBuilder.PathRight(SafeDir(pb - pa));
 
-            // Clone cA's ACTUAL lanes as one corridor (a pulled subset carries the parent's profile id but only its own lanes).
+            // Match lanes by flow direction: forward (A-incoming↔B-outgoing), return (A-outgoing↔B-incoming), paired by lateral order.
+            var aIn = new List<int>(); var aOut = new List<int>(); SplitByFlow(cA, a, aIn, aOut);
+            var bIn = new List<int>(); var bOut = new List<int>();
+            if (cB != null) SplitByFlow(cB, b, bIn, bOut);
+            else if (eB0 != null && eB0.Kind == LaneKind.Traffic) { bool inc = (eB0.Direction == 2 && b == eB0.B) || (eB0.Direction == 0 && b == eB0.A); (inc ? bIn : bOut).Add(edgeB); }
+            SortByLateral(aIn, cA, a, perp); SortByLateral(aOut, cA, a, perp);
+            SortByLateral(bOut, cB, b, perp); SortByLateral(bIn, cB, b, perp);
+            int fc = Mathf.Min(aIn.Count, bOut.Count), rc = Mathf.Min(aOut.Count, bIn.Count);
+            var matchA = new List<int>();
+            for (int i = 0; i < fc; i++) matchA.Add(aIn[i]);
+            for (int i = 0; i < rc; i++) matchA.Add(aOut[i]);
+            if (matchA.Count == 0) { foreach (int sl in cA.Lanes) if (sl >= 0 && sl < Net.Edges.Count && Net.Edges[sl].Kind == LaneKind.Traffic) matchA.Add(sl); }   // no shared direction → clone all (degenerate)
+            var matchB = new List<int>();
+            for (int i = 0; i < fc; i++) matchB.Add(bOut[i]);
+            for (int i = 0; i < rc; i++) matchB.Add(bIn[i]);
+
             Corridor nc = Net.AddCorridor();
             nc.Curved = true; nc.ControlA = pa + tanA * d; nc.ControlB = pb + tanB * d;
-            nc.AlignLanes = false; nc.Profile = cA.Profile;
-            nc.ShoulderBA = cA.ShoulderBA; nc.ShoulderAB = cA.ShoulderAB; nc.MedianWidth = cA.MedianWidth;
-            bool sameSense = (a == eA.B);   // connector A→B continues cA's A→B (clicked its far/B end) → keep offsets + directions
-            foreach (int sl in cA.Lanes)
+            nc.AlignLanes = false; nc.MedianWidth = cA.MedianWidth;
+            bool sameSense = (a == eA.B);
+            foreach (int sl in matchA)
             {
                 if (sl < 0 || sl >= Net.Edges.Count) continue;
                 LaneEdge s = Net.Edges[sl];
@@ -2088,17 +2147,22 @@ namespace NetworkDesigner.Roads
                 int li = Net.AddLane(new LaneEdge { A = a, B = b, CorridorId = nc.Id, Kind = s.Kind, Direction = dir, Width = s.Width, Offset = off });
                 nc.Lanes.Add(li);
             }
-            if (!sameSense) { float t = nc.ShoulderBA; nc.ShoulderBA = nc.ShoulderAB; nc.ShoulderAB = t; }   // mirror shoulders with the flip
             Net.SortCorridorLanes(nc);
 
-            // Two-ended body shift: project each road's body centre onto the connector's per-END lateral axis (the tangent normal
-            // PathFrame slews along at that end) and subtract the connector's own lane-span centre, so the body starts flush on the
-            // source's pavement and ends flush on the target's — even where the connector leaves at an angle.
-            Vector2 frA = LaneEdgeCorridorBuilder.PathRight(tanA);   // A-end axis (connector tangent normal at a)
-            Vector2 frB = LaneEdgeCorridorBuilder.PathRight(-tanB);  // B-end axis (connector A→B tangent normal at b)
+            // Profile + shoulders for the connector's ACTUAL (matched) cross-section — e.g. a 4-lane half of a 4×4 becomes a "4".
+            int cab = 0, cba = 0;
+            foreach (int li in nc.Lanes) { LaneEdge e = Net.Edges[li]; if (e.Kind != LaneKind.Traffic) continue; if (e.Direction == 2) cab++; else if (e.Direction == 0) cba++; }
+            string pk = RoadProfileLibrary.FindByConfig(cab, cba, cA.Profile);
+            var rp = !string.IsNullOrEmpty(pk) ? RoadProfileLibrary.Resolve(pk) : null;
+            if (rp != null) { nc.Profile = pk; nc.ShoulderBA = rp.ShoulderBA != null ? rp.ShoulderBA.Width : 0f; nc.ShoulderAB = rp.ShoulderAB != null ? rp.ShoulderAB.Width : 0f; }
+            else { nc.Profile = cA.Profile; nc.ShoulderBA = cA.ShoulderBA; nc.ShoulderAB = cA.ShoulderAB; if (!sameSense) { float t = nc.ShoulderBA; nc.ShoulderBA = nc.ShoulderAB; nc.ShoulderAB = t; } }
+
+            // Two-ended body shift onto each MATCHED subset's centre (the off-centre half, for a one-way↔two-way join).
+            Vector2 frA = LaneEdgeCorridorBuilder.PathRight(tanA);
+            Vector2 frB = LaneEdgeCorridorBuilder.PathRight(-tanB);
             float ncMid = LaneSpanCentre(nc);
-            Vector2 srcC = CorridorBodyCentre(cA, a);
-            Vector2 tgtC = cB != null ? CorridorBodyCentre(cB, b) : (eB0 != null ? pb + frB * eB0.Offset : pb);
+            Vector2 srcC = SubsetBodyCentre(cA, a, matchA);
+            Vector2 tgtC = cB != null ? SubsetBodyCentre(cB, b, matchB) : (eB0 != null ? pb + frB * eB0.Offset : pb);
             nc.CenterShift  = Vector2.Dot(srcC - pa, frA) - ncMid;
             nc.CenterShiftB = Vector2.Dot(tgtC - pb, frB) - ncMid;
 
@@ -2283,7 +2347,7 @@ namespace NetworkDesigner.Roads
             if (c == null || c.Lanes.Count == 0) return r;
             LaneEdge l0 = Net.Edges[c.Lanes[0]];
             if (sourceNode != l0.A && sourceNode != l0.B) return r;
-            if (!LaneEdgeCorridorBuilder.PathEndpoints(Net, c, out Vector2 A, out Vector2 B)) return r;
+            if (!LaneEdgeCorridorBuilder.PathFrameShifted(Net, c, out Vector2 A, out Vector2 B, out Vector2 scA, out Vector2 scB)) return r;
             float tN = (sourceNode == l0.A) ? 0f : 1f;
             Vector2 Ncl = (tN == 0f) ? A : B;
             Vector2 tanN = LaneEdgeCorridorBuilder.PathTangent(Net, c, tN);
@@ -2306,7 +2370,7 @@ namespace NetworkDesigner.Roads
             r.Curved = c.Curved; r.Profile = profileId;
             if (c.Curved)
             {
-                SubCubic(A, c.ControlA, c.ControlB, B, lo, hi, out Vector2 s0, out Vector2 s1, out Vector2 s2, out Vector2 s3);
+                SubCubic(A, scA, scB, B, lo, hi, out Vector2 s0, out Vector2 s1, out Vector2 s2, out Vector2 s3);   // shifted controls (CenterShift-aware)
                 OffsetCubic(s0, s1, s2, s3, offR, out r.Q0, out r.Q1, out r.Q2, out r.Q3);
             }
             else
@@ -2601,7 +2665,7 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, nodeN == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float srcOff = s.Offset + (sc != null ? sc.CenterShift : 0f);            // source lane's BODY position (incl. CenterShift) — extending a canonicalised pull-off off its node-relative offset would land it CenterShift metres off the source
+                float srcOff = s.Offset + ShiftAtNode(sc, nodeN);                        // source lane's BODY position at the PULLED end (per-end shift) — extending off its node-relative offset would land it shift metres off the source
                 float oNew = (srcOff * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));       // preserve the lane's offset magnitude (re-spread on the new frame) so a turn doesn't collapse lanes to centre
                 bool incomingAtN = (s.Direction == 2 && nodeN == s.B) || (s.Direction == 0 && nodeN == s.A);
                 int dirNew = incomingAtN ? 2 : 0;                  // arriving lane → continue outward (A'=N→B'); return lane → inbound
