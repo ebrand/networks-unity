@@ -69,6 +69,7 @@ namespace NetworkDesigner.Roads
         {
             ComputeEndpoints(groundAt);
             DetectLaneDropTapers();   // derive lane-drop tapers from lane-count mismatches at shared nodes
+            DetectExitGores();        // derive exit-ramp gores (ramp diverging from a through corridor) → nose/gore convergence
             GameObject root = Root();
             for (int i = root.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(root.transform.GetChild(i).gameObject);
@@ -77,6 +78,8 @@ namespace NetworkDesigner.Roads
                 if (c.Built) LaneEdgeCorridorBuilder.RenderCorridor(Net, c, root.transform, groundAt);   // real swept body
                 else RenderPlanOverlay(c, root.transform, groundAt);                                     // schematic plan line
             }
+            RenderExitGores(root.transform, groundAt);       // ramp-gore shoulder-edge convergence (nose/gore) — plan overlay
+
             // The segment (cluster) node + flow connectors are intersection-routing visuals — only show them while mapping
             // flows. In plain draw mode the lanes + endpoint pucks are the handles; the centreline node is internal.
             if (LaneEdgeModel.MappingMode)
@@ -87,7 +90,7 @@ namespace NetworkDesigner.Roads
             RenderEndpointSpheres(root.transform);
         }
 
-        static readonly Color PlanCol = new Color(0.9f, 0.35f, 0.2f, 1f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);
+        static readonly Color PlanCol = new Color(1f, 0.5f, 0.3f, 1f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);   // brighter red-orange — reads better on green terrain
         static Material _plannedMat, _excavatedMat;
         static Material PlannedMat() => _plannedMat != null ? _plannedMat : (_plannedMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(PlanCol, "LanePlanLine"));
         static Material ExcavatedMat() => _excavatedMat != null ? _excavatedMat : (_excavatedMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(ExcCol, "LaneExcavLine"));
@@ -126,7 +129,7 @@ namespace NetworkDesigner.Roads
         static void ProfileLanes(string profileId, out float shBA, out float shAB)
         {
             _laneBuf.Clear(); shBA = 0f; shAB = 0f;
-            _suppLeftEdge = _suppRightEdge = false;   // profile preview has no tapers
+            _suppLeftEdge = _suppRightEdge = false; _goreSuppressEdgeSide = 0; _goreSuppressShoulderSide = 0;   // profile preview has no tapers/gores
             var cfg = RoadProfileLibrary.ResolveConfig(profileId);
             if (cfg == null || cfg.Corridor == null) return;
             var bands = new List<RoadCrossSectionBuilder.StackBand>();
@@ -146,6 +149,9 @@ namespace NetworkDesigner.Roads
         // lane dividers, and a DOUBLE solid line at any direction flip (the A→B/B→A divider).
         static float _shBA, _shAB;   // lane-set shoulder widths, set before CollectGuideLines
         static bool _suppLeftEdge, _suppRightEdge;   // a taper owns the solid outer edge on this side → body skips it
+        // Exit-gore suppression: the side whose LANE EDGE (ramp inner) and/or SHOULDER (ramp inner + through outer) is hidden
+        // here and redrawn clipped at the nose/gore. -1=left, +1=right, 0=none.
+        static int _goreSuppressEdgeSide, _goreSuppressShoulderSide;
         static void CollectGuideLines()
         {
             _guideBuf.Clear();
@@ -153,10 +159,10 @@ namespace NetworkDesigner.Roads
             _laneBuf.Sort((a, b) => a.off.CompareTo(b.off));
             float laneLeft = _laneBuf[0].off - _laneBuf[0].w * 0.5f;                                  // outermost lane edges → SOLID
             float laneRight = _laneBuf[_laneBuf.Count - 1].off + _laneBuf[_laneBuf.Count - 1].w * 0.5f;
-            if (!_suppLeftEdge) _guideBuf.Add((laneLeft, 0f, 0f));    // taper owns this edge → skip (its dashed inner divider shows instead)
-            if (!_suppRightEdge) _guideBuf.Add((laneRight, 0f, 0f));
-            if (_shBA > 0.01f) _guideBuf.Add((laneLeft - _shBA, OuterDash, OuterGap));                // shoulder outside → small dashes
-            if (_shAB > 0.01f) _guideBuf.Add((laneRight + _shAB, OuterDash, OuterGap));
+            if (!_suppLeftEdge && _goreSuppressEdgeSide != -1) _guideBuf.Add((laneLeft, 0f, 0f));    // taper/gore owns this edge → skip (drawn clipped elsewhere)
+            if (!_suppRightEdge && _goreSuppressEdgeSide != 1) _guideBuf.Add((laneRight, 0f, 0f));
+            if (_shBA > 0.01f && _goreSuppressShoulderSide != -1) _guideBuf.Add((laneLeft - _shBA, OuterDash, OuterGap));   // shoulder outside → small dashes
+            if (_shAB > 0.01f && _goreSuppressShoulderSide != 1) _guideBuf.Add((laneRight + _shAB, OuterDash, OuterGap));
             for (int i = 0; i < _laneBuf.Count - 1; i++)
             {
                 float boundary = (_laneBuf[i].off + _laneBuf[i].w * 0.5f + _laneBuf[i + 1].off - _laneBuf[i + 1].w * 0.5f) * 0.5f;
@@ -198,6 +204,7 @@ namespace NetworkDesigner.Roads
                 return;
             }
             CorridorLanes(c, out _shBA, out _shAB);
+            GoreSuppress(c, out _goreSuppressEdgeSide, out _goreSuppressShoulderSide);   // hide gore ramp/through edges (drawn clipped at nose/gore)
             CollectGuideLines();
             bool hasTaper = c.Tapers != null && c.Tapers.Count > 0;
             if (_guideBuf.Count == 0 && !hasTaper) return;   // still render even if every lane is a taper wedge
@@ -260,6 +267,10 @@ namespace NetworkDesigner.Roads
                 float t = tp.AtA ? u : (1f - u);                     // junction at A → grow toward B; else toward A
                 float e = a * a * (3f - 2f * a);                     // smoothstep → S-curve outer edge
                 float outerOff = innerOff + sgn * tp.Width * e;
+                // Shoulder rides at CONSTANT width just outside the wedge's outer edge (NOT scaled by e). Only the dropped
+                // lane collapses to the gore tip; the shoulder keeps its 1.5 m and ends one shoulder-width off the tip, where
+                // it meets the continuing road's shoulder. Scaling by e dragged the line inward across the dropped-lane slot
+                // into the travel lanes and missed the neighbour's shoulder at both ends.
                 TaperCross(c, t, innerOff, outerOff, outerOff + sgn * shoulder, wantSh, inner, outer, shOut);
             }
             if (frac < 0.999f)                                       // full-width tail from the taper end to the far end
@@ -470,6 +481,308 @@ namespace NetworkDesigner.Roads
             }
         }
 
+        // ── exit-ramp gore convergence ── where a ramp corridor diverges from a through corridor, the ramp's inner-side
+        // shoulder edges must converge with the through corridor's shoulder edges: the two INNER edges meet at the NOSE
+        // (upstream), the two OUTER edges meet at the GORE (downstream). Derived geometrically each Rebuild (like tapers).
+        public struct ExitGore { public int Through, Ramp; public float ThroughSide, RampSide, RampT; public Vector2 Nose, Gore; public bool HasNose, HasGore; }
+        static readonly List<ExitGore> _gores = new List<ExitGore>();
+        const float GoreSnap = 12f;   // a ramp end this close to a through path is a gore candidate
+
+        // Outer lane edge (innerOff) and shoulder outer edge (outerOff) on side +1 (AB) / −1 (BA) of a corridor.
+        static void SideEdges(Corridor c, float side, out float innerOff, out float outerOff)
+        {
+            float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= Net.Edges.Count) continue;
+                LaneEdge e = Net.Edges[li]; if (e.Kind == LaneKind.Sidewalk) continue;
+                lo = Mathf.Min(lo, e.Offset - e.Width * 0.5f); hi = Mathf.Max(hi, e.Offset + e.Width * 0.5f);
+            }
+            if (float.IsInfinity(lo)) { innerOff = outerOff = 0f; return; }
+            if (side >= 0f) { innerOff = hi; outerOff = hi + c.ShoulderAB; }
+            else            { innerOff = lo; outerOff = lo - c.ShoulderBA; }
+        }
+
+        // Lateral-offset polyline of a corridor's reference path (point = path + right·off), sampled n+1 times. `extend`
+        // extrapolates the line straight past both ends (so a nose/gore landing just before the through corridor's start —
+        // e.g. at a shared fork node — is still caught).
+        static List<Vector2> OffsetPolyline(Corridor c, float off, int n, float extend = 0f)
+        {
+            var pts = new List<Vector2>(n + 3);
+            for (int i = 0; i <= n; i++)
+            {
+                float t = (float)i / n;
+                pts.Add(LaneEdgeCorridorBuilder.PathPoint(Net, c, t) + LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t)) * off);
+            }
+            if (extend > 0f && pts.Count >= 2)
+            {
+                Vector2 d0 = pts[0] - pts[1]; if (d0.sqrMagnitude > 1e-6f) pts.Insert(0, pts[0] + d0.normalized * extend);
+                Vector2 d1 = pts[pts.Count - 1] - pts[pts.Count - 2]; if (d1.sqrMagnitude > 1e-6f) pts.Add(pts[pts.Count - 1] + d1.normalized * extend);
+            }
+            return pts;
+        }
+
+        // Nearest point on a corridor path to p (coarse sample). Always returns a point for a valid corridor.
+        static bool NearestOnPath(Corridor c, Vector2 p, out Vector2 nearest, out float tBest)
+        {
+            nearest = Vector2.zero; tBest = 0f;
+            if (c.Lanes.Count == 0) return false;
+            const int n = 48; float best = float.PositiveInfinity;
+            for (int i = 0; i <= n; i++)
+            {
+                float t = (float)i / n; Vector2 q = LaneEdgeCorridorBuilder.PathPoint(Net, c, t);
+                float d = (q - p).sqrMagnitude; if (d < best) { best = d; nearest = q; tBest = t; }
+            }
+            return true;
+        }
+
+        // Proper crossing of two segments (false if parallel or crossing outside either segment).
+        static bool SegInt(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, out Vector2 hit)
+        {
+            hit = Vector2.zero;
+            Vector2 r = p2 - p1, s = p4 - p3; float rxs = r.x * s.y - r.y * s.x;
+            if (Mathf.Abs(rxs) < 1e-9f) return false;
+            Vector2 qp = p3 - p1; float t = (qp.x * s.y - qp.y * s.x) / rxs, u = (qp.x * r.y - qp.y * r.x) / rxs;
+            if (t < 0f || t > 1f || u < 0f || u > 1f) return false;
+            hit = p1 + r * t; return true;
+        }
+
+        // First crossing of polyline a with polyline b (scanning a from its start), or false.
+        static bool PolylineIntersect(List<Vector2> a, List<Vector2> b, out Vector2 hit)
+        {
+            hit = Vector2.zero;
+            for (int i = 0; i < a.Count - 1; i++)
+                for (int j = 0; j < b.Count - 1; j++)
+                    if (SegInt(a[i], a[i + 1], b[j], b[j + 1], out hit)) return true;
+            return false;
+        }
+
+        // True if some corridor (other than miSkip/riSkip) arrives at `forkNode` colinear with mDir — i.e. M continues an
+        // upstream road through the fork (it's the through), whereas a diverging ramp has no such upstream continuation.
+        static bool HasUpstreamColinear(int forkNode, int miSkip, int riSkip, Vector2 mDir, out Vector2 bestUInto)
+        {
+            bestUInto = Vector2.zero; float bestDot = 0.8f; bool found = false;
+            if (forkNode < 0) return false;
+            for (int ui = 0; ui < Net.Corridors.Count; ui++)
+            {
+                if (ui == miSkip || ui == riSkip) continue;
+                Corridor U = Net.Corridors[ui];
+                if (U.Lanes.Count == 0) continue;
+                LaneEdge ul0 = Net.Edges[U.Lanes[0]];
+                int uEnd = ul0.A == forkNode ? 0 : (ul0.B == forkNode ? 1 : -1);
+                if (uEnd < 0) continue;
+                Vector2 uFar = uEnd == 0 ? Net.Nodes[ul0.B] : Net.Nodes[ul0.A];
+                Vector2 uInto = Net.Nodes[forkNode] - uFar; if (uInto.sqrMagnitude < 1e-6f) continue; uInto.Normalize();
+                float d = Vector2.Dot(uInto, mDir);
+                if (d > bestDot) { bestDot = d; bestUInto = uInto; found = true; }
+            }
+            return found;
+        }
+
+        static void DetectExitGores()
+        {
+            _gores.Clear();
+            int nc = Net.Corridors.Count;
+            for (int ri = 0; ri < nc; ri++)
+            {
+                Corridor R = Net.Corridors[ri];
+                if (R.Lanes.Count == 0) continue;
+                if (!LaneEdgeCorridorBuilder.PathEndpoints(Net, R, out Vector2 rA, out Vector2 rB)) continue;
+                if (LaneEdgeCorridorBuilder.PathLength(Net, R) < 1e-2f) continue;
+                for (int endSel = 0; endSel < 2; endSel++)
+                {
+                    float rampT = endSel == 0 ? 0f : 1f;
+                    Vector2 Nr = endSel == 0 ? rA : rB, Nfar = endSel == 0 ? rB : rA;
+                    Vector2 Tr = LaneEdgeCorridorBuilder.PathTangent(Net, R, rampT); if (endSel == 1) Tr = -Tr;   // into-ramp dir
+                    LaneEdge rl0 = Net.Edges[R.Lanes[0]];
+                    int forkNode = endSel == 0 ? rl0.A : rl0.B;
+                    int bestM = -1; float bestSide = 0f, bestNear = GoreSnap; Vector2 bestPm = Vector2.zero;
+                    for (int mi = 0; mi < nc; mi++)
+                    {
+                        if (mi == ri) continue;
+                        Corridor M = Net.Corridors[mi];
+                        if (!NearestOnPath(M, Nr, out Vector2 Pm, out float tm)) continue;
+                        float dn = (Pm - Nr).magnitude; if (dn > GoreSnap) continue;
+                        Vector2 Tm = LaneEdgeCorridorBuilder.PathTangent(Net, M, tm);
+                        if (Vector2.Dot(Tr, Tm) < 0.3f) continue;                // same general downstream direction (exit only; entrances unsupported)
+                        // M must CONTINUE downstream past the fork (so the nose/gore, which land downstream, are on M's path).
+                        LaneEdgeCorridorBuilder.PathEndpoints(Net, M, out Vector2 mA, out Vector2 mB);
+                        Vector2 mFar = Vector2.Dot(mB - Pm, Tr) > Vector2.Dot(mA - Pm, Tr) ? mB : mA;
+                        if (Vector2.Dot(mFar - Pm, Tr) < 5f) continue;           // skip a through segment that ends at the fork
+                        // M is the THROUGH only if it's colinear with an upstream corridor arriving at the fork (the ramp turns
+                        // off, so it has none). Replaces a lane-count test that broke when the through ended with the same lane
+                        // count as the ramp (2-lane → 1+1, 3-lane → 1+2, etc.).
+                        Vector2 mDir = mFar - Pm; if (mDir.sqrMagnitude < 1e-6f) continue; mDir.Normalize();
+                        if (!HasUpstreamColinear(forkNode, mi, ri, mDir, out Vector2 uInto)) continue;
+                        // The THROUGH must be MORE colinear with the upstream than the ramp (the ramp diverges more). Without
+                        // this, a gradually-curving ramp is also within the colinear threshold → the gore gets detected twice
+                        // with through/ramp swapped, and the real through gets wrongly given ramp treatment.
+                        Vector2 rChord = Nfar - Nr; if (rChord.sqrMagnitude < 1e-6f) continue; rChord.Normalize();
+                        if (Vector2.Dot(uInto, mDir) <= Vector2.Dot(uInto, rChord)) continue;
+                        NearestOnPath(M, Nfar, out Vector2 Pmf, out _);
+                        if ((Pmf - Nfar).magnitude <= dn + 1f) continue;          // ramp must diverge (far end farther off M)
+                        float side = Mathf.Sign(Vector2.Dot(LaneEdgeCorridorBuilder.PathRight(Tm), Nfar - Pmf));
+                        if (dn < bestNear) { bestNear = dn; bestM = mi; bestSide = side; bestPm = Pm; }
+                    }
+                    if (bestM < 0) continue;
+                    Corridor Mm = Net.Corridors[bestM];
+                    Vector2 TrFrame = LaneEdgeCorridorBuilder.PathTangent(Net, R, rampT);
+                    // Which side of the RAMP the mainline lies on — measured at the FAR end where the two roadways are well
+                    // separated (at the near/fork end they're coincident, so the sign is just noise). Ramp inner shoulder = this side.
+                    NearestOnPath(Mm, Nfar, out Vector2 PmFar, out _);
+                    float rampSide = Mathf.Sign(Vector2.Dot(LaneEdgeCorridorBuilder.PathRight(TrFrame), PmFar - Nfar));
+                    if (rampSide == 0f) rampSide = -bestSide;
+                    SideEdges(Mm, bestSide, out float mInner, out float mOuter);
+                    SideEdges(R, rampSide, out float rInner, out float rOuter);
+                    int nR = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, R) / 2f), 2, 256);
+                    int nM = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, Mm) / 2f), 2, 256);
+                    // Intersect the ACTUAL (possibly curved) ramp shoulder edges with the through edges: nose = inner∩inner,
+                    // gore = outer∩outer. Iterate the ramp polyline from its fork end so the FIRST crossing is the upstream one.
+                    var rampIn = OffsetPolyline(R, rInner, nR); var rampOut = OffsetPolyline(R, rOuter, nR);
+                    if (rampT > 0.5f) { rampIn.Reverse(); rampOut.Reverse(); }
+                    var g = new ExitGore { Through = bestM, Ramp = ri, ThroughSide = bestSide, RampSide = rampSide, RampT = rampT };
+                    g.HasNose = PolylineIntersect(rampIn, OffsetPolyline(Mm, mInner, nM, 40f), out g.Nose);
+                    g.HasGore = PolylineIntersect(rampOut, OffsetPolyline(Mm, mOuter, nM, 40f), out g.Gore);
+                    if (g.HasNose || g.HasGore) _gores.Add(g);
+                }
+            }
+        }
+
+        // Gore suppression for corridor c: a RAMP hides its inner lane edge + inner shoulder (rampSide); a THROUGH hides only
+        // its exit-side OUTER shoulder (throughSide), keeping its lane edge continuous. Both are redrawn clipped in RenderExitGores.
+        // True if corridor c is the diverging ramp of an exit gore (shares pavement with the through road near the fork).
+        public static bool IsGoreRamp(Corridor c)
+        {
+            foreach (var g in _gores)
+                if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c)) return true;
+            return false;
+        }
+
+        // For a gore ramp, the inner side (toward the through road) whose shoulder overlaps the through lanes. Else 0.
+        public static int GoreRampInnerSide(Corridor c)
+        {
+            foreach (var g in _gores)
+                if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c)) return (int)g.RampSide;
+            return 0;
+        }
+
+        // Marking-clip info for a gore corridor: the gore-side sign (ramp inner side / through exit side) and the NOSE point.
+        // The outermost lane edge on that side is clipped to start at the nose; interior dividers stay continuous. False if neither.
+        public static bool GoreMarkClip(Corridor c, out int side, out Vector2 nosePt)
+        {
+            foreach (var g in _gores)
+            {
+                if (!g.HasNose) continue;
+                if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c)) { side = (int)g.RampSide; nosePt = g.Nose; return true; }
+                if (g.Through >= 0 && g.Through < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Through], c)) { side = (int)g.ThroughSide; nosePt = g.Nose; return true; }
+            }
+            side = 0; nosePt = Vector2.zero; return false;
+        }
+
+        // Gore-ramp inner-shoulder taper info: the inner side + the NOSE and GORE points (the suppressed inner shoulder grows
+        // from zero at the nose to full at the gore). False if c is not a gore ramp with both points.
+        public static bool GoreRampWedgeInfo(Corridor c, out float rampSide, out Vector2 nosePt, out Vector2 gorePt)
+        {
+            foreach (var g in _gores)
+                if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c) && g.HasGore && g.HasNose)
+                { rampSide = g.RampSide; nosePt = g.Nose; gorePt = g.Gore; return true; }
+            rampSide = 0f; nosePt = Vector2.zero; gorePt = Vector2.zero; return false;
+        }
+
+        static void GoreSuppress(Corridor c, out int edgeSide, out int shoulderSide)
+        {
+            edgeSide = 0; shoulderSide = 0;
+            foreach (var g in _gores)
+            {
+                if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c))
+                { edgeSide = (int)g.RampSide; shoulderSide = (int)g.RampSide; return; }
+                if (g.Through >= 0 && g.Through < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Through], c))
+                { edgeSide = (int)g.ThroughSide; shoulderSide = (int)g.ThroughSide; }   // through: its exit-side outer lane EDGE + shoulder are interior in the shared region → drawn clipped from the nose/gore
+            }
+        }
+
+        static Vector2 ClosestOnSeg(Vector2 a, Vector2 b, Vector2 p)
+        {
+            Vector2 ab = b - a; float t = Vector2.Dot(p - a, ab) / Mathf.Max(1e-6f, ab.sqrMagnitude);
+            return a + ab * Mathf.Clamp01(t);
+        }
+
+        // Polyline starting AT `start` (assumed to lie on `poly`) and continuing to poly's end — the downstream remainder.
+        static List<Vector2> ClipFrom(List<Vector2> poly, Vector2 start)
+        {
+            int bestSeg = 0; float best = float.PositiveInfinity;
+            for (int i = 0; i < poly.Count - 1; i++)
+            {
+                float d = (ClosestOnSeg(poly[i], poly[i + 1], start) - start).sqrMagnitude;
+                if (d < best) { best = d; bestSeg = i; }
+            }
+            var res = new List<Vector2> { start };
+            for (int i = bestSeg + 1; i < poly.Count; i++) res.Add(poly[i]);
+            return res;
+        }
+
+        // Draw the ramp's inner-side shoulder edges CLIPPED to begin at the NOSE (inner lane edge, solid) and GORE (outer
+        // shoulder edge, dashed), so they converge with the through corridor's edges. Plan overlay only (skip built ramps).
+        static void RenderExitGores(Transform parent, Func<Vector2, float> groundAt)
+        {
+            if (_gores.Count == 0) return;
+            // Two buffers so each gore line takes its owning corridor's plan colour (red planned / yellow excavated).
+            var vP = new List<Vector3>(); var tP = new List<int>(); var vE = new List<Vector3>(); var tE = new List<int>();
+            foreach (var g in _gores)
+            {
+                Corridor R = Net.Corridors[g.Ramp];
+                if (R.Built) continue;
+                List<Vector3> rv = R.Excavated ? vE : vP; List<int> rt = R.Excavated ? tE : tP;
+                SideEdges(R, g.RampSide, out float rInner, out float rOuter);
+                int nR = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, R) / 2f), 2, 256);
+                var rampIn = OffsetPolyline(R, rInner, nR); var rampOut = OffsetPolyline(R, rOuter, nR);
+                if (g.RampT > 0.5f) { rampIn.Reverse(); rampOut.Reverse(); }   // fork end first
+                if (g.HasNose) EmitPolyline(ClipFrom(rampIn, g.Nose), rv, rt, groundAt);   // ramp inner edge: SOLID, clipped at the nose (forms one side of the gore nose)
+                if (g.HasGore) EmitDashedPolyline(ClipFrom(rampOut, g.Gore), LaneDash, LaneGap, rv, rt, groundAt);
+                // The ramp's interior dividers are NOT redrawn here — they stay continuous (drawn full by the ramp's own overlay),
+                // flowing uninterrupted from the upstream divider through the gore into the ramp (per the spec mockup).
+                if (g.Through >= 0 && g.Through < Net.Corridors.Count)
+                {
+                    Corridor M = Net.Corridors[g.Through];
+                    if (!M.Built)
+                    {
+                        List<Vector3> mv = M.Excavated ? vE : vP; List<int> mt = M.Excavated ? tE : tP;
+                        SideEdges(M, g.ThroughSide, out float mInner, out float mOuter);
+                        int nM = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, M) / 2f), 2, 256);
+                        LaneEdgeCorridorBuilder.PathEndpoints(Net, M, out Vector2 mA, out Vector2 mB);
+                        bool forkAtA = (mA - g.Nose).sqrMagnitude <= (mB - g.Nose).sqrMagnitude;
+                        // Through's exit-side OUTER LANE EDGE: solid, clipped from the NOSE (forms the other side of the gore nose;
+                        // upstream of the nose it's interior — the ramp's continuous divider covers it, so no solid runs back).
+                        if (g.HasNose)
+                        {
+                            var mainEdge = OffsetPolyline(M, mInner, nM); if (!forkAtA) mainEdge.Reverse();
+                            EmitPolyline(ClipFrom(mainEdge, g.Nose), mv, mt, groundAt);
+                        }
+                        // Through's exit-side OUTER SHOULDER edge: dashed, clipped from the GORE downstream.
+                        if (g.HasGore)
+                        {
+                            var mainOut = OffsetPolyline(M, mOuter, nM); if (!forkAtA) mainOut.Reverse();
+                            EmitDashedPolyline(ClipFrom(mainOut, g.Gore), LaneDash, LaneGap, mv, mt, groundAt);
+                        }
+                    }
+                }
+            }
+            BuildGoreMesh(vP, tP, PlannedMat(), "ExitGores", parent);
+            BuildGoreMesh(vE, tE, ExcavatedMat(), "ExitGoresExcavated", parent);
+        }
+
+        static void BuildGoreMesh(List<Vector3> verts, List<int> tris, Material mat, string name, Transform parent)
+        {
+            if (verts.Count == 0) return;
+            var mesh = new Mesh { name = name };
+            if (verts.Count > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateBounds();
+            var go = new GameObject(name); go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>(); mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+        }
+
         // True if lane `li` is rendered as a taper wedge (so it should be excluded from the corridor's uniform body/lines).
         public static bool LaneIsTapered(Corridor c, int li)
         {
@@ -556,7 +869,15 @@ namespace NetworkDesigner.Roads
             // there would DOUBLE-offset it — a skewed puck and a flow-match position that no longer coincides with the
             // connector at the shared peel node. Detect a peeled end (node differs from the corridor's path node at this
             // end) and treat the node itself as the puck (lat = 0).
-            float lat = e.Offset;
+            // Include the body shift at THIS end (A→CenterShift, B→CenterShiftB) so the puck sits on the (canonicalised/connector)
+            // BODY, not at offset-from-node — else picking and flow-position matching land metres off the pavement.
+            float endShift = 0f;
+            if (c != null && c.Lanes.Count > 0)
+            {
+                LaneEdge l0e = Net.Edges[c.Lanes[0]];
+                endShift = (atNode == l0e.B) ? c.CenterShiftB : c.CenterShift;
+            }
+            float lat = e.Offset + endShift;
             if (c != null && c.Lanes.Count > 0 && c.Lanes[0] != edgeIndex)
             {
                 LaneEdge path = Net.Edges[c.Lanes[0]];
@@ -801,7 +1122,8 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float oNew = (s.Offset * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
+                float srcOff = s.Offset + (sc != null ? sc.CenterShift : 0f);              // body position (incl. CenterShift) so the start frame sits on the source's pavement
+                float oNew = (srcOff * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
                 lo = Mathf.Min(lo, oNew); hi = Mathf.Max(hi, oNew);
             }
             if (lo > hi) return false;
@@ -1164,7 +1486,8 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float oNew = (s.Offset * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
+                float srcOff = s.Offset + (sc != null ? sc.CenterShift : 0f);             // body position (incl. CenterShift), to match BuildExtensionCorridor + the source's actual pavement
+                float oNew = (srcOff * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));
                 lo = Mathf.Min(lo, oNew - s.Width * 0.5f); hi = Mathf.Max(hi, oNew + s.Width * 0.5f);
                 // Count by the EXTENSION-frame direction (dirNew), matching BuildExtensionCorridor — off the A end the
                 // source direction inverts, so source-direction counts would put the surplus on the wrong side.
@@ -1564,11 +1887,37 @@ namespace NetworkDesigner.Roads
 
         // node/edge come straight from the ray snap (the exact puck under the cursor) — no re-derivation, so the curve
         // ends on the node you clicked, not a coincident neighbour.
+        // True when (node,edge) is a FULL corridor end — the shared centreline node used by the path lane (lane[0]) — vs a
+        // peeled/single lane that sits on its own node off the cluster. Whole-road connect (road-to-road) only applies between
+        // two full ends; a peeled lane connects lane-to-lane instead. A peeled/subset corridor is flagged AlignLanes (its
+        // lanes sit OFF the centreline at their real offsets), so cloning those offsets onto a centreline path would land the
+        // connector off-centre at the far end — exclude it and let BuildConnectCurve join the actual lane pucks.
+        static bool IsFullCorridorEnd(int node, int edge)
+        {
+            if (edge < 0 || edge >= Net.Edges.Count) return false;
+            LaneEdge e = Net.Edges[edge];
+            Corridor c = (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count) ? Net.Corridors[e.CorridorId] : null;
+            if (c == null || c.Lanes.Count == 0) return false;
+            // A SINGLE peeled lane → lane-to-lane (puck connect): its lone lane IS its path, so BuildConnectCurve lands it on the
+            // clicked puck. A MULTI-lane pull-off is still a road → road-to-road, which clones ALL its lanes onto the a/b nodes
+            // with no peeling (so all lanes are drawn and no node is orphaned); routing it to the 1-lane path drew one lane and
+            // stranded peel nodes.
+            if (c.AlignLanes && c.Lanes.Count <= 1) return false;
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            return node == l0.A || node == l0.B;
+        }
+
         public static bool ConnectClick(int node, int edge, Func<Vector2, float> groundAt)
         {
             if (node < 0) return false;   // both clicks must land on a snapped lane puck
             if (_connA < 0) { _connA = node; _connEdgeA = edge; Rebuild(groundAt); return true; }
-            if (node != _connA) BuildConnectCurve(_connA, _connEdgeA, node, edge, groundAt);
+            if (node != _connA)
+            {
+                if (IsFullCorridorEnd(_connA, _connEdgeA) && IsFullCorridorEnd(node, edge))
+                    BuildCorridorConnectCurve(_connA, _connEdgeA, node, edge, groundAt);   // both full road ends → multi-lane curve
+                else
+                    BuildConnectCurve(_connA, _connEdgeA, node, edge, groundAt);           // a peeled/single lane → 1-lane curve
+            }
             _connA = -1; _connEdgeA = -1;
             return true;
         }
@@ -1662,6 +2011,101 @@ namespace NetworkDesigner.Roads
             Rebuild(groundAt);
         }
 
+        // Outward road tangent at the corridor end on `node` (the A→B path tangent, flipped to point toward `toward`).
+        static Vector2 CorridorEndTangent(Corridor c, LaneEdge end, int node, Vector2 toward, Vector2 fallback)
+        {
+            if (c == null) return fallback;
+            Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, node == end.A ? 0f : 1f);
+            if (tan.sqrMagnitude < 1e-6f) return fallback;
+            return Vector2.Dot(tan, toward) < 0f ? -tan.normalized : tan.normalized;
+        }
+
+        // Lane-span centre (offset) of a corridor's navigable lanes — the lateral middle of its cross-section.
+        static float LaneSpanCentre(Corridor c)
+        {
+            float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
+            if (c != null)
+                foreach (int li in c.Lanes)
+                {
+                    if (li < 0 || li >= Net.Edges.Count) continue;
+                    LaneEdge e = Net.Edges[li]; if (e.Kind == LaneKind.Sidewalk) continue;
+                    lo = Mathf.Min(lo, e.Offset - e.Width * 0.5f); hi = Mathf.Max(hi, e.Offset + e.Width * 0.5f);
+                }
+            return float.IsInfinity(lo) ? 0f : (lo + hi) * 0.5f;
+        }
+
+        // The body lateral shift at the corridor end touching `node` (A→CenterShift, B→CenterShiftB).
+        static float ShiftAtNode(Corridor c, int node)
+        {
+            if (c == null || c.Lanes.Count == 0) return 0f;
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            return (node == l0.B) ? c.CenterShiftB : c.CenterShift;
+        }
+
+        // World position of corridor c's body CENTRE at `node` = node + right·(lane-span centre + body shift at this end).
+        static Vector2 CorridorBodyCentre(Corridor c, int node)
+        {
+            if (node < 0 || node >= Net.Nodes.Count) return Vector2.zero;
+            if (c == null || c.Lanes.Count == 0) return Net.Nodes[node];
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            float t = (node == l0.A) ? 0f : 1f;
+            Vector2 fr = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, c, t));
+            return Net.Nodes[node] + fr * (LaneSpanCentre(c) + ShiftAtNode(c, node));
+        }
+
+        // WHOLE-ROAD connect (road-to-road): join the corridor at node `a` to the corridor at node `b` with ONE tangent-continuous
+        // connector carrying the source road's profile (one shoulder set, all lanes). It SHARES the clicked end nodes — no peeling —
+        // so RegenerateDefaultFlows wires the movements through. Both ends land flush via a TWO-ENDED body shift: CenterShift slews
+        // the body onto the SOURCE's pavement at `a`, CenterShiftB onto the TARGET's at `b`. The shifts are derived from each road's
+        // actual body centre, so they're correct whether a joined road is centred, a canonicalised pull-off, or reversed in sense.
+        static void BuildCorridorConnectCurve(int a, int edgeA, int b, int edgeB, Func<Vector2, float> groundAt)
+        {
+            if (a < 0 || b < 0 || a == b || a >= Net.Nodes.Count || b >= Net.Nodes.Count) return;
+            if (edgeA < 0 || edgeA >= Net.Edges.Count) return;
+            LaneEdge eA = Net.Edges[edgeA];
+            Corridor cA = (eA.CorridorId >= 0 && eA.CorridorId < Net.Corridors.Count) ? Net.Corridors[eA.CorridorId] : null;
+            if (cA == null) return;
+            LaneEdge eB0 = (edgeB >= 0 && edgeB < Net.Edges.Count) ? Net.Edges[edgeB] : null;
+            Corridor cB = (eB0 != null && eB0.CorridorId >= 0 && eB0.CorridorId < Net.Corridors.Count) ? Net.Corridors[eB0.CorridorId] : null;
+            Vector2 pa = Net.Nodes[a], pb = Net.Nodes[b];
+            Vector2 tanA = CorridorEndTangent(cA, eA, a, pb - pa, SafeDir(pb - pa));
+            Vector2 tanB = SafeDir(pa - pb);
+            if (eB0 != null) tanB = CorridorEndTangent(cB, eB0, b, pa - pb, SafeDir(pa - pb));
+            float d = (pb - pa).magnitude * 0.4f;
+
+            // Clone cA's ACTUAL lanes as one corridor (a pulled subset carries the parent's profile id but only its own lanes).
+            Corridor nc = Net.AddCorridor();
+            nc.Curved = true; nc.ControlA = pa + tanA * d; nc.ControlB = pb + tanB * d;
+            nc.AlignLanes = false; nc.Profile = cA.Profile;
+            nc.ShoulderBA = cA.ShoulderBA; nc.ShoulderAB = cA.ShoulderAB; nc.MedianWidth = cA.MedianWidth;
+            bool sameSense = (a == eA.B);   // connector A→B continues cA's A→B (clicked its far/B end) → keep offsets + directions
+            foreach (int sl in cA.Lanes)
+            {
+                if (sl < 0 || sl >= Net.Edges.Count) continue;
+                LaneEdge s = Net.Edges[sl];
+                float off = sameSense ? s.Offset : -s.Offset;
+                int dir = sameSense ? s.Direction : (s.Direction == 2 ? 0 : s.Direction == 0 ? 2 : s.Direction);
+                int li = Net.AddLane(new LaneEdge { A = a, B = b, CorridorId = nc.Id, Kind = s.Kind, Direction = dir, Width = s.Width, Offset = off });
+                nc.Lanes.Add(li);
+            }
+            if (!sameSense) { float t = nc.ShoulderBA; nc.ShoulderBA = nc.ShoulderAB; nc.ShoulderAB = t; }   // mirror shoulders with the flip
+            Net.SortCorridorLanes(nc);
+
+            // Two-ended body shift: project each road's body centre onto the connector's per-END lateral axis (the tangent normal
+            // PathFrame slews along at that end) and subtract the connector's own lane-span centre, so the body starts flush on the
+            // source's pavement and ends flush on the target's — even where the connector leaves at an angle.
+            Vector2 frA = LaneEdgeCorridorBuilder.PathRight(tanA);   // A-end axis (connector tangent normal at a)
+            Vector2 frB = LaneEdgeCorridorBuilder.PathRight(-tanB);  // B-end axis (connector A→B tangent normal at b)
+            float ncMid = LaneSpanCentre(nc);
+            Vector2 srcC = CorridorBodyCentre(cA, a);
+            Vector2 tgtC = cB != null ? CorridorBodyCentre(cB, b) : (eB0 != null ? pb + frB * eB0.Offset : pb);
+            nc.CenterShift  = Vector2.Dot(srcC - pa, frA) - ncMid;
+            nc.CenterShiftB = Vector2.Dot(tgtC - pb, frB) - ncMid;
+
+            RegenerateDefaultFlows(groundAt);
+            Rebuild(groundAt);
+        }
+
         // ── connect guides: colinear + perpendicular dashed-yellow guides off the nodes near the cursor while connecting.
         static GameObject _connGuideGo; static Mesh _connGuideMesh; static Material _connGuideMat;
         static Material ConnGuideMat() => _connGuideMat != null ? _connGuideMat
@@ -1672,14 +2116,48 @@ namespace NetworkDesigner.Roads
         // (same tangent-continuous cubic BuildConnectCurve will create). Sampled as short segments into the guide mesh.
         static void AppendConnectPreview(Vector2 toXz, int toNode, int toEdge, Func<Vector2, float> groundAt)
         {
-            if (!TryEndpointPos(_connA, _connEdgeA, out Vector2 fromP, out _)) return;
-            Vector2 toP = toXz;
-            if (toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && TryEndpointPos(toNode, toEdge, out Vector2 tp, out _)) toP = tp;
-            if ((toP - fromP).sqrMagnitude < 1f) return;
-            Vector2 tanA = SafeDir(toP - fromP);
-            if (LaneGuideFrame(_connA, _connEdgeA, out _, out Vector2 ta)) tanA = Vector2.Dot(ta, toP - fromP) >= 0f ? ta : -ta;
-            Vector2 tanB = SafeDir(fromP - toP);
-            if (toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && LaneGuideFrame(toNode, toEdge, out _, out Vector2 tb)) tanB = Vector2.Dot(tb, fromP - toP) >= 0f ? tb : -tb;
+            if (_connA < 0 || _connA >= Net.Nodes.Count || _connEdgeA < 0 || _connEdgeA >= Net.Edges.Count) return;
+            LaneEdge eA = Net.Edges[_connEdgeA];
+            Corridor cA = (eA.CorridorId >= 0 && eA.CorridorId < Net.Corridors.Count) ? Net.Corridors[eA.CorridorId] : null;
+            if (cA == null) return;
+            // Mirror ConnectClick's branch so the ghost matches what gets built. ROAD-TO-ROAD draws the connector's BODY centreline
+            // (source body-centre → target body-centre, or the cursor while unsnapped) — the same slewed line the two-ended-shift
+            // connector renders, so the dashed guide lands where the connector will (drawing from the clicked lane's puck put the
+            // guide a lane off the body centre). Otherwise LANE-TO-LANE from the clicked lane pucks.
+            bool srcFull = IsFullCorridorEnd(_connA, _connEdgeA);
+            bool tgtFull = srcFull && toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && IsFullCorridorEnd(toNode, toEdge);
+            Vector2 fromP, toP, tanA, tanB;
+            if (srcFull)
+            {
+                fromP = CorridorBodyCentre(cA, _connA);
+                if (tgtFull)
+                {
+                    LaneEdge eB = Net.Edges[toEdge];
+                    Corridor cB = (eB.CorridorId >= 0 && eB.CorridorId < Net.Corridors.Count) ? Net.Corridors[eB.CorridorId] : null;
+                    toP = CorridorBodyCentre(cB, toNode);
+                    if ((toP - fromP).sqrMagnitude < 1f) return;
+                    tanA = CorridorEndTangent(cA, eA, _connA, toP - fromP, SafeDir(toP - fromP));
+                    tanB = CorridorEndTangent(cB, eB, toNode, fromP - toP, SafeDir(fromP - toP));
+                }
+                else
+                {
+                    toP = toXz;
+                    if ((toP - fromP).sqrMagnitude < 1f) return;
+                    tanA = CorridorEndTangent(cA, eA, _connA, toP - fromP, SafeDir(toP - fromP));
+                    tanB = SafeDir(fromP - toP);
+                }
+            }
+            else
+            {
+                if (!TryEndpointPos(_connA, _connEdgeA, out fromP, out _)) return;
+                toP = toXz;
+                if (toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && TryEndpointPos(toNode, toEdge, out Vector2 tp, out _)) toP = tp;
+                if ((toP - fromP).sqrMagnitude < 1f) return;
+                tanA = SafeDir(toP - fromP);
+                if (LaneGuideFrame(_connA, _connEdgeA, out _, out Vector2 ta)) tanA = Vector2.Dot(ta, toP - fromP) >= 0f ? ta : -ta;
+                tanB = SafeDir(fromP - toP);
+                if (toNode >= 0 && toEdge >= 0 && toEdge < Net.Edges.Count && LaneGuideFrame(toNode, toEdge, out _, out Vector2 tb)) tanB = Vector2.Dot(tb, fromP - toP) >= 0f ? tb : -tb;
+            }
             float d = (toP - fromP).magnitude * 0.4f;
             Vector2 c1 = fromP + tanA * d, c2 = toP + tanB * d;
             Vector2 prev = fromP; const int N = 24;
@@ -1796,8 +2274,10 @@ namespace NetworkDesigner.Roads
         struct ParCand { public bool Ok; public Vector2 Q0, Q1, Q2, Q3, Far; public bool Curved; public string Profile; public int StartEnd; }
         static readonly System.Collections.Generic.HashSet<long> _parSeen = new System.Collections.Generic.HashSet<long>();
 
-        // Build the parallel segment for corridor c off its `sourceNode` end, given the placed start + drag cursor.
-        static ParCand BuildParallelSeg(Corridor c, int sourceNode, Vector2 startPos, Vector2 cursor)
+        // Build the parallel segment for corridor c off its `sourceNode` end, given the placed start + drag cursor. The new
+        // road is laid with `profileId` (the active/selected profile) — NOT the source's — so you can parallel a 4-lane road
+        // with a 1-lane one. Only the offset PATH comes from the source corridor.
+        static ParCand BuildParallelSeg(Corridor c, int sourceNode, Vector2 startPos, Vector2 cursor, string profileId)
         {
             ParCand r = default;
             if (c == null || c.Lanes.Count == 0) return r;
@@ -1823,7 +2303,7 @@ namespace NetworkDesigner.Roads
             }
             float lo = Mathf.Min(tN, tEnd), hi = Mathf.Max(tN, tEnd);
             if (hi - lo <= 1e-3f) return r;
-            r.Curved = c.Curved; r.Profile = c.Profile;
+            r.Curved = c.Curved; r.Profile = profileId;
             if (c.Curved)
             {
                 SubCubic(A, c.ControlA, c.ControlB, B, lo, hi, out Vector2 s0, out Vector2 s1, out Vector2 s2, out Vector2 s3);
@@ -1853,7 +2333,7 @@ namespace NetworkDesigner.Roads
         // every source corridor whose end sits near the start (excluding our own road), and picks the one whose far end is
         // nearest the cursor — i.e. the segment that CONTINUES FORWARD. This lets a run carry on past a junction or start
         // beside a mid-road node, not just off a road's free end.
-        public static bool UpdateParallelDraw(Vector2 startPos, Vector2 cursor, Func<Vector2, float> groundAt)
+        public static bool UpdateParallelDraw(Vector2 startPos, Vector2 cursor, Func<Vector2, float> groundAt, string profileId)
         {
             _parArmed = false;
             float rng = Mathf.Max(40f, NetworkDesigner.Terrain.PlanGuides.GuideRange); float rng2 = rng * rng;
@@ -1867,7 +2347,7 @@ namespace NetworkDesigner.Roads
                 if (e.CorridorId < 0 || e.CorridorId >= Net.Corridors.Count) continue;
                 long key = ((long)e.CorridorId << 24) ^ (uint)Endpoints[i].Node;
                 if (!_parSeen.Add(key)) continue;                                   // one eval per (corridor, end)
-                ParCand cand = BuildParallelSeg(Net.Corridors[e.CorridorId], Endpoints[i].Node, startPos, cursor);
+                ParCand cand = BuildParallelSeg(Net.Corridors[e.CorridorId], Endpoints[i].Node, startPos, cursor, profileId);
                 if (!cand.Ok) continue;
                 float d = (cand.Far - cursor).sqrMagnitude;
                 if (d < bestFar) { bestFar = d; best = cand; }
@@ -2034,6 +2514,47 @@ namespace NetworkDesigner.Roads
         public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius, string profileId, float designSpeedKmh = 40f)
         {
             if (!Extending) return false;
+            // No-go: a pull-off must map BOTH resulting roads onto existing profiles. Check the pulled group's config AND the
+            // remainder (= source road − pulled); refuse if either has no profile. The PULLED check rarely fires (you needed a
+            // one-way "k" profile to select k lanes at all); the REMAINDER is the one that bites — pull 3 off a 4×4 and you need
+            // a 1×4 to exist. A whole-road continuation has an empty remainder and is exempt.
+            {
+                int pab = 0, pba = 0;
+                foreach (int sl in _extLanes)
+                {
+                    if (sl < 0 || sl >= Net.Edges.Count) continue;
+                    LaneEdge e = Net.Edges[sl]; if (e.Kind != LaneKind.Traffic) continue;
+                    if (e.Direction == 2) pab++; else if (e.Direction == 0) pba++;
+                }
+                if (pab + pba > 0 && RoadProfileLibrary.FindByConfig(pab, pba) == null)
+                { Debug.LogWarning($"[Pull-off] refused: pulled group ({pab},{pba}) has no profile"); return false; }
+
+                int sab = 0, sba = 0;
+                if (_extLanes.Count > 0 && _extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count)
+                {
+                    int cid = Net.Edges[_extLanes[0]].CorridorId;
+                    Corridor srcC = (cid >= 0 && cid < Net.Corridors.Count) ? Net.Corridors[cid] : null;
+                    if (srcC != null)
+                        foreach (int li in srcC.Lanes)
+                        { if (li < 0 || li >= Net.Edges.Count) continue; LaneEdge e = Net.Edges[li]; if (e.Kind != LaneKind.Traffic) continue; if (e.Direction == 2) sab++; else if (e.Direction == 0) sba++; }
+                }
+                // Only a STRICT SUBSET pull-off reduces a downstream road. Selecting ALL the source's lanes is a whole-road
+                // continuation (extend a 4×4 with a 4×4) — no remainder, exempt. (Also exempt when the source config is
+                // indeterminate, sab=sba=0, so we never refuse on missing data.)
+                bool wholeRoad = pab >= sab && pba >= sba;
+                if (!wholeRoad)
+                {
+                    // Remainder reduction follows the per-pull ExitMode (cycled on the RoadPalette button): DeleteAll drops all
+                    // k pulled continuations (remainder N−k), DeleteOuter drops just the outer one (N−1 in the pulled direction),
+                    // Keep drops nothing. Source config approximates the downstream; ApplyExitPull re-profiles the actual one.
+                    int delAb = 0, delBa = 0;
+                    if (ExitMode == ExitPullMode.DeleteAll) { delAb = pab; delBa = pba; }
+                    else if (ExitMode == ExitPullMode.DeleteOuter) { if (pab > 0) delAb = 1; else if (pba > 0) delBa = 1; }
+                    int rab = sab - delAb, rba = sba - delBa;
+                    if (delAb + delBa > 0 && rab + rba > 0 && (rab < 0 || rba < 0 || RoadProfileLibrary.FindByConfig(rab, rba) == null))
+                    { Debug.LogWarning($"[Pull-off] refused: remainder ({rab},{rba}) has no profile (ExitMode {ExitMode})"); return false; }
+                }
+            }
             Vector2 start = Net.Nodes[_extNode];
             // Resolve in/out from the pull direction (first leg): pulling in a lane's travel direction extends its incoming
             // lane, against it the outgoing — so it never matters which unified puck you clicked.
@@ -2080,7 +2601,8 @@ namespace NetworkDesigner.Roads
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, nodeN == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
-                float oNew = (s.Offset * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));   // preserve the lane's offset magnitude (re-spread on the new frame) so a turn doesn't collapse lanes to centre
+                float srcOff = s.Offset + (sc != null ? sc.CenterShift : 0f);            // source lane's BODY position (incl. CenterShift) — extending a canonicalised pull-off off its node-relative offset would land it CenterShift metres off the source
+                float oNew = (srcOff * (Vector2.Dot(frS, frNew) >= 0f ? 1f : -1f));       // preserve the lane's offset magnitude (re-spread on the new frame) so a turn doesn't collapse lanes to centre
                 bool incomingAtN = (s.Direction == 2 && nodeN == s.B) || (s.Direction == 0 && nodeN == s.A);
                 int dirNew = incomingAtN ? 2 : 0;                  // arriving lane → continue outward (A'=N→B'); return lane → inbound
                 int li = Net.AddLane(new LaneEdge { A = nodeN, B = nodeM, CorridorId = nc.Id, Kind = s.Kind, Direction = dirNew, Width = s.Width, Offset = oNew });
@@ -2102,6 +2624,54 @@ namespace NetworkDesigner.Roads
             if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // F: mirror which side gains the surplus lane
             if (wantBA > 0 && wantAB > 0) { AppendOutboard(nc, 0, wantBA); AppendOutboard(nc, 2, wantAB); }
             Net.SortCorridorLanes(nc);
+            // Adopt the matching one-way profile for the pulled group AND canonicalise it. The group inherited the SOURCE profile
+            // and the PARENT's lane offsets, so a 2-lane pull-off off a "4" carried profile "4" and offsets like +2.75/+6.75
+            // instead of a standalone "2"'s −1.25/+2.75. FindByConfig picks the one-way k-lane profile ("1".."4"); we then replace
+            // each lane's offset with that profile's CANONICAL offset and store the constant lateral Δ as CenterShift — so the
+            // body stays on the same pavement while the lanes' nodes stay shared with the parent for flow. Result: a pulled "k" is
+            // byte-for-byte a standalone "k" (same profile ⇒ same offsets) → the clone-connect lands flush.
+            {
+                int cab = 0, cba = 0;
+                foreach (int li in nc.Lanes)
+                {
+                    if (li < 0 || li >= Net.Edges.Count) continue;
+                    LaneEdge e = Net.Edges[li]; if (e.Kind != LaneKind.Traffic) continue;
+                    if (e.Direction == 2) cab++; else if (e.Direction == 0) cba++;
+                }
+                string pk = RoadProfileLibrary.FindByConfig(cab, cba, nc.Profile);
+                if (!string.IsNullOrEmpty(pk))
+                {
+                    nc.Profile = pk;
+                    var rp = RoadProfileLibrary.Resolve(pk);
+                    if (rp != null)
+                    {
+                        if (rp.ShoulderBA != null) nc.ShoulderBA = rp.ShoulderBA.Width;
+                        if (rp.ShoulderAB != null) nc.ShoulderAB = rp.ShoulderAB.Width;
+                    }
+                    // Canonical offsets for pk (= what a standalone road uses), mirrored to the pulled group's travel side.
+                    ProfileLanes(pk, out _, out _);
+                    int pulledDir = cab > 0 ? 2 : 0;
+                    int pkDir = _laneBuf.Count > 0 ? _laneBuf[0].dir : pulledDir;
+                    float mir = pkDir == pulledDir ? 1f : -1f;
+                    var canon = new List<float>();
+                    foreach (var lb in _laneBuf) canon.Add(lb.off * mir);
+                    canon.Sort();
+                    var pulled = new List<int>();
+                    foreach (int li in nc.Lanes) if (li >= 0 && li < Net.Edges.Count && Net.Edges[li].Kind == LaneKind.Traffic) pulled.Add(li);
+                    pulled.Sort((x, y) => Net.Edges[x].Offset.CompareTo(Net.Edges[y].Offset));
+                    if (pulled.Count == canon.Count && pulled.Count > 0)
+                    {
+                        float shift = 0f;
+                        for (int i = 0; i < pulled.Count; i++) shift += Net.Edges[pulled[i]].Offset - canon[i];
+                        shift /= pulled.Count;
+                        for (int i = 0; i < pulled.Count; i++) Net.Edges[pulled[i]].Offset = canon[i];
+                        nc.CenterShift = shift; nc.CenterShiftB = shift;   // uniform shift along the whole pull-off
+                        nc.AlignLanes = false;        // it's now a canonical road, body sits on the shifted centreline
+                        Net.SortCorridorLanes(nc);
+                    }
+                }
+                else Debug.LogWarning($"[Pull-off] no profile with config ({cab},{cba}) — pulled group keeps profile '{nc.Profile}'");
+            }
         }
 
         // Append (want − current) navigable lanes in travel direction `dir` OUTBOARD of the corridor's outermost lane on
@@ -2263,10 +2833,30 @@ namespace NetworkDesigner.Roads
             foreach (int dl in del) { int ci = Net.Edges[dl].CorridorId; if (ci < 0) continue; if (!survive.ContainsKey(ci)) survive[ci] = Net.Corridors[ci].Lanes.Count; survive[ci]--; }
             foreach (var kv in survive) if (kv.Value <= 0) return;
             foreach (var kv in survive) Net.Corridors[kv.Key].AlignLanes = true;
+            // Capture the remainder corridor OBJECTS before DeleteLanes — it re-indexes edges/nodes/corridors but REUSES the
+            // Corridor instances and remaps their Lanes, so references stay valid while indices don't.
+            var remainder = new List<Corridor>();
+            foreach (var kv in survive) if (kv.Key >= 0 && kv.Key < Net.Corridors.Count) remainder.Add(Net.Corridors[kv.Key]);
 
             // Tapers are NOT recorded here — they're derived generally at Rebuild (DetectLaneDropTapers) from lane-count
             // mismatches at shared nodes, wherever they occur, not pinned to this pull.
             DeleteLanes(del, groundAt);
+
+            // Remainder re-profiling: the reduced downstream road is now a real "N−k". Adopt the profile matching its NEW lane
+            // config (one proper shoulder set + a real identity) so it's a "2" not a clipped "4". Keep AlignLanes — its survivors
+            // keep their offsets and fan at the fork. The pulled-group no-go check already guaranteed this profile exists.
+            foreach (Corridor rc in remainder)
+            {
+                if (rc == null) continue;
+                int rab = 0, rba = 0;
+                foreach (int li in rc.Lanes)
+                { if (li < 0 || li >= Net.Edges.Count) continue; LaneEdge e = Net.Edges[li]; if (e.Kind != LaneKind.Traffic) continue; if (e.Direction == 2) rab++; else if (e.Direction == 0) rba++; }
+                string pr = RoadProfileLibrary.FindByConfig(rab, rba, rc.Profile);
+                if (string.IsNullOrEmpty(pr)) continue;
+                rc.Profile = pr;
+                var rp = RoadProfileLibrary.Resolve(pr);
+                if (rp != null) { if (rp.ShoulderBA != null) rc.ShoulderBA = rp.ShoulderBA.Width; if (rp.ShoulderAB != null) rc.ShoulderAB = rp.ShoulderAB.Width; }
+            }
         }
 
         // The lane that `pickedLane` continues into THROUGH `node` — same travel direction, best world-position match,

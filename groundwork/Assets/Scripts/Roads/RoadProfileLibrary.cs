@@ -54,6 +54,40 @@ namespace NetworkDesigner.Roads
             return p != null && p.TotalWidth > 0.1f ? p.TotalWidth : fallback;
         }
 
+        // ── profile lane configuration (for pull-off / connect re-profiling) ──
+        // The (AB, BA) navigable traffic-lane counts of a profile, derived from its authored stack. Only Traffic segments
+        // are car lanes (Turn is the centre lane, Bike/Rail/Shoulder/Sidewalk are not). Both zero if the profile is unknown.
+        public static void LaneConfig(string id, out int ab, out int ba)
+        {
+            ab = 0; ba = 0;
+            CorridorStack st = ResolveStack(id);
+            if (st == null) return;
+            if (st.AB != null) foreach (var s in st.AB) if (s != null && s.Type == CorridorType.Traffic) ab++;
+            if (st.BA != null) foreach (var s in st.BA) if (s != null && s.Type == CorridorType.Traffic) ba++;
+        }
+
+        // Find a profile whose traffic-lane config matches (ab, ba) — direction-MIRRORED, so a one-way profile stored as
+        // (k,0) also satisfies a request for (0,k) (which side is symmetric). Among matches, prefers the one most like
+        // `preferLike` (closest total width) so a pull-off keeps the source's shoulder/lane style. Null if none matches —
+        // the caller treats that as a hard "no-go" (the pull-off/connect is refused). Excludes `preferLike`'s own id is NOT
+        // done here: a self-match is valid (e.g. re-profiling to the same profile when nothing changed).
+        public static string FindByConfig(int ab, int ba, string preferLike = null)
+        {
+            string best = null; float bestScore = float.PositiveInfinity;
+            float likeW = !string.IsNullOrEmpty(preferLike) ? TotalWidth(preferLike, -1f) : -1f;
+            foreach (var c in Configs)
+            {
+                if (c == null || string.IsNullOrEmpty(c.Id)) continue;
+                LaneConfig(c.Id, out int cab, out int cba);
+                if (cab + cba == 0) continue;                                   // not a drivable profile
+                bool match = (cab == ab && cba == ba) || (cab == ba && cba == ab);
+                if (!match) continue;
+                float score = likeW > 0f ? Mathf.Abs(TotalWidth(c.Id, 0f) - likeW) : 0f;
+                if (score < bestScore) { bestScore = score; best = c.Id; }
+            }
+            return best;
+        }
+
         static string ReactPath => Path.Combine(Application.dataPath, "..", "road-config.json");
         static string UserPath => Path.Combine(Application.dataPath, "..", "road-profiles-ingame.json");
 

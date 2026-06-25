@@ -59,6 +59,12 @@ namespace NetworkDesigner.Roads
         public Vector2 ControlA, ControlB;                    // cubic control points in the corridor's A→B param (only when Curved)
         public bool AlignLanes;                              // lane-subset extension: lay the body at each lane's actual Offset
                                                              // (fill gaps with asphalt + shift CenterU) so it sits on the source lanes
+        public float CenterShift;                            // lateral body shift at the A end (canonicalised pull-off / connector):
+                                                             // render the body on a centreline shifted from the lane[0] path, so the
+                                                             // lanes' graph nodes stay shared (flow) while stored offsets are canonical.
+        public float CenterShiftB;                           // lateral body shift at the B end; the body interpolates A→B. Equals
+                                                             // CenterShift for a uniform shift (pull-off); differs for a CONNECTOR that
+                                                             // sweeps from the source's pavement (A) to the target's (B). 0 = no shift.
         public float MedianWidth;                             // centre band width between BA and AB lanes (0 = none)
         public float ShoulderBA, ShoulderAB;                  // outer non-navigable shoulder widths
         public string Profile;                                // source profile id (markings/style reuse during the spike)

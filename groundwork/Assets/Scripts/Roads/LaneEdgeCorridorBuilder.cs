@@ -16,26 +16,49 @@ namespace NetworkDesigner.Roads
     {
         // ── corridor reference-path samplers (A→B param 0..1; straight chord or cubic bezier per c.Curved) ──
         // Shared by render/overlay/endpoints/beds/agents so the lane geometry stays consistent across all of them.
-        public static bool PathEndpoints(LaneEdgeNetwork net, Corridor c, out Vector2 a, out Vector2 b)
+        // Reference-path frame: lane[0]'s graph nodes + controls, laterally offset by CenterShift/CenterShiftB (canonicalised
+        // pull-off or connector — the body renders on a slewed centreline while the lanes' nodes stay put for flow). Each END is
+        // shifted along ITS OWN tangent normal (A: control−node dir; B: node−control dir), NOT the chord normal — so when the
+        // corridor leaves at an angle the body stays flush with the road it meets (chord-normal shifting tilted the join).
+        static bool PathFrame(LaneEdgeNetwork net, Corridor c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)
         {
-            a = b = Vector2.zero;
+            a = b = c1 = c2 = Vector2.zero;
             if (c == null || c.Lanes.Count == 0) return false;
             LaneEdge l0 = net.Edges[c.Lanes[0]];
-            a = net.Nodes[l0.A]; b = net.Nodes[l0.B];
+            a = net.Nodes[l0.A]; b = net.Nodes[l0.B]; c1 = c.ControlA; c2 = c.ControlB;
+            if (Mathf.Abs(c.CenterShift) > 1e-4f || Mathf.Abs(c.CenterShiftB) > 1e-4f)
+            {
+                Vector2 chord = b - a;
+                if (chord.sqrMagnitude > 1e-8f)
+                {
+                    Vector2 tA = c.Curved && (c1 - a).sqrMagnitude > 1e-8f ? (c1 - a).normalized : chord.normalized;   // tangent at A
+                    Vector2 tB = c.Curved && (b - c2).sqrMagnitude > 1e-8f ? (b - c2).normalized : chord.normalized;   // tangent at B (A→B dir)
+                    Vector2 nrmA = new Vector2(tA.y, -tA.x);
+                    Vector2 nrmB = new Vector2(tB.y, -tB.x);
+                    a += nrmA * c.CenterShift;  c1 += nrmA * c.CenterShift;    // A end + its control
+                    b += nrmB * c.CenterShiftB; c2 += nrmB * c.CenterShiftB;   // B end + its control → the path slews A→B
+                }
+            }
             return true;
+        }
+
+        public static bool PathEndpoints(LaneEdgeNetwork net, Corridor c, out Vector2 a, out Vector2 b)
+        {
+            b = Vector2.zero;
+            return PathFrame(net, c, out a, out b, out _, out _);
         }
 
         public static Vector2 PathPoint(LaneEdgeNetwork net, Corridor c, float t)
         {
-            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return Vector2.zero;
-            return c.Curved ? GeometryResolver.SampleCubic(a, c.ControlA, c.ControlB, b, t) : Vector2.Lerp(a, b, t);
+            if (!PathFrame(net, c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)) return Vector2.zero;
+            return c.Curved ? GeometryResolver.SampleCubic(a, c1, c2, b, t) : Vector2.Lerp(a, b, t);
         }
 
         // Unit tangent of the reference path at t, pointing A→B (or +X for a degenerate corridor).
         public static Vector2 PathTangent(LaneEdgeNetwork net, Corridor c, float t)
         {
-            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return Vector2.right;
-            Vector2 tan = c.Curved ? GeometryResolver.CubicTangent(a, c.ControlA, c.ControlB, b, t) : (b - a);
+            if (!PathFrame(net, c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)) return Vector2.right;
+            Vector2 tan = c.Curved ? GeometryResolver.CubicTangent(a, c1, c2, b, t) : (b - a);
             return tan.sqrMagnitude < 1e-8f ? Vector2.right : tan.normalized;
         }
 
@@ -45,8 +68,8 @@ namespace NetworkDesigner.Roads
         // Arc length of the corridor reference path (curve) or chord (straight).
         public static float PathLength(LaneEdgeNetwork net, Corridor c)
         {
-            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return 0f;
-            return c.Curved ? GeometryResolver.CubicArcLength(a, c.ControlA, c.ControlB, b) : (b - a).magnitude;
+            if (!PathFrame(net, c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)) return 0f;
+            return c.Curved ? GeometryResolver.CubicArcLength(a, c1, c2, b) : (b - a).magnitude;
         }
 
         // The corridor's cross-section, laid left→right from its lanes (ordered by lateral offset) with the median
@@ -76,6 +99,9 @@ namespace NetworkDesigner.Roads
             // A taper that owns a side's shoulder draws it along the wedge (BuildTaperBodies), so drop it from the body.
             float shBA = LaneEdgeWorld.ShoulderSuppressed(c, -1f) ? 0f : c.ShoulderBA;
             float shAB = LaneEdgeWorld.ShoulderSuppressed(c, 1f) ? 0f : c.ShoulderAB;
+            // A gore ramp's inner shoulder overlaps the through lanes near the fork → drop it from the built body.
+            int goreInner = LaneEdgeWorld.GoreRampInnerSide(c);
+            if (goreInner < 0) shBA = 0f; else if (goreInner > 0) shAB = 0f;
 
             // Lane-subset extension: lay each lane at its ACTUAL Offset (fill any gaps between non-adjacent lanes with
             // asphalt) and shift the centreline (CenterU) so the swept body sits on the source lanes, not re-centred.
@@ -139,7 +165,9 @@ namespace NetworkDesigner.Roads
         {
             if (c.Lanes.Count == 0) return null;
             LaneEdge l0 = net.Edges[c.Lanes[0]];
-            Vector2 a = net.Nodes[l0.A], b = net.Nodes[l0.B];
+            // Body sweeps along the (possibly CenterShift-ed) reference path, not the raw lane[0] nodes — so a canonicalised
+            // pull-off renders on its shifted centreline while l0's nodes stay shared with the parent for flow/grade.
+            PathFrame(net, c, out Vector2 a, out Vector2 b, out Vector2 swA, out Vector2 swB);
             RoadCrossSection xs = BuildCrossSection(c, net);
             // Once excavated, sit the body on the CAPTURED design grade (NodeY) as a slab of the bed depth — so it fills
             // the cut bed at the original level instead of draping into the (now-lowered) terrain. Un-excavated → drape.
@@ -148,12 +176,17 @@ namespace NetworkDesigner.Roads
             if (haveGrade && c.BedDepth > 0f) xs.Thickness = c.BedDepth;
             float hA = haveGrade ? yA : (groundAt != null ? groundAt(a) : 0f);
             float hB = haveGrade ? yB : (groundAt != null ? groundAt(b) : 0f);
+            // A gore ramp shares pavement with the through road near the fork; sit it just above so the overlap renders cleanly
+            // (the two coplanar slabs otherwise z-fight into a dirty speckle) instead of fighting per-pixel.
+            if (LaneEdgeWorld.IsGoreRamp(c)) { hA += 0.04f; hB += 0.04f; }
             float follow = haveGrade ? 0f : (groundAt != null ? 1f : 0f);   // design grade once excavated; else terrain-follow
-            GameObject body = RoadSweep.Build(xs, a, b, c.Curved, c.ControlA, c.ControlB, parent, $"LaneEdgeCorridor_{c.Id}",
+            GameObject body = RoadSweep.Build(xs, a, b, c.Curved, swA, swB, parent, $"LaneEdgeCorridor_{c.Id}",
                                               hA, hB, groundAt, follow);
             BuildMarkings(net, c, parent, hA, hB, groundAt, follow);   // painted lane lines, riding the same path + grade
             BuildDirectionArrows(net, c, parent, hA, hB, groundAt, follow);   // travel arrows on one-way roads (~every 200 m)
             BuildTaperBodies(net, c, parent, hA, hB, groundAt, follow);   // paved lane-drop wedges in dropped-lane slots
+            if (LaneEdgeWorld.GoreRampWedgeInfo(c, out float gRampSide, out Vector2 gNose, out Vector2 gGore))
+                BuildGoreShoulderWedge(net, c, parent, hA, hB, groundAt, follow, gRampSide, gNose, gGore);   // ramp inner shoulder: 0 at nose → full at gore
             return body;
         }
 
@@ -198,6 +231,8 @@ namespace NetworkDesigner.Roads
                     Vector2 ip = p + fr * innerOff, op = p + fr * outerOff;
                     inner.Add(new Vector3(ip.x, y, ip.y));
                     outer.Add(new Vector3(op.x, y, op.y));
+                    // Shoulder rides at constant width outside the wedge (NOT scaled): keeps its 1.5 m to the gore, ending one
+                    // shoulder-width off the tip where it meets the continuing road's shoulder. See LaneEdgeWorld.TaperWedge.
                     if (sh > 0.01f) { Vector2 spq = p + fr * (outerOff + sgn * sh); shel.Add(new Vector3(spq.x, y, spq.y)); }
                 }
                 BuildTaperStrip(inner, outer, parent, $"LaneDropTaper_{c.Id}", TaperMat());
@@ -206,6 +241,50 @@ namespace NetworkDesigner.Roads
                 // edge there was suppressed) → paint it SOLID white. The inner divider is the dashed CorridorMarks line.
                 if (LaneEdgeWorld.TaperIsOutermost(c, tp)) BuildRailLine(outer, MarkWhiteMat(), parent, $"LaneDropTaperEdge_{c.Id}");
             }
+        }
+
+        // ── gore-ramp inner shoulder ── the ramp's inner (through-facing) shoulder is dropped from the uniform body (it would
+        // overlap the through lanes near the fork); here it REGROWS from zero width at the GORE to full over a short taper, so
+        // downstream — where the ramp is a separate road beside grass — it has a proper inner shoulder again.
+        static float NearestPathT(LaneEdgeNetwork net, Corridor c, Vector2 q)
+        {
+            float bt = 0f, best = float.PositiveInfinity;
+            for (int i = 0; i <= 96; i++) { float t = i / 96f; float d = (PathPoint(net, c, t) - q).sqrMagnitude; if (d < best) { best = d; bt = t; } }
+            return bt;
+        }
+
+        static void BuildGoreShoulderWedge(LaneEdgeNetwork net, Corridor c, Transform parent, float hA, float hB, Func<Vector2, float> groundAt, float follow, float rampSide, Vector2 nosePt, Vector2 gorePt)
+        {
+            if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return;
+            float pathLen = PathLength(net, c); if (pathLen < 1e-2f) return;
+            float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
+            foreach (int li in c.Lanes)
+            {
+                if (li < 0 || li >= net.Edges.Count) continue;
+                LaneEdge e = net.Edges[li]; if (e.Kind == LaneKind.Sidewalk) continue;
+                lo = Mathf.Min(lo, e.Offset - e.Width * 0.5f); hi = Mathf.Max(hi, e.Offset + e.Width * 0.5f);
+            }
+            if (float.IsInfinity(lo)) return;
+            float innerEdge = rampSide < 0f ? lo : hi;                 // ramp lane edge on the inner side
+            float sh = rampSide < 0f ? c.ShoulderBA : c.ShoulderAB; if (sh < 0.01f) return;
+            // The inner shoulder grows from ZERO at the NOSE to FULL at the GORE (the paved-gore triangle), then stays full.
+            float noseT = NearestPathT(net, c, nosePt), goreT = NearestPathT(net, c, gorePt);
+            float startT = Mathf.Min(noseT, goreT);                     // upstream end (the wedge begins here)
+            int frames = Mathf.Clamp(Mathf.CeilToInt(pathLen / 0.5f) + 1, 2, 2048);
+            float[] elev = RoadSweep.ElevationProfile(a, b, c.Curved, c.ControlA, c.ControlB, frames, hA, hB, groundAt, follow);
+            const int M = 28;
+            var inner = new List<Vector3>(M + 1); var outer = new List<Vector3>(M + 1);
+            for (int k = 0; k <= M; k++)
+            {
+                float t = Mathf.Lerp(startT, 1f, k / (float)M);
+                float growth = Mathf.Abs(goreT - noseT) < 1e-4f ? 1f : Mathf.Clamp01((t - noseT) / (goreT - noseT));
+                Vector2 p = PathPoint(net, c, t); Vector2 fr = PathRight(PathTangent(net, c, t));
+                float y = elev[Mathf.Clamp(Mathf.RoundToInt(t * (frames - 1)), 0, frames - 1)] + TaperLift;
+                Vector2 ip = p + fr * innerEdge;                                  // lane edge (inner)
+                Vector2 op = p + fr * (innerEdge + rampSide * sh * growth);       // shoulder outer edge: 0 at nose → full at gore
+                inner.Add(new Vector3(ip.x, y, ip.y)); outer.Add(new Vector3(op.x, y, op.y));
+            }
+            BuildTaperStrip(inner, outer, parent, $"GoreRampInnerShoulder_{c.Id}", TaperShoulderMat());
         }
 
         // Solid painted line swept along a rail polyline (the taper wedge's outer edge), lifted above the asphalt.
@@ -272,9 +351,10 @@ namespace NetworkDesigner.Roads
         // Marking layout from the corridor's own lanes (offset, yellow?, dashed?): solid white outer edge lines,
         // dashed white between same-direction lanes, double-yellow between opposing directions, solid white beside a
         // bike lane. Offsets are in the body's frame (lane Offset = lateral from centreline), so they sit on the lanes.
-        static List<(float u, bool yellow, bool dashed)> CorridorMarks(LaneEdgeNetwork net, Corridor c)
+        // clipNose=true: a gore ramp's inner-side mark — painted only from the NOSE downstream (it overlaps the through near the fork).
+        static List<(float u, bool yellow, bool dashed, bool clipNose)> CorridorMarks(LaneEdgeNetwork net, Corridor c)
         {
-            var marks = new List<(float, bool, bool)>();
+            var marks = new List<(float, bool, bool, bool)>();
             var lanes = new List<LaneEdge>();
             foreach (int li in c.Lanes)
                 if (li >= 0 && li < net.Edges.Count && net.Edges[li].Kind != LaneKind.Sidewalk && !LaneTapered(c, li)) lanes.Add(net.Edges[li]);
@@ -283,25 +363,35 @@ namespace NetworkDesigner.Roads
             // Outer edge lines (solid white) at the outer edges of the outermost roadway lanes — but SKIP the side a taper
             // owns: there the dropped lane is still a viable lane, so its INNER edge is a dashed divider (added below), not
             // the solid road edge (the solid edge is the taper wedge's outer S-curve, painted in BuildTaperBodies).
-            if (!LaneEdgeWorld.OuterEdgeSuppressed(c, -1f)) marks.Add((lanes[0].Offset - lanes[0].Width * 0.5f, false, false));
-            if (!LaneEdgeWorld.OuterEdgeSuppressed(c, 1f)) marks.Add((lanes[lanes.Count - 1].Offset + lanes[lanes.Count - 1].Width * 0.5f, false, false));
+            if (!LaneEdgeWorld.OuterEdgeSuppressed(c, -1f)) marks.Add((lanes[0].Offset - lanes[0].Width * 0.5f, false, false, false));
+            if (!LaneEdgeWorld.OuterEdgeSuppressed(c, 1f)) marks.Add((lanes[lanes.Count - 1].Offset + lanes[lanes.Count - 1].Width * 0.5f, false, false, false));
             for (int i = 0; i < lanes.Count - 1; i++)
             {
                 LaneEdge L = lanes[i], R = lanes[i + 1];
                 float boundary = (L.Offset + L.Width * 0.5f + R.Offset - R.Width * 0.5f) * 0.5f;
                 if (L.Direction != R.Direction)                                                  // opposing → double yellow
-                { marks.Add((boundary - DblYellowSep, true, false)); marks.Add((boundary + DblYellowSep, true, false)); }
-                else if (L.Kind == LaneKind.Bike || R.Kind == LaneKind.Bike) marks.Add((boundary, false, false));   // bike-lane edge → solid white
-                else marks.Add((boundary, false, true));                                         // same dir → dashed white
+                { marks.Add((boundary - DblYellowSep, true, false, false)); marks.Add((boundary + DblYellowSep, true, false, false)); }
+                else if (L.Kind == LaneKind.Bike || R.Kind == LaneKind.Bike) marks.Add((boundary, false, false, false));   // bike-lane edge → solid white
+                else marks.Add((boundary, false, true, false));                                  // same dir → dashed white
             }
-            // A dropped (tapered) lane is excluded from `lanes` but is still drivable in the taper segment → paint its INNER
-            // divider as a dashed white line at the lane's inner edge (constant offset toward the surviving lanes).
             if (c.Tapers != null)
                 foreach (var tp in c.Tapers)
                 {
                     float sgn = tp.Offset >= 0f ? 1f : -1f;
-                    marks.Add((tp.Offset - sgn * tp.Width * 0.5f, false, true));   // dashed white inner divider
+                    marks.Add((tp.Offset - sgn * tp.Width * 0.5f, false, true, false));   // dashed white inner divider
                 }
+            // Exit-gore ramp: its inner-side markings overlap the through near the fork. Keep only the OUTER road edge solid+full;
+            // dash the inner edge (it sits on a shared lane, not a boundary) and clip every inner-side mark to start at the nose.
+            // Exit gore: clip ONLY the gore-side outermost lane EDGE from the nose (ramp's inner edge / through's outer edge —
+            // these form the solid gore nose). Interior dividers stay continuous (they flow through the gore); the opposite
+            // road edge stays full.
+            if (LaneEdgeWorld.GoreMarkClip(c, out int goreSide, out _))
+            {
+                float clipEdge = goreSide < 0 ? lanes[0].Offset - lanes[0].Width * 0.5f : lanes[lanes.Count - 1].Offset + lanes[lanes.Count - 1].Width * 0.5f;
+                for (int i = 0; i < marks.Count; i++)
+                    if (Mathf.Abs(marks[i].Item1 - clipEdge) < 0.05f)
+                        marks[i] = (marks[i].Item1, marks[i].Item2, marks[i].Item3, true);   // clip from nose; keep solid (forms the gore nose)
+            }
             return marks;
         }
 
@@ -312,6 +402,8 @@ namespace NetworkDesigner.Roads
             if (!PathEndpoints(net, c, out Vector2 a, out Vector2 b)) return;
             var marks = CorridorMarks(net, c);
             if (marks.Count == 0) return;
+            float clipMinT = -1f;   // gore corridor: the clipNose mark (gore-side outer lane edge) is painted only from the nose downstream
+            if (LaneEdgeWorld.GoreMarkClip(c, out _, out Vector2 gNose)) clipMinT = NearestPathT(net, c, gNose);
             float mlen = PathLength(net, c);
             int frames = Mathf.Clamp(Mathf.CeilToInt(mlen / 0.5f) + 1, 2, 2048);
             var fp = new Vector3[frames]; var fr = new Vector3[frames];
@@ -338,6 +430,7 @@ namespace NetworkDesigner.Roads
                     bool on = !m.dashed || (walked % period) < MarkDash;
                     walked += segLen;
                     if (!on) continue;
+                    if (m.clipNose && clipMinT > 0f && f / (float)(frames - 1) < clipMinT) continue;   // gore ramp inner-side: only from the nose downstream
                     Vector3 l0 = fp[f] + fr[f] * (m.u - hw), r0 = fp[f] + fr[f] * (m.u + hw);
                     Vector3 l1 = fp[f + 1] + fr[f + 1] * (m.u - hw), r1 = fp[f + 1] + fr[f + 1] * (m.u + hw);
                     int s = verts.Count;

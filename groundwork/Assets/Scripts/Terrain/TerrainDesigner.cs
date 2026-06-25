@@ -3999,7 +3999,7 @@ namespace NetworkDesigner.Terrain
                             && NetworkDesigner.Roads.LaneEdgeWorld.Drawing && !NetworkDesigner.Roads.LaneEdgeWorld.Extending
                             && !NetworkDesigner.Roads.LaneEdgeWorld.CornerPending;
                         if (leCtrlPar && NetworkDesigner.Roads.LaneEdgeWorld.UpdateParallelDraw(
-                                NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, new Vector2(hit.point.x, hit.point.z), leGfn))
+                                NetworkDesigner.Roads.LaneEdgeWorld.DrawStartPos, new Vector2(hit.point.x, hit.point.z), leGfn, rdPv.ActiveProfileId))
                         {
                             // Hold Ctrl after placing the start on a node's perpendicular guide: draw a road parallel to
                             // that segment (follows its curvature), length set by the drag. Suppress the normal straight ghost.
