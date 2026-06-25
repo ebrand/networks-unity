@@ -1250,9 +1250,13 @@ namespace NetworkDesigner.Roads
 
         // ── live draw preview (host calls UpdatePreview each frame while in lane-edge draw mode) ──
         static GameObject _pvRoot;
-        static LineRenderer _pvC, _pvL, _pvR, _pvLegA, _pvLegB, _pvGuide;   // path centre/left/right + bend legs + colinear guide
+        static LineRenderer _pvC, _pvL, _pvR, _pvLegA, _pvLegB, _pvGuide, _pvLaneHi;   // path centre/left/right + bend legs + colinear guide + Alt single-lane hover band
         static GameObject _pvStartM, _pvCornerM, _pvEndM;          // start / armed-corner / end markers
-        static Material _pvOkM, _pvBadM, _pvLegM, _pvNodeM, _pvSnapM, _pvGuideM;
+        static Material _pvOkM, _pvBadM, _pvLegM, _pvNodeM, _pvSnapM, _pvGuideM, _pvPendM, _pvLaneHiM;
+        // Loud "armed bend" cue: bright opaque amber so a placed (but not-yet-finalised) corner reads as "click again", not dead.
+        static Material PvPending() => _pvPendM != null ? _pvPendM : (_pvPendM = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.5f, 0.0f, 1f), "LanePvPending"));
+        // Alt single-lane hover: translucent magenta band over the WHOLE lane the click will grab (matches the selection puck colour).
+        static Material PvLaneHi() => _pvLaneHiM != null ? _pvLaneHiM : (_pvLaneHiM = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.4f, 1f, 0.45f), "LanePvLaneHi"));
         static Material PvOk()   => _pvOkM   != null ? _pvOkM   : (_pvOkM   = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.30f, 1f, 0.55f, 0.85f), "LanePvOk"));
         static Material PvBad()  => _pvBadM  != null ? _pvBadM  : (_pvBadM  = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 0.30f, 0.25f, 0.9f), "LanePvBad"));
         static Material PvLeg()  => _pvLegM  != null ? _pvLegM  : (_pvLegM  = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.8f, 0.8f, 0.85f, 0.6f), "LanePvLeg"));
@@ -1285,11 +1289,12 @@ namespace NetworkDesigner.Roads
             _pvC = MakePvLine(_pvRoot.transform, 0.6f, PvOk());
             _pvL = MakePvLine(_pvRoot.transform, 0.35f, PvOk());
             _pvR = MakePvLine(_pvRoot.transform, 0.35f, PvOk());
-            _pvLegA = MakePvLine(_pvRoot.transform, 0.25f, PvLeg());
-            _pvLegB = MakePvLine(_pvRoot.transform, 0.25f, PvLeg());
+            _pvLegA = MakePvLine(_pvRoot.transform, 0.4f, PvLeg());
+            _pvLegB = MakePvLine(_pvRoot.transform, 0.4f, PvLeg());
             _pvGuide = MakePvLine(_pvRoot.transform, 0.2f, PvGuide());
+            _pvLaneHi = MakePvLine(_pvRoot.transform, 3.5f, PvLaneHi());   // width set per-hover to the lane width
             _pvStartM = MakePvMarker(_pvRoot.transform, 2.5f, PvNode());
-            _pvCornerM = MakePvMarker(_pvRoot.transform, 2.2f, PvLeg());
+            _pvCornerM = MakePvMarker(_pvRoot.transform, 5f, PvPending());
             _pvEndM = MakePvMarker(_pvRoot.transform, 2.5f, PvNode());
             _pvMeshGo = new GameObject("pvStyled"); _pvMeshGo.transform.SetParent(_pvRoot.transform, false);
             _pvMeshData = new Mesh { name = "pvStyledMesh" };
@@ -1350,6 +1355,54 @@ namespace NetworkDesigner.Roads
             m.SetActive(true);
         }
 
+        // Paint a translucent band over the WHOLE lane `edge` (its full A→B length at its offset), width = the lane width.
+        static bool FillLaneBand(LineRenderer lr, int edge, Func<Vector2, float> groundAt)
+        {
+            if (lr == null || edge < 0 || edge >= Net.Edges.Count) return false;
+            LaneEdge e = Net.Edges[edge];
+            Corridor c = (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count) ? Net.Corridors[e.CorridorId] : null;
+            if (c == null || e.A < 0 || e.A >= Net.Nodes.Count || e.B < 0 || e.B >= Net.Nodes.Count) return false;
+            FillPvLine(lr, Net.Nodes[e.A], Net.Nodes[e.B], c.Curved, c.ControlA, c.ControlB, e.Offset, groundAt, PvLaneHi());
+            lr.widthMultiplier = Mathf.Max(1f, e.Width);
+            lr.gameObject.SetActive(true);
+            return true;
+        }
+
+        // The UPSTREAM lane that feeds `edge` at `node` (flows TOWARD the node) — the lane an exit actually pulls / that
+        // becomes the ramp. If `edge` already flows toward the node it IS upstream; else its through-partner on the segment
+        // arriving at the node. Highlighting this (not the forward segment past the node) matches what gets pulled.
+        static int UpstreamLane(int edge, int node)
+        {
+            if (edge < 0 || edge >= Net.Edges.Count) return edge;
+            LaneEdge e = Net.Edges[edge];
+            bool incoming = (e.Direction == 2 && node == e.B) || (e.Direction == 0 && node == e.A);
+            if (incoming) return edge;
+            int p = ThroughPartner(node, edge);
+            return p >= 0 ? p : edge;
+        }
+
+        // Alt single-lane hover: highlight the lane a click will toggle into the pull. edge<0 hides the band.
+        static void ShowLaneHover(int edge, Func<Vector2, float> groundAt)
+        {
+            if (_pvLaneHi == null) return;
+            if (!FillLaneBand(_pvLaneHi, edge, groundAt)) _pvLaneHi.gameObject.SetActive(false);
+        }
+
+        // Keep every SELECTED lane highlighted (full-lane bands) for the whole pull, so you can see what you're pulling
+        // while drawing the curve. Pooled like the hover halos; unused entries are hidden.
+        static readonly List<LineRenderer> _pvLaneSel = new List<LineRenderer>();
+        static void ShowSelectedLaneBands(Func<Vector2, float> groundAt)
+        {
+            int shown = 0;
+            foreach (int li in _extLanes)
+            {
+                while (_pvLaneSel.Count <= shown) _pvLaneSel.Add(MakePvLine(_pvRoot.transform, 3.5f, PvLaneHi()));
+                if (FillLaneBand(_pvLaneSel[shown], UpstreamLane(li, _extNode), groundAt)) shown++;   // highlight the upstream lane that gets pulled
+            }
+            for (int i = shown; i < _pvLaneSel.Count; i++) _pvLaneSel[i].gameObject.SetActive(false);
+        }
+        static void HideSelectedLaneBands() { for (int i = 0; i < _pvLaneSel.Count; i++) _pvLaneSel[i].gameObject.SetActive(false); }
+
         // Fill a preview LineRenderer along a straight or cubic path at lateral offset `off`, draped + lit by `mat`.
         static void FillPvLine(LineRenderer lr, Vector2 a, Vector2 b, bool curved, Vector2 c1, Vector2 c2, float off, Func<Vector2, float> groundAt, Material mat)
         {
@@ -1408,6 +1461,9 @@ namespace NetworkDesigner.Roads
             _pvRoot.SetActive(true);
             _pvC.gameObject.SetActive(false); _pvL.gameObject.SetActive(false); _pvR.gameObject.SetActive(false);
             _pvLegA.gameObject.SetActive(false); _pvLegB.gameObject.SetActive(false); _pvGuide.gameObject.SetActive(false);
+            _pvLegA.widthMultiplier = 0.4f; _pvLegB.widthMultiplier = 0.4f;   // baseline; the armed-bend branch widens these
+            if (_pvLaneHi != null) _pvLaneHi.gameObject.SetActive(false);
+            HideSelectedLaneBands();
             _pvCornerM.SetActive(false); _pvStartM.SetActive(false);
             if (_pvMeshGo != null) _pvMeshGo.SetActive(false);
             for (int i = 0; i < _pvHover.Count; i++) _pvHover[i].SetActive(false);
@@ -1427,6 +1483,8 @@ namespace NetworkDesigner.Roads
                         GameObject h = HoverHalo(shown++);
                         h.transform.position = new Vector3(hp.x, hy, hp.y); h.SetActive(true);
                     }
+                // Alt: paint the whole UPSTREAM lane the click will grab so it's obvious which single lane you're picking.
+                ShowLaneHover(ForceSingleLane && _grpBuf.Count > 0 ? UpstreamLane(_grpBuf[0], hNode) : -1, groundAt);
                 if (shown > 0) _pvEndM.SetActive(false);   // snapping to lanes → drop the free ghost marker
                 return;
             }
@@ -1462,9 +1520,10 @@ namespace NetworkDesigner.Roads
                 CurveControls(start, endPos, _corner, out Vector2 c1, out Vector2 c2);
                 bool tooTight = limitRadius && MinCurveRadius(start, c1, c2, endPos) < minRadius;
                 DrawStyledPreview(start, endPos, true, c1, c2, profileId, groundAt, tooTight);   // styled per-lane guides
-                FillPvLine(_pvLegA, start, _corner, false, default, default, 0f, groundAt, PvLeg());
-                FillPvLine(_pvLegB, _corner, endPos, false, default, default, 0f, groundAt, PvLeg());
-                PlaceMarker(_pvCornerM, _corner, groundAt, PvLeg());
+                FillPvLine(_pvLegA, start, _corner, false, default, default, 0f, groundAt, PvPending());
+                FillPvLine(_pvLegB, _corner, endPos, false, default, default, 0f, groundAt, PvPending());
+                _pvLegA.widthMultiplier = 0.8f; _pvLegB.widthMultiplier = 0.8f;
+                PlaceMarker(_pvCornerM, _corner, groundAt, PvPending());
             }
             else if (curveModifier)   // about to drop a bend here → show the first leg only (no corridor yet)
             {
@@ -1486,9 +1545,17 @@ namespace NetworkDesigner.Roads
             _pvRoot.SetActive(true);
             _pvC.gameObject.SetActive(false); _pvL.gameObject.SetActive(false); _pvR.gameObject.SetActive(false);
             _pvLegA.gameObject.SetActive(false); _pvLegB.gameObject.SetActive(false); _pvGuide.gameObject.SetActive(false);
+            _pvLegA.widthMultiplier = 0.4f; _pvLegB.widthMultiplier = 0.4f;   // baseline; the armed-bend (pending) branch widens these
             _pvCornerM.SetActive(false); _pvStartM.SetActive(false); _pvEndM.SetActive(false);
             _pvShown = false;   // invalidate the normal-preview cache so it rebuilds when we leave extend mode
-            if (!Extending) return;
+            if (!Extending) { ShowLaneHover(-1, groundAt); HideSelectedLaneBands(); return; }
+            // Keep the picked lanes lit for the whole pull so you see what you're pulling while drawing the curve.
+            ShowSelectedLaneBands(groundAt);
+            // Alt accumulate: while picking more lanes, paint the upstream lane the cursor is over (so each add is obvious).
+            int hovEdge = -1;
+            if (ForceSingleLane && !_extCornerPending && ComputeExtendGroup(cursor, profileId, 5f, out int hovNode, out _) && _grpBuf.Count > 0)
+                hovEdge = UpstreamLane(_grpBuf[0], hovNode);
+            ShowLaneHover(hovEdge, groundAt);
 
             Vector2 N = Net.Nodes[_extNode];
             PlaceMarker(_pvStartM, N, groundAt, PvNode());
@@ -1553,10 +1620,12 @@ namespace NetworkDesigner.Roads
                 FillPvLine(_pvC, N, cursor, true, c1, c2, mid, groundAt, PvOk());
                 FillPvLine(_pvL, N, cursor, true, c1, c2, mid + halfW, groundAt, PvOk());
                 FillPvLine(_pvR, N, cursor, true, c1, c2, mid - halfW, groundAt, PvOk());
-                // Construction legs + bend marker ride the PICKED-LANES' centre (offset mid), not the road centre N.
-                FillPvLine(_pvLegA, N, _extCorner, false, default, default, mid, groundAt, PvLeg());
-                FillPvLine(_pvLegB, _extCorner, cursor, false, default, default, mid, groundAt, PvLeg());
-                PlaceMarker(_pvCornerM, _extCorner + frNew * mid, groundAt, PvLeg());
+                // LOUD armed-bend cue: bright opaque amber construction legs + a big amber bend marker so a placed-but-not-
+                // finalised corner can't be mistaken for "nothing happened". Legs ride the PICKED-LANES' centre (offset mid).
+                FillPvLine(_pvLegA, N, _extCorner, false, default, default, mid, groundAt, PvPending());
+                FillPvLine(_pvLegB, _extCorner, cursor, false, default, default, mid, groundAt, PvPending());
+                _pvLegA.widthMultiplier = 0.8f; _pvLegB.widthMultiplier = 0.8f;
+                PlaceMarker(_pvCornerM, _extCorner + frNew * mid, groundAt, PvPending());
             }
             else if (curveModifier)   // about to drop a bend → show the first leg off the lane centre
                 FillPvLine(_pvLegA, N, cursor, false, default, default, mid, groundAt, PvLeg());
@@ -1693,6 +1762,8 @@ namespace NetworkDesigner.Roads
         static int _extNode = -1;
         static readonly List<int> _extLanes = new List<int>();        // selected lane-edge indices to extend
         static Vector2 _extCorner; static bool _extCornerPending;
+        public static bool ForceSingleLane;                           // Alt/Option held: pick lanes ONE AT A TIME (accumulate), not the profile's whole group
+        static bool _extForceSingle;                                  // selection came from Alt-accumulate → build exactly those lanes (skip surplus-lane padding)
         public static bool ExtFlipSide;                               // F while extending: append the surplus lane on the OTHER side
         public static void ToggleExtFlip() => ExtFlipSide = !ExtFlipSide;
         // On a lane pull, what happens to the SOURCE segment's pulled lanes: Keep (continuation — today's behaviour), or
@@ -1727,7 +1798,7 @@ namespace NetworkDesigner.Roads
             if (best < 0) return false;
             LaneEndpoint ep = Endpoints[best]; node = ep.Node;
             LaneEdge picked = Net.Edges[ep.Edge];
-            if (ProfileLaneCount(profileId) <= 1) { _grpBuf.Add(ep.Edge); single = true; return true; }
+            if (ForceSingleLane || ProfileLaneCount(profileId) <= 1) { _grpBuf.Add(ep.Edge); single = true; return true; }   // Alt: grab ONLY the clicked lane
 
             // A two-way profile extends the FULL cross-section (both travel directions + the median divider), so we don't
             // restrict the group to the clicked lane's direction. A one-way profile is a fork → same-direction lanes only.
@@ -1773,13 +1844,22 @@ namespace NetworkDesigner.Roads
             if (!ComputeExtendGroup(worldXz, profileId, worldR, out int node, out bool single)) return false;
             if (_extNode >= 0 && node != _extNode) _extLanes.Clear();   // switched node → restart selection
             _extNode = node;
-            if (single)   // 1-lane profile → toggle the single lane (build up multi-lane by clicking each)
+            if (single)   // single-lane pick: Alt-accumulate (click each lane you want) OR a 1-lane profile → toggle in/out
             {
                 int edge = _grpBuf[0];
-                if (_extLanes.Contains(edge)) _extLanes.Remove(edge); else _extLanes.Add(edge);
+                if (_extLanes.Contains(edge)) _extLanes.Remove(edge);
+                else
+                {
+                    // Cap the accumulation at the largest one-way profile that exists — a pulled group of k lanes must
+                    // canonicalise to a one-way "k", so you can't pull more lanes than the biggest one-way road you've defined.
+                    int cap = ForceSingleLane ? RoadProfileLibrary.MaxOneWayLanes() : int.MaxValue;
+                    if (cap > 0 && _extLanes.Count >= cap) return true;   // at the cap → ignore the add (click still consumed)
+                    _extLanes.Add(edge);
+                }
                 if (_extLanes.Count == 0) _extNode = -1;
+                _extForceSingle = ForceSingleLane && _extLanes.Count > 0;   // Alt subset → build exactly these lanes (skip profile surplus padding)
             }
-            else { _extLanes.Clear(); _extLanes.AddRange(_grpBuf); }   // multi-lane → grab the contiguous group
+            else { _extLanes.Clear(); _extLanes.AddRange(_grpBuf); _extForceSingle = false; }   // multi-lane → grab the contiguous group
             return true;
         }
 
@@ -1856,7 +1936,7 @@ namespace NetworkDesigner.Roads
                 { if (bd.Zone == 0) nBA++; else nAB++; }
         }
 
-        public static void CancelExtend() { _extNode = -1; _extLanes.Clear(); _extCornerPending = false; ExtFlipSide = false; }
+        public static void CancelExtend() { _extNode = -1; _extLanes.Clear(); _extCornerPending = false; ExtFlipSide = false; _extForceSingle = false; }
 
         // ── C-connect: hold C, click two existing nodes → a smooth curve between them. The cubic leaves node A tangent to
         // A's road and arrives at node B tangent to B's road, so an S-curve (parallel-offset ends) or a simple bend (angled
@@ -2710,7 +2790,9 @@ namespace NetworkDesigner.Roads
                 if ((inc0 ? 2 : 0) != s0.Direction) { int t = wantBA; wantBA = wantAB; wantAB = t; }
             }
             if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // F: mirror which side gains the surplus lane
-            if (wantBA > 0 && wantAB > 0) { AppendOutboard(nc, 0, wantBA); AppendOutboard(nc, 2, wantAB); }
+            // Alt force-single pull: keep EXACTLY the grabbed lane(s) — skip the profile's surplus-lane padding so a 1-lane
+            // pick off a 6-lane road stays a 1-lane ramp (canonicalised to "1" below) instead of being re-inflated to the profile.
+            if (!_extForceSingle && wantBA > 0 && wantAB > 0) { AppendOutboard(nc, 0, wantBA); AppendOutboard(nc, 2, wantAB); }
             Net.SortCorridorLanes(nc);
             // Adopt the matching one-way profile for the pulled group AND canonicalise it. The group inherited the SOURCE profile
             // and the PARENT's lane offsets, so a 2-lane pull-off off a "4" carried profile "4" and offsets like +2.75/+6.75

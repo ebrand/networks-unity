@@ -3974,6 +3974,8 @@ namespace NetworkDesigner.Terrain
                     _lineActive.HidePreview();   // the corridor-edge ghost is irrelevant in lane-edge mode
                     var rdPv = (RoadPlanLayer)_lineActive;
                     bool leShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                    // Alt/Option held: lane picks grab ONE lane at a time (accumulate) instead of the profile's whole group → pull a subset off a road.
+                    NetworkDesigner.Roads.LaneEdgeWorld.ForceSingleLane = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
                     // Node snap (M = EndSnapRadius) + guides (N = GuideRange), always active in road mode. The snap is
                     // RAY-based (robust to camera parallax) and actually MOVES the cursor onto the nearest lane puck.
                     System.Func<Vector2, float> leGfn = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
@@ -4090,6 +4092,7 @@ namespace NetworkDesigner.Terrain
                     {
                         System.Func<Vector2, float> leGround = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
                         bool leShiftClick = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
+                        NetworkDesigner.Roads.LaneEdgeWorld.ForceSingleLane = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);   // Alt: single-lane accumulate pick
                         Camera leCam = PickCamera != null ? PickCamera : Camera.main;
                         Vector2 leMouse = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                         // Drawing a parallel road (start placed on a perpendicular guide, Ctrl held): a click commits it.

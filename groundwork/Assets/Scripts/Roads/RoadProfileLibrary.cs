@@ -71,6 +71,21 @@ namespace NetworkDesigner.Roads
         // `preferLike` (closest total width) so a pull-off keeps the source's shoulder/lane style. Null if none matches —
         // the caller treats that as a hard "no-go" (the pull-off/connect is refused). Excludes `preferLike`'s own id is NOT
         // done here: a self-match is valid (e.g. re-profiling to the same profile when nothing changed).
+        // Highest lane count among the ONE-WAY profiles (one direction empty) — the most lanes an Alt single-lane pull can
+        // accumulate, since the pulled group must canonicalise to a one-way "k" profile that exists. 0 if there are none.
+        public static int MaxOneWayLanes()
+        {
+            int max = 0;
+            foreach (var c in Configs)
+            {
+                if (c == null || string.IsNullOrEmpty(c.Id)) continue;
+                LaneConfig(c.Id, out int ab, out int ba);
+                if (ab > 0 && ba > 0) continue;             // two-way → not a pull target
+                max = Mathf.Max(max, Mathf.Max(ab, ba));
+            }
+            return max;
+        }
+
         public static string FindByConfig(int ab, int ba, string preferLike = null)
         {
             string best = null; float bestScore = float.PositiveInfinity;
