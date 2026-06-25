@@ -218,7 +218,6 @@ namespace NetworkDesigner.Roads
                 Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, t);
                 rg[f] = new Vector2(tan.y, -tan.x);
             }
-
             var verts = new List<Vector3>(); var tris = new List<int>();
             BuildStyledGuides(verts, tris, cp, rg, groundAt);
             BuildPlanArrows(c, pathLen, verts, tris, cp, rg, groundAt);   // travel triangles on one-way plans (~every 200 m)
@@ -2885,17 +2884,14 @@ namespace NetworkDesigner.Roads
             int srcCorr = (_extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count) ? Net.Edges[_extLanes[0]].CorridorId : -1;
             ComputeEndpoints(groundAt);   // include the just-built ramp lanes
 
+            // The through-lane the ramp replaces: for an EXIT (pulled lane incoming to the fork → diverges) it's the DOWNSTREAM
+            // continuation; for an ENTRANCE (pulled lane outgoing → the ramp occupies the outer lane) it's the UPSTREAM lane,
+            // which tapers out before the merge. FindContinuationLane returns the opposite-end lane either way, so one path
+            // handles both — the entrance just drops/tapers its upstream side instead of the downstream.
             var cand = new List<int>();
             foreach (int sl in _extLanes)
             {
                 if (sl < 0 || sl >= Net.Edges.Count) continue;
-                LaneEdge se = Net.Edges[sl];
-                // EXIT only: the dropped lane is the through-lane an exit REPLACES — valid only when the pulled lane flows TOWARD
-                // the fork (incoming to _extNode) so it diverges downstream. An ENTRANCE ramp's source flows AWAY from the fork
-                // (outgoing); it adds capacity, replacing no through-lane — finding/deleting a "continuation" there grabs the
-                // UPSTREAM lane and corrupts the road (the curved segment).
-                bool incoming = (se.Direction == 2 && _extNode == se.B) || (se.Direction == 0 && _extNode == se.A);
-                if (!incoming) continue;
                 int d = FindContinuationLane(_extNode, sl, srcCorr, rampCorr);
                 if (d >= 0 && !cand.Contains(d)) cand.Add(d);
             }
@@ -2911,6 +2907,29 @@ namespace NetworkDesigner.Roads
                 if (outer >= 0) del.Add(outer);
             }
             if (del.Count == 0) return;
+
+            // Propagate the drop DOWNSTREAM along the whole road, not just the adjacent segment. A real exit removes the lane
+            // for the entire length past the fork; if we only drop the first segment, the lane reappears on the next colinear
+            // segment (e.g. across a curve) → a one-segment "notch" and a spurious taper at the far join (#27). Walk each
+            // deleted lane's continuation chain (its downstream end → next corridor's in-line lane) and drop the whole run.
+            {
+                var frontier = new List<(int lane, int entered)>();
+                foreach (int d in del) frontier.Add((d, _extNode));
+                int guard = 0;
+                while (frontier.Count > 0 && guard++ < 128)
+                {
+                    var next = new List<(int, int)>();
+                    foreach ((int dl, int entered) in frontier)
+                    {
+                        if (dl < 0 || dl >= Net.Edges.Count) continue;
+                        LaneEdge de = Net.Edges[dl];
+                        int downstream = entered == de.A ? de.B : de.A;       // far end of this lane = where it continues onward
+                        int cont = FindContinuationLane(downstream, dl, de.CorridorId, rampCorr);   // exclude our own corridor
+                        if (cont >= 0 && del.Add(cont)) next.Add((cont, downstream));
+                    }
+                    frontier = next;
+                }
+            }
 
             // Guard: never empty a downstream corridor (protects full/colinear continuations). Then flag the affected
             // corridors AlignLanes so the surviving lanes keep their offsets and the split stays aligned.
