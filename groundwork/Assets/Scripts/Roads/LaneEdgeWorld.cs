@@ -718,10 +718,13 @@ namespace NetworkDesigner.Roads
             edgeMask = 0; shoulderMask = 0;
             foreach (var g in _gores)
             {
+                // Suppress the LANE EDGE only when there's a NOSE to redraw it from, and the SHOULDER only when there's a GORE
+                // — RenderExitGores redraws the edge `if (HasNose)` and the shoulder `if (HasGore)`. Suppressing unconditionally
+                // dropped the through's outer solid edge whenever a gore formed with no nose (gore=True, nose=False) → #57.
                 if (g.Ramp >= 0 && g.Ramp < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Ramp], c))
-                { int b = SideBit(g.RampSide); edgeMask |= b; shoulderMask |= b; }   // ramp: inner lane EDGE + inner shoulder, drawn clipped at nose/gore
+                { int b = SideBit(g.RampSide); if (g.HasNose) edgeMask |= b; if (g.HasGore) shoulderMask |= b; }   // ramp: inner lane edge (nose) + inner shoulder (gore)
                 if (g.Through >= 0 && g.Through < Net.Corridors.Count && ReferenceEquals(Net.Corridors[g.Through], c))
-                { int b = SideBit(g.ThroughSide); edgeMask |= b; shoulderMask |= b; }   // through: its exit-side outer lane EDGE + shoulder are interior in the shared region → drawn clipped from the nose/gore
+                { int b = SideBit(g.ThroughSide); if (g.HasNose) edgeMask |= b; if (g.HasGore) shoulderMask |= b; }   // through: exit-side outer lane edge (nose) + shoulder (gore)
             }
         }
 
@@ -2913,6 +2916,14 @@ namespace NetworkDesigner.Roads
             sb.Append($"  config AB={ab} BA={ba} → FindByConfig='{RoadProfileLibrary.FindByConfig(ab, ba)}'\n");
             sb.Append($"  profile '{c.Profile}' canonical lanes=[{string.Join(", ", canon)}] shBA/AB={pShBA:F1}/{pShAB:F1}\n");
             if (c.Tapers != null) foreach (var t in c.Tapers) sb.Append($"  TAPER atA={t.AtA} off={t.Offset:F2} w={t.Width:F2} len={t.Length:F1} edge={t.LaneEdge}\n");
+            // Why might an outer solid edge be missing? Taper suppression vs gore suppression (the gore-suppressed edge is
+            // meant to be REDRAWN clipped in RenderExitGores — if that gore has no nose/gore the edge just disappears).
+            GoreSuppress(c, out int em, out int sm);
+            sb.Append($"  EDGE SUPPRESS: outerEdge L(BA)={OuterEdgeSuppressed(c, -1f)} R(AB)={OuterEdgeSuppressed(c, 1f)} | goreEdgeMask={em} (bit1=BA,bit2=AB) goreShoulderMask={sm}\n");
+            int cidx = -1; for (int k = 0; k < Net.Corridors.Count; k++) if (ReferenceEquals(Net.Corridors[k], c)) { cidx = k; break; }
+            foreach (var g in _gores)
+                if (g.Ramp == cidx || g.Through == cidx)
+                    sb.Append($"  GORE: thru c{g.Through} ramp c{g.Ramp} thruSide={g.ThroughSide} rampSide={g.RampSide} nose={g.HasNose} gore={g.HasGore} (this c{cidx} is {(g.Ramp == cidx ? "RAMP" : "THROUGH")})\n");
             Debug.Log(sb.ToString());
             return true;
         }
