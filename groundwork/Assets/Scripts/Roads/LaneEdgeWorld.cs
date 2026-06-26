@@ -340,6 +340,26 @@ namespace NetworkDesigner.Roads
             }
         }
 
+        // Dash a polyline the SAME way the plan shoulder lines are dashed: whole-segment on/off by cumulative arc length
+        // (walked % period < dash), sampled at the plan overlay's ~1.5m frame step so the dash SIZE matches too.
+        static void EmitGuideDashedPolyline(List<Vector2> pts, float dash, float gap, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
+        {
+            const float step = 1.5f;   // = the plan overlay's frame spacing (pathLen/1.5), which quantises the shoulder dash
+            bool dashed = dash > 0.01f; float period = dash + gap; float walked = 0f;
+            for (int k = 0; k < pts.Count - 1; k++)
+            {
+                Vector2 a = pts[k], b = pts[k + 1];
+                float segLen = (b - a).magnitude; if (segLen < 1e-4f) continue;
+                Vector2 dir = (b - a) / segLen;
+                for (float t = 0f; t < segLen; t += step)
+                {
+                    float t2 = Mathf.Min(t + step, segLen);
+                    if (!dashed || (walked % period) < dash) EmitLineSeg(a + dir * t, a + dir * t2, verts, tris, groundAt);
+                    walked += (t2 - t);
+                }
+            }
+        }
+
         // A thin, draped, double-sided line ribbon for one segment (LineHalfW wide) — the plan-line primitive used for the
         // taper outline.
         static void EmitLineSeg(Vector2 a, Vector2 b, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
@@ -807,17 +827,18 @@ namespace NetworkDesigner.Roads
         // outer edges, rounded into the neighbours with constant-radius CURB-RETURN FILLETS. For now this renders the
         // footprint as a translucent pad (geometry validation) — body setback-trim + marking-clip + turn routing come next.
         public static float JunctionRadius = 6f;     // corner curb-return radius (m), tunable
-        public static float JunctionSetback = 10f;   // minimum stop-line setback floor per approach (m), tunable
+        public static float JunctionSetback = 10f;   // default setback MARGIN beyond the crossing (m): face = crossing-clearance + this
         static Material _junctionMat;
         static Material JunctionMat() => _junctionMat != null ? _junctionMat
-            : (_junctionMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.15f, 0.15f, 0.18f, 0.55f), "LaneJunction"));
+            : (_junctionMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(0.08f, 0.08f, 0.10f, 1f), "LaneJunction"));   // solid dark curb-return lines
 
         struct JctApproach
         {
             public Vector2 P;            // body centreline endpoint at the node (CenterShift-aware)
             public Vector2 away;         // unit direction the road extends AWAY from the node
             public Vector2 fr;           // right-of-travel normal (A→B frame): body spans P+fr*leftOff .. P+fr*rightOff
-            public float leftOff, rightOff;   // outer-edge offsets (left = BA = negative, right = AB = positive)
+            public float leftOff, rightOff;     // OUTER (shoulder) edge offsets (left = BA = negative, right = AB = positive)
+            public float leftInner, rightInner; // INNER (lane/pavement) edge offsets — the inside-of-shoulder line
             public float bearing;        // atan2(away) for CCW sort
             public int corrId; public bool atA;   // which corridor end this approach is (for the per-end setback map)
             public float setbackOverride;   // <0 = auto; else this end's dragged setback (Corridor.SetbackA/B)
@@ -825,7 +846,7 @@ namespace NetworkDesigner.Roads
         static readonly List<JctApproach> _japp = new List<JctApproach>();
 
         // Per-junction results, computed once per Rebuild BEFORE corridors render so the plan overlay can clip to the setback.
-        struct JunctionPad { public int node; public List<Vector2> loop; }
+        struct JunctionPad { public int node; public List<List<Vector2>> arcsInner, arcsOuter; }   // solid lane-edge curbs + dashed shoulder curbs
         static readonly List<JunctionPad> _junctions = new List<JunctionPad>();
 
         // A draggable junction setback handle (one per approach): drag it along the road to set that end's stop-line setback.
@@ -913,14 +934,14 @@ namespace NetworkDesigner.Roads
                     if (!LaneEdgeCorridorBuilder.PathFrameShifted(Net, c, out Vector2 sa, out Vector2 sb, out _, out _)) continue;
                     Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, atA ? 0f : 1f);   // A→B
                     Vector2 away = (atA ? tan : -tan).normalized;
-                    SideEdges(c, 1f, out _, out float rOff);
-                    SideEdges(c, -1f, out _, out float lOff);
+                    SideEdges(c, 1f, out float rInner, out float rOff);
+                    SideEdges(c, -1f, out float lInner, out float lOff);
                     _japp.Add(new JctApproach
                     {
                         P = atA ? sa : sb,
                         away = away,
                         fr = LaneEdgeCorridorBuilder.PathRight(tan),
-                        leftOff = lOff, rightOff = rOff,
+                        leftOff = lOff, rightOff = rOff, leftInner = lInner, rightInner = rInner,
                         bearing = Mathf.Atan2(away.y, away.x),
                         corrId = c.Id, atA = atA,
                         setbackOverride = atA ? c.SetbackA : c.SetbackB
@@ -941,15 +962,17 @@ namespace NetworkDesigner.Roads
                     float hi = (_japp[i].rightOff - _japp[i].leftOff) * 0.5f;
                     float hn = (_japp[inx].rightOff - _japp[inx].leftOff) * 0.5f;
                     float hp = (_japp[ip].rightOff - _japp[ip].leftOff) * 0.5f;
-                    float req = Mathf.Max(RequiredSetback(hi, hn, thetaNext), RequiredSetback(hi, hp, thetaPrev));
-                    S[i] = _japp[i].setbackOverride >= 0f ? _japp[i].setbackOverride : Mathf.Max(JunctionSetback, req);   // dragged override wins
+                    float req = Mathf.Max(RequiredSetback(hi, hn, thetaNext), RequiredSetback(hi, hp, thetaPrev));   // just-touching clearance to the crossing roads
+                    // Default setback = that clearance PLUS a 10m margin, so each approach's face sits 10m beyond the
+                    // intersection's width/depth. A dragged override wins.
+                    S[i] = _japp[i].setbackOverride >= 0f ? _japp[i].setbackOverride : req + JunctionSetback;
                     _setbackByEnd[EndKey(_japp[i].corrId, _japp[i].atA)] = S[i];   // so the corridor's plan overlay clips here
                 }
 
-                // Face corners at each setback: full outer-edge points, plus corners pulled IN by the curb radius so the corner
-                // bezier has room to round (control = the two roads' outer-edge intersection — the box corner).
-                var leftEdge = new Vector2[n]; var rightEdge = new Vector2[n];
-                var leftC = new Vector2[n]; var rightC = new Vector2[n];
+                // Outer (shoulder) + inner (lane/pavement) edge points at each setback. The corner curves connect adjacent
+                // approaches' edges; the approaches stay OPEN (roads enter through the gaps), like a real intersection wireframe.
+                var outL = new Vector2[n]; var outR = new Vector2[n];   // outer shoulder edges
+                var inL = new Vector2[n]; var inR = new Vector2[n];     // inner lane edges
                 for (int i = 0; i < n; i++)
                 {
                     JctApproach ap = _japp[i];
@@ -957,62 +980,57 @@ namespace NetworkDesigner.Roads
                     Vector2 perp = new Vector2(-ap.away.y, ap.away.x);   // left when looking outward from the node
                     Vector2 e1 = fc + ap.fr * ap.leftOff, e2 = fc + ap.fr * ap.rightOff;
                     bool e1IsLeft = Vector2.Dot(e1 - fc, perp) >= Vector2.Dot(e2 - fc, perp);
-                    Vector2 lE = e1IsLeft ? e1 : e2, rE = e1IsLeft ? e2 : e1;
-                    leftEdge[i] = lE; rightEdge[i] = rE;
-                    // Grab handle: sits beside the road (in the grass) at the setback distance; drag it along `away` to set this end's setback.
+                    outL[i] = e1IsLeft ? e1 : e2; outR[i] = e1IsLeft ? e2 : e1;
+                    Vector2 j1 = fc + ap.fr * ap.leftInner, j2 = fc + ap.fr * ap.rightInner;
+                    inL[i] = e1IsLeft ? j1 : j2; inR[i] = e1IsLeft ? j2 : j1;
                     _setbackHandles.Add(new SetbackHandle {
-                        Pos = fc + perp * ((rE - lE).magnitude * 0.5f + 4f), Node = Net.Nodes[node], Away = ap.away,
+                        Pos = fc + perp * ((outR[i] - outL[i]).magnitude * 0.5f + 4f), Node = Net.Nodes[node], Away = ap.away,
                         CorrId = ap.corrId, AtA = ap.atA, Y = 0f
                     });
-                    // Face spans the FULL shoulder-to-shoulder edge so the pad connects each segment's outermost edge. The corner
-                    // bezier (control = outer-edge intersection) rounds whatever gap the setback leaves beyond the crossing box.
-                    leftC[i] = lE; rightC[i] = rE;
                 }
-
-                // Closed CCW boundary: each approach's face (right corner → left corner), then a curb-return bezier to the next
-                // approach's right corner (control = outer-edge intersection; straight if the edges are parallel / run away).
-                var loop = new List<Vector2>();
-                for (int i = 0; i < n; i++)
-                {
-                    loop.Add(rightC[i]); loop.Add(leftC[i]);
-                    int j = (i + 1) % n;
-                    if (LineLineIntersect(leftEdge[i], _japp[i].away, rightEdge[j], _japp[j].away, out Vector2 ctrl))
-                    {
-                        Vector2 a = leftC[i], b = rightC[j], mid = (a + b) * 0.5f;
-                        float maxReach = Mathf.Max((b - a).magnitude * 2f, 6f);
-                        if ((ctrl - mid).magnitude <= maxReach)   // skip a runaway control (near-parallel) → straight chamfer
-                        {
-                            const int steps = 12;
-                            for (int k = 1; k < steps; k++) { float s = k / (float)steps, u = 1f - s; loop.Add(u * u * a + 2f * u * s * ctrl + s * s * b); }
-                        }
-                    }
-                }
-                if (loop.Count < 3) continue;
-                _junctions.Add(new JunctionPad { node = node, loop = loop });
+                var arcsOuter = BuildCornerArcs(outL, outR, n);
+                var arcsInner = BuildCornerArcs(inL, inR, n);
+                _junctions.Add(new JunctionPad { node = node, arcsInner = arcsInner, arcsOuter = arcsOuter });
             }
         }
 
-        // Fan each stored junction footprint from its node (star-shaped about it). Double-sided so winding never hides it.
+        // One corner polyline per adjacent approach pair: approach i's left edge → bezier (control = the two edges' crossing)
+        // → next approach's right edge. Parallel edges (a through road's far side) → a straight chamfer.
+        static List<List<Vector2>> BuildCornerArcs(Vector2[] leftE, Vector2[] rightE, int n)
+        {
+            var arcs = new List<List<Vector2>>();
+            for (int i = 0; i < n; i++)
+            {
+                int j = (i + 1) % n;
+                Vector2 a = leftE[i], b = rightE[j];
+                var arc = new List<Vector2> { a };
+                if (LineLineIntersect(a, _japp[i].away, b, _japp[j].away, out Vector2 ctrl))
+                {
+                    float maxReach = Mathf.Max((b - a).magnitude * 2f, 6f);
+                    if ((ctrl - (a + b) * 0.5f).magnitude <= maxReach)   // skip a runaway control (near-parallel) → straight chamfer
+                    {
+                        const int steps = 12;
+                        for (int k = 1; k < steps; k++) { float s = k / (float)steps, u = 1f - s; arc.Add(u * u * a + 2f * u * s * ctrl + s * s * b); }
+                    }
+                }
+                arc.Add(b);
+                arcs.Add(arc);
+            }
+            return arcs;
+        }
+
+        // Wireframe (plan-line colour): solid curb at the inner lane edge + dashed curb at the outer shoulder edge per corner.
         static void RenderJunctions(Transform parent, Func<Vector2, float> groundAt)
         {
-            if (_junctions.Count == 0) return;
-            var verts = new List<Vector3>(); var tris = new List<int>();
+            var vS = new List<Vector3>(); var tS = new List<int>();   // solid (inner lane-edge curbs)
+            var vD = new List<Vector3>(); var tD = new List<int>();   // dashed (outer shoulder curbs)
             foreach (var jp in _junctions)
             {
-                List<Vector2> loop = jp.loop;
-                Vector2 ctr = Net.Nodes[jp.node];
-                float yC = (groundAt != null ? groundAt(ctr) : 0f) + 0.10f;
-                int baseIdx = verts.Count;
-                verts.Add(new Vector3(ctr.x, yC, ctr.y));
-                foreach (var p in loop) verts.Add(new Vector3(p.x, (groundAt != null ? groundAt(p) : 0f) + 0.10f, p.y));
-                for (int k = 0; k < loop.Count; k++)
-                {
-                    int a = baseIdx + 1 + k, b = baseIdx + 1 + (k + 1) % loop.Count;
-                    tris.Add(baseIdx); tris.Add(a); tris.Add(b);          // one winding
-                    tris.Add(baseIdx); tris.Add(b); tris.Add(a);          // and the reverse (double-sided)
-                }
+                if (jp.arcsInner != null) foreach (var arc in jp.arcsInner) EmitPolyline(arc, vS, tS, groundAt);
+                if (jp.arcsOuter != null) foreach (var arc in jp.arcsOuter) EmitGuideDashedPolyline(arc, OuterDash, OuterGap, vD, tD, groundAt);
             }
-            BuildGoreMesh(verts, tris, JunctionMat(), "Junctions", parent);
+            BuildGoreMesh(vS, tS, PlannedMat(), "JunctionsInner", parent);
+            BuildGoreMesh(vD, tD, PlannedMat(), "JunctionsOuter", parent);
             RenderSetbackHandles(parent, groundAt);
         }
 
