@@ -70,6 +70,7 @@ namespace NetworkDesigner.Roads
             ComputeEndpoints(groundAt);
             DetectLaneDropTapers();   // derive lane-drop tapers from lane-count mismatches at shared nodes
             DetectExitGores();        // derive exit-ramp gores (ramp diverging from a through corridor) → nose/gore convergence
+            ComputeJunctions();       // 3+ way crossings → per-approach setback (so the overlays below clip) + footprint pads
             GameObject root = Root();
             for (int i = root.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(root.transform.GetChild(i).gameObject);
@@ -79,6 +80,7 @@ namespace NetworkDesigner.Roads
                 else RenderPlanOverlay(c, root.transform, groundAt);                                     // schematic plan line
             }
             RenderExitGores(root.transform, groundAt);       // ramp-gore shoulder-edge convergence (nose/gore) — plan overlay
+            RenderJunctions(root.transform, groundAt);        // 3+ corridor crossings → paved footprint with curb-return fillets
 
             // The segment (cluster) node + flow connectors are intersection-routing visuals — only show them while mapping
             // flows. In plain draw mode the lanes + endpoint pucks are the handles; the centreline node is internal.
@@ -209,11 +211,17 @@ namespace NetworkDesigner.Roads
             bool hasTaper = c.Tapers != null && c.Tapers.Count > 0;
             if (_guideBuf.Count == 0 && !hasTaper) return;   // still render even if every lane is a taper wedge
 
+            // Pull the overlay back from any junction end by that approach's setback, so lines stop at the intersection pad
+            // instead of running through it (the crossing is paved separately).
+            LaneEdge le0 = Net.Edges[c.Lanes[0]];
+            float tA = Mathf.Clamp01(JunctionEndSetback(c, le0.A) / pathLen);
+            float tB = Mathf.Clamp01(JunctionEndSetback(c, le0.B) / pathLen);
+            if (tA + tB > 0.85f) { float k = 0.85f / (tA + tB); tA *= k; tB *= k; }   // never clip a short segment to nothing
             int frames = Mathf.Clamp(Mathf.CeilToInt(pathLen / 1.5f) + 1, 2, 1024);
             var cp = new Vector2[frames]; var rg = new Vector2[frames];
             for (int f = 0; f < frames; f++)
             {
-                float t = (float)f / (frames - 1);
+                float t = Mathf.Lerp(tA, 1f - tB, (float)f / (frames - 1));
                 cp[f] = LaneEdgeCorridorBuilder.PathPoint(Net, c, t);
                 Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, t);
                 rg[f] = new Vector2(tan.y, -tan.x);
@@ -467,6 +475,7 @@ namespace NetworkDesigner.Roads
                 {
                     int N = endSel == 0 ? L.A : L.B;
                     if (N < 0 || N >= Net.Nodes.Count) continue;
+                    if (CountCorridorsAtNode(N) >= 3) continue;   // a 3+ way junction resolves lane mismatches via the crossing, not a collapsing drop-taper
                     if (!TryEndpointPos(N, li, out Vector2 pL, out _)) continue;
                     Vector2 travel = LaneTravelDirAt(L, c, N);        // heading AT this node (curve-aware), not the midpoint
                     if (travel.sqrMagnitude < 1e-6f) continue;
@@ -796,6 +805,206 @@ namespace NetworkDesigner.Roads
             }
             BuildGoreMesh(vP, tP, PlannedMat(), "ExitGores", parent);
             BuildGoreMesh(vE, tE, ExcavatedMat(), "ExitGoresExcavated", parent);
+        }
+
+        // ══ INTERSECTIONS (Phase 1a) ══ where 3+ corridors share a node, build a paved junction FOOTPRINT: each approach's
+        // outer edges, rounded into the neighbours with constant-radius CURB-RETURN FILLETS. For now this renders the
+        // footprint as a translucent pad (geometry validation) — body setback-trim + marking-clip + turn routing come next.
+        public static float JunctionRadius = 6f;     // corner curb-return radius (m), tunable
+        public static float JunctionSetback = 10f;   // minimum stop-line setback floor per approach (m), tunable
+        static Material _junctionMat;
+        static Material JunctionMat() => _junctionMat != null ? _junctionMat
+            : (_junctionMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.15f, 0.15f, 0.18f, 0.55f), "LaneJunction"));
+
+        struct JctApproach
+        {
+            public Vector2 P;            // body centreline endpoint at the node (CenterShift-aware)
+            public Vector2 away;         // unit direction the road extends AWAY from the node
+            public Vector2 fr;           // right-of-travel normal (A→B frame): body spans P+fr*leftOff .. P+fr*rightOff
+            public float leftOff, rightOff;   // outer-edge offsets (left = BA = negative, right = AB = positive)
+            public float bearing;        // atan2(away) for CCW sort
+            public int corrId; public bool atA;   // which corridor end this approach is (for the per-end setback map)
+        }
+        static readonly List<JctApproach> _japp = new List<JctApproach>();
+
+        // Per-junction results, computed once per Rebuild BEFORE corridors render so the plan overlay can clip to the setback.
+        struct JunctionPad { public int node; public List<Vector2> loop; }
+        static readonly List<JunctionPad> _junctions = new List<JunctionPad>();
+        static readonly Dictionary<int, float> _setbackByEnd = new Dictionary<int, float>();   // corrId*2 + (atA?0:1) → setback (m)
+        static int EndKey(int corrId, bool atA) => corrId * 2 + (atA ? 0 : 1);
+        // The junction stop-line setback at the corridor end touching `node` (0 if that end isn't a junction). Used to pull
+        // the road's body/markings back from the crossing so the junction pad reads as a clean intersection.
+        public static float JunctionEndSetback(Corridor c, int node)
+        {
+            if (c.Lanes.Count == 0) return 0f;
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            if (l0.A != node && l0.B != node) return 0f;
+            return _setbackByEnd.TryGetValue(EndKey(c.Id, l0.A == node), out float s) ? s : 0f;
+        }
+        static bool IsJunctionNode(int node)
+        {
+            for (int i = 0; i < _junctions.Count; i++) if (_junctions[i].node == node) return true;
+            return false;
+        }
+        // How many corridors touch `node` at one of their endpoints (degree): 1 = free road end, 2 = split/through, 3+ = junction.
+        static int CountCorridorsAtNode(int node)
+        {
+            int count = 0;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                Corridor c = Net.Corridors[ci]; if (c.Lanes.Count == 0) continue;
+                LaneEdge l0 = Net.Edges[c.Lanes[0]];
+                if (l0.A == node || l0.B == node) count++;
+            }
+            return count;
+        }
+
+        // Infinite-line intersection (false if parallel). Lines: p1+t·d1, p2+s·d2.
+        static bool LineLineIntersect(Vector2 p1, Vector2 d1, Vector2 p2, Vector2 d2, out Vector2 hit)
+        {
+            hit = Vector2.zero;
+            float denom = d1.x * d2.y - d1.y * d2.x;
+            if (Mathf.Abs(denom) < 1e-7f) return false;
+            Vector2 dp = p2 - p1;
+            hit = p1 + d1 * ((dp.x * d2.y - dp.y * d2.x) / denom);
+            return true;
+        }
+
+        // Just-touching setback so this approach's face clears its neighbour across a corner of angle theta (the wedge between
+        // the two roads): (hNeighbour + hSelf·cos θ)/sin θ. Straight-through (θ≈π) or reflex → 0 (no constraint on that side).
+        static float RequiredSetback(float hSelf, float hNeigh, float theta)
+        {
+            if (theta <= 0.05f || theta >= Mathf.PI - 0.05f) return 0f;
+            float s = Mathf.Sin(theta); if (s < 0.05f) return 0f;
+            return Mathf.Max(0f, (hNeigh + hSelf * Mathf.Cos(theta)) / s);
+        }
+
+        // True if `node` is the diverging fork of a detected gore (so it's a ramp split, not a 3+ way crossing).
+        static bool IsGoreForkNode(int node)
+        {
+            foreach (var g in _gores)
+            {
+                if (g.Ramp < 0 || g.Ramp >= Net.Corridors.Count) continue;
+                Corridor R = Net.Corridors[g.Ramp]; if (R.Lanes.Count == 0) continue;
+                LaneEdge l0 = Net.Edges[R.Lanes[0]];
+                if ((g.RampT > 0.5f ? l0.B : l0.A) == node) return true;
+            }
+            return false;
+        }
+
+        // Detect every 3+ way crossing, compute its per-approach setback + footprint loop, and stash them (in _junctions and
+        // _setbackByEnd) — run EARLY in Rebuild so corridor plan overlays can clip their lines back to the setback.
+        static void ComputeJunctions()
+        {
+            _junctions.Clear(); _setbackByEnd.Clear();
+            for (int node = 0; node < Net.Nodes.Count; node++)
+            {
+                if (IsGoreForkNode(node)) continue;   // a gore (ramp diverging from a through road) is also 3 ends at a node — not a crossing
+                _japp.Clear();
+                for (int ci = 0; ci < Net.Corridors.Count; ci++)
+                {
+                    Corridor c = Net.Corridors[ci];
+                    if (c.Lanes.Count == 0) continue;
+                    LaneEdge l0 = Net.Edges[c.Lanes[0]];
+                    bool atA = l0.A == node, atB = l0.B == node;
+                    if (!atA && !atB) continue;
+                    if (!LaneEdgeCorridorBuilder.PathFrameShifted(Net, c, out Vector2 sa, out Vector2 sb, out _, out _)) continue;
+                    Vector2 tan = LaneEdgeCorridorBuilder.PathTangent(Net, c, atA ? 0f : 1f);   // A→B
+                    Vector2 away = (atA ? tan : -tan).normalized;
+                    SideEdges(c, 1f, out _, out float rOff);
+                    SideEdges(c, -1f, out _, out float lOff);
+                    _japp.Add(new JctApproach
+                    {
+                        P = atA ? sa : sb,
+                        away = away,
+                        fr = LaneEdgeCorridorBuilder.PathRight(tan),
+                        leftOff = lOff, rightOff = rOff,
+                        bearing = Mathf.Atan2(away.y, away.x),
+                        corrId = c.Id, atA = atA
+                    });
+                }
+                if (_japp.Count < 3) continue;                       // 3+ approaches = a junction (2 = continuation / bend)
+                _japp.Sort((x, y) => x.bearing.CompareTo(y.bearing)); // CCW order
+                int n = _japp.Count;
+
+                // Per-approach setback: a floor, or the just-touching requirement against each CCW neighbour (so each road's
+                // stop-line face clears the crossing roads). The face then sits at the crossing-box edge.
+                var S = new float[n];
+                for (int i = 0; i < n; i++)
+                {
+                    int ip = (i - 1 + n) % n, inx = (i + 1) % n;
+                    float thetaNext = Mathf.Repeat(_japp[inx].bearing - _japp[i].bearing, Mathf.PI * 2f);   // CCW wedge to next
+                    float thetaPrev = Mathf.Repeat(_japp[i].bearing - _japp[ip].bearing, Mathf.PI * 2f);    // CCW wedge from prev
+                    float hi = (_japp[i].rightOff - _japp[i].leftOff) * 0.5f;
+                    float hn = (_japp[inx].rightOff - _japp[inx].leftOff) * 0.5f;
+                    float hp = (_japp[ip].rightOff - _japp[ip].leftOff) * 0.5f;
+                    float req = Mathf.Max(RequiredSetback(hi, hn, thetaNext), RequiredSetback(hi, hp, thetaPrev));
+                    S[i] = Mathf.Max(JunctionSetback, req);
+                    _setbackByEnd[EndKey(_japp[i].corrId, _japp[i].atA)] = S[i];   // so the corridor's plan overlay clips here
+                }
+
+                // Face corners at each setback: full outer-edge points, plus corners pulled IN by the curb radius so the corner
+                // bezier has room to round (control = the two roads' outer-edge intersection — the box corner).
+                var leftEdge = new Vector2[n]; var rightEdge = new Vector2[n];
+                var leftC = new Vector2[n]; var rightC = new Vector2[n];
+                for (int i = 0; i < n; i++)
+                {
+                    JctApproach ap = _japp[i];
+                    Vector2 fc = ap.P + ap.away * S[i];
+                    Vector2 perp = new Vector2(-ap.away.y, ap.away.x);   // left when looking outward from the node
+                    Vector2 e1 = fc + ap.fr * ap.leftOff, e2 = fc + ap.fr * ap.rightOff;
+                    bool e1IsLeft = Vector2.Dot(e1 - fc, perp) >= Vector2.Dot(e2 - fc, perp);
+                    Vector2 lE = e1IsLeft ? e1 : e2, rE = e1IsLeft ? e2 : e1;
+                    leftEdge[i] = lE; rightEdge[i] = rE;
+                    float pull = Mathf.Min(JunctionRadius, (rE - lE).magnitude * 0.45f);
+                    leftC[i]  = lE + (fc - lE).normalized * pull;
+                    rightC[i] = rE + (fc - rE).normalized * pull;
+                }
+
+                // Closed CCW boundary: each approach's face (right corner → left corner), then a curb-return bezier to the next
+                // approach's right corner (control = outer-edge intersection; straight if the edges are parallel / run away).
+                var loop = new List<Vector2>();
+                for (int i = 0; i < n; i++)
+                {
+                    loop.Add(rightC[i]); loop.Add(leftC[i]);
+                    int j = (i + 1) % n;
+                    if (LineLineIntersect(leftEdge[i], _japp[i].away, rightEdge[j], _japp[j].away, out Vector2 ctrl))
+                    {
+                        Vector2 a = leftC[i], b = rightC[j], mid = (a + b) * 0.5f;
+                        float maxReach = Mathf.Max((b - a).magnitude * 2f, 6f);
+                        if ((ctrl - mid).magnitude <= maxReach)   // skip a runaway control (near-parallel) → straight chamfer
+                        {
+                            const int steps = 12;
+                            for (int k = 1; k < steps; k++) { float s = k / (float)steps, u = 1f - s; loop.Add(u * u * a + 2f * u * s * ctrl + s * s * b); }
+                        }
+                    }
+                }
+                if (loop.Count < 3) continue;
+                _junctions.Add(new JunctionPad { node = node, loop = loop });
+            }
+        }
+
+        // Fan each stored junction footprint from its node (star-shaped about it). Double-sided so winding never hides it.
+        static void RenderJunctions(Transform parent, Func<Vector2, float> groundAt)
+        {
+            if (_junctions.Count == 0) return;
+            var verts = new List<Vector3>(); var tris = new List<int>();
+            foreach (var jp in _junctions)
+            {
+                List<Vector2> loop = jp.loop;
+                Vector2 ctr = Net.Nodes[jp.node];
+                float yC = (groundAt != null ? groundAt(ctr) : 0f) + 0.10f;
+                int baseIdx = verts.Count;
+                verts.Add(new Vector3(ctr.x, yC, ctr.y));
+                foreach (var p in loop) verts.Add(new Vector3(p.x, (groundAt != null ? groundAt(p) : 0f) + 0.10f, p.y));
+                for (int k = 0; k < loop.Count; k++)
+                {
+                    int a = baseIdx + 1 + k, b = baseIdx + 1 + (k + 1) % loop.Count;
+                    tris.Add(baseIdx); tris.Add(a); tris.Add(b);          // one winding
+                    tris.Add(baseIdx); tris.Add(b); tris.Add(a);          // and the reverse (double-sided)
+                }
+            }
+            BuildGoreMesh(verts, tris, JunctionMat(), "Junctions", parent);
         }
 
         static void BuildGoreMesh(List<Vector3> verts, List<int> tris, Material mat, string name, Transform parent)
@@ -1180,11 +1389,12 @@ namespace NetworkDesigner.Roads
         public static bool Click(Vector2 xz, string profileId, Func<Vector2, float> groundAt,
                                  bool curveModifier = false, bool limitRadius = false, float minRadius = 0f)
         {
-            // A normal draw never snaps to an existing SEGMENT node — you expand/connect an existing road ONLY via its lane
-            // pucks (extension). So start/bend/end are always fresh nodes; the segment-node centreline is never a draw handle.
+            // A draw endpoint JOINS an existing road when it lands on one: it shares a nearby node, or splits the road body at
+            // the click and shares the inserted node (auto-T/cross junction) — see ResolveJoinNode. Off any road it's a fresh
+            // node. (Lane-subset extension off a road's pucks is still the separate ToggleExtendPick path, gated upstream.)
             if (_drawStart < 0)
             {
-                _drawStart = Net.AddNode(xz);
+                _drawStart = ResolveJoinNode(xz, groundAt);
                 return false;
             }
 
@@ -1200,7 +1410,7 @@ namespace NetworkDesigner.Roads
                     Debug.LogWarning($"[LaneEdgeWorld] curve too tight (R {MinCurveRadius(start, c1, c2, endPos):0} < {minRadius:0} m) — pick a wider end");
                     return false;   // keep the corner armed so the next click can finish a buildable curve
                 }
-                int bc = Net.AddNode(xz);
+                int bc = ResolveJoinNode(xz, groundAt);
                 AddCorridorFromProfile(_drawStart, bc, profileId, true, c1, c2);
                 _drawStart = -1; _cornerPending = false;
                 RegenerateDefaultFlows(groundAt);
@@ -1214,7 +1424,7 @@ namespace NetworkDesigner.Roads
                 return false;
             }
 
-            int b = Net.AddNode(xz);
+            int b = ResolveJoinNode(xz, groundAt);
             if (b == _drawStart || (Net.Nodes[b] - start).sqrMagnitude < 1f) return false;   // degenerate
             AddCorridorFromProfile(_drawStart, b, profileId);
             _drawStart = -1;
@@ -1824,6 +2034,13 @@ namespace NetworkDesigner.Roads
         public static bool ToggleExtendPick(Vector2 worldXz, string profileId, float worldR = 5f)
         {
             if (!ComputeExtendGroup(worldXz, profileId, worldR, out int node, out bool single)) return false;
+            // At a CONNECTED node (already 2+ corridors — a split/junction), a whole-corridor grab is almost always "add a
+            // leg", not "extend this road" — and grabbing steals lanes from a crossing corridor. Suppress it so the click
+            // falls through to a fresh JOINED draw. Alt single-lane subset picks (ramps) and free road ends (degree 1) still
+            // pull normally.
+            int deg = CountCorridorsAtNode(node);
+            if (deg >= 3) return false;                  // a true junction → always a fresh leg
+            if (deg >= 2 && !single) return false;       // connected node + whole-corridor grab → junction leg, not an extend
             if (_extNode >= 0 && node != _extNode) _extLanes.Clear();   // switched node → restart selection
             _extNode = node;
             if (single)   // single-lane pick: Alt-accumulate (click each lane you want) OR a 1-lane profile → toggle in/out
@@ -2901,7 +3118,18 @@ namespace NetworkDesigner.Roads
             Corridor c = Net.Corridors[best];
             if (!NearestOnPath(c, xz, out _, out float t)) return false;
             if (t < 0.04f || t > 0.96f) return false;   // clicked at/near an existing end → nothing to split
+            if (SplitCorridorAtCore(c, t) < 0) return false;
+            RegenerateDefaultFlows(groundAt);
+            Rebuild(groundAt);
+            return true;
+        }
 
+        // Topology-only split of corridor c at param t → the inserted node index (NO flow-regen / rebuild, so callers can
+        // batch). The clicked corridor keeps the A-side half; a fresh corridor takes the B-side half. Curved corridors
+        // de-Casteljau-split so both halves trace the original cubic. Returns -1 if degenerate.
+        static int SplitCorridorAtCore(Corridor c, float t)
+        {
+            if (c.Lanes.Count == 0) return -1;
             LaneEdge l0 = Net.Edges[c.Lanes[0]];
             Vector2 rawA = Net.Nodes[l0.A], rawB = Net.Nodes[l0.B];
 
@@ -2957,9 +3185,33 @@ namespace NetworkDesigner.Roads
             c.Tapers?.Clear();
 
             Net.SortCorridorLanes(c); Net.SortCorridorLanes(c2);
-            RegenerateDefaultFlows(groundAt);
-            Rebuild(groundAt);
-            return true;
+            return nn;
+        }
+
+        // Resolve a draw endpoint to the node it should CONNECT to so a fresh road can T/cross into an existing one without
+        // stealing lanes (a normal draw otherwise always makes its own node — see Click). Order: (1) reuse a nearby existing
+        // node; (2) land on a corridor BODY → split it there + share the inserted node (auto-junction); (3) a fresh node.
+        public static float JoinNodeSnap = 7f;       // radius for reusing an existing node as a draw endpoint
+        static int ResolveJoinNode(Vector2 xz, Func<Vector2, float> groundAt)
+        {
+            int near = NearestCluster(xz, JoinNodeSnap);
+            if (near >= 0) return near;
+            int best = -1; float bestD = float.PositiveInfinity;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                Corridor c = Net.Corridors[ci];
+                if (c.Lanes.Count == 0) continue;
+                float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(c, Net).Width * 0.5f + 0.5f;   // tight: only join when actually ON the road
+                float d = CorridorDistSq(c, xz);
+                if (d < halfW * halfW && d < bestD) { bestD = d; best = ci; }
+            }
+            if (best < 0) return Net.AddNode(xz);
+            Corridor cc = Net.Corridors[best];
+            if (!NearestOnPath(cc, xz, out _, out float t)) return Net.AddNode(xz);
+            if (t <= 0.04f) return Net.Edges[cc.Lanes[0]].A;   // near a real end → share it
+            if (t >= 0.96f) return Net.Edges[cc.Lanes[0]].B;
+            int split = SplitCorridorAtCore(cc, t);
+            return split >= 0 ? split : Net.AddNode(xz);
         }
 
         // De Casteljau split of cubic (p0,p1,p2,p3) at t → the split point plus first-half controls (q1,q2) and
