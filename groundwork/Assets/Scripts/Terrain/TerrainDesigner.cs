@@ -4108,6 +4108,9 @@ namespace NetworkDesigner.Terrain
                         // cursor (ray-based node snap) so the click lands on the node, not the parallax terrain-hit.
                         if (connectMod)
                             NetworkDesigner.Roads.LaneEdgeWorld.ConnectClick(_leSnapNode, _leSnapEdge, leGround);
+                        // DEBUG: hold 'I' and left-click a segment to dump its structure to the console (compare two segments).
+                        else if (Input.GetKey(KeyCode.I))
+                            NetworkDesigner.Roads.LaneEdgeWorld.InspectCorridorAt(new Vector2(hit.point.x, hit.point.z));
                         // Hold ',' and left-click a segment to flip it in place (mirror its cross-section).
                         else if (Input.GetKey(KeyCode.Comma))
                             NetworkDesigner.Roads.LaneEdgeWorld.FlipCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);

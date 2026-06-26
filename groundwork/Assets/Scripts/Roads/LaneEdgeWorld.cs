@@ -1587,15 +1587,13 @@ namespace NetworkDesigner.Roads
                 else { gotAB++; if (Mathf.Abs(oNew) >= abMax) { abMax = Mathf.Abs(oNew); abW = s.Width; } }
             }
             if (lo > hi) return;
-            // Lane addition (two-way only — mirrors BuildExtensionCorridor's gate): widen the band on the side that gains
-            // lanes (BA → lo, AB → hi) so the preview matches the built corridor, not just the grabbed-lane span.
-            ProfileLaneSplit(profileId, out int wantBA, out int wantAB);
-            if (_extLanes.Count > 0 && _extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count)   // A-end pull inverts direction (match build)
-            {
-                LaneEdge sf = Net.Edges[_extLanes[0]];
-                bool inc0 = (sf.Direction == 2 && _extNode == sf.B) || (sf.Direction == 0 && _extNode == sf.A);
-                if ((inc0 ? 2 : 0) != sf.Direction) { int t = wantBA; wantBA = wantAB; wantAB = t; }
-            }
+            // Lane addition: widen the band on the side that gains lanes (BA → lo, AB → hi) so the preview matches the built
+            // corridor. Orient the target to the GRABBED lanes' direction majority (gotBA/gotAB), exactly like
+            // BuildExtensionCorridor — else a direction-mirrored road previews wider than it builds.
+            ProfileLaneSplit(profileId, out int pSplA, out int pSplB);
+            int profBig = Mathf.Max(pSplA, pSplB), profSmall = Mathf.Min(pSplA, pSplB);
+            int wantBA, wantAB;
+            if (gotBA >= gotAB) { wantBA = profBig; wantAB = profSmall; } else { wantBA = profSmall; wantAB = profBig; }
             if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // mirror — match the built side (F flip)
             if (wantBA > 0 && wantAB > 0)
             {
@@ -1800,42 +1798,18 @@ namespace NetworkDesigner.Roads
             LaneEdge picked = Net.Edges[ep.Edge];
             if (ForceSingleLane || ProfileLaneCount(profileId) <= 1) { _grpBuf.Add(ep.Edge); single = true; return true; }   // Alt: grab ONLY the clicked lane
 
-            // A two-way profile extends the FULL cross-section (both travel directions + the median divider), so we don't
-            // restrict the group to the clicked lane's direction. A one-way profile is a fork → same-direction lanes only.
-            bool twoWay = ProfileIsTwoWay(profileId);
-            _grpCand.Clear();
+            // Whole-road grab: take the clicked corridor's ENTIRE cross-section at the node (every lane, both directions) —
+            // "extend the road" should grab the road AS IT ACTUALLY IS, even if its lane count has drifted from the active
+            // profile (lanes pulled off then added back). The build canonicalises the copy to the road's own profile. Use
+            // Alt to pick a subset instead. (Previously this capped the grab at the active profile's lane split, which
+            // under-grabbed any road whose lane count no longer matched the palette profile.)
             for (int i = 0; i < Net.Edges.Count; i++)
             {
                 LaneEdge e = Net.Edges[i];
-                if ((e.A != node && e.B != node) || e.CorridorId != picked.CorridorId) continue;
-                if (e.Kind == LaneKind.Sidewalk) continue;
-                if (!twoWay && e.Direction != picked.Direction) continue;
-                _grpCand.Add(i);
+                if ((e.A != node && e.B != node) || e.CorridorId != picked.CorridorId || e.Kind == LaneKind.Sidewalk) continue;
+                _grpBuf.Add(i);
             }
-            if (twoWay)
-            {
-                // Direction-balanced grab: take the profile's per-direction lane counts, the lanes NEAREST THE MEDIAN on
-                // each side. Inner-first keeps the extension centred on the source centreline (centrelines align) and makes
-                // a mis-split (e.g. 3+1 off a 3x2) impossible — surplus outer lanes simply drop. Pick position is ignored.
-                ProfileLaneSplit(profileId, out int nBA, out int nAB);
-                _grpCand.Sort((x, y) => Mathf.Abs(Net.Edges[x].Offset).CompareTo(Mathf.Abs(Net.Edges[y].Offset)));   // median-hugging first
-                int gotBA = 0, gotAB = 0;
-                foreach (int ei in _grpCand)
-                {
-                    if (Net.Edges[ei].Direction == 0) { if (gotBA < nBA) { _grpBuf.Add(ei); gotBA++; } }
-                    else { if (gotAB < nAB) { _grpBuf.Add(ei); gotAB++; } }
-                }
-                if (_grpBuf.Count == 0) _grpBuf.Add(ep.Edge);
-                return true;
-            }
-
-            // one-way fork: contiguous same-direction block centred on the pick.
-            _grpCand.Sort((x, y) => Net.Edges[x].Offset.CompareTo(Net.Edges[y].Offset));
-            int pi = _grpCand.IndexOf(ep.Edge);
-            if (pi < 0) { _grpBuf.Add(ep.Edge); return true; }
-            int g = Mathf.Min(ProfileLaneCount(profileId), _grpCand.Count);
-            int startIdx = Mathf.Clamp(pi - g / 2, 0, _grpCand.Count - g);
-            for (int k = 0; k < g; k++) _grpBuf.Add(_grpCand[startIdx + k]);
+            if (_grpBuf.Count == 0) _grpBuf.Add(ep.Edge);
             return true;
         }
 
@@ -1859,7 +1833,7 @@ namespace NetworkDesigner.Roads
                 if (_extLanes.Count == 0) _extNode = -1;
                 _extForceSingle = ForceSingleLane && _extLanes.Count > 0;   // Alt subset → build exactly these lanes (skip profile surplus padding)
             }
-            else { _extLanes.Clear(); _extLanes.AddRange(_grpBuf); _extForceSingle = false; }   // multi-lane → grab the contiguous group
+            else { _extLanes.Clear(); _extLanes.AddRange(_grpBuf); _extForceSingle = false; }   // multi-lane → grab the whole corridor cross-section
             return true;
         }
 
@@ -2777,18 +2751,18 @@ namespace NetworkDesigner.Roads
                 nc.Lanes.Add(li);
                 if (string.IsNullOrEmpty(nc.Profile) && sc != null) { nc.Profile = sc.Profile; nc.ShoulderBA = sc.ShoulderBA; nc.ShoulderAB = sc.ShoulderAB; nc.MedianWidth = sc.MedianWidth; }
             }
-            // Lane addition: append surplus profile lanes outboard on each side (median stays aligned, through-lanes stay
-            // put). Scoped to TWO-WAY profiles so one-way forks (confirmed working) keep their copy-grabbed-lanes behaviour.
-            ProfileLaneSplit(profileId, out int wantBA, out int wantAB);
-            // Pulling off the source's A end inverts each lane's direction label in the extension (incomingAtN flips
-            // dirNew), so the profile's per-direction counts must be swapped to match — else the surplus lands on the
-            // already-full side and a 2x3 pulled off that end wrongly grows to 3x3. Independent of (and composed with) F.
-            if (_extLanes.Count > 0 && _extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count)
-            {
-                LaneEdge s0 = Net.Edges[_extLanes[0]];
-                bool inc0 = (s0.Direction == 2 && nodeN == s0.B) || (s0.Direction == 0 && nodeN == s0.A);
-                if ((inc0 ? 2 : 0) != s0.Direction) { int t = wantBA; wantBA = wantAB; wantAB = t; }
-            }
+            // Lane addition: append surplus profile lanes outboard to reach the active profile's lane count. Orient the
+            // per-direction target to the SOURCE ROAD'S actual direction majority (the copied lanes' BA/AB split), not the
+            // profile's nominal sides — a direction-mirrored 2x4 (4 BA + 2 AB) must stay (4,2); otherwise AppendOutboard pads
+            // the minority side up to the profile's BIG count and a "2x4" wrongly inflates to a "4x4". Counting nc's CURRENT
+            // lanes also subsumes the A-end direction-label flip (incomingAtN). Symmetric profiles (4x4) are orientation-free.
+            ProfileLaneSplit(profileId, out int pSplA, out int pSplB);
+            int profBig = Mathf.Max(pSplA, pSplB), profSmall = Mathf.Min(pSplA, pSplB);
+            int curBA = 0, curAB = 0;
+            foreach (int ei in nc.Lanes)
+            { if (ei < 0 || ei >= Net.Edges.Count) continue; LaneEdge e = Net.Edges[ei]; if (e.Kind != LaneKind.Traffic) continue; if (e.Direction == 0) curBA++; else if (e.Direction == 2) curAB++; }
+            int wantBA, wantAB;
+            if (curBA >= curAB) { wantBA = profBig; wantAB = profSmall; } else { wantBA = profSmall; wantAB = profBig; }
             if (ExtFlipSide) { int t = wantBA; wantBA = wantAB; wantAB = t; }   // F: mirror which side gains the surplus lane
             // Alt force-single pull: keep EXACTLY the grabbed lane(s) — skip the profile's surplus-lane padding so a 1-lane
             // pick off a 6-lane road stays a 1-lane ramp (canonicalised to "1" below) instead of being re-inflated to the profile.
@@ -2897,6 +2871,44 @@ namespace NetworkDesigner.Roads
             Net.SortCorridorLanes(c);
             RegenerateDefaultFlows(groundAt);
             Rebuild(groundAt);
+            return true;
+        }
+
+        // ── DEBUG: click a segment to dump its full structure (profile, centreline shift, lane indices/offsets/dirs, the
+        // built cross-section, lane config). Lets two "identical-looking" segments be compared to find why they differ.
+        public static bool InspectCorridorAt(Vector2 xz)
+        {
+            int best = -1; float bestD = float.PositiveInfinity;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                if (Net.Corridors[ci].Lanes.Count == 0) continue;
+                float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(Net.Corridors[ci], Net).Width * 0.5f + 1.5f;
+                float d = CorridorDistSq(Net.Corridors[ci], xz);
+                if (d < halfW * halfW && d < bestD) { bestD = d; best = ci; }
+            }
+            if (best < 0) { Debug.Log("[INSPECT] no corridor under click"); return false; }
+            Corridor c = Net.Corridors[best];
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            RoadCrossSection xs = LaneEdgeCorridorBuilder.BuildCrossSection(c, Net);
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"[INSPECT] c{c.Id} profile='{c.Profile}' Curved={c.Curved} AlignLanes={c.AlignLanes} CenterShift={c.CenterShift:F2}/{c.CenterShiftB:F2} Median={c.MedianWidth:F1} ShBA/AB={c.ShoulderBA:F1}/{c.ShoulderAB:F1} Built={c.Built}\n");
+            sb.Append($"  lane[0]={c.Lanes[0]} nodesA={l0.A}{Net.Nodes[l0.A]} B={l0.B}{Net.Nodes[l0.B]} ctrlA={c.ControlA} ctrlB={c.ControlB}\n");
+            sb.Append($"  built cross-section: width={xs.Width:F2} center(U)={xs.Center():F2} CenterUSet={xs.CenterUSet} SplitU={xs.SplitU:F2} segs={xs.Segs.Count} pts={xs.Pts.Count}\n");
+            int ab = 0, ba = 0;
+            sb.Append($"  lanes [{c.Lanes.Count}] (in c.Lanes order):\n");
+            foreach (int li in c.Lanes)
+            {
+                LaneEdge e = Net.Edges[li];
+                if (e.Kind == LaneKind.Traffic) { if (e.Direction == 2) ab++; else if (e.Direction == 0) ba++; }
+                bool tapered = LaneIsTapered(c, li);
+                sb.Append($"    idx={li} serial={e.Serial} {e.Kind} dir={(e.Direction == 2 ? "AB" : e.Direction == 0 ? "BA" : "?")} off={e.Offset:F2} w={e.Width:F2} A={e.A} B={e.B}{(tapered ? " [TAPERED]" : "")}\n");
+            }
+            ProfileLanes(c.Profile, out float pShBA, out float pShAB);
+            var canon = new List<string>(); foreach (var lb in _laneBuf) canon.Add($"{lb.off:F2}/{(lb.dir == 2 ? "AB" : "BA")}");
+            sb.Append($"  config AB={ab} BA={ba} → FindByConfig='{RoadProfileLibrary.FindByConfig(ab, ba)}'\n");
+            sb.Append($"  profile '{c.Profile}' canonical lanes=[{string.Join(", ", canon)}] shBA/AB={pShBA:F1}/{pShAB:F1}\n");
+            if (c.Tapers != null) foreach (var t in c.Tapers) sb.Append($"  TAPER atA={t.AtA} off={t.Offset:F2} w={t.Width:F2} len={t.Length:F1} edge={t.LaneEdge}\n");
+            Debug.Log(sb.ToString());
             return true;
         }
 
