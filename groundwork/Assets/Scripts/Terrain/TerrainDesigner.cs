@@ -3973,6 +3973,22 @@ namespace NetworkDesigner.Terrain
                 {
                     _lineActive.HidePreview();   // the corridor-edge ghost is irrelevant in lane-edge mode
                     var rdPv = (RoadPlanLayer)_lineActive;
+                    // Junction setback grab handles: a press on a yellow handle starts a drag (left = set, right = reset to auto);
+                    // while dragging, the handle owns the mouse. Checked before draw/extend so the click can't leak into a draw.
+                    System.Func<Vector2, float> sbGfn = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
+                    Vector2 sbXz = new Vector2(hit.point.x, hit.point.z);
+                    if (NetworkDesigner.Roads.LaneEdgeWorld.SetbackDragging)
+                    {
+                        NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview();
+                        if (Input.GetMouseButton(0) && overTerrain) NetworkDesigner.Roads.LaneEdgeWorld.UpdateSetbackDrag(sbXz, sbGfn);
+                        if (Input.GetMouseButtonUp(0)) { NetworkDesigner.Roads.LaneEdgeWorld.EndSetbackDrag(sbGfn); _dirtySince = Time.realtimeSinceStartup; }
+                        return;
+                    }
+                    if (overTerrain && !MouseOverActivePanel())
+                    {
+                        if (Input.GetMouseButtonDown(0) && NetworkDesigner.Roads.LaneEdgeWorld.BeginSetbackDrag(sbXz, 7f)) { NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); return; }
+                        if (Input.GetMouseButtonDown(1) && NetworkDesigner.Roads.LaneEdgeWorld.ResetSetbackAt(sbXz, 7f, sbGfn)) { _dirtySince = Time.realtimeSinceStartup; return; }
+                    }
                     bool leShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                     // Alt/Option held: lane picks grab ONE lane at a time (accumulate) instead of the profile's whole group → pull a subset off a road.
                     NetworkDesigner.Roads.LaneEdgeWorld.ForceSingleLane = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);

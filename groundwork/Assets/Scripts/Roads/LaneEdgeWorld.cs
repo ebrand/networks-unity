@@ -824,12 +824,18 @@ namespace NetworkDesigner.Roads
             public float leftOff, rightOff;   // outer-edge offsets (left = BA = negative, right = AB = positive)
             public float bearing;        // atan2(away) for CCW sort
             public int corrId; public bool atA;   // which corridor end this approach is (for the per-end setback map)
+            public float setbackOverride;   // <0 = auto; else this end's dragged setback (Corridor.SetbackA/B)
         }
         static readonly List<JctApproach> _japp = new List<JctApproach>();
 
         // Per-junction results, computed once per Rebuild BEFORE corridors render so the plan overlay can clip to the setback.
         struct JunctionPad { public int node; public List<Vector2> loop; }
         static readonly List<JunctionPad> _junctions = new List<JunctionPad>();
+
+        // A draggable junction setback handle (one per approach): drag it along the road to set that end's stop-line setback.
+        public struct SetbackHandle { public Vector2 Pos, Node, Away; public float Y; public int CorrId; public bool AtA; }
+        static readonly List<SetbackHandle> _setbackHandles = new List<SetbackHandle>();
+        public static IReadOnlyList<SetbackHandle> SetbackHandlesList => _setbackHandles;
         static readonly Dictionary<int, float> _setbackByEnd = new Dictionary<int, float>();   // corrId*2 + (atA?0:1) → setback (m)
         static int EndKey(int corrId, bool atA) => corrId * 2 + (atA ? 0 : 1);
         // The junction stop-line setback at the corridor end touching `node` (0 if that end isn't a junction). Used to pull
@@ -896,7 +902,7 @@ namespace NetworkDesigner.Roads
         // _setbackByEnd) — run EARLY in Rebuild so corridor plan overlays can clip their lines back to the setback.
         static void ComputeJunctions()
         {
-            _junctions.Clear(); _setbackByEnd.Clear();
+            _junctions.Clear(); _setbackByEnd.Clear(); _setbackHandles.Clear();
             for (int node = 0; node < Net.Nodes.Count; node++)
             {
                 if (IsGoreForkNode(node)) continue;   // a gore (ramp diverging from a through road) is also 3 ends at a node — not a crossing
@@ -920,7 +926,8 @@ namespace NetworkDesigner.Roads
                         fr = LaneEdgeCorridorBuilder.PathRight(tan),
                         leftOff = lOff, rightOff = rOff,
                         bearing = Mathf.Atan2(away.y, away.x),
-                        corrId = c.Id, atA = atA
+                        corrId = c.Id, atA = atA,
+                        setbackOverride = atA ? c.SetbackA : c.SetbackB
                     });
                 }
                 if (_japp.Count < 3) continue;                       // 3+ approaches = a junction (2 = continuation / bend)
@@ -939,7 +946,7 @@ namespace NetworkDesigner.Roads
                     float hn = (_japp[inx].rightOff - _japp[inx].leftOff) * 0.5f;
                     float hp = (_japp[ip].rightOff - _japp[ip].leftOff) * 0.5f;
                     float req = Mathf.Max(RequiredSetback(hi, hn, thetaNext), RequiredSetback(hi, hp, thetaPrev));
-                    S[i] = Mathf.Max(JunctionSetback, req);
+                    S[i] = _japp[i].setbackOverride >= 0f ? _japp[i].setbackOverride : Mathf.Max(JunctionSetback, req);   // dragged override wins
                     _setbackByEnd[EndKey(_japp[i].corrId, _japp[i].atA)] = S[i];   // so the corridor's plan overlay clips here
                 }
 
@@ -956,9 +963,14 @@ namespace NetworkDesigner.Roads
                     bool e1IsLeft = Vector2.Dot(e1 - fc, perp) >= Vector2.Dot(e2 - fc, perp);
                     Vector2 lE = e1IsLeft ? e1 : e2, rE = e1IsLeft ? e2 : e1;
                     leftEdge[i] = lE; rightEdge[i] = rE;
-                    float pull = Mathf.Min(JunctionRadius, (rE - lE).magnitude * 0.45f);
-                    leftC[i]  = lE + (fc - lE).normalized * pull;
-                    rightC[i] = rE + (fc - rE).normalized * pull;
+                    // Grab handle: sits beside the road (in the grass) at the setback distance; drag it along `away` to set this end's setback.
+                    _setbackHandles.Add(new SetbackHandle {
+                        Pos = fc + perp * ((rE - lE).magnitude * 0.5f + 4f), Node = Net.Nodes[node], Away = ap.away,
+                        CorrId = ap.corrId, AtA = ap.atA, Y = 0f
+                    });
+                    // Face spans the FULL shoulder-to-shoulder edge so the pad connects each segment's outermost edge. The corner
+                    // bezier (control = outer-edge intersection) rounds whatever gap the setback leaves beyond the crossing box.
+                    leftC[i] = lE; rightC[i] = rE;
                 }
 
                 // Closed CCW boundary: each approach's face (right corner → left corner), then a curb-return bezier to the next
@@ -1005,6 +1017,77 @@ namespace NetworkDesigner.Roads
                 }
             }
             BuildGoreMesh(verts, tris, JunctionMat(), "Junctions", parent);
+            RenderSetbackHandles(parent, groundAt);
+        }
+
+        static Material _sbHandleMat;
+        static Material SetbackHandleMat() => _sbHandleMat != null ? _sbHandleMat
+            : (_sbHandleMat = NetworkDesigner.PipelineMaterials.CreateUnlitColor(new Color(1f, 0.92f, 0.2f, 1f), "LaneSetbackHandle"));
+
+        // Yellow grab pucks beside each approach + a dashed leader from the road to the puck (drag the puck to set the setback).
+        static void RenderSetbackHandles(Transform parent, Func<Vector2, float> groundAt)
+        {
+            for (int i = 0; i < _setbackHandles.Count; i++)
+            {
+                SetbackHandle h = _setbackHandles[i];
+                Vector2 onRoad = h.Node + h.Away * Vector2.Dot(h.Pos - h.Node, h.Away);   // foot of the puck on the road centreline (the setback point)
+                float y = (groundAt != null ? groundAt(h.Pos) : 0f) + 1.0f;
+                var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
+                go.GetComponent<MeshRenderer>().sharedMaterial = SetbackHandleMat();
+                go.transform.SetParent(parent, false);
+                go.transform.position = new Vector3(h.Pos.x, y, h.Pos.y);
+                go.transform.localScale = Vector3.one * 4f;
+                go.name = $"setbackHandle_{h.CorrId}_{(h.AtA ? "A" : "B")}";
+                // dashed leader puck → road (on the ground; the puck floats above it)
+                var vv = new List<Vector3>(); var tt = new List<int>();
+                EmitDashedPolyline(new List<Vector2> { h.Pos, onRoad }, 2f, 1.5f, vv, tt, groundAt);
+                BuildGoreMesh(vv, tt, SetbackHandleMat(), $"setbackLeader_{i}", parent);
+            }
+        }
+
+        // ── setback drag: pick a handle, drag it along its road to set that end's setback override ──
+        static SetbackHandle _sbDrag; static bool _sbDragging;
+        public static bool SetbackDragging => _sbDragging;
+        // Nearest setback handle within `r` of a world point (XZ), or -1.
+        public static int PickSetbackHandle(Vector2 xz, float r)
+        {
+            int best = -1; float bestSq = r * r;
+            for (int i = 0; i < _setbackHandles.Count; i++)
+            { float d = (_setbackHandles[i].Pos - xz).sqrMagnitude; if (d < bestSq) { bestSq = d; best = i; } }
+            return best;
+        }
+        public static bool BeginSetbackDrag(Vector2 xz, float r)
+        {
+            int i = PickSetbackHandle(xz, r);
+            if (i < 0) return false;
+            _sbDrag = _setbackHandles[i]; _sbDragging = true; return true;
+        }
+        static float _lastSbRebuild;
+        public static void UpdateSetbackDrag(Vector2 xz, Func<Vector2, float> groundAt)
+        {
+            if (!_sbDragging) return;
+            Corridor c = null;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++) if (Net.Corridors[ci].Id == _sbDrag.CorrId) { c = Net.Corridors[ci]; break; }
+            if (c == null) { _sbDragging = false; return; }
+            float s = Vector2.Dot(xz - _sbDrag.Node, _sbDrag.Away);   // project the cursor onto the road axis → setback distance
+            float pathLen = LaneEdgeCorridorBuilder.PathLength(Net, c);
+            s = Mathf.Clamp(s, 1f, Mathf.Max(1f, pathLen * 0.9f));
+            if (_sbDrag.AtA) c.SetbackA = s; else c.SetbackB = s;   // data is always current; the rebuild (the cost) is throttled
+            if (Time.realtimeSinceStartup - _lastSbRebuild < 0.016f) return;   // ~60 Hz live rebuilds instead of every frame
+            _lastSbRebuild = Time.realtimeSinceStartup;
+            Rebuild(groundAt);
+        }
+        public static void EndSetbackDrag(Func<Vector2, float> groundAt) { _sbDragging = false; Rebuild(groundAt); }   // final rebuild applies the last value
+        // Right-click a handle → reset that end's setback back to auto.
+        public static bool ResetSetbackAt(Vector2 xz, float r, Func<Vector2, float> groundAt)
+        {
+            int i = PickSetbackHandle(xz, r); if (i < 0) return false;
+            SetbackHandle h = _setbackHandles[i];
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+                if (Net.Corridors[ci].Id == h.CorrId)
+                { if (h.AtA) Net.Corridors[ci].SetbackA = -1f; else Net.Corridors[ci].SetbackB = -1f; Rebuild(groundAt); return true; }
+            return false;
         }
 
         static void BuildGoreMesh(List<Vector3> verts, List<int> tris, Material mat, string name, Transform parent)

@@ -77,6 +77,7 @@ namespace NetworkDesigner.Roads
         public bool Built;                                    // 3D body swept + registered for agents
         public float BedDepth;                                // excavation depth (built body becomes a slab of this thickness)
         public List<LaneDropTaper> Tapers = new List<LaneDropTaper>();   // paved lane-drop wedges (Phase-2 taper geometry)
+        public float SetbackA = -1f, SetbackB = -1f;          // per-end junction stop-line setback OVERRIDE (m); <0 = auto (computed from crossing geometry). Dragged via the junction grab handles.
     }
 
     // The lane-edge graph: a shared node list + lane-edges + corridors. Parallels LineGraph but at lane granularity.
