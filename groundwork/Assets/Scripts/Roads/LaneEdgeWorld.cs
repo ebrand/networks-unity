@@ -893,23 +893,25 @@ namespace NetworkDesigner.Roads
             // there would DOUBLE-offset it — a skewed puck and a flow-match position that no longer coincides with the
             // connector at the shared peel node. Detect a peeled end (node differs from the corridor's path node at this
             // end) and treat the node itself as the puck (lat = 0).
-            // Include the body shift at THIS end (A→CenterShift, B→CenterShiftB) so the puck sits on the (canonicalised/connector)
-            // BODY, not at offset-from-node — else picking and flow-position matching land metres off the pavement.
-            float endShift = 0f;
-            if (c != null && c.Lanes.Count > 0)
-            {
-                LaneEdge l0e = Net.Edges[c.Lanes[0]];
-                endShift = (atNode == l0e.B) ? c.CenterShiftB : c.CenterShift;
-            }
-            float lat = e.Offset + endShift;
+            // Anchor the puck on the corridor BODY (CenterShift-aware): use the shifted-path endpoint, which applies the shift
+            // EXACTLY as the body renders — a uniform shift is a RIGID translate along the A-end normal, so re-deriving it per
+            // end (the old `+endShift` along this end's normal) drifted several metres off the body on a CURVED ramp. Add the
+            // lane's own lateral offset along fr. Non-shifted corridors are unchanged (shifted endpoint == raw node). A PEELED
+            // lane sits on its own node already → use the node directly (offset 0).
+            bool peeled = false;
             if (c != null && c.Lanes.Count > 0 && c.Lanes[0] != edgeIndex)
             {
                 LaneEdge path = Net.Edges[c.Lanes[0]];
                 int pathNode = (atNode == e.A) ? path.A : path.B;
-                if (atNode != pathNode) lat = 0f;   // this end was peeled onto its own node, already at the lane position
+                if (atNode != pathNode) peeled = true;   // this end was peeled onto its own node
             }
-            Vector2 pos = N + into * inset + fr * lat;
-            Vector2 nodePos = N + fr * lat;   // lateral-only (no inset): the in/out of a through-lane coincide here → one unified puck
+            Vector2 baseN = N;
+            if (!peeled && c != null && c.Lanes.Count > 0
+                && LaneEdgeCorridorBuilder.PathFrameShifted(Net, c, out Vector2 sa, out Vector2 sb, out _, out _))
+                baseN = (atNode == Net.Edges[c.Lanes[0]].A) ? sa : sb;
+            float lat = peeled ? 0f : e.Offset;
+            Vector2 pos = baseN + into * inset + fr * lat;
+            Vector2 nodePos = baseN + fr * lat;   // lateral-only (no inset): the in/out of a through-lane coincide here → one unified puck
             bool incoming = (e.Direction == 2 && atNode == e.B) || (e.Direction == 0 && atNode == e.A);
             float y = (groundAt != null ? groundAt(pos) : 0f) + 0.6f;
             _endpointIndex[EpKey(atNode, edgeIndex)] = Endpoints.Count;
@@ -1361,8 +1363,11 @@ namespace NetworkDesigner.Roads
             if (lr == null || edge < 0 || edge >= Net.Edges.Count) return false;
             LaneEdge e = Net.Edges[edge];
             Corridor c = (e.CorridorId >= 0 && e.CorridorId < Net.Corridors.Count) ? Net.Corridors[e.CorridorId] : null;
-            if (c == null || e.A < 0 || e.A >= Net.Nodes.Count || e.B < 0 || e.B >= Net.Nodes.Count) return false;
-            FillPvLine(lr, Net.Nodes[e.A], Net.Nodes[e.B], c.Curved, c.ControlA, c.ControlB, e.Offset, groundAt, PvLaneHi());
+            if (c == null) return false;
+            // Use the CenterShift-aware (body) path, not the raw lane nodes — a pulled-off ramp has its lane node 0-offset
+            // but its body shifted (CenterShift); drawing on the raw nodes put the highlight CenterShift metres off the road.
+            if (!LaneEdgeCorridorBuilder.PathFrameShifted(Net, c, out Vector2 a, out Vector2 b, out Vector2 c1, out Vector2 c2)) return false;
+            FillPvLine(lr, a, b, c.Curved, c1, c2, e.Offset, groundAt, PvLaneHi());
             lr.widthMultiplier = Mathf.Max(1f, e.Width);
             lr.gameObject.SetActive(true);
             return true;
