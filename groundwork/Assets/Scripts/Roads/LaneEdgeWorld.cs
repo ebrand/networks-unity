@@ -82,14 +82,10 @@ namespace NetworkDesigner.Roads
             RenderExitGores(root.transform, groundAt);       // ramp-gore shoulder-edge convergence (nose/gore) — plan overlay
             RenderJunctions(root.transform, groundAt);        // 3+ corridor crossings → paved footprint with curb-return fillets
 
-            // The segment (cluster) node + flow connectors are intersection-routing visuals — only show them while mapping
-            // flows. In plain draw mode the lanes + endpoint pucks are the handles; the centreline node is internal.
-            if (LaneEdgeModel.MappingMode)
-            {
-                RenderNodes(root.transform, groundAt);
-                RenderFlows(root.transform);
-            }
-            RenderEndpointSpheres(root.transform);
+            // Lane-flow mode shows ONLY the flow circles + movement arrows (clean). Plain draw mode shows the lane/endpoint
+            // pucks (the draw/extend handles); the cluster node is internal either way.
+            if (LaneEdgeModel.MappingMode) RenderFlows(root.transform, groundAt);
+            else RenderEndpointSpheres(root.transform);
         }
 
         static readonly Color PlanCol = new Color(.5f, 0f, 0f, .25f), ExcCol = new Color(0.95f, 0.85f, 0.2f, 1f);   // white plan lines on green terrain
@@ -1252,8 +1248,65 @@ namespace NetworkDesigner.Roads
                 LaneEndpoint inc = Endpoints[i];
                 if (!inc.Incoming) continue;
                 if (Net.Flows.Exists(f => f.Node == inc.Node && f.FromEdge == inc.Edge)) continue;   // a manual flow already routes this lane
-                int best = BestOutgoingMatch(i);
+                if (CountCorridorsAtNode(inc.Node) >= 3)
+                {
+                    GenerateJunctionFlows(i);   // 3+ way crossing → straight + position-based left/right turns
+                    continue;
+                }
+                int best = BestOutgoingMatch(i);   // through / continuation → single best forward continuation
                 if (best >= 0) Net.Flows.Add(new LaneFlow { Node = inc.Node, FromEdge = inc.Edge, ToEdge = Endpoints[best].Edge, Auto = true });
+            }
+        }
+
+        // Turning movements at a 3+ way junction: from this incoming lane emit a flow to the best receiving lane on EACH other
+        // corridor — STRAIGHT always; a LEFT turn only from the leftmost incoming lane of its approach, a RIGHT only from the
+        // rightmost (so cars turn from the correct lanes, not the middle). The agent sim already picks among multiple flows.
+        static readonly Dictionary<int, (int ep, float score, int mv)> _jflowBest = new Dictionary<int, (int, float, int)>();
+        static void GenerateJunctionFlows(int incIdx)
+        {
+            LaneEndpoint inc = Endpoints[incIdx];
+            LaneEdge ie = Net.Edges[inc.Edge];
+            if (ie.Kind == LaneKind.Sidewalk) return;
+            int node = inc.Node;
+            int io = node == ie.A ? ie.B : ie.A;
+            Vector2 inDir = Net.Nodes[node] - Net.Nodes[io]; if (inDir.sqrMagnitude < 1e-6f) return; inDir.Normalize();
+            Vector2 leftPerp = new Vector2(-inDir.y, inDir.x);
+            int incCorr = ie.CorridorId;
+            Vector2 nodeP = Net.Nodes[node];
+
+            // Is this the leftmost / rightmost incoming lane of its own approach (corridor) at this node?
+            float myLat = Vector2.Dot(inc.NodePos - nodeP, leftPerp), maxLat = myLat, minLat = myLat;
+            for (int k = 0; k < Endpoints.Count; k++)
+            {
+                LaneEndpoint e = Endpoints[k];
+                if (!e.Incoming || e.Node != node || Net.Edges[e.Edge].CorridorId != incCorr || Net.Edges[e.Edge].Kind == LaneKind.Sidewalk) continue;
+                float lat = Vector2.Dot(e.NodePos - nodeP, leftPerp);
+                if (lat > maxLat) maxLat = lat; if (lat < minLat) minLat = lat;
+            }
+            bool leftmost = myLat >= maxLat - 0.01f, rightmost = myLat <= minLat + 0.01f;
+
+            // Best receiving outgoing lane per destination corridor + its movement class (0 straight / +1 left / -1 right).
+            _jflowBest.Clear();
+            for (int j = 0; j < Endpoints.Count; j++)
+            {
+                LaneEndpoint outg = Endpoints[j];
+                if (outg.Incoming || outg.Node != node) continue;
+                LaneEdge oe = Net.Edges[outg.Edge];
+                if (oe.Kind == LaneKind.Sidewalk || oe.CorridorId == incCorr) continue;   // not back into our own approach (U-turn)
+                int oo = outg.Node == oe.A ? oe.B : oe.A;
+                Vector2 outDir = Net.Nodes[oo] - Net.Nodes[outg.Node]; if (outDir.sqrMagnitude < 1e-6f) continue; outDir.Normalize();
+                float align = Vector2.Dot(inDir, outDir);
+                if (align <= FlowMinForwardAlign) continue;
+                float lateral = Mathf.Abs(Vector2.Dot(outg.Pos - inc.Pos, leftPerp));
+                float score = align * FlowAlignWeight - lateral;
+                int mv = align > 0.7f ? 0 : (inDir.x * outDir.y - inDir.y * outDir.x > 0f ? 1 : -1);   // ahead, or cross-product side
+                if (!_jflowBest.TryGetValue(oe.CorridorId, out var cur) || score > cur.score) _jflowBest[oe.CorridorId] = (j, score, mv);
+            }
+            foreach (var kv in _jflowBest)
+            {
+                int mv = kv.Value.mv;
+                if (mv == 0 || (mv > 0 && leftmost) || (mv < 0 && rightmost))
+                    Net.Flows.Add(new LaneFlow { Node = node, FromEdge = inc.Edge, ToEdge = Endpoints[kv.Value.ep].Edge, Auto = true });
             }
         }
 
@@ -1294,26 +1347,220 @@ namespace NetworkDesigner.Roads
         static Material _flowMat;
         static Material FlowMat() => _flowMat != null ? _flowMat : (_flowMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(1f, 1f, 1f, 1f), "LaneFlow"));
 
-        // Draw each mapped flow as a thin bar from its incoming endpoint to its outgoing endpoint (the #149 connectors).
-        static void RenderFlows(Transform parent)
+        // Per-entering-lane colour palette: each entering lane gets a colour; its setback-centre circle + its movement
+        // arrows share it, so you can trace which movements belong to which lane.
+        static readonly Color[] _flowPalette = {
+            new Color(0.15f, 0.30f, 1f), new Color(0.10f, 0.78f, 0.25f), new Color(1f, 0.20f, 0.20f), new Color(1f, 0.40f, 1f),
+            new Color(0.10f, 0.85f, 0.95f), new Color(1f, 0.60f, 0.05f), new Color(0.60f, 0.30f, 1f), new Color(0.80f, 0.80f, 0.10f),
+        };
+        static Material[] _flowMatsFaint, _flowMatsFull;
+        static int FlowColorIndex(int fromEdge) => ((fromEdge % _flowPalette.Length) + _flowPalette.Length) % _flowPalette.Length;
+        static Material FlowMat(int i, bool full)
         {
-            foreach (LaneFlow f in Net.Flows)
+            if (full)
             {
-                int inc = FindEndpoint(f.Node, f.FromEdge, true);
-                int outg = FindEndpoint(f.Node, f.ToEdge, false);
-                if (inc < 0 || outg < 0) continue;
-                LaneEndpoint a = Endpoints[inc], b = Endpoints[outg];
-                Vector3 p0 = new Vector3(a.Pos.x, a.Y, a.Pos.y), p1 = new Vector3(b.Pos.x, b.Y, b.Pos.y);
-                Vector3 dir = p1 - p0; float len = dir.magnitude; if (len < 1e-3f) continue;
-                var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
-                go.GetComponent<MeshRenderer>().sharedMaterial = FlowMat();
-                go.transform.SetParent(parent, false);
-                go.transform.position = (p0 + p1) * 0.5f;
-                go.transform.rotation = Quaternion.LookRotation(dir / len, Vector3.up);
-                go.transform.localScale = new Vector3(0.3f, 0.3f, len);
-                go.name = "flow";
+                if (_flowMatsFull == null) _flowMatsFull = new Material[_flowPalette.Length];
+                if (_flowMatsFull[i] == null) { Color c = _flowPalette[i]; c.a = 1f; _flowMatsFull[i] = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(c, $"LaneFlowFull{i}"); }
+                return _flowMatsFull[i];
             }
+            if (_flowMatsFaint == null) _flowMatsFaint = new Material[_flowPalette.Length];
+            if (_flowMatsFaint[i] == null) { Color c = _flowPalette[i]; c.a = 0.25f; _flowMatsFaint[i] = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(c, $"LaneFlowFaint{i}"); }
+            return _flowMatsFaint[i];
+        }
+        // One entry per entering lane at a junction: its movement-arrow mesh + setback circle, so hover can light just it.
+        class FlowGroup { public int Node, FromEdge, Color; public Vector2 Circle; public readonly List<GameObject> Objs = new List<GameObject>(); }
+        static readonly List<FlowGroup> _flowGroups = new List<FlowGroup>();
+        static readonly Dictionary<long, List<LaneFlow>> _flowByLane = new Dictionary<long, List<LaneFlow>>();
+        static int _hoverNode = -1, _hoverEdge = -1;
+        // Flow EDITOR: click an entering lane's circle to PIN it (stays lit); grey target circles appear at every outgoing
+        // lane; a coloured rubber-band follows the cursor; clicking an outgoing circle TOGGLES the flow (create / delete).
+        static int _pinNode = -1, _pinEdge = -1; static Vector2 _pinCircle;
+        public static bool FlowEditPinned => _pinEdge >= 0;
+        static readonly List<(int toEdge, Vector2 pos)> _flowTargets = new List<(int, Vector2)>();
+        static Material _flowTargetMat;
+        static Material FlowTargetMat() => _flowTargetMat != null ? _flowTargetMat
+            : (_flowTargetMat = NetworkDesigner.PipelineMaterials.CreateUnlitTransparent(new Color(0.55f, 0.55f, 0.55f, 0.85f), "LaneFlowTarget"));
+        static bool LaneHot(int node, int edge) => (node == _pinNode && edge == _pinEdge) || (node == _hoverNode && edge == _hoverEdge);
+        static Corridor CorridorById(int id)
+        {
+            if (id < 0) return null;
+            for (int i = 0; i < Net.Corridors.Count; i++) if (Net.Corridors[i].Id == id) return Net.Corridors[i];
+            return null;
+        }
+
+        // Draw each junction movement as a curved dashed ARROW (its bezier turn path) coloured by its entering lane, plus a
+        // matching circle at each entering lane's setback centrepoint. Works built or plan (MappingMode-gated, not Built-gated).
+        static void RenderFlows(Transform parent, Func<Vector2, float> groundAt)
+        {
+            Func<Vector2, float> hi = xz => (groundAt != null ? groundAt(xz) : 0f) + 0.4f;   // float above built road surfaces
+            _flowGroups.Clear(); _flowByLane.Clear();
+            foreach (LaneFlow f in Net.Flows)   // group movements by their entering lane
+            {
+                if (f.FromEdge < 0 || CountCorridorsAtNode(f.Node) < 3) continue;
+                long key = ((long)f.Node << 32) | (uint)f.FromEdge;
+                if (!_flowByLane.TryGetValue(key, out var list)) { list = new List<LaneFlow>(); _flowByLane[key] = list; }
+                list.Add(f);
+            }
+            foreach (var kv in _flowByLane)
+            {
+                int node = (int)(kv.Key >> 32), fromEdge = (int)(uint)kv.Key, ci = FlowColorIndex(fromEdge);
+                var verts = new List<Vector3>(); var tris = new List<int>();
+                Vector2 circlePos = Vector2.zero; bool haveCircle = false;
+                foreach (LaneFlow f in kv.Value)
+                {
+                    if (!FlowTurnPath(f, out var pts, out Vector2 endDir)) continue;
+                    EmitDashedPolyline(pts, 1.6f, 1.1f, verts, tris, hi);
+                    AppendArrowhead(pts[pts.Count - 1], endDir, verts, tris, hi);
+                    if (!haveCircle) { circlePos = pts[0]; haveCircle = true; }
+                }
+                if (!haveCircle) continue;
+                Material mat = FlowMat(ci, LaneHot(node, fromEdge));   // full if pinned or hovered, else faint (keeps across rebuild)
+                var fg = new FlowGroup { Node = node, FromEdge = fromEdge, Color = ci, Circle = circlePos };
+                if (verts.Count > 0) fg.Objs.Add(BuildFlowMesh(verts, tris, mat, $"LaneFlow_{node}_{fromEdge}", parent));
+                fg.Objs.Add(MakeFlowCircle(circlePos, mat, parent, hi));
+                _flowGroups.Add(fg);
+                if (node == _pinNode && fromEdge == _pinEdge) _pinCircle = circlePos;
+            }
+            // Pinned source: drop a grey target circle at every outgoing lane of the node (click one to create/delete a flow).
+            _flowTargets.Clear();
+            if (_pinEdge >= 0)
+            {
+                for (int j = 0; j < Endpoints.Count; j++)
+                {
+                    LaneEndpoint e = Endpoints[j];
+                    if (e.Incoming || e.Node != _pinNode || e.Edge < 0 || e.Edge >= Net.Edges.Count) continue;
+                    LaneEdge oe = Net.Edges[e.Edge]; if (oe.Kind == LaneKind.Sidewalk) continue;
+                    int oo = e.Node == oe.A ? oe.B : oe.A;
+                    Vector2 outDir = Net.Nodes[oo] - Net.Nodes[e.Node]; if (outDir.sqrMagnitude < 1e-6f) continue; outDir.Normalize();
+                    Corridor oc = CorridorById(oe.CorridorId);
+                    float sOut = oc != null ? JunctionEndSetback(oc, e.Node) : 0f;
+                    Vector2 tp = e.NodePos + outDir * sOut;
+                    _flowTargets.Add((e.Edge, tp));
+                    MakeFlowCircle(tp, FlowTargetMat(), parent, hi);
+                }
+            }
+        }
+
+        static GameObject BuildFlowMesh(List<Vector3> verts, List<int> tris, Material mat, string name, Transform parent)
+        {
+            var mesh = new Mesh { name = name };
+            mesh.SetVertices(verts); mesh.SetTriangles(tris, 0); mesh.RecalculateBounds();
+            var go = new GameObject(name); go.transform.SetParent(parent, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>(); mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+            return go;
+        }
+
+        static GameObject MakeFlowCircle(Vector2 p, Material mat, Transform parent, Func<Vector2, float> groundAt)
+        {
+            var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            var col = go.GetComponent<Collider>(); if (col != null) UnityEngine.Object.Destroy(col);
+            go.GetComponent<MeshRenderer>().sharedMaterial = mat;
+            go.transform.SetParent(parent, false);
+            go.transform.position = new Vector3(p.x, (groundAt != null ? groundAt(p) : 0f) + 0.6f, p.y);
+            go.transform.localScale = Vector3.one * 4f;
+            go.name = "flowCircle";
+            return go;
+        }
+
+        // Hover: light up one entering lane's circle + arrows (full alpha); the pinned lane stays full too. Cheap, no rebuild.
+        public static void SetHoveredFlow(int node, int fromEdge)
+        {
+            _hoverNode = node; _hoverEdge = fromEdge;
+            foreach (var fg in _flowGroups)
+            {
+                Material m = FlowMat(fg.Color, LaneHot(fg.Node, fg.FromEdge));
+                foreach (var go in fg.Objs) if (go != null) { var r = go.GetComponent<MeshRenderer>(); if (r != null) r.sharedMaterial = m; }
+            }
+        }
+        // Nearest entering-lane circle within `r` of a world XZ point.
+        public static bool PickFlowCircle(Vector2 xz, float r, out int node, out int fromEdge)
+        {
+            node = -1; fromEdge = -1; float best = r * r;
+            foreach (var fg in _flowGroups) { float d = (fg.Circle - xz).sqrMagnitude; if (d < best) { best = d; node = fg.Node; fromEdge = fg.FromEdge; } }
+            return node >= 0;
+        }
+
+        // ── flow editor actions ──
+        public static void PinFlowSource(int node, int fromEdge, Func<Vector2, float> groundAt) { _pinNode = node; _pinEdge = fromEdge; Rebuild(groundAt); }
+        public static void UnpinFlow(Func<Vector2, float> groundAt) { _pinNode = -1; _pinEdge = -1; ClearFlowRubberBand(); Rebuild(groundAt); }
+        public static void ExitFlowEdit() { _pinNode = -1; _pinEdge = -1; _hoverNode = -1; _hoverEdge = -1; ClearFlowRubberBand(); }   // reset on mode toggle (no rebuild)
+        // Nearest grey OUTGOING target circle within `r` (only valid while a source is pinned).
+        public static bool PickFlowTarget(Vector2 xz, float r, out int toEdge)
+        {
+            toEdge = -1; float best = r * r;
+            foreach (var t in _flowTargets) { float d = (t.pos - xz).sqrMagnitude; if (d < best) { best = d; toEdge = t.toEdge; } }
+            return toEdge >= 0;
+        }
+        // Click an outgoing target: create the flow, or DELETE it if one already exists between these two lanes (toggle).
+        public static void ToggleFlow(int toEdge, Func<Vector2, float> groundAt)
+        {
+            if (_pinEdge < 0) return;
+            int ex = Net.Flows.FindIndex(f => f.Node == _pinNode && f.FromEdge == _pinEdge && f.ToEdge == toEdge);
+            if (ex >= 0) Net.Flows.RemoveAt(ex);
+            else Net.Flows.Add(new LaneFlow { Node = _pinNode, FromEdge = _pinEdge, ToEdge = toEdge, Auto = false });
+            Rebuild(groundAt);   // stay pinned → targets + arrows refresh
+        }
+
+        // Rubber-band: a coloured dashed line from the pinned source circle to the cursor (updated per frame, no full rebuild).
+        static GameObject _rubberGO;
+        static readonly List<Vector2> _rubberPts = new List<Vector2>(2);
+        static readonly List<Vector3> _rubberV = new List<Vector3>(); static readonly List<int> _rubberT = new List<int>();
+        public static void UpdateFlowRubberBand(Vector2 cursor, Func<Vector2, float> groundAt)
+        {
+            if (_pinEdge < 0) { ClearFlowRubberBand(); return; }
+            _rubberPts.Clear(); _rubberPts.Add(_pinCircle); _rubberPts.Add(cursor);
+            _rubberV.Clear(); _rubberT.Clear();
+            EmitDashedPolyline(_rubberPts, 1.8f, 1.2f, _rubberV, _rubberT, xz => (groundAt != null ? groundAt(xz) : 0f) + 0.5f);
+            if (_rubberGO == null)
+            {
+                _rubberGO = new GameObject("flowRubber"); _rubberGO.transform.SetParent(Root().transform, false);
+                _rubberGO.AddComponent<MeshFilter>().sharedMesh = new Mesh();
+                var mr = _rubberGO.AddComponent<MeshRenderer>(); mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off; mr.receiveShadows = false;
+            }
+            _rubberGO.GetComponent<MeshRenderer>().sharedMaterial = FlowMat(FlowColorIndex(_pinEdge), true);
+            var mesh = _rubberGO.GetComponent<MeshFilter>().sharedMesh;
+            mesh.Clear(); mesh.SetVertices(_rubberV); mesh.SetTriangles(_rubberT, 0); mesh.RecalculateBounds();
+        }
+        public static void ClearFlowRubberBand() { if (_rubberGO != null) { UnityEngine.Object.Destroy(_rubberGO); _rubberGO = null; } }
+
+        // Bezier turn path of a junction movement: from the ENTERING lane's setback centrepoint (tangent = travel into the
+        // node) to the EXITING lane's setback centrepoint (tangent = travel out). Junction-only (skips through nodes).
+        static readonly List<Vector2> _flowPts = new List<Vector2>();
+        static bool FlowTurnPath(LaneFlow f, out List<Vector2> pts, out Vector2 endDir)
+        {
+            pts = _flowPts; pts.Clear(); endDir = Vector2.right;
+            if (CountCorridorsAtNode(f.Node) < 3) return false;   // only the real intersections get arrows
+            int inc = FindEndpoint(f.Node, f.FromEdge, true), outg = FindEndpoint(f.Node, f.ToEdge, false);
+            if (inc < 0 || outg < 0) return false;
+            if (f.FromEdge < 0 || f.FromEdge >= Net.Edges.Count || f.ToEdge < 0 || f.ToEdge >= Net.Edges.Count) return false;
+            LaneEdge ie = Net.Edges[f.FromEdge]; int io = f.Node == ie.A ? ie.B : ie.A;
+            Vector2 inDir = Net.Nodes[f.Node] - Net.Nodes[io]; if (inDir.sqrMagnitude < 1e-6f) return false; inDir.Normalize();
+            LaneEdge oe = Net.Edges[f.ToEdge]; int oo = f.Node == oe.A ? oe.B : oe.A;
+            Vector2 outDir = Net.Nodes[oo] - Net.Nodes[f.Node]; if (outDir.sqrMagnitude < 1e-6f) return false; outDir.Normalize();
+            endDir = outDir;
+            Corridor cf = CorridorById(ie.CorridorId), cto = CorridorById(oe.CorridorId);
+            float sIn = cf != null ? JunctionEndSetback(cf, f.Node) : 0f;
+            float sOut = cto != null ? JunctionEndSetback(cto, f.Node) : 0f;
+            Vector2 p0 = Endpoints[inc].NodePos - inDir * sIn;     // entering lane centre at its setback line
+            Vector2 p3 = Endpoints[outg].NodePos + outDir * sOut;  // exiting lane centre at its setback line
+            float d = Mathf.Max(2f, (p3 - p0).magnitude * 0.4f);
+            Vector2 p1 = p0 + inDir * d, p2 = p3 - outDir * d;
+            const int N = 18;
+            for (int k = 0; k <= N; k++)
+            { float t = k / (float)N, u = 1f - t; pts.Add(u * u * u * p0 + 3f * u * u * t * p1 + 3f * u * t * t * p2 + t * t * t * p3); }
+            return true;
+        }
+
+        static void AppendArrowhead(Vector2 p, Vector2 dir, List<Vector3> verts, List<int> tris, Func<Vector2, float> groundAt)
+        {
+            Vector2 perp = new Vector2(-dir.y, dir.x);
+            Vector2 tip = p + dir * 2.2f, bl = p - perp * 1.3f, br = p + perp * 1.3f;
+            float y = (groundAt != null ? groundAt(p) : 0f) + 0.18f;
+            int bi = verts.Count;
+            verts.Add(new Vector3(tip.x, y, tip.y)); verts.Add(new Vector3(bl.x, y, bl.y)); verts.Add(new Vector3(br.x, y, br.y));
+            tris.Add(bi); tris.Add(bi + 1); tris.Add(bi + 2); tris.Add(bi); tris.Add(bi + 2); tris.Add(bi + 1);   // double-sided
         }
 
         static int FindEndpoint(int node, int edge, bool incoming)

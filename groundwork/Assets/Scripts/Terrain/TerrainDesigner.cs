@@ -3490,9 +3490,23 @@ namespace NetworkDesigner.Terrain
             FrameFly(fly);
         }
 
+        bool _prevMappingMode;
         void Update()
         {
             UpdatePlanGradeLabels();   // world-space TMP grade labels (runs even under a modal, to hide)
+            // Toggling "Map lane flows" only flips a flag; regenerate the (turn-aware) flows on entry + re-render so the
+            // flow arrows show/hide at once instead of waiting for the next draw.
+            if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode != _prevMappingMode)
+            {
+                _prevMappingMode = NetworkDesigner.Roads.LaneEdgeModel.MappingMode;
+                NetworkDesigner.Roads.LaneEdgeWorld.ExitFlowEdit();   // drop any pin/rubber-band when toggling the mode
+                if (NetworkDesigner.Roads.LaneEdgeWorld.HasData)
+                {
+                    System.Func<Vector2, float> mgfn = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
+                    if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode) NetworkDesigner.Roads.LaneEdgeWorld.RegenerateDefaultFlows(mgfn);
+                    NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(mgfn);
+                }
+            }
             AutoOverviewByAltitude();  // fast-travel auto-engages above ~2 km altitude
             // Deferred post-load road re-sweep: a load stages the plan + Built flags, but the world (chunks) may
             // still be settling — wait a beat, then re-sweep so the 3D roads appear without a manual Build click.
@@ -3989,6 +4003,16 @@ namespace NetworkDesigner.Terrain
                         if (Input.GetMouseButtonDown(0) && NetworkDesigner.Roads.LaneEdgeWorld.BeginSetbackDrag(sbXz, 7f)) { NetworkDesigner.Roads.LaneEdgeWorld.ClearPreview(); return; }
                         if (Input.GetMouseButtonDown(1) && NetworkDesigner.Roads.LaneEdgeWorld.ResetSetbackAt(sbXz, 7f, sbGfn)) { _dirtySince = Time.realtimeSinceStartup; return; }
                     }
+                    // Lane-flow hover: light up the entering lane whose setback circle the cursor is over (rest stay faint).
+                    // While a source is pinned, drape the coloured rubber-band from it to the cursor.
+                    if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
+                    {
+                        Vector2 fxz = new Vector2(hit.point.x, hit.point.z);
+                        if (overTerrain && NetworkDesigner.Roads.LaneEdgeWorld.PickFlowCircle(fxz, 8f, out int hvN, out int hvE))
+                            NetworkDesigner.Roads.LaneEdgeWorld.SetHoveredFlow(hvN, hvE);
+                        else NetworkDesigner.Roads.LaneEdgeWorld.SetHoveredFlow(-1, -1);
+                        if (NetworkDesigner.Roads.LaneEdgeWorld.FlowEditPinned) NetworkDesigner.Roads.LaneEdgeWorld.UpdateFlowRubberBand(fxz, sbGfn);
+                    }
                     bool leShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                     // Alt/Option held: lane picks grab ONE lane at a time (accumulate) instead of the profile's whole group → pull a subset off a road.
                     NetworkDesigner.Roads.LaneEdgeWorld.ForceSingleLane = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
@@ -3997,7 +4021,8 @@ namespace NetworkDesigner.Terrain
                     System.Func<Vector2, float> leGfn = xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f;
                     _roadCursorHasWorld = false; _leSnapActive = false; _leAnySnap = false; _leSnapNode = -1; _leSnapEdge = -1;
                     _leSnapXz = new Vector2(hit.point.x, hit.point.z);
-                    if (overTerrain && !MouseOverActivePanel())
+                    // In lane-flow mode there's no drawing/extending — skip puck snap + colinear/perpendicular guides entirely.
+                    if (!NetworkDesigner.Roads.LaneEdgeModel.MappingMode && overTerrain && !MouseOverActivePanel())
                     {
                         Camera leSnapCam = PickCamera != null ? PickCamera : Camera.main;
                         if (NetworkDesigner.Roads.LaneEdgeWorld.SnapLanePuckToRay(
@@ -4134,7 +4159,16 @@ namespace NetworkDesigner.Terrain
                         else if (Input.GetKey(KeyCode.X) && !NetworkDesigner.Roads.LaneEdgeWorld.Drawing && !NetworkDesigner.Roads.LaneEdgeWorld.Extending)
                             NetworkDesigner.Roads.LaneEdgeWorld.SplitCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);
                         else if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
-                            NetworkDesigner.Roads.LaneEdgeWorld.MapClick(leCam, leMouse, leGround);
+                        {
+                            Vector2 mxz = new Vector2(hit.point.x, hit.point.z);
+                            if (NetworkDesigner.Roads.LaneEdgeWorld.FlowEditPinned
+                                && NetworkDesigner.Roads.LaneEdgeWorld.PickFlowTarget(mxz, 8f, out int toE))
+                                NetworkDesigner.Roads.LaneEdgeWorld.ToggleFlow(toE, leGround);                 // grey target → create/delete the flow
+                            else if (NetworkDesigner.Roads.LaneEdgeWorld.PickFlowCircle(mxz, 8f, out int pinN, out int pinE))
+                                NetworkDesigner.Roads.LaneEdgeWorld.PinFlowSource(pinN, pinE, leGround);        // entering circle → pin as the source
+                            else
+                                NetworkDesigner.Roads.LaneEdgeWorld.UnpinFlow(leGround);                       // empty → deselect
+                        }
                         // Lane-subset extension: clicking a lane endpoint puck toggles it into the selection; once lanes are
                         // selected, a click on open ground draws the continuation. Skipped mid normal-draw so a puck near the
                         // end click can't hijack it. Otherwise fall through to a normal draw.
