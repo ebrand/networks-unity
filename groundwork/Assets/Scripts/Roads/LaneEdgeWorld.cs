@@ -647,6 +647,7 @@ namespace NetworkDesigner.Roads
                     {
                         if (mi == ri) continue;
                         Corridor M = Net.Corridors[mi];
+                        if (M.IsSlip) continue;   // a slip is a connector, never a "through" road a normal road ramps off of (caused normal curved roads near a slip to be mis-flagged as ramps)
                         if (!NearestOnPath(M, Nr, out Vector2 Pm, out float tm)) continue;
                         float dn = (Pm - Nr).magnitude; if (dn > GoreSnap) continue;
                         Vector2 Tm = LaneEdgeCorridorBuilder.PathTangent(Net, M, tm);
@@ -1036,15 +1037,30 @@ namespace NetworkDesigner.Roads
                 for (int i = 0; i < n; i++)
                 {
                     JctApproach ap = _japp[i];
-                    Vector2 fc = ap.P + ap.away * S[i];
-                    Vector2 perp = new Vector2(-ap.away.y, ap.away.x);   // left when looking outward from the node
-                    Vector2 e1 = fc + ap.fr * ap.leftOff, e2 = fc + ap.fr * ap.rightOff;
+                    // Sample the face on the corridor PATH at the SAME param the plan overlay clips at (S/pathLen, see line ~214),
+                    // not a straight projection from the node — so on a CURVED approach the face + corner arc sit exactly on the
+                    // clipped road edge and leave it tangentially (was: straight `P + away*S`, which diverged from the curve).
+                    Corridor cc = CorridorById(ap.corrId);
+                    float plen = cc != null ? LaneEdgeCorridorBuilder.PathLength(Net, cc) : 0f;
+                    Vector2 fc, awayAt, frAt;
+                    if (cc != null && plen > 1e-3f)
+                    {
+                        float tAt = ap.atA ? Mathf.Clamp01(S[i] / plen) : 1f - Mathf.Clamp01(S[i] / plen);
+                        fc = LaneEdgeCorridorBuilder.PathPoint(Net, cc, tAt);
+                        Vector2 tanAt = LaneEdgeCorridorBuilder.PathTangent(Net, cc, tAt);
+                        awayAt = (ap.atA ? tanAt : -tanAt).normalized;
+                        frAt = LaneEdgeCorridorBuilder.PathRight(tanAt);
+                    }
+                    else { fc = ap.P + ap.away * S[i]; awayAt = ap.away; frAt = ap.fr; }
+                    ap.away = awayAt; ap.fr = frAt; _japp[i] = ap;   // corner arcs (BuildCornerArcs) read ap.away — keep it curve-aligned
+                    Vector2 perp = new Vector2(-awayAt.y, awayAt.x);   // left when looking outward from the node
+                    Vector2 e1 = fc + frAt * ap.leftOff, e2 = fc + frAt * ap.rightOff;
                     bool e1IsLeft = Vector2.Dot(e1 - fc, perp) >= Vector2.Dot(e2 - fc, perp);
                     outL[i] = e1IsLeft ? e1 : e2; outR[i] = e1IsLeft ? e2 : e1;
-                    Vector2 j1 = fc + ap.fr * ap.leftInner, j2 = fc + ap.fr * ap.rightInner;
+                    Vector2 j1 = fc + frAt * ap.leftInner, j2 = fc + frAt * ap.rightInner;
                     inL[i] = e1IsLeft ? j1 : j2; inR[i] = e1IsLeft ? j2 : j1;
                     _setbackHandles.Add(new SetbackHandle {
-                        Pos = fc + perp * ((outR[i] - outL[i]).magnitude * 0.5f + 4f), Node = Net.Nodes[node], Away = ap.away,
+                        Pos = fc + perp * ((outR[i] - outL[i]).magnitude * 0.5f + 4f), Node = Net.Nodes[node], Away = awayAt,
                         CorrId = ap.corrId, AtA = ap.atA, Y = 0f
                     });
                     // distance ruler: dashed 5m ticks down the WHOLE road (walking colinear continuations across split nodes)
