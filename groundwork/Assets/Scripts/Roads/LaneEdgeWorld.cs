@@ -2882,6 +2882,100 @@ namespace NetworkDesigner.Roads
             return true;
         }
 
+        // ── inline node insertion: click a segment body to split its corridor at the clicked point into TWO corridors that
+        // share a NEW node (geometry unchanged). The clicked corridor keeps the A-side half; a fresh corridor takes the
+        // B-side half. Every lane A→B becomes A→new (kept) + new→B (cloned into the new corridor); flow re-links through the
+        // new node. Curved corridors de-Casteljau-split so both halves trace the original cubic exactly. ADD-only
+        // (no removals) → no index compaction needed.
+        public static bool SplitCorridorAt(Vector2 xz, Func<Vector2, float> groundAt)
+        {
+            int best = -1; float bestD = float.PositiveInfinity;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                if (Net.Corridors[ci].Lanes.Count == 0) continue;
+                float halfW = LaneEdgeCorridorBuilder.BuildCrossSection(Net.Corridors[ci], Net).Width * 0.5f + 1.5f;
+                float d = CorridorDistSq(Net.Corridors[ci], xz);
+                if (d < halfW * halfW && d < bestD) { bestD = d; best = ci; }
+            }
+            if (best < 0) return false;
+            Corridor c = Net.Corridors[best];
+            if (!NearestOnPath(c, xz, out _, out float t)) return false;
+            if (t < 0.04f || t > 0.96f) return false;   // clicked at/near an existing end → nothing to split
+
+            LaneEdge l0 = Net.Edges[c.Lanes[0]];
+            Vector2 rawA = Net.Nodes[l0.A], rawB = Net.Nodes[l0.B];
+
+            // Capture the uniform-shift translate direction up-front (before we mutate c.ControlA) so BOTH halves translate
+            // along the SAME world normal. Without this, the second half would re-derive its normal from the seam tangent —
+            // a different direction on a curve — and the two bodies would splay apart at the seam.
+            bool shifted = Mathf.Abs(c.CenterShift) > 1e-4f || Mathf.Abs(c.CenterShiftB) > 1e-4f;
+            bool uniform = Mathf.Abs(c.CenterShift - c.CenterShiftB) <= 1e-3f;
+            Vector2 shiftDir = Vector2.zero;
+            if (shifted && uniform)
+            {
+                shiftDir = c.ShiftDir;
+                if (shiftDir.sqrMagnitude < 1e-8f)
+                {
+                    Vector2 tA = c.Curved && (c.ControlA - rawA).sqrMagnitude > 1e-8f ? (c.ControlA - rawA).normalized : (rawB - rawA).normalized;
+                    shiftDir = new Vector2(tA.y, -tA.x);
+                }
+            }
+
+            Vector2 splitPos, ac1, ac2, bc1, bc2;   // split point + first-half (ac*) and second-half (bc*) controls
+            if (c.Curved)
+                SplitCubic(rawA, c.ControlA, c.ControlB, rawB, t, out splitPos, out ac1, out ac2, out bc1, out bc2);
+            else { splitPos = Vector2.Lerp(rawA, rawB, t); ac1 = ac2 = bc1 = bc2 = Vector2.zero; }
+
+            int nn = Net.AddNode(splitPos);
+            float ya = Net.GetNodeY(l0.A), yb = Net.GetNodeY(l0.B);   // interpolate the captured grade so the seam doesn't crater on build
+            if (!float.IsNaN(ya) && !float.IsNaN(yb)) Net.SetNodeY(nn, Mathf.Lerp(ya, yb, t));
+
+            // second-half corridor (B side) — clone the source's profile / bands / built-state
+            Corridor c2 = Net.AddCorridor();
+            c2.Curved = c.Curved; c2.Profile = c.Profile; c2.AlignLanes = c.AlignLanes;
+            c2.MedianWidth = c.MedianWidth; c2.ShoulderBA = c.ShoulderBA; c2.ShoulderAB = c.ShoulderAB;
+            c2.Planned = c.Planned; c2.Excavated = c.Excavated; c2.Built = c.Built; c2.BedDepth = c.BedDepth;
+            float shiftAtT = Mathf.Lerp(c.CenterShift, c.CenterShiftB, t);   // body shift at the seam (uniform shift stays uniform)
+            c2.CenterShift = shiftAtT; c2.CenterShiftB = c.CenterShiftB;
+            c2.ShiftDir = shiftDir;                                          // both halves share the captured normal (zero if unshifted/two-ended)
+            if (c.Curved) { c2.ControlA = bc1; c2.ControlB = bc2; }
+
+            // split every lane: original A→B becomes A→nn (kept in c); a clone nn→(old B) joins c2
+            var orig = new List<int>(c.Lanes);
+            foreach (int li in orig)
+            {
+                LaneEdge e = Net.Edges[li];
+                int oldB = e.B;
+                e.B = nn;
+                int li2 = Net.AddLane(new LaneEdge { A = nn, B = oldB, CorridorId = c2.Id, Kind = e.Kind, Direction = e.Direction, Width = e.Width, Offset = e.Offset });
+                c2.Lanes.Add(li2);
+            }
+            // first-half corridor stays c: update its B-end controls + seam shift; tapers are rebuild-scoped lane indices → re-detect
+            if (c.Curved) { c.ControlA = ac1; c.ControlB = ac2; }
+            c.CenterShiftB = shiftAtT;
+            c.ShiftDir = shiftDir;
+            c.Tapers?.Clear();
+
+            Net.SortCorridorLanes(c); Net.SortCorridorLanes(c2);
+            RegenerateDefaultFlows(groundAt);
+            Rebuild(groundAt);
+            return true;
+        }
+
+        // De Casteljau split of cubic (p0,p1,p2,p3) at t → the split point plus first-half controls (q1,q2) and
+        // second-half controls (r1,r2): first half = (p0,q1,q2,split), second half = (split,r1,r2,p3).
+        static void SplitCubic(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3, float t,
+                               out Vector2 split, out Vector2 q1, out Vector2 q2, out Vector2 r1, out Vector2 r2)
+        {
+            Vector2 a = Vector2.Lerp(p0, p1, t);
+            Vector2 b = Vector2.Lerp(p1, p2, t);
+            Vector2 d = Vector2.Lerp(p2, p3, t);
+            Vector2 e = Vector2.Lerp(a, b, t);
+            Vector2 f = Vector2.Lerp(b, d, t);
+            q1 = a; q2 = e; r1 = f; r2 = d;
+            split = Vector2.Lerp(e, f, t);
+        }
+
         // ── DEBUG: click a segment to dump its full structure (profile, centreline shift, lane indices/offsets/dirs, the
         // built cross-section, lane config). Lets two "identical-looking" segments be compared to find why they differ.
         public static bool InspectCorridorAt(Vector2 xz)

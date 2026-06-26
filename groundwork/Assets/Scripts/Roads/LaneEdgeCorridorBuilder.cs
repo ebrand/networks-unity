@@ -32,13 +32,22 @@ namespace NetworkDesigner.Roads
                 Vector2 chord = b - a;
                 if (chord.sqrMagnitude > 1e-8f)
                 {
-                    Vector2 tA = c.Curved && (c1 - a).sqrMagnitude > 1e-8f ? (c1 - a).normalized : chord.normalized;   // tangent at A
-                    Vector2 nrmA = new Vector2(tA.y, -tA.x);
-                    Vector2 nrmB = nrmA;                                       // uniform shift → rigid translate (no splay)
-                    if (Mathf.Abs(c.CenterShift - c.CenterShiftB) > 1e-3f)     // two-ended (connector) → slew along each end's own normal
+                    bool twoEnded = Mathf.Abs(c.CenterShift - c.CenterShiftB) > 1e-3f;   // connector (slew) vs uniform pull-off (rigid translate)
+                    Vector2 nrmA, nrmB;
+                    if (!twoEnded && c.ShiftDir.sqrMagnitude > 1e-8f)
                     {
-                        Vector2 tB = c.Curved && (b - c2).sqrMagnitude > 1e-8f ? (b - c2).normalized : chord.normalized;
-                        nrmB = new Vector2(tB.y, -tB.x);
+                        nrmA = nrmB = c.ShiftDir.normalized;                   // explicit captured normal — split/extend-safe (a re-derived seam tangent splays a curve)
+                    }
+                    else
+                    {
+                        Vector2 tA = c.Curved && (c1 - a).sqrMagnitude > 1e-8f ? (c1 - a).normalized : chord.normalized;   // tangent at A
+                        nrmA = new Vector2(tA.y, -tA.x);
+                        nrmB = nrmA;                                           // uniform shift → rigid translate (no splay)
+                        if (twoEnded)                                         // two-ended (connector) → slew along each end's own normal
+                        {
+                            Vector2 tB = c.Curved && (b - c2).sqrMagnitude > 1e-8f ? (b - c2).normalized : chord.normalized;
+                            nrmB = new Vector2(tB.y, -tB.x);
+                        }
                     }
                     a += nrmA * c.CenterShift;  c1 += nrmA * c.CenterShift;    // A end + its control
                     b += nrmB * c.CenterShiftB; c2 += nrmB * c.CenterShiftB;   // B end + its control

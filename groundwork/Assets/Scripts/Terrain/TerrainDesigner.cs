@@ -1467,7 +1467,7 @@ namespace NetworkDesigner.Terrain
                     else if (NetworkDesigner.Roads.LaneEdgeWorld.Drawing)
                     { GUI.color = new Color(0.30f, 1f, 0.5f); GUILayout.Label("● Lane-edge: click end (hold Shift for a curve) · right-click cancels"); }
                     else
-                    { GUI.color = new Color(0.30f, 1f, 0.5f); GUILayout.Label("● Lane-edge: click to start a corridor"); }
+                    { GUI.color = new Color(0.30f, 1f, 0.5f); GUILayout.Label("● Lane-edge: click to start a corridor · X+click a segment = insert node · ,+click = flip · I+click = inspect"); }
                     GUI.color = prevC;
                 }
                 if (_lineActive is LineworkLayer lw && lw.Asset == null)
@@ -4114,6 +4114,9 @@ namespace NetworkDesigner.Terrain
                         // Hold ',' and left-click a segment to flip it in place (mirror its cross-section).
                         else if (Input.GetKey(KeyCode.Comma))
                             NetworkDesigner.Roads.LaneEdgeWorld.FlipCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);
+                        // Hold 'X' and left-click a segment to split it in place — inserts a node, dividing it into two segments.
+                        else if (Input.GetKey(KeyCode.X) && !NetworkDesigner.Roads.LaneEdgeWorld.Drawing && !NetworkDesigner.Roads.LaneEdgeWorld.Extending)
+                            NetworkDesigner.Roads.LaneEdgeWorld.SplitCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);
                         else if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
                             NetworkDesigner.Roads.LaneEdgeWorld.MapClick(leCam, leMouse, leGround);
                         // Lane-subset extension: clicking a lane endpoint puck toggles it into the selection; once lanes are

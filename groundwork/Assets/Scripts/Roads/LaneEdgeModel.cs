@@ -65,6 +65,10 @@ namespace NetworkDesigner.Roads
         public float CenterShiftB;                           // lateral body shift at the B end; the body interpolates A→B. Equals
                                                              // CenterShift for a uniform shift (pull-off); differs for a CONNECTOR that
                                                              // sweeps from the source's pavement (A) to the target's (B). 0 = no shift.
+        public Vector2 ShiftDir;                             // explicit world-space unit normal for a UNIFORM shift (else PathFrame derives
+                                                             // it from the A-tangent). Captured when a curve is split/extended so both
+                                                             // pieces translate along the SAME direction — a re-derived seam tangent would
+                                                             // splay them apart. Zero = derive as before (straight / freshly-pulled).
         public float MedianWidth;                             // centre band width between BA and AB lanes (0 = none)
         public float ShoulderBA, ShoulderAB;                  // outer non-navigable shoulder widths
         public string Profile;                                // source profile id (markings/style reuse during the spike)
