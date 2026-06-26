@@ -10,6 +10,8 @@ namespace NetworkDesigner.Roads
     {
         public static bool Enabled = true;        // master flag: when true, road plan uses the lane-edge model (now the default)
         public static bool MappingMode = false;   // when true, road-plan clicks author lane-flow mappings instead of drawing
+        public static bool ShowRuler = true;       // plan-mode distance ladder (5 m tick ruler down each junction approach)
+        public static bool ShowSegmentLabels = true;  // plan-mode per-segment length "m" labels
     }
 
     // A through/turn movement at a node: traffic on the incoming lane-edge continues onto the outgoing lane-edge.
@@ -78,6 +80,7 @@ namespace NetworkDesigner.Roads
         public float BedDepth;                                // excavation depth (built body becomes a slab of this thickness)
         public List<LaneDropTaper> Tapers = new List<LaneDropTaper>();   // paved lane-drop wedges (Phase-2 taper geometry)
         public float SetbackA = -1f, SetbackB = -1f;          // per-end junction stop-line setback OVERRIDE (m); <0 = auto (computed from crossing geometry). Dragged via the junction grab handles.
+        public bool IsSlip;                                   // a channelised slip lane (corner-bypass connector) — excluded from junction-footprint detection.
     }
 
     // The lane-edge graph: a shared node list + lane-edges + corridors. Parallels LineGraph but at lane granularity.

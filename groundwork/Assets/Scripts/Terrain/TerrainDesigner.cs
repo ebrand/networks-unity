@@ -1908,14 +1908,29 @@ namespace NetworkDesigner.Terrain
             if (cam == null) return;
             float s = Mathf.Max(0.25f, UiScale);
             var col = new Color(0.92f, 0.92f, 0.92f);   // light grey — distinct from the yellow live-draw label
-            foreach (var c in net.Corridors)
+            if (NetworkDesigner.Roads.LaneEdgeModel.ShowSegmentLabels)
+                foreach (var c in net.Corridors)
+                {
+                    if (c.Lanes == null || c.Lanes.Count == 0) continue;
+                    float len = NetworkDesigner.Roads.LaneEdgeCorridorBuilder.PathLength(net, c);
+                    if (len < 1f) continue;
+                    Vector2 mid = NetworkDesigner.Roads.LaneEdgeCorridorBuilder.PathPoint(net, c, 0.5f);
+                    DrawWorldText(cam, s, ToWorldXZ(mid, 2f), $"{len:0} m", col, 0.8f);
+                }
+            // Distance-ruler tick labels (yellow), only within 100m of the camera (matches the lines).
+            if (NetworkDesigner.Roads.LaneEdgeModel.ShowRuler)
             {
-                if (c.Lanes == null || c.Lanes.Count == 0) continue;
-                float len = NetworkDesigner.Roads.LaneEdgeCorridorBuilder.PathLength(net, c);
-                if (len < 1f) continue;
-                Vector2 mid = NetworkDesigner.Roads.LaneEdgeCorridorBuilder.PathPoint(net, c, 0.5f);
-                DrawWorldText(cam, s, ToWorldXZ(mid, 2f), $"{len:0} m", col);
+                var rcol = new Color(0.95f, 0.9f, 0.3f);
+                Vector2 rcamXz = new Vector2(cam.transform.position.x, cam.transform.position.z);
+                const float rr2 = 100f * 100f;
+                foreach (var (xz, text) in NetworkDesigner.Roads.LaneEdgeWorld.RulerLabels)
+                    if ((xz - rcamXz).sqrMagnitude < rr2) DrawWorldText(cam, s, ToWorldXZ(xz, 2f), text, rcol, 0.8f);
             }
+            // Slip-lane gesture: after the first Z-click the start node is armed — show it so the second click isn't a guess.
+            int slipN = NetworkDesigner.Roads.LaneEdgeWorld.SlipStartNode;
+            if (slipN >= 0 && slipN < net.Nodes.Count)
+                DrawWorldText(cam, s, ToWorldXZ(net.Nodes[slipN], 3f), "slip start ▸ click merge node",
+                              new Color(0.4f, 1f, 0.6f), 0.9f);
         }
 
 
@@ -4013,6 +4028,12 @@ namespace NetworkDesigner.Terrain
                         else NetworkDesigner.Roads.LaneEdgeWorld.SetHoveredFlow(-1, -1);
                         if (NetworkDesigner.Roads.LaneEdgeWorld.FlowEditPinned) NetworkDesigner.Roads.LaneEdgeWorld.UpdateFlowRubberBand(fxz, sbGfn);
                     }
+                    // Distance ruler: in plan (non-mapping) mode, every junction approach within 100m of the camera shows 5m ticks.
+                    if (!NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
+                    {
+                        Camera rcam = PickCamera != null ? PickCamera : Camera.main;   // RenderRulerCulled self-gates on ShowRuler (and clears its mesh when off)
+                        if (rcam != null) NetworkDesigner.Roads.LaneEdgeWorld.RenderRulerCulled(new Vector2(rcam.transform.position.x, rcam.transform.position.z), sbGfn);
+                    }
                     bool leShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
                     // Alt/Option held: lane picks grab ONE lane at a time (accumulate) instead of the profile's whole group → pull a subset off a road.
                     NetworkDesigner.Roads.LaneEdgeWorld.ForceSingleLane = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
@@ -4158,6 +4179,10 @@ namespace NetworkDesigner.Terrain
                         // Hold 'X' and left-click a segment to split it in place — inserts a node, dividing it into two segments.
                         else if (Input.GetKey(KeyCode.X) && !NetworkDesigner.Roads.LaneEdgeWorld.Drawing && !NetworkDesigner.Roads.LaneEdgeWorld.Extending)
                             NetworkDesigner.Roads.LaneEdgeWorld.SplitCorridorAt(new Vector2(hit.point.x, hit.point.z), leGround);
+                        // Hold 'Z' + click the START node (diverge) then the END node (merge) — connects them with a slip lane.
+                        // Pre-split the approaches (hold 'X') to place the nodes first; this just joins two existing nodes.
+                        else if (Input.GetKey(KeyCode.Z))
+                            NetworkDesigner.Roads.LaneEdgeWorld.SlipClick(_leSnapNode, new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId, leGround);
                         else if (NetworkDesigner.Roads.LaneEdgeModel.MappingMode)
                         {
                             Vector2 mxz = new Vector2(hit.point.x, hit.point.z);

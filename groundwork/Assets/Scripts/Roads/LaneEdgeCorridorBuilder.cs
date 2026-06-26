@@ -32,7 +32,10 @@ namespace NetworkDesigner.Roads
                 Vector2 chord = b - a;
                 if (chord.sqrMagnitude > 1e-8f)
                 {
-                    bool twoEnded = Mathf.Abs(c.CenterShift - c.CenterShiftB) > 1e-3f;   // connector (slew) vs uniform pull-off (rigid translate)
+                    // Connector (slew each end along its own normal) vs uniform pull-off (rigid translate). A slip is ALWAYS a
+                    // connector between non-parallel ends (perpendicular approaches) — force slew even if the two shift
+                    // magnitudes happen to match, else the B end would translate along the A-normal and miss its outer edge.
+                    bool twoEnded = c.IsSlip || Mathf.Abs(c.CenterShift - c.CenterShiftB) > 1e-3f;
                     Vector2 nrmA, nrmB;
                     if (!twoEnded && c.ShiftDir.sqrMagnitude > 1e-8f)
                     {

@@ -146,34 +146,10 @@ namespace NetworkDesigner.UI
             var laneEdge = Section(body, "LANE-EDGE MODEL (NEW)");
             var leHint = Cap("Each lane is its own graph edge; map flows at nodes. Excavate/Build use the buttons above.");
             leHint.style.fontSize = 10; leHint.style.marginBottom = 4; laneEdge.Add(leHint);
-            laneEdge.Add(ToggleRow("Lane-edge mode",
-                () => NetworkDesigner.Roads.LaneEdgeModel.Enabled,
-                v => { NetworkDesigner.Roads.LaneEdgeModel.Enabled = v;
-                       if (!v) NetworkDesigner.Roads.LaneEdgeModel.MappingMode = false;
-                       NetworkDesigner.Roads.LaneEdgeWorld.CancelDraw(); NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); }));
-            laneEdge.Add(ToggleRow("Map lane flows",
-                () => NetworkDesigner.Roads.LaneEdgeModel.MappingMode,
-                v => { NetworkDesigner.Roads.LaneEdgeModel.MappingMode = v;
-                       if (v) NetworkDesigner.Roads.LaneEdgeModel.Enabled = true;
-                       NetworkDesigner.Roads.LaneEdgeWorld.CancelMap(); }));
             var leDraw = Cap("Draw: pick a profile, click–click to lay a corridor. Hold Shift after the first click to bend it into a curve (design-speed radius enforced). Right-click ends the chain.");
             leDraw.style.fontSize = 10; leDraw.style.marginTop = 2; laneEdge.Add(leDraw);
-
-            // Exit pull: when pulling lane(s) off to make a ramp, what happens to the source segment's pulled lanes.
-            var exitPullBtn = MakeButton("Exit pull: …", () =>
-                NetworkDesigner.Roads.LaneEdgeWorld.ExitMode =
-                    (NetworkDesigner.Roads.LaneEdgeWorld.ExitPullMode)(((int)NetworkDesigner.Roads.LaneEdgeWorld.ExitMode + 1) % 3));
-            exitPullBtn.style.marginTop = 6;
-            exitPullBtn.tooltip = "When pulling lanes off to a ramp: Keep = source keeps its lanes (continuation, default); " +
-                                  "Delete all = the pulled lanes leave the source (full exit); Delete outer = only the outermost pulled lane leaves, an inner one stays shared.";
-            laneEdge.Add(exitPullBtn);
-            _sync.Add(() =>
-            {
-                var m = NetworkDesigner.Roads.LaneEdgeWorld.ExitMode;
-                exitPullBtn.text = "Exit pull: " + (m == NetworkDesigner.Roads.LaneEdgeWorld.ExitPullMode.Keep ? "Keep lanes"
-                    : m == NetworkDesigner.Roads.LaneEdgeWorld.ExitPullMode.DeleteAll ? "Delete all pulled" : "Delete outer only");
-                StyleActive(exitPullBtn, m != NetworkDesigner.Roads.LaneEdgeWorld.ExitPullMode.Keep);
-            });
+            var leMoved = Cap("Mode / Map-flows / Exit-pull toggles + slip & measurement controls now live in the Design Controls palette (Gd).");
+            leMoved.style.fontSize = 10; leMoved.style.marginTop = 2; laneEdge.Add(leMoved);
             var carRow = HBox(); carRow.style.marginTop = 6;
             var spawnCars = MakeButton("Spawn cars", () => NetworkDesigner.Roads.LaneEdgeAgentSim.Instance().Spawn(10));
             spawnCars.style.flexGrow = 1; spawnCars.style.marginRight = 6;

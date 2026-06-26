@@ -5,6 +5,7 @@
 using UnityEngine;
 using UnityEngine.UIElements;
 using NetworkDesigner.Terrain;
+using NetworkDesigner.Roads;
 
 namespace NetworkDesigner.UI
 {
@@ -55,6 +56,72 @@ namespace NetworkDesigner.UI
                 v => PlanGuides.MidpointGuides = v));
             body.Add(SliderRow("Node pick", () => PlanGuides.NodePickRadius,
                 v => PlanGuides.NodePickRadius = v, 0f, 10f, "0.#"));
+
+            body.Add(Divider());
+            body.Add(SectionLabel("ROAD PLAN"));
+            body.Add(ToggleRow("Lane-edge mode", () => LaneEdgeModel.Enabled,
+                v => { LaneEdgeModel.Enabled = v;
+                       if (!v) LaneEdgeModel.MappingMode = false;
+                       LaneEdgeWorld.CancelDraw(); LaneEdgeWorld.CancelMap(); }));
+            body.Add(ToggleRow("Map lane flows", () => LaneEdgeModel.MappingMode,
+                v => { LaneEdgeModel.MappingMode = v;
+                       if (v) LaneEdgeModel.Enabled = true;
+                       LaneEdgeWorld.CancelMap(); }));
+            Button exitPullBtn = null;
+            void SyncExit()
+            {
+                var m = LaneEdgeWorld.ExitMode;
+                exitPullBtn.text = "Exit pull: " + (m == LaneEdgeWorld.ExitPullMode.Keep ? "Keep lanes"
+                    : m == LaneEdgeWorld.ExitPullMode.DeleteAll ? "Delete all pulled" : "Delete outer only");
+                StyleActive(exitPullBtn, m != LaneEdgeWorld.ExitPullMode.Keep);
+            }
+            exitPullBtn = MakeButton("Exit pull: …", () =>
+            {
+                LaneEdgeWorld.ExitMode = (LaneEdgeWorld.ExitPullMode)(((int)LaneEdgeWorld.ExitMode + 1) % 3);
+                SyncExit();
+            });
+            exitPullBtn.style.marginTop = 6;
+            exitPullBtn.tooltip = "When pulling lanes off to a ramp: Keep = source keeps its lanes; " +
+                                  "Delete all = the pulled lanes leave; Delete outer = only the outermost pulled lane leaves.";
+            body.Add(exitPullBtn); SyncExit();
+
+            body.Add(Divider());
+            body.Add(SectionLabel("MEASUREMENTS"));
+            body.Add(ToggleRow("Distance ladder", () => LaneEdgeModel.ShowRuler,
+                v => LaneEdgeModel.ShowRuler = v));
+            body.Add(ToggleRow("Segment lengths", () => LaneEdgeModel.ShowSegmentLabels,
+                v => LaneEdgeModel.ShowSegmentLabels = v));
+
+            body.Add(Divider());
+            body.Add(SectionLabel("SLIP LANE"));
+            body.Add(ToggleRow("Build transition pockets", () => LaneEdgeWorld.SlipBuildPockets,
+                v => LaneEdgeWorld.SlipBuildPockets = v));
+            var clipGores = ToggleRow("Clip gore shoulders", () => LaneEdgeWorld.SlipClipGores,
+                v => { LaneEdgeWorld.SlipClipGores = v; Designer.RebuildRoadPlan(); });
+            clipGores.tooltip = "Clip slip/through shoulders at the gore. Fragile on skewed or curved intersections (can leave stray lines) — off by default.";
+            body.Add(clipGores);
+            body.Add(SliderRow("Curve tightness", () => LaneEdgeWorld.SlipCurveTightness,
+                v => LaneEdgeWorld.SlipCurveTightness = v, 0.1f, 0.9f, "0.00"));
+            body.Add(SliderRow("Lane width (0=auto)", () => LaneEdgeWorld.SlipLaneWidth,
+                v => LaneEdgeWorld.SlipLaneWidth = v, 0f, 6f, "0.#"));
+
+            body.Add(Divider());
+            body.Add(SectionLabel("GESTURES"));
+            foreach (var g in new[]
+            {
+                "Z   slip lane — click start node, then merge node",
+                "X   split a segment at the click",
+                "C   connect two nodes with a curve",
+                "I   inspect a corridor (dumps to console)",
+                ",   flip a corridor's cross-section",
+                "Alt  pull lanes one at a time (ramp subset)",
+                "drag yellow puck — set junction setback",
+            })
+            {
+                var l = new Label(g);
+                l.style.color = Sub; l.style.fontSize = 11; l.style.whiteSpace = WhiteSpace.Normal; l.style.marginBottom = 1;
+                body.Add(l);
+            }
         }
     }
 }
