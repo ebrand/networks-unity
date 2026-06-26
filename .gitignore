@@ -145,3 +145,7 @@ groundwork/ChunkEditsDem/
 
 # Local backups (e.g. road-config.json.bak)
 *.bak
+
+# Debug inspector dumps (I+click corridor inspector)
+groundwork/Assets/Scripts/Roads/scratchpad.txt
+groundwork/Assets/Scripts/Roads/scratchpad.txt.meta
