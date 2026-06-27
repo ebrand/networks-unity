@@ -84,6 +84,12 @@ namespace NetworkDesigner.UI
             exitPullBtn.tooltip = "When pulling lanes off to a ramp: Keep = source keeps its lanes; " +
                                   "Delete all = the pulled lanes leave; Delete outer = only the outermost pulled lane leaves.";
             body.Add(exitPullBtn); SyncExit();
+            var limitRadius = ToggleRow("Limit curve radius (speed)",
+                () => Designer.RoadPlanLayer.LimitCurveRadius,
+                v => Designer.RoadPlanLayer.LimitCurveRadius = v);
+            limitRadius.tooltip = "On: curves are held to the design-speed minimum radius (tighter curves refused, preview turns red). " +
+                                  "Off: unconstrained — draw tight/small turns by hand.";
+            body.Add(limitRadius);
 
             body.Add(Divider());
             body.Add(SectionLabel("MEASUREMENTS"));

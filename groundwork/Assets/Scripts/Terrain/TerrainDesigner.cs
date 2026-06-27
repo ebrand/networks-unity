@@ -4120,7 +4120,7 @@ namespace NetworkDesigner.Terrain
                                     _leDrawCursor = eCol;
                                 rdPv.ShowExternalStraightGuide(leN, _leDrawCursor);   // straight extension → live length label
                             }
-                            NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId);
+                            NetworkDesigner.Roads.LaneEdgeWorld.UpdateExtendPreview(_leDrawCursor, leShift, xz => Surf.SampleHeight(xz.x, xz.y) + 0.3f, rdPv.ActiveProfileId, Input.GetKey(KeyCode.B));
                         }
                         else
                         {
@@ -4200,7 +4200,8 @@ namespace NetworkDesigner.Terrain
                         else if (!NetworkDesigner.Roads.LaneEdgeWorld.Drawing && NetworkDesigner.Roads.LaneEdgeWorld.ToggleExtendPick(new Vector2(hit.point.x, hit.point.z), rdLE.ActiveProfileId))
                             NetworkDesigner.Roads.LaneEdgeWorld.Rebuild(leGround);   // refresh the selected-puck highlight
                         else if (NetworkDesigner.Roads.LaneEdgeWorld.Extending)
-                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed, rdLE.ActiveProfileId, rdLE.DesignSpeedKmh);
+                            NetworkDesigner.Roads.LaneEdgeWorld.ExtendClick(_leDrawCursor, leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed, rdLE.ActiveProfileId, rdLE.DesignSpeedKmh,
+                                Input.GetKey(KeyCode.B));   // hold B while extending → bend to meet the nearest road at 90°
                         else
                             NetworkDesigner.Roads.LaneEdgeWorld.Click(_leDrawCursor, rdLE.ActiveProfileId,   // PAC-snapped cursor (matches the preview)
                                 leGround, leShiftClick, rdLE.LimitCurveRadius, rdLE.MinRadiusForSpeed);

@@ -2349,7 +2349,7 @@ namespace NetworkDesigner.Roads
 
         // Live preview while pulling out a lane-subset extension: the new road outline (centre + edges), offset onto the
         // selected lanes exactly as it will build, from the source node to the cursor (straight, or curved via shift-bend).
-        public static void UpdateExtendPreview(Vector2 cursor, bool curveModifier, Func<Vector2, float> groundAt, string profileId)
+        public static void UpdateExtendPreview(Vector2 cursor, bool curveModifier, Func<Vector2, float> groundAt, string profileId, bool perpJoin = false)
         {
             EnsurePreview();
             _pvRoot.SetActive(true);
@@ -2436,6 +2436,18 @@ namespace NetworkDesigner.Roads
                 shiftV = srcN * srcPvCorr.CenterShift;
             }
             Vector2 Ns = N + shiftV, curS = cursor + shiftV, cornS = _extCorner + shiftV;
+
+            // 90° JOIN preview: when the perpendicular key is held and a target road is near, draw the curve meeting it at 90°
+            // (slewed onto the body like the rest of the band) and mark the foot, instead of the cursor-following extension.
+            if (perpJoin && PerpJoinCurve(cursor, out Vector2 ppc1, out Vector2 ppc2, out Vector2 ppFoot, out _, out _))
+            {
+                Vector2 footS = ppFoot + shiftV;
+                FillPvLine(_pvC, Ns, footS, true, ppc1 + shiftV, ppc2 + shiftV, 0f, groundAt, PvOk());
+                FillPvLine(_pvL, Ns, footS, true, ppc1 + shiftV, ppc2 + shiftV, halfW, groundAt, PvOk());
+                FillPvLine(_pvR, Ns, footS, true, ppc1 + shiftV, ppc2 + shiftV, -halfW, groundAt, PvOk());
+                PlaceMarker(_pvEndM, ppFoot, groundAt, PvSnap());
+                return;
+            }
 
             PlaceMarker(_pvEndM, cursor, groundAt, PvSnap());
             if (_extCornerPending)
@@ -3486,7 +3498,49 @@ namespace NetworkDesigner.Roads
 
         // Draw the extension end (straight, or shift-curve through a bend). Builds the aligned subset corridor + lets the
         // default-flow regen wire continuations (selected) and merges (dropped). Mirrors Click's straight/curve flow.
-        public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius, string profileId, float designSpeedKmh = 40f)
+        public static float PerpJoinRange = 40f;   // how close the aim must be to a target road for a 90° join to snap
+
+        // 90° JOIN: from the extend node (leaving along the source road's outward tangent) build a cubic that ARRIVES at the
+        // nearest foot on a target road at exactly 90° to it. `aim` = the cursor — the foot snaps to the nearest point on the
+        // road. Returns false if no joinable road is within PerpJoinRange. Out: curve controls + foot + target corridor/param.
+        static bool PerpJoinCurve(Vector2 aim, out Vector2 c1, out Vector2 c2, out Vector2 foot, out int targetCi, out float targetT)
+        {
+            c1 = c2 = foot = Vector2.zero; targetCi = -1; targetT = 0f;
+            if (_extNode < 0 || _extNode >= Net.Nodes.Count || _extLanes.Count == 0) return false;
+            Vector2 S = Net.Nodes[_extNode];
+            int cid = (_extLanes[0] >= 0 && _extLanes[0] < Net.Edges.Count) ? Net.Edges[_extLanes[0]].CorridorId : -1;
+            Corridor sc = (cid >= 0 && cid < Net.Corridors.Count) ? Net.Corridors[cid] : null;
+            Vector2 Ts;   // outward tangent — the extension continues the road this way before bending to the join
+            if (sc != null && sc.Lanes.Count > 0)
+            {
+                LaneEdge sl0 = Net.Edges[sc.Lanes[0]];
+                Ts = (_extNode == sl0.A) ? -LaneEdgeCorridorBuilder.PathTangent(Net, sc, 0f) : LaneEdgeCorridorBuilder.PathTangent(Net, sc, 1f);
+            }
+            else Ts = aim - S;
+            if (Ts.sqrMagnitude < 1e-6f) Ts = aim - S;
+            Ts.Normalize();
+            int best = -1; float bestD = PerpJoinRange * PerpJoinRange; Vector2 bFoot = Vector2.zero; float bT = 0f;
+            for (int ci = 0; ci < Net.Corridors.Count; ci++)
+            {
+                Corridor c = Net.Corridors[ci]; if (c.Lanes.Count == 0 || c.IsSlip || ReferenceEquals(c, sc)) continue;
+                if (!NearestOnPath(c, aim, out Vector2 p, out float t)) continue;
+                if (t <= 0.02f || t >= 0.98f) continue;   // join mid-span (the ends are handled by the normal join)
+                float d = (p - aim).sqrMagnitude;
+                if (d < bestD) { bestD = d; best = ci; bFoot = p; bT = t; }
+            }
+            if (best < 0) return false;
+            Corridor tc = Net.Corridors[best];
+            Vector2 perp = LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, tc, bT));
+            if (Vector2.Dot(perp, S - bFoot) < 0f) perp = -perp;   // perp points from the road toward the approach (S) side
+            Vector2 arrive = -perp;                                // the curve travels toward the road at the foot
+            float d1 = Mathf.Max((bFoot - S).magnitude * 0.45f, 1f);
+            c1 = S + Ts * d1;
+            c2 = bFoot - arrive * d1;
+            foot = bFoot; targetCi = best; targetT = bT;
+            return true;
+        }
+
+        public static bool ExtendClick(Vector2 xz, Func<Vector2, float> groundAt, bool curveModifier, bool limitRadius, float minRadius, string profileId, float designSpeedKmh = 40f, bool perpJoin = false)
         {
             if (!Extending) return false;
             // No-go: a pull-off must map BOTH resulting roads onto existing profiles. Check the pulled group's config AND the
@@ -3531,6 +3585,17 @@ namespace NetworkDesigner.Roads
                 }
             }
             Vector2 start = Net.Nodes[_extNode];
+            // 90° JOIN (hold the perpendicular key): bend the extension to meet the nearest target road at exactly 90°.
+            if (perpJoin && PerpJoinCurve(xz, out Vector2 pc1, out Vector2 pc2, out Vector2 pfoot, out _, out _))
+            {
+                ResolveExtBySwap(pfoot - start);
+                if (limitRadius && MinCurveRadius(start, pc1, pc2, pfoot) < minRadius)
+                { Debug.LogWarning("[LaneEdgeWorld] 90° join too tight — turn off the radius limit or aim a wider foot"); return false; }
+                int joinNode = ResolveJoinNode(pfoot, groundAt);   // splits the target road at the foot (or shares a near end)
+                BuildExtensionCorridor(_extNode, joinNode, true, pc1, pc2, profileId);
+                ApplyExitPull(Net.Corridors.Count - 1, groundAt, designSpeedKmh);
+                CancelExtend(); RegenerateDefaultFlows(groundAt); Rebuild(groundAt); return true;
+            }
             // Resolve in/out from the pull direction (first leg): pulling in a lane's travel direction extends its incoming
             // lane, against it the outgoing — so it never matters which unified puck you clicked.
             ResolveExtBySwap((_extCornerPending ? _extCorner : xz) - start);
