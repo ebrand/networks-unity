@@ -861,6 +861,28 @@ namespace NetworkDesigner.Roads
             return res;
         }
 
+        // Drop the last `dist` metres of `poly` (from its END) — so a gore-redrawn ramp/through edge stops at a junction
+        // setback at its far end instead of running into the crossing. dist<=0 → unchanged.
+        static List<Vector2> ClipTail(List<Vector2> poly, float dist)
+        {
+            if (dist <= 0f || poly.Count < 2) return poly;
+            float acc = 0f;
+            for (int i = poly.Count - 1; i > 0; i--)
+            {
+                float seg = (poly[i] - poly[i - 1]).magnitude;
+                if (acc + seg >= dist)
+                {
+                    Vector2 cut = Vector2.Lerp(poly[i], poly[i - 1], (dist - acc) / Mathf.Max(seg, 1e-6f));
+                    var res = new List<Vector2>();
+                    for (int k = 0; k < i; k++) res.Add(poly[k]);
+                    res.Add(cut);
+                    return res;
+                }
+                acc += seg;
+            }
+            return new List<Vector2>();
+        }
+
         // Draw the ramp's inner-side shoulder edges CLIPPED to begin at the NOSE (inner lane edge, solid) and GORE (outer
         // shoulder edge, dashed), so they converge with the through corridor's edges. Plan overlay only (skip built ramps).
         static void RenderExitGores(Transform parent, Func<Vector2, float> groundAt)
@@ -877,8 +899,10 @@ namespace NetworkDesigner.Roads
                 int nR = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, R) / 2f), 2, 256);
                 var rampIn = OffsetPolyline(R, rInner, nR); var rampOut = OffsetPolyline(R, rOuter, nR);
                 if (g.RampT > 0.5f) { rampIn.Reverse(); rampOut.Reverse(); }   // fork end first
-                if (g.HasNose) EmitPolyline(ClipFrom(rampIn, g.Nose), rv, rt, groundAt);   // ramp inner edge: SOLID, clipped at the nose (forms one side of the gore nose)
-                if (g.HasGore) EmitDashedPolyline(ClipFrom(rampOut, g.Gore), LaneDash, LaneGap, rv, rt, groundAt);
+                LaneEdge rl0 = Net.Edges[R.Lanes[0]];
+                float rFarSb = JunctionEndSetback(R, g.RampT > 0.5f ? rl0.A : rl0.B);   // setback at the ramp's FAR end (the gore nose is at the near end)
+                if (g.HasNose) EmitPolyline(ClipTail(ClipFrom(rampIn, g.Nose), rFarSb), rv, rt, groundAt);   // ramp inner edge: SOLID, clipped at the nose (forms one side of the gore nose), stopped at the far junction
+                if (g.HasGore) EmitDashedPolyline(ClipTail(ClipFrom(rampOut, g.Gore), rFarSb), LaneDash, LaneGap, rv, rt, groundAt);
                 // The ramp's interior dividers are NOT redrawn here — they stay continuous (drawn full by the ramp's own overlay),
                 // flowing uninterrupted from the upstream divider through the gore into the ramp (per the spec mockup).
                 if (g.Through >= 0 && g.Through < Net.Corridors.Count)
@@ -891,18 +915,20 @@ namespace NetworkDesigner.Roads
                         int nM = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, M) / 2f), 2, 256);
                         LaneEdgeCorridorBuilder.PathEndpoints(Net, M, out Vector2 mA, out Vector2 mB);
                         bool forkAtA = (mA - g.Nose).sqrMagnitude <= (mB - g.Nose).sqrMagnitude;
+                        LaneEdge ml0 = Net.Edges[M.Lanes[0]];
+                        float mFarSb = JunctionEndSetback(M, forkAtA ? ml0.B : ml0.A);   // setback at the through's downstream (far) end
                         // Through's exit-side OUTER LANE EDGE: solid, clipped from the NOSE (forms the other side of the gore nose;
                         // upstream of the nose it's interior — the ramp's continuous divider covers it, so no solid runs back).
                         if (g.HasNose)
                         {
                             var mainEdge = OffsetPolyline(M, mInner, nM); if (!forkAtA) mainEdge.Reverse();
-                            EmitPolyline(ClipFrom(mainEdge, g.Nose), mv, mt, groundAt);
+                            EmitPolyline(ClipTail(ClipFrom(mainEdge, g.Nose), mFarSb), mv, mt, groundAt);
                         }
                         // Through's exit-side OUTER SHOULDER edge: dashed, clipped from the GORE downstream.
                         if (g.HasGore)
                         {
                             var mainOut = OffsetPolyline(M, mOuter, nM); if (!forkAtA) mainOut.Reverse();
-                            EmitDashedPolyline(ClipFrom(mainOut, g.Gore), LaneDash, LaneGap, mv, mt, groundAt);
+                            EmitDashedPolyline(ClipTail(ClipFrom(mainOut, g.Gore), mFarSb), LaneDash, LaneGap, mv, mt, groundAt);
                         }
                     }
                 }
@@ -2353,11 +2379,13 @@ namespace NetworkDesigner.Roads
 
             float lo = float.PositiveInfinity, hi = float.NegativeInfinity;
             int gotBA = 0, gotAB = 0; float baW = 3.5f, abW = 3.5f, baMax = -1f, abMax = -1f;
+            Corridor srcPvCorr = null;   // source ramp — used to slew the preview band the SAME way the built body slews
             foreach (int sl in _extLanes)
             {
                 if (sl < 0 || sl >= Net.Edges.Count) continue;
                 LaneEdge s = Net.Edges[sl];
                 Corridor sc = (s.CorridorId >= 0 && s.CorridorId < Net.Corridors.Count) ? Net.Corridors[s.CorridorId] : null;
+                if (srcPvCorr == null && sc != null) srcPvCorr = sc;
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, _extNode == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
@@ -2395,27 +2423,41 @@ namespace NetworkDesigner.Roads
             }
             float mid = (lo + hi) * 0.5f, halfW = (hi - lo) * 0.5f + shoulder;
 
+            // Match the BUILT body's rigid slew: the body is translated by a CONSTANT vector (the source ramp's slew, see
+            // BuildExtensionCorridor's ShiftDir stamp), not bent along the curve's local normal. So rigid-translate the whole
+            // band by that vector and draw it centred (offset 0), instead of offsetting `mid` along the rotating local normal
+            // — which is what made the curved preview ghost diverge from where the road actually builds.
+            Vector2 shiftV = frNew * mid;
+            if (srcPvCorr != null && Mathf.Abs(srcPvCorr.CenterShift) > 1e-4f)
+            {
+                Vector2 srcN = srcPvCorr.ShiftDir.sqrMagnitude > 1e-8f
+                    ? srcPvCorr.ShiftDir.normalized
+                    : LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, srcPvCorr, 0f));
+                shiftV = srcN * srcPvCorr.CenterShift;
+            }
+            Vector2 Ns = N + shiftV, curS = cursor + shiftV, cornS = _extCorner + shiftV;
+
             PlaceMarker(_pvEndM, cursor, groundAt, PvSnap());
             if (_extCornerPending)
             {
                 CurveControls(N, cursor, _extCorner, out Vector2 c1, out Vector2 c2);
-                FillPvLine(_pvC, N, cursor, true, c1, c2, mid, groundAt, PvOk());
-                FillPvLine(_pvL, N, cursor, true, c1, c2, mid + halfW, groundAt, PvOk());
-                FillPvLine(_pvR, N, cursor, true, c1, c2, mid - halfW, groundAt, PvOk());
+                FillPvLine(_pvC, Ns, curS, true, c1 + shiftV, c2 + shiftV, 0f, groundAt, PvOk());
+                FillPvLine(_pvL, Ns, curS, true, c1 + shiftV, c2 + shiftV, halfW, groundAt, PvOk());
+                FillPvLine(_pvR, Ns, curS, true, c1 + shiftV, c2 + shiftV, -halfW, groundAt, PvOk());
                 // LOUD armed-bend cue: bright opaque amber construction legs + a big amber bend marker so a placed-but-not-
-                // finalised corner can't be mistaken for "nothing happened". Legs ride the PICKED-LANES' centre (offset mid).
-                FillPvLine(_pvLegA, N, _extCorner, false, default, default, mid, groundAt, PvPending());
-                FillPvLine(_pvLegB, _extCorner, cursor, false, default, default, mid, groundAt, PvPending());
+                // finalised corner can't be mistaken for "nothing happened". Legs ride the slewed lane centre.
+                FillPvLine(_pvLegA, Ns, cornS, false, default, default, 0f, groundAt, PvPending());
+                FillPvLine(_pvLegB, cornS, curS, false, default, default, 0f, groundAt, PvPending());
                 _pvLegA.widthMultiplier = 0.8f; _pvLegB.widthMultiplier = 0.8f;
-                PlaceMarker(_pvCornerM, _extCorner + frNew * mid, groundAt, PvPending());
+                PlaceMarker(_pvCornerM, cornS, groundAt, PvPending());
             }
             else if (curveModifier)   // about to drop a bend → show the first leg off the lane centre
-                FillPvLine(_pvLegA, N, cursor, false, default, default, mid, groundAt, PvLeg());
+                FillPvLine(_pvLegA, Ns, curS, false, default, default, 0f, groundAt, PvLeg());
             else
             {
-                FillPvLine(_pvC, N, cursor, false, default, default, mid, groundAt, PvOk());
-                FillPvLine(_pvL, N, cursor, false, default, default, mid + halfW, groundAt, PvOk());
-                FillPvLine(_pvR, N, cursor, false, default, default, mid - halfW, groundAt, PvOk());
+                FillPvLine(_pvC, Ns, curS, false, default, default, 0f, groundAt, PvOk());
+                FillPvLine(_pvL, Ns, curS, false, default, default, halfW, groundAt, PvOk());
+                FillPvLine(_pvR, Ns, curS, false, default, default, -halfW, groundAt, PvOk());
             }
         }
 
