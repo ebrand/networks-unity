@@ -3526,11 +3526,13 @@ namespace NetworkDesigner.Roads
             Vector2 tanN = curved ? GeometryResolver.CubicTangent(N, c1, c2, M, 0f) : (M - N);
             tanN = tanN.sqrMagnitude < 1e-8f ? Vector2.right : tanN.normalized;
             Vector2 frNew = new Vector2(tanN.y, -tanN.x);
+            Corridor srcCorr = null;   // the ramp being extended — its translate normal is stamped onto nc.ShiftDir below so a curved extension doesn't jog at the seam
             foreach (int sl in _extLanes)
             {
                 if (sl < 0 || sl >= Net.Edges.Count) continue;
                 LaneEdge s = Net.Edges[sl];
                 Corridor sc = (s.CorridorId >= 0 && s.CorridorId < Net.Corridors.Count) ? Net.Corridors[s.CorridorId] : null;
+                if (srcCorr == null && sc != null) srcCorr = sc;
                 Vector2 frS;
                 if (sc != null) { Vector2 ts = LaneEdgeCorridorBuilder.PathTangent(Net, sc, nodeN == s.A ? 0f : 1f); frS = new Vector2(ts.y, -ts.x); }
                 else { Vector2 cd = Net.Nodes[s.B] - Net.Nodes[s.A]; frS = cd.sqrMagnitude < 1e-6f ? Vector2.right : new Vector2(cd.normalized.y, -cd.normalized.x); }
@@ -3602,6 +3604,17 @@ namespace NetworkDesigner.Roads
                         for (int i = 0; i < pulled.Count; i++) Net.Edges[pulled[i]].Offset = canon[i];
                         nc.CenterShift = shift; nc.CenterShiftB = shift;   // uniform shift along the whole pull-off
                         nc.AlignLanes = false;        // it's now a canonical road, body sits on the shifted centreline
+                        // Slew the extension's body along the SOURCE ramp's translate normal, not this segment's own A-normal:
+                        // PathFrame would otherwise rigid-translate nc along its A-tangent normal, which on a CURVED extension
+                        // points a different way than the source → the two bodies meet offset (the seam jog). Sign follows
+                        // both shifts so a direction-mirrored frame can't invert it; magnitude is irrelevant (ShiftDir is normalised).
+                        if (srcCorr != null && Mathf.Abs(srcCorr.CenterShift) > 1e-4f && Mathf.Abs(shift) > 1e-4f)
+                        {
+                            Vector2 srcN = srcCorr.ShiftDir.sqrMagnitude > 1e-8f
+                                ? srcCorr.ShiftDir.normalized
+                                : LaneEdgeCorridorBuilder.PathRight(LaneEdgeCorridorBuilder.PathTangent(Net, srcCorr, 0f));
+                            nc.ShiftDir = srcN * Mathf.Sign(srcCorr.CenterShift * shift);
+                        }
                         Net.SortCorridorLanes(nc);
                     }
                 }
