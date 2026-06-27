@@ -818,6 +818,15 @@ namespace NetworkDesigner.Terrain
             _chunks[c] = ch;
             _everLoaded.Add(c);
             _loadTime[c] = Time.realtimeSinceStartup;
+
+            // If this chunk carries a sculpt edit, its surface differs from the raw DEM. Neighbours already loaded
+            // computed their border normals against this chunk's DEM (it wasn't loaded yet) → a stale shading seam on
+            // their side. Refresh those neighbours' edge normals so they pick up this chunk's edited surface. Gated to
+            // edited chunks (untouched terrain reads the same DEM either way); normals-only, so colliders stay valid.
+            if (ch.Op != null)
+                foreach (var d in _edgeNeighbours)
+                    if (_chunks.TryGetValue(new Vector2Int(c.x + d.x, c.y + d.y), out var nb))
+                        RefreshChunkNormals(nb);
         }
 
         static void RebuildLod(Vector2Int c, int newRes)
@@ -961,6 +970,21 @@ namespace NetworkDesigner.Terrain
             m.uv2 = ShowRidges ? RidgeBuf(ch, res, sp, perim) : null;   // uv2 == TEXCOORD1 (what the ridge shader reads)
             m.RecalculateBounds();
         }
+
+        // Recompute ONLY a chunk's normals (positions/tris/uv unchanged) and push them to its mesh — used to refresh a
+        // neighbour's BORDER shading after an adjacent chunk loads/edits (its edge normals were computed against the
+        // neighbour's stale state). Far cheaper than a full BuildMesh, and the collider is position-based so it needs no re-cook.
+        static void RefreshChunkNormals(Chunk ch)
+        {
+            if (ch == null || ch.Mesh == null || ch.H == null) return;
+            if (ch.BakePending) { ch.BakeHandle.Complete(); ch.BakePending = false; AssignBakedCollider(ch); }
+            int res = ch.LodRes; float sp = ChunkSize / (res - 1);
+            var normals = NormalsBuf(res);
+            ComputeChunkNormals(ch, res, sp, Perim(res), normals);
+            ch.Mesh.normals = normals;
+        }
+
+        static readonly Vector2Int[] _edgeNeighbours = { new Vector2Int(1, 0), new Vector2Int(-1, 0), new Vector2Int(0, 1), new Vector2Int(0, -1) };
 
         // Per-vertex curvature signal = -Laplacian(H) over a physical stencil arm (RidgeScaleMeters): > 0 on
         // convex crests (ridges), < 0 in concave hollows (valleys). The stencil samples in WORLD space across

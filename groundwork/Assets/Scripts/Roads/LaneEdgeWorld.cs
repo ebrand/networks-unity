@@ -301,11 +301,10 @@ namespace NetworkDesigner.Roads
             EmitDashedPolyline(_twIn, LaneDash, LaneGap, verts, tris, groundAt);      // inner straight edge (lane divider)
             // No end cap at the full-width end: the dropped lane MERGES into the road body there (it doesn't terminate), so a
             // solid perpendicular bar across the lane is spurious — the inner (dashed) + outer (solid) edges just continue.
-            // Shoulder edge following the taper. The straight road's shoulder line is drawn frame-quantized (EmitGuideLine)
-            // which renders OuterDash≈lane-length dashes; the taper uses true dashing, so match the visible plan by using the
-            // lane dash here (small OuterDash would render as tiny dots that don't match the rest of the plan).
+            // Shoulder edge following the taper — use the SAME small shoulder dash as the straight road's shoulder line
+            // (EmitGuideLine now dashes true-to-period, OuterDash/OuterGap), so the taper shoulder matches it seamlessly.
             if (sh > 0.01f && _twSh.Count == n)
-                EmitDashedPolyline(_twSh, LaneDash, LaneGap, verts, tris, groundAt);
+                EmitDashedPolyline(_twSh, OuterDash, OuterGap, verts, tris, groundAt);
         }
 
         // Dashed version of EmitPolyline: walks the polyline by arc length, emitting only the dash-on portions. Dash-on
@@ -392,18 +391,46 @@ namespace NetworkDesigner.Roads
             for (int f = 0; f < cp.Length - 1; f++)
             {
                 Vector2 a = cp[f] + rg[f] * off, b = cp[f + 1] + rg[f + 1] * off;
-                float segLen = (b - a).magnitude;
-                bool on = !dashed || (walked % period) < dash;
-                walked += segLen;
-                if (!on) continue;
                 Vector2 fa = rg[f] * LineHalfW, fb = rg[f + 1] * LineHalfW;
-                Vector3 l0 = Drape(a - fa, groundAt), r0 = Drape(a + fa, groundAt);
-                Vector3 l1 = Drape(b - fb, groundAt), r1 = Drape(b + fb, groundAt);
-                int s = verts.Count;
-                verts.Add(l0); verts.Add(r0); verts.Add(r1); verts.Add(l1);
-                tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 3);
-                tris.Add(s); tris.Add(s + 2); tris.Add(s + 1); tris.Add(s); tris.Add(s + 3); tris.Add(s + 2);   // 2-sided
+                float segLen = (b - a).magnitude;
+                if (segLen < 1e-5f) continue;
+                if (!dashed) { EmitGuideQuad(verts, tris, a, b, fa, fb, groundAt); walked += segLen; continue; }
+                // True arc-length dashing: walk the segment emitting only the ON spans of the dash period, with the phase
+                // carried in `walked` across frame segments. (Was whole-segment on/off keyed on the ~1.5m frame step, which
+                // never divided the period evenly → irregular dashes — worst for the small-period shoulder line.)
+                float s = 0f;
+                for (int guard = 0; s < segLen - 1e-4f && guard < 8192; guard++)
+                {
+                    float phase = Mathf.Repeat(walked + s, period);
+                    float adv;
+                    if (phase < dash)
+                    {
+                        float on = Mathf.Min(dash - phase, segLen - s);
+                        if (on > 1e-4f)
+                        {
+                            float u0 = s / segLen, u1 = (s + on) / segLen;
+                            EmitGuideQuad(verts, tris, Vector2.Lerp(a, b, u0), Vector2.Lerp(a, b, u1),
+                                          Vector2.Lerp(fa, fb, u0), Vector2.Lerp(fa, fb, u1), groundAt);
+                        }
+                        adv = on;
+                    }
+                    else adv = period - phase;   // skip the gap to the next dash start
+                    // Always advance: at very large `walked` float precision can quantize the period step to ~0 → infinite
+                    // loop. The 8192 cap also bounds a degenerate huge-coordinate corridor instead of freezing on it.
+                    s += Mathf.Max(adv, 1e-3f);
+                }
+                walked += segLen;
             }
+        }
+
+        static void EmitGuideQuad(List<Vector3> verts, List<int> tris, Vector2 a, Vector2 b, Vector2 fa, Vector2 fb, Func<Vector2, float> groundAt)
+        {
+            Vector3 l0 = Drape(a - fa, groundAt), r0 = Drape(a + fa, groundAt);
+            Vector3 l1 = Drape(b - fb, groundAt), r1 = Drape(b + fb, groundAt);
+            int s = verts.Count;
+            verts.Add(l0); verts.Add(r0); verts.Add(r1); verts.Add(l1);
+            tris.Add(s); tris.Add(s + 1); tris.Add(s + 2); tris.Add(s); tris.Add(s + 2); tris.Add(s + 3);
+            tris.Add(s); tris.Add(s + 2); tris.Add(s + 1); tris.Add(s); tris.Add(s + 3); tris.Add(s + 2);   // 2-sided
         }
 
         static Vector3 Drape(Vector2 p, Func<Vector2, float> groundAt) => new Vector3(p.x, (groundAt != null ? groundAt(p) : 0f) + LineLift, p.y);
@@ -642,6 +669,7 @@ namespace NetworkDesigner.Roads
                     Vector2 Tr = LaneEdgeCorridorBuilder.PathTangent(Net, R, rampT); if (endSel == 1) Tr = -Tr;   // into-ramp dir
                     LaneEdge rl0 = Net.Edges[R.Lanes[0]];
                     int forkNode = endSel == 0 ? rl0.A : rl0.B;
+                    if (CountCorridorsAtNode(forkNode) >= 4) continue;   // 4 corridors meet = a crossing JUNCTION, not a ramp divergence (an oblique X looked like a shallow-angle ramp to the heuristic → no junction formed)
                     int bestM = -1; float bestSide = 0f, bestNear = GoreSnap; Vector2 bestPm = Vector2.zero;
                     for (int mi = 0; mi < nc; mi++)
                     {
@@ -958,8 +986,13 @@ namespace NetworkDesigner.Roads
         static float RequiredSetback(float hSelf, float hNeigh, float theta)
         {
             if (theta <= 0.05f || theta >= Mathf.PI - 0.05f) return 0f;
-            float s = Mathf.Sin(theta); if (s < 0.05f) return 0f;
-            return Mathf.Max(0f, (hNeigh + hSelf * Mathf.Cos(theta)) / s);
+            // Clamp to a minimum effective angle (~18°) so a near-PARALLEL "crossing" can't demand a runaway 1/sin(θ) setback,
+            // while a genuine acute crossing still gets the full setback it needs to clear the long oblique pavement overlap.
+            // When that exceeds the road length, the junction face tracks the road's clamped clip point (ComputeJunctions) so
+            // the junction stays clean (just tight) instead of floating out into a wedge.
+            float th = Mathf.Clamp(theta, 18f * Mathf.Deg2Rad, Mathf.PI - 18f * Mathf.Deg2Rad);
+            float s = Mathf.Sin(th);
+            return Mathf.Max(0f, (hNeigh + hSelf * Mathf.Cos(th)) / s);
         }
 
         // True if `node` is the diverging fork of a detected gore (so it's a ramp split, not a 3+ way crossing).
@@ -1045,7 +1078,14 @@ namespace NetworkDesigner.Roads
                     Vector2 fc, awayAt, frAt;
                     if (cc != null && plen > 1e-3f)
                     {
-                        float tAt = ap.atA ? Mathf.Clamp01(S[i] / plen) : 1f - Mathf.Clamp01(S[i] / plen);
+                        // Track the road's CLAMPED clip point: apply the same tA+tB ≤ 0.85 guard the plan overlay uses (line ~216)
+                        // so when the setback exceeds the road length the face sits on the clipped road end, not floating past it
+                        // into a wedge. The other end's setback is read from _setbackByEnd (0 if that end is free / not a junction).
+                        float tThis = Mathf.Clamp01(S[i] / plen);
+                        float sOther = _setbackByEnd.TryGetValue(EndKey(ap.corrId, !ap.atA), out float so) ? so : 0f;
+                        float tOther = Mathf.Clamp01(sOther / plen);
+                        if (tThis + tOther > 0.85f) { float k = 0.85f / (tThis + tOther); tThis *= k; tOther *= k; }
+                        float tAt = ap.atA ? tThis : 1f - tThis;
                         fc = LaneEdgeCorridorBuilder.PathPoint(Net, cc, tAt);
                         Vector2 tanAt = LaneEdgeCorridorBuilder.PathTangent(Net, cc, tAt);
                         awayAt = (ap.atA ? tanAt : -tanAt).normalized;
@@ -1935,7 +1975,8 @@ namespace NetworkDesigner.Roads
                     return false;   // keep the corner armed so the next click can finish a buildable curve
                 }
                 int bc = ResolveJoinNode(xz, groundAt);
-                AddCorridorFromProfile(_drawStart, bc, profileId, true, c1, c2);
+                Corridor ncv = AddCorridorFromProfile(_drawStart, bc, profileId, true, c1, c2);
+                SplitAtCrossings(ncv.Id, groundAt);   // auto-junction where the new road crosses an existing one mid-span
                 _drawStart = -1; _cornerPending = false;
                 RegenerateDefaultFlows(groundAt);
                 Rebuild(groundAt);
@@ -1950,7 +1991,8 @@ namespace NetworkDesigner.Roads
 
             int b = ResolveJoinNode(xz, groundAt);
             if (b == _drawStart || (Net.Nodes[b] - start).sqrMagnitude < 1f) return false;   // degenerate
-            AddCorridorFromProfile(_drawStart, b, profileId);
+            Corridor ncs = AddCorridorFromProfile(_drawStart, b, profileId);
+            SplitAtCrossings(ncs.Id, groundAt);   // auto-junction where the new road crosses an existing one mid-span
             _drawStart = -1;
             RegenerateDefaultFlows(groundAt);   // straight-through defaults at any newly-connected node
             Rebuild(groundAt);
@@ -3651,7 +3693,7 @@ namespace NetworkDesigner.Roads
         // Topology-only split of corridor c at param t → the inserted node index (NO flow-regen / rebuild, so callers can
         // batch). The clicked corridor keeps the A-side half; a fresh corridor takes the B-side half. Curved corridors
         // de-Casteljau-split so both halves trace the original cubic. Returns -1 if degenerate.
-        static int SplitCorridorAtCore(Corridor c, float t)
+        static int SplitCorridorAtCore(Corridor c, float t, int reuseNode = -1)
         {
             if (c.Lanes.Count == 0) return -1;
             LaneEdge l0 = Net.Edges[c.Lanes[0]];
@@ -3678,9 +3720,12 @@ namespace NetworkDesigner.Roads
                 SplitCubic(rawA, c.ControlA, c.ControlB, rawB, t, out splitPos, out ac1, out ac2, out bc1, out bc2);
             else { splitPos = Vector2.Lerp(rawA, rawB, t); ac1 = ac2 = bc1 = bc2 = Vector2.zero; }
 
-            int nn = Net.AddNode(splitPos);
-            float ya = Net.GetNodeY(l0.A), yb = Net.GetNodeY(l0.B);   // interpolate the captured grade so the seam doesn't crater on build
-            if (!float.IsNaN(ya) && !float.IsNaN(yb)) Net.SetNodeY(nn, Mathf.Lerp(ya, yb, t));
+            int nn = reuseNode >= 0 && reuseNode < Net.Nodes.Count ? reuseNode : Net.AddNode(splitPos);
+            if (nn != reuseNode)   // fresh node → interpolate the captured grade so the seam doesn't crater on build (a reused crossing node keeps its own grade)
+            {
+                float ya = Net.GetNodeY(l0.A), yb = Net.GetNodeY(l0.B);
+                if (!float.IsNaN(ya) && !float.IsNaN(yb)) Net.SetNodeY(nn, Mathf.Lerp(ya, yb, t));
+            }
 
             // second-half corridor (B side) — clone the source's profile / bands / built-state
             Corridor c2 = Net.AddCorridor();
@@ -3736,6 +3781,100 @@ namespace NetworkDesigner.Roads
             if (t >= 0.96f) return Net.Edges[cc.Lanes[0]].B;
             int split = SplitCorridorAtCore(cc, t);
             return split >= 0 ? split : Net.AddNode(xz);
+        }
+
+        // Segment intersection returning the param on EACH segment (t on p1→p2, u on p3→p4). False if parallel or
+        // the crossing lands outside either segment.
+        static bool SegIntUV(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, out Vector2 hit, out float t, out float u)
+        {
+            hit = Vector2.zero; t = 0f; u = 0f;
+            Vector2 r = p2 - p1, s = p4 - p3; float rxs = r.x * s.y - r.y * s.x;
+            if (Mathf.Abs(rxs) < 1e-9f) return false;
+            Vector2 qp = p3 - p1; t = (qp.x * s.y - qp.y * s.x) / rxs; u = (qp.x * r.y - qp.y * r.x) / rxs;
+            if (t < 0f || t > 1f || u < 0f || u > 1f) return false;
+            hit = p1 + r * t; return true;
+        }
+
+        // All interior crossings of two corridor centrelines, as (param on a, param on b, world point). Polyline-sampled
+        // (~2 m), so it catches curved paths too.
+        static void FindPathCrossings(Corridor a, Corridor b, List<(float ta, float tb, Vector2 p)> outList)
+        {
+            int na = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, a) / 2f), 4, 256);
+            int nb = Mathf.Clamp(Mathf.CeilToInt(LaneEdgeCorridorBuilder.PathLength(Net, b) / 2f), 4, 256);
+            var pa = new Vector2[na + 1]; for (int i = 0; i <= na; i++) pa[i] = LaneEdgeCorridorBuilder.PathPoint(Net, a, i / (float)na);
+            var pb = new Vector2[nb + 1]; for (int j = 0; j <= nb; j++) pb[j] = LaneEdgeCorridorBuilder.PathPoint(Net, b, j / (float)nb);
+            for (int i = 0; i < na; i++)
+                for (int j = 0; j < nb; j++)
+                    if (SegIntUV(pa[i], pa[i + 1], pb[j], pb[j + 1], out Vector2 hit, out float ts, out float us))
+                        outList.Add(((i + ts) / na, (j + us) / nb, hit));
+        }
+
+        // Auto-intersection: where the just-drawn corridor `newIdx` crosses an existing corridor mid-span, split BOTH at the
+        // crossing onto a SHARED node so a junction forms (footprint + flows come from ComputeJunctions / RegenerateDefaultFlows
+        // on the next Rebuild). Endpoints are already handled by ResolveJoinNode; this is the mid-span X/T case.
+        static void SplitAtCrossings(int newIdx, Func<Vector2, float> groundAt)
+        {
+            if (newIdx < 0 || newIdx >= Net.Corridors.Count) return;
+            Corridor newC = Net.Corridors[newIdx];
+            if (newC.Lanes.Count == 0 || newC.IsSlip) return;
+
+            var crossings = new List<(float tNew, int oldIdx, float tOld, Vector2 p)>();
+            var tmp = new List<(float ta, float tb, Vector2 p)>();
+            int nc0 = Net.Corridors.Count;
+            for (int ci = 0; ci < nc0; ci++)
+            {
+                if (ci == newIdx) continue;
+                Corridor oc = Net.Corridors[ci];
+                if (oc.Lanes.Count == 0 || oc.IsSlip) continue;
+                tmp.Clear();
+                FindPathCrossings(newC, oc, tmp);
+                foreach (var x in tmp)
+                    if (x.ta > 0.02f && x.ta < 0.98f && x.tb > 0.02f && x.tb < 0.98f)
+                    {
+                        // drop a near-duplicate of one already recorded on the SAME old corridor (adjacent-segment double hit)
+                        bool dup = false;
+                        for (int k = 0; k < crossings.Count; k++)
+                            if (crossings[k].oldIdx == ci && Mathf.Abs(crossings[k].tOld - x.tb) < 0.03f) { dup = true; break; }
+                        if (!dup) crossings.Add((x.ta, ci, x.tb, x.p));
+                    }
+            }
+            if (crossings.Count == 0) return;
+
+            // Split each OLD corridor at its crossing(s) → a shared node per crossing. Descending tOld per corridor so an
+            // earlier (higher-param) split doesn't shift the remaining params; remap each against the shrinking first half.
+            var nodeFor = new int[crossings.Count];
+            var byOld = new Dictionary<int, List<int>>();
+            for (int i = 0; i < crossings.Count; i++)
+            {
+                if (!byOld.TryGetValue(crossings[i].oldIdx, out var lst)) { lst = new List<int>(); byOld[crossings[i].oldIdx] = lst; }
+                lst.Add(i);
+            }
+            foreach (var kv in byOld)
+            {
+                Corridor oc = Net.Corridors[kv.Key];
+                kv.Value.Sort((a, b) => crossings[b].tOld.CompareTo(crossings[a].tOld));   // descending
+                float upper = 1f;
+                foreach (int i in kv.Value)
+                {
+                    float p = Mathf.Clamp(crossings[i].tOld / Mathf.Max(upper, 1e-4f), 0.02f, 0.98f);
+                    nodeFor[i] = SplitCorridorAtCore(oc, p);
+                    upper = crossings[i].tOld;
+                }
+            }
+
+            // Split the NEW corridor at each crossing (descending tNew, remapped — newC stays the first half), reusing the
+            // old's node so both roads pass through ONE node.
+            var order = new List<int>();
+            for (int i = 0; i < crossings.Count; i++) order.Add(i);
+            order.Sort((a, b) => crossings[b].tNew.CompareTo(crossings[a].tNew));   // descending
+            float nu = 1f;
+            foreach (int i in order)
+            {
+                if (nodeFor[i] < 0) continue;
+                float p = Mathf.Clamp(crossings[i].tNew / Mathf.Max(nu, 1e-4f), 0.02f, 0.98f);
+                SplitCorridorAtCore(newC, p, nodeFor[i]);
+                nu = crossings[i].tNew;
+            }
         }
 
         // ── slip lane (channelised corner bypass) ── TWO-CLICK NODE gesture: first PRE-SPLIT the approaches where you want
